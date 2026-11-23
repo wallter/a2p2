@@ -180,3 +180,34 @@ Recorded so they are not mistaken for oversights:
 - No "leave room" for non-owners; the owner removes a member.
 - One-way reachability (only one side can accept connections) leaves the other
   direction queued; there is no pull endpoint yet (see D3).
+
+## D23. License: Apache-2.0 with sign-off (2026-11-23)
+
+Supersedes D10. Five independent reviewers were asked; four chose Apache-2.0
+for its explicit patent grant, which some companies require before they will
+embed a daemon, and one chose MIT for brevity
+(`research/09-deliberation-on-owner-decisions.md`, Q8). Contributions are
+accepted under the Developer Certificate of Origin: a `Signed-off-by` line on
+every commit and no contributor agreement. The dependencies (BSD-3-Clause and
+MIT) are compatible. Nothing had been released under MIT.
+
+## D24. A requirement register checked by `make check` (2026-11-23)
+
+`docs/TRACE.md` has one row per requirement in `docs/REQUIREMENTS.md`: its
+status and the tests that prove it. `scripts/trace.sh` fails the build when a
+requirement has no row, a row names a test that does not exist, or a row
+claims `met` without a test. Needed now because the requirements are about to
+drive a rework of the delivery core, and rule 2 (a guarantee without a test
+does not exist) had no mechanical check.
+
+## D25. The delivery core will be reworked to the new requirements (2026-11-23)
+
+The owner widened the goal (rooms that survive any machine being away or
+lost, several admins, threads, subscriptions, a path to very large rooms) and
+answered the open choices; see `REQUIREMENTS.md` section 10. Research found no
+existing system to adopt (`research/08-synthesis-and-recommendation.md`). The
+v0.2 push-from-the-author delivery (D3, D13) will be replaced, not extended:
+nothing has been released, so there is nothing to stay compatible with. Order
+of work is in `REQUIREMENTS.md` section 9: executable scenarios first, then
+the design, then the build.
+

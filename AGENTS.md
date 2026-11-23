@@ -88,6 +88,8 @@ Things that are easy to get wrong:
    each finding. Reviewers get the diff, not your reasoning.
 7. **Leave the docs true.** If behaviour changes, update `docs/DESIGN.md` in
    the same change. Decisions are appended to `docs/DECISIONS.md`, never edited.
+8. **Sign off commits.** `git commit -s`; the licence is Apache-2.0 and
+   contributions come in under the Developer Certificate of Origin.
 
 ## Where things are
 

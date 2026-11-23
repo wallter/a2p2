@@ -118,4 +118,10 @@ database, the local socket and a log.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE).
+
+Contributions are accepted under the same licence. Every commit carries a
+`Signed-off-by` line (`git commit -s`), by which its author states, as in the
+[Developer Certificate of Origin](https://developercertificate.org/), that
+they have the right to contribute it. That includes work written with an AI
+agent: the person or organisation submitting it signs off.
