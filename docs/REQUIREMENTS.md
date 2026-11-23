@@ -64,8 +64,9 @@ there is no server.
   up. An always-on machine helps and is otherwise an ordinary member.
 - **P3 Agents operate, a person confirms trust.** An agent can use and tune
   the layer by itself. Changing who is trusted or what the machine exposes
-  needs a person's confirmation on that machine, enforced by the daemon, not
-  only by a harness prompt.
+  needs a separate confirmation on that machine: a step that is not among
+  the agent tools, is made at a terminal or the local page, names exactly
+  what is approved, and is recorded. The daemon will not act without it.
 - **P4 Honest guarantees.** Every guarantee has a test named for it. Limits
   are stated in plain words where users will see them.
 - **P5 Cost is multiplied.** Bytes on the wire, connections, disk, and tokens
@@ -281,6 +282,10 @@ there is no server.
 - **A machine receiving only its own mail trusts the members it pulls from**
   not to leave messages out. Nobody can forge a message; a member could
   withhold one.
+- **The confirmation step is a guard rail, not a lock.** It stops an agent
+  being talked into a trust change through its tools. An agent running as
+  the same user that sets out to get around it can, because it can do
+  anything that user can do at a terminal.
 - **Every member can read everything in the room** that it is allowed to
   fetch, including who handled which message.
 - **An agent may see a message again** after a crash or a restore from
