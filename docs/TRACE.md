@@ -12,6 +12,10 @@ Status values:
 - `untested`: believed true from reading the code; no test proves it.
 - `not yet`: not built.
 
+A test under `internal/model` shows that a rule is sound in the small
+executable model; it does not show that the daemon follows the rule, so it
+never makes a row `met`. Such tests are listed after "Model:".
+
 "Due" is the step in section 9 of the requirements where the row must reach
 `met`. Statuses below describe the v0.2 code on 2026-11-23, before the
 delivery rework.
@@ -19,25 +23,25 @@ delivery rework.
 | ID | Status | Due | Tests and notes |
 |---|---|---|---|
 | D1 | partly | 2 | `TestSenderRestartResumesOutbox`. Restart is tested; power loss is not |
-| D2 | not yet | 2 | Today only the author's machine delivers its messages |
-| D3 | partly | 2 | `TestLostResponseDoesNotDuplicate`, `TestReceiverRestartKeepsDedup`, `TestSendIsIdempotentByID`. One path only; several paths do not exist yet |
-| D4 | met | 2 | `TestOfflineRecipientGetsEverythingOnceInOrder`, `TestConcurrentSenders`. Must be re-proven after the rework |
-| D5 | partly | 2 | `TestTwoNodesDeliverAndReceipt`, `TestDeliverAndReceipt`, `TestReceiptCannotCrossRoomsOrBeForged`. Reports go straight to the author, so they do not arrive when the two are never online together |
-| D6 | partly | 2 | `TestSenderRestartResumesOutbox`, `TestReceiverRestartKeepsDedup`. No random-kill test and no network-split test |
-| D7 | partly | 2 | `TestExpiryIsVisible`. Today's periods are 7 days for delivery and 30 for storage, not the rule as written |
-| D8 | not yet | 2 | Today the author is known only from the direct connection (`TestFromNodeComesFromTLS`) |
-| D9 | not yet | 2 | |
-| D10 | partly | 2 | `TestSendInboxReplyAck`. Replies record parent and thread; reading one thread is not built |
+| D2 | not yet | 2 | Today only the author's machine delivers its messages. Model: `TestRelayDeliversAndReportsHandledWithoutAuthorAndReaderEverAwakeTogether`, `TestReportHeldOnlyByANoHistoryNewcomerSurvivesTheLossOfItsAuthor` |
+| D3 | partly | 2 | `TestLostResponseDoesNotDuplicate`, `TestReceiverRestartKeepsDedup`, `TestSendIsIdempotentByID`. One path only; several paths do not exist yet. Model: `TestLostReplyRetryAndRestartsGiveOneCopyInOrder`, `TestEverySmallScheduleKeepsTheDeliveryProperties` |
+| D4 | met | 2 | `TestOfflineRecipientGetsEverythingOnceInOrder`, `TestConcurrentSenders`. Must be re-proven after the rework. Model: `TestSwitchingSourcesPastAHoleLosesSkipsAndReordersNothing`, `TestRestoredAuthorThatCatchesUpBeforeWritingKeepsItsOrder` |
+| D5 | partly | 2 | `TestTwoNodesDeliverAndReceipt`, `TestDeliverAndReceipt`, `TestReceiptCannotCrossRoomsOrBeForged`. Reports go straight to the author, so they do not arrive when the two are never online together. Model: `TestHandledReportsOnlyFromAddresseesAndRoomWidePostsOnlyWhenAsked`, `TestTwoMachinesNeverAwakeTogetherExchangeNothingAndSenderSeesNoCopy`. Known gap: `TestAuthorLearnsOfCopiesOnMachinesItNeverMet` |
+| D6 | partly | 2 | `TestSenderRestartResumesOutbox`, `TestReceiverRestartKeepsDedup`. No random-kill test and no network-split test. Model: `TestRandomSchedulesKeepTheDeliveryProperties`, `TestAuthorRestoredWithEveryNewerHolderAsleepWritesANewStreamWithoutFork`, `TestMachinesReceivingSameEntriesInAnyOrderAgree` |
+| D7 | partly | 2 | `TestExpiryIsVisible`. Today's periods are 7 days for delivery and 30 for storage, not the rule as written. Model: `TestAwayThirtyOneDaysIsToldWhatIsMissingThenContinues`, `TestExpiryWithDifferingClocksIsByEachHoldersOwnClockAndNeverResurrects`, `TestRelayThatStripsTextAndClaimsWithdrawalCannotLoseIt` |
+| D8 | not yet | 2 | Today the author is known only from the direct connection (`TestFromNodeComesFromTLS`). Model: `TestRelayThatAltersARecordIsRefused` |
+| D9 | not yet | 2 | Model: `TestWithdrawAndReplaceBeforeAndAfterTheReaderWasShown`, `TestWithdrawArrivingBeforeItsMessageMeansTheMessageIsNeverShown`, `TestWithdrawDropsTheTextOfReplacementsToo` |
+| D10 | partly | 2 | `TestSendInboxReplyAck`. Replies record parent and thread; reading one thread is not built. Model: `TestThreadsBranchesAndRepliesWhoseParentIsMissing`. Known gap: `TestBranchUnderAMessageIncludesRepliesBelowAMissingReply` |
 | T1 | met | 2 | `TestStrangerAndWrongRoomAreRejected`, `TestStrangerIsRefused` |
 | T2 | met | 2 | `TestCertIsNodeID`, `TestFromNodeComesFromTLS`, `TestPinningRefusesWrongServerKey` |
-| T3 | partly | 2 | `TestInviteIsSingleUseAndExpires`. No confirmation by a person, no choice about earlier history, and the token is over 300 characters |
+| T3 | partly | 2 | `TestInviteIsSingleUseAndExpires`. No confirmation by a person, no choice about earlier history, and the token is over 300 characters. Model: `TestNewMachineInboxStartsEmptyAndHistoryFlagFiltersWhatMembersHandOver`, `TestFirstThreeMachinesBecomeAdminsWithTwoAdminConfirmations`. Known gap: `TestNewcomerWithoutHistoryIsNotHandedPostsItsAdmitterHadNotSeen` |
 | T4 | partly | 2 | `TestNewMemberCanTalkBeforeOthersHeard`, `TestThreeNodesNonOwnerSends`. The member list is fetched only from the room's owner |
-| T5 | met | 2 | `TestRemovedMemberIsCutOff`, `TestUsedInviteDoesNotReadmitARemovedNode`, `TestLateRefreshAnswerCannotResurrectARoom` |
+| T5 | met | 2 | `TestRemovedMemberIsCutOff`, `TestUsedInviteDoesNotReadmitARemovedNode`, `TestLateRefreshAnswerCannotResurrectARoom`. Model: `TestRemovedAdminsConcurrentRemovalOfCompromisedMachineStands`, `TestConcurrentAddAndRemoveOfSameMachineRemovalWins` |
 | T6 | not yet | 3 | |
 | T7 | met | 2 | `TestWireIsEncrypted`, `TestServerRejectsBadClientCerts` |
 | T8 | met | 2 | `TestHostileStringsAreInert`, `TestInboxForgedHeadersStayInert`, `TestNoticeSanitisesLabels` |
-| T9 | not yet | 2 | Today a room has one owner |
-| T10 | untested | 2 | Nothing promotes a machine today; needs a test once there are several admins |
+| T9 | not yet | 2 | Today a room has one owner. Model: `TestOneKeyCannotChangeAdminSetOnceThereAreThreeAdmins`, `TestSeededRoomsKeepEveryProperty`, `TestLostAdminOfThreeIsReplacedByTheOtherTwo`. Known gap: `TestForkInTwoAdminRoomIsNeverSettled` |
+| T10 | untested | 2 | Nothing promotes a machine today; needs a test once there are several admins. Model: `TestAllAdminsLostFreezesMembershipNobodyPromoted` |
 | U1 | partly | 3 | `TestAddressedMessagesAndNewAgents`. Addressing works; there are no levels to choose |
 | U2 | not yet | 3 | |
 | U3 | partly | 3 | `TestLateJoinerGetsNoBackfill`. No way to read what was skipped |
@@ -48,7 +52,7 @@ delivery rework.
 | A1 | met | 2 | `TestToolsGolden`, `TestLocalRoundTrip`, and `make e2e` for the three harnesses |
 | A2 | partly | 2 | `TestToolsGolden` fixes the definitions (about 800 tokens); nothing asserts the limit |
 | A3 | partly | 2 | `TestAskHuman`, `TestQuestionAnswerFlow`, `TestSendAsHuman`, `TestInboxWaitWakesOnArrival`. No confirming of requests; the browser flow is not exercised |
-| A4 | partly | 2 | `TestStatusMapping`. Reasons for non-delivery are shown; copies on other machines are not |
+| A4 | partly | 2 | `TestStatusMapping`. Reasons for non-delivery are shown; copies on other machines are not. Model: `TestResolveGivesEveryEntryAReasonOnArbitraryInput` |
 | I1 | partly | 1 | `TestInstallFresh`, `TestDoctor`. Not yet shown that an agent can install from the repository's instructions alone |
 | I2 | met | 1 | `TestExistingSurvivesIdempotentOnStopUninstall`, `TestUninstallFreshLeavesEmptyObject`, `TestOwnershipIsExact` |
 | I3 | partly | 1 | `AGENTS.md` exists; no portable skill, no recipes |

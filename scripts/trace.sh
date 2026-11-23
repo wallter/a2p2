@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Check docs/TRACE.md against docs/REQUIREMENTS.md and the test suite.
 # Fails if a requirement has no row, a row has no requirement, a named test
-# does not exist, or a row says "met" without naming a test.
+# does not exist, or a row says "met" without naming a test of the built code
+# (tests under internal/model check the rules, not the daemon).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 req=$(grep -oE '^- \*\*[A-Z][0-9]+ ' docs/REQUIREMENTS.md | grep -oE '[A-Z][0-9]+' | grep -v '^P' | sort -u)
@@ -14,6 +15,8 @@ missing=$(comm -23 <(printf '%s\n' "$req") <(printf '%s\n' "$rows" | sort -u))
 extra=$(comm -13 <(printf '%s\n' "$req") <(printf '%s\n' "$rows" | sort -u))
 [ -z "$extra" ] || { echo "trace: row without a requirement: $extra" | tr '\n' ' '; echo; fail=1; }
 tests=$(grep -rhoE '^func (Test|Fuzz)[A-Za-z0-9_]+' --include='*_test.go' cmd internal | awk '{print $2}' | sort -u)
+# Tests in internal/model show a rule is sound, not that the daemon follows it.
+built=$(grep -rhoE '^func (Test|Fuzz)[A-Za-z0-9_]+' --include='*_test.go' --exclude-dir=model cmd internal | awk '{print $2}' | sort -u)
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | awk -F'|' '{gsub(/ /,"",$2); print $2}')
   status=$(printf '%s' "$line" | awk -F'|' '{gsub(/^ +| +$/,"",$3); print $3}')
@@ -21,7 +24,11 @@ while IFS= read -r line; do
   for t in $named; do
     printf '%s\n' "$tests" | grep -qx "$t" || { echo "trace: $id names $t, which does not exist"; fail=1; }
   done
-  if [ "$status" = met ] && [ -z "$named" ]; then echo "trace: $id is 'met' without a test"; fail=1; fi
+  if [ "$status" = met ]; then
+    ok=0
+    for t in $named; do printf '%s\n' "$built" | grep -qx "$t" && ok=1; done
+    [ "$ok" = 1 ] || { echo "trace: $id is 'met' without a test of the built code (model tests do not count)"; fail=1; }
+  fi
   case "$status" in met|partly|untested|"not yet") ;; *) echo "trace: $id has unknown status '$status'"; fail=1 ;; esac
 done < <(grep -E '^\| [A-Z][0-9]+ \|' docs/TRACE.md)
 [ "$fail" = 0 ] || exit 1

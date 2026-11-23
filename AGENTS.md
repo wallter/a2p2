@@ -41,6 +41,8 @@ internal/mcpshim  stdio MCP server; stateless, one local API call per tool
 internal/harness  install / uninstall / hook output / doctor per harness
 internal/web      loopback UI
 internal/daemon   assembles the above; finds or starts the daemon
+internal/model    executable models of the NEXT version's rules (members, delivery);
+                  not used by the daemon yet. Each has a FINDINGS.md
 ```
 
 Dependencies point one way: `core` ← `store` ← `node` ← everything else.

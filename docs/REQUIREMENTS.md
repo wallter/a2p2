@@ -1,7 +1,9 @@
 # Requirements
 
-**Status: draft 0.3, 2026-11-23, awaiting the owner's confirmation of
-section 10.** Written by the project lead (Claude Code) from the owner's
+**Status: draft 0.4, 2026-11-23.** Draft 0.4 applies what the executable
+models in `internal/model` showed (their `FINDINGS.md` files), mainly to
+D3 to D5, D7, T3, T9 and section 6. Section 10 lists what the owner decided
+and what is still open. Written by the project lead (Claude Code) from the owner's
 statements, five research reports, a design panel and a deliberation on the
 open questions (`docs/research/07`, `08`, `09`, `prior-art/`, `decisions/`).
 Draft 0.3 applies the owner's answers to draft 0.2: several admins per room,
@@ -82,19 +84,30 @@ there is no server.
   offline when it was sent, from any member machine that has a copy, without
   the author being online.
 - **D3 At-least-once, no duplicates.** Retries, lost responses, restarts and
-  multiple paths never put a message in an inbox twice.
+  multiple paths never put a message in an inbox twice. The exceptions are
+  the ones in section 6: a crash between being shown a message and confirming
+  it, and a restore from backup on the reader's own machine.
 - **D4 Order.** Messages from one author arrive in the order sent. No order
-  is promised across authors.
+  is promised across authors. If an author's machine is restored from a
+  backup, what it wrote before the restore may arrive after what it wrote
+  later, and is marked as late.
 - **D5 Acknowledgement.** The sender can see three things: the message is
-  saved here; which other machines reported a copy, and when; and that the
-  recipient agent reported handling it. Handling reports are sent for
-  addressed messages and travel like any message, so they arrive even if
-  sender and handler are never online together. Room-wide posts get none
-  unless the sender asks.
+  saved here; which machines it has been in touch with reported a copy, and
+  when; and that the recipient agent reported handling it. A copy report is
+  a dated observation, not a promise that the copy still exists. An agent
+  can report handling only for a message whose text it was shown. Handling
+  reports are sent for addressed messages and travel like any message, so
+  they arrive even if sender and handler are never online together.
+  Room-wide posts get none unless the sender asks.
 - **D6 Self-healing.** After any machine sleeps, restarts or loses power, and
   after a network split ends, machines catch up without anyone acting.
-- **D7 Retention.** A room keeps messages for 30 days. A message that expired
-  before it could be delivered is shown as missing, never silently dropped.
+- **D7 Retention.** A room keeps the text of messages for 30 days, measured
+  by each machine's own clock, and keeps a small signed stub after that so
+  that what expired can still be accounted for and passed on. A message that
+  expired before it could be delivered is shown as missing, never silently
+  dropped. Text is missing on a machine only for a reason that machine can
+  check itself: it expired, its author withdrew it, or the machine was added
+  without earlier history. Otherwise the machine keeps trying to fetch it.
 - **D8 Authorship is provable.** A machine can verify who wrote a message no
   matter which machine passed it on.
 - **D9 Withdraw and replace.** An author can withdraw a message or replace
@@ -119,7 +132,10 @@ there is no server.
   of the room's admins and an action on the joining machine. Pairing takes
   one command and one confirmation on each side and one copy-and-paste;
   nothing long is typed. The person adding a machine chooses whether it may
-  read what was said before it joined; if they do not choose, it may not.
+  read what was said before it joined; if they do not choose, it may not. A
+  machine added without earlier history still carries the signed stubs of
+  earlier messages, without their text, so it can pass the room's history on
+  to others intact.
 - **T4 Admins stay out of the way.** Any member can show another member a
   genuine member list. Only changing it needs an admin. Messages never wait
   for an admin, and nothing an agent does day to day depends on knowing who
@@ -139,8 +155,11 @@ there is no server.
   one, so a single stolen key cannot take a room over. When admins act
   without knowing of each other, every machine reaches the same member list
   whatever order the changes arrive in, and a removal is never undone
-  silently. Unless the person adding them says otherwise, the first three
-  machines in a room are its admins.
+  silently. A machine's vote on its own removal does not count. A change
+  that is waiting for a second admin is shown as waiting. Unless the person
+  adding them says otherwise, the first three machines in a room are its
+  admins; making the third an admin takes a person's confirmation on both
+  machines that already are.
 - **T10 No automatic promotion.** No machine becomes an admin because another
   has been quiet for some time. A machine cannot tell an admin that is gone
   from one it cannot reach, so a rule like that would let a machine that was
@@ -217,18 +236,45 @@ there is no server.
   the lost key cannot be retired and no new admin can be named. If every
   admin is lost, everyone already in the room keeps talking and nobody can be
   added or removed; to change who is in it, people form a new room.
-- **A stolen admin key can add machines until other admins remove it**, and
-  what those machines read cannot be recalled. Every backup of an admin
-  machine holds an admin key.
+- **A stolen admin key can add machines and remove members until two other
+  admins remove it**, and what those machines read cannot be recalled. It can
+  also supply the second signature for a change another admin has started,
+  including one started by an admin who has since been removed.
+  Every backup of an admin machine holds an admin key.
+- **A removed admin's key is not quite dead.** If a current member is willing
+  to pass its entries on, it can still remove each member it knew of, once.
+  It cannot add anyone.
 - **Admins who are out of touch can make changes that collide.** A machine
   added by an admin who was being removed at the same moment may be dropped
   again after it has read the room.
+- **An admin machine restored from backup must catch up before it changes
+  membership.** If it signs first, its new changes conflict with ones it made
+  before the backup was lost. With three admins the other two settle that by
+  removing its key, and it rejoins under a new one. With two admins it cannot
+  be settled, and machines can disagree about a member for good; the fix is a
+  new room.
+- **While a room has had only one admin, that key is the room.** A thief
+  holding it can show a different history to a machine that never received
+  the real one. Machines that did receive the real one refuse the other.
 - **"May not read earlier history" is kept by the members, not by
   mathematics.** Members refuse to hand earlier messages to such a machine,
   but any member can still quote or forward what it holds.
 - **A lost disk loses its copies.** A message survives if any other machine
-  still has one. The system aims for two copies beyond the author when two
-  other machines exist.
+  still has one. In a small room every member takes a copy as soon as it is
+  in touch; the sender is shown which machines have reported one. If a disk
+  is lost before any other machine fetched a message, that message is gone.
+- **After a restore from backup** agents on that machine may be shown
+  messages again, a message already read may be reported as expired, and what
+  the machine wrote before the restore can reach others late. Nothing new it
+  writes is mistaken for something old.
+- **Clocks matter a little.** Where two machines' clocks differ, a message
+  can expire on one earlier than on the other, by up to the difference.
+- **"Without earlier history" is drawn where the adding machine stood.** A
+  message that already existed but had not yet reached the machine that did
+  the adding can still be read by the newcomer.
+- **A copy report can be out of date.** It says a machine had the message at
+  a stated time, and only machines the sender has been in touch with are
+  listed.
 - **Removal is not instant.** A member that has not yet heard of a removal
   may still serve the removed machine. Nothing already copied can be
   recalled.

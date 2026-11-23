@@ -211,3 +211,35 @@ nothing has been released, so there is nothing to stay compatible with. Order
 of work is in `REQUIREMENTS.md` section 9: executable scenarios first, then
 the design, then the build.
 
+## D26. Rules are settled in executable models before the design (2026-11-23)
+
+Hand-written rules for several admins were shown unsound twice by reviewers,
+so step 0 of the plan became two pure-Go models with exhaustive small
+scenarios (`research/prior-art/07-requirements-and-verification.md`):
+`internal/model/members` (who is a member and who is an admin, given any set
+of signed entries) and `internal/model/delivery` (store and forward in a room
+where every member keeps everything). No new dependency and no separate
+specification tool. Each was reviewed twice by an independent model and
+fixed; the reviews found faults the first searches had not reached (for
+example, removing a re-appointed admin a second time emptied the room), which
+is why the searches now start from seeded rooms as well as from scratch.
+
+What the models settled:
+- Admin-set changes need two admins whenever a room has more than one. A
+  threshold of one for two-admin rooms lets a single key take the room over.
+- No cut-off field on removals; what a removed admin's grants keep is decided
+  by what its removers had seen. A completed removal is closed.
+- A machine restored from backup starts a new stream of messages, so it never
+  reuses a position; continuing the old stream loses new messages silently.
+- A machine added without earlier history carries signed stubs without text,
+  so it can still pass history on.
+- Text is missing on a machine only for a reason it can check itself.
+
+Known gaps are skipped tests marked KNOWN GAP in each package, and stated
+limits in `REQUIREMENTS.md` section 6. Model tests appear in `TRACE.md` after
+"Model:" and never make a requirement `met`.
+
+Codex declined to review the membership model (its provider flagged the
+request as a possible cybersecurity risk); that review came from a different
+Claude model instead. The delivery model was reviewed by Codex.
+
