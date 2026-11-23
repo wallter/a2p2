@@ -1,0 +1,62 @@
+# Requirement register
+
+One row per requirement in `docs/REQUIREMENTS.md`. It answers two questions:
+is this requirement met by the code today, and which test proves it. `make
+trace` fails if a requirement has no row, a row has no requirement, a named
+test does not exist, or a row says `met` without naming a test.
+
+Status values:
+
+- `met`: the tests named here exercise the requirement as written.
+- `partly`: some of it is tested; the note says what is missing.
+- `untested`: believed true from reading the code; no test proves it.
+- `not yet`: not built.
+
+"Due" is the step in section 9 of the requirements where the row must reach
+`met`. Statuses below describe the v0.2 code on 2026-11-23, before the
+delivery rework.
+
+| ID | Status | Due | Tests and notes |
+|---|---|---|---|
+| D1 | partly | 2 | `TestSenderRestartResumesOutbox`. Restart is tested; power loss is not |
+| D2 | not yet | 2 | Today only the author's machine delivers its messages |
+| D3 | partly | 2 | `TestLostResponseDoesNotDuplicate`, `TestReceiverRestartKeepsDedup`, `TestSendIsIdempotentByID`. One path only; several paths do not exist yet |
+| D4 | met | 2 | `TestOfflineRecipientGetsEverythingOnceInOrder`, `TestConcurrentSenders`. Must be re-proven after the rework |
+| D5 | partly | 2 | `TestTwoNodesDeliverAndReceipt`, `TestDeliverAndReceipt`, `TestReceiptCannotCrossRoomsOrBeForged`. Reports go straight to the author, so they do not arrive when the two are never online together |
+| D6 | partly | 2 | `TestSenderRestartResumesOutbox`, `TestReceiverRestartKeepsDedup`. No random-kill test and no network-split test |
+| D7 | partly | 2 | `TestExpiryIsVisible`. Today's periods are 7 days for delivery and 30 for storage, not the rule as written |
+| D8 | not yet | 2 | Today the author is known only from the direct connection (`TestFromNodeComesFromTLS`) |
+| D9 | not yet | 2 | |
+| D10 | partly | 2 | `TestSendInboxReplyAck`. Replies record parent and thread; reading one thread is not built |
+| T1 | met | 2 | `TestStrangerAndWrongRoomAreRejected`, `TestStrangerIsRefused` |
+| T2 | met | 2 | `TestCertIsNodeID`, `TestFromNodeComesFromTLS`, `TestPinningRefusesWrongServerKey` |
+| T3 | partly | 2 | `TestInviteIsSingleUseAndExpires`. No confirmation by a person, no choice about earlier history, and the token is over 300 characters |
+| T4 | partly | 2 | `TestNewMemberCanTalkBeforeOthersHeard`, `TestThreeNodesNonOwnerSends`. The member list is fetched only from the room's owner |
+| T5 | met | 2 | `TestRemovedMemberIsCutOff`, `TestUsedInviteDoesNotReadmitARemovedNode`, `TestLateRefreshAnswerCannotResurrectARoom` |
+| T6 | not yet | 3 | |
+| T7 | met | 2 | `TestWireIsEncrypted`, `TestServerRejectsBadClientCerts` |
+| T8 | met | 2 | `TestHostileStringsAreInert`, `TestInboxForgedHeadersStayInert`, `TestNoticeSanitisesLabels` |
+| T9 | not yet | 2 | Today a room has one owner |
+| T10 | untested | 2 | Nothing promotes a machine today; needs a test once there are several admins |
+| U1 | partly | 3 | `TestAddressedMessagesAndNewAgents`. Addressing works; there are no levels to choose |
+| U2 | not yet | 3 | |
+| U3 | partly | 3 | `TestLateJoinerGetsNoBackfill`. No way to read what was skipped |
+| U4 | partly | 3 | `TestHookOutputs` covers the unread count. No first-lines reading |
+| N1 | not yet | 2 | Today both machines must accept connections |
+| N2 | untested | 2 | Several addresses are tried in turn; no test |
+| N3 | untested | 2 | True by construction; no test |
+| A1 | met | 2 | `TestToolsGolden`, `TestLocalRoundTrip`, and `make e2e` for the three harnesses |
+| A2 | partly | 2 | `TestToolsGolden` fixes the definitions (about 800 tokens); nothing asserts the limit |
+| A3 | partly | 2 | `TestAskHuman`, `TestQuestionAnswerFlow`, `TestSendAsHuman`, `TestInboxWaitWakesOnArrival`. No confirming of requests; the browser flow is not exercised |
+| A4 | partly | 2 | `TestStatusMapping`. Reasons for non-delivery are shown; copies on other machines are not |
+| I1 | partly | 1 | `TestInstallFresh`, `TestDoctor`. Not yet shown that an agent can install from the repository's instructions alone |
+| I2 | met | 1 | `TestExistingSurvivesIdempotentOnStopUninstall`, `TestUninstallFreshLeavesEmptyObject`, `TestOwnershipIsExact` |
+| I3 | partly | 1 | `AGENTS.md` exists; no portable skill, no recipes |
+| I4 | untested | 1 | One static binary, two direct dependencies; licences are not checked automatically |
+| I5 | not yet | 2 | |
+| I6 | untested | 1 | True from reading the code; no test |
+| L1 | not yet | 5 | |
+
+Principles P1–P6 and the limits in section 6 are not rows. Each limit in
+section 6 becomes a scenario in step 0 that shows the limit behaving as
+described.

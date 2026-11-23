@@ -1,0 +1,8 @@
+/bin/
+/dist/
+*.test
+*.out
+.DS_Store
+/.a2p2-dev/
+/.claude/settings.local.json
+/.trw/

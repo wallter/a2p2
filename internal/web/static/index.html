@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>a2p2</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="authfail" hidden>
+  <p>This page needs a fresh link. Run <code>a2p2 ui</code> in a terminal and open the address it prints.</p>
+</div>
+<div id="app" hidden>
+  <aside id="side">
+    <h1>a2p2</h1>
+    <section><h2>Rooms</h2><ul id="rooms" class="list"></ul></section>
+    <section><h2>Node</h2><div id="node"></div></section>
+  </aside>
+  <main>
+    <section id="needs" hidden><h2>Needs you</h2><div id="questions"></div></section>
+    <header id="roomhead"></header>
+    <div id="empty" hidden>
+      <p><strong>Nothing here yet.</strong></p>
+      <p>Connect a coding agent by running <code>a2p2 install claude</code>, then start a session.</p>
+      <p>Messages from your agents will show up in this window, and you can write back from the box below.</p>
+    </div>
+    <div id="stream"><button id="older" hidden>Load older messages</button><div id="msgs"></div></div>
+    <form id="compose">
+      <div id="replying" hidden></div>
+      <div class="row">
+        <select id="to" title="Recipients"></select>
+        <textarea id="text" rows="2" placeholder="Write a message. Enter sends, Shift+Enter adds a line."></textarea>
+        <button type="submit">Send</button>
+      </div>
+      <div id="err" role="alert"></div>
+    </form>
+  </main>
+  <dialog id="trace"><div id="tracebody"></div><button id="traceclose" type="button">Close</button></dialog>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>
