@@ -273,8 +273,14 @@ when agents show the need); bridging to other agent protocols such as A2A
 
 ## 9. Order of work
 
-0. **Baseline and executable scenarios.** Commit the current tree locally.
-   Write the scenarios as tests against a small model before the design: A
+0. **Baseline and executable scenarios.** Commit the current tree locally
+   (done 2026-11-23). Write the rules as small pure functions in
+   `internal/model` and check them with exhaustive small scenarios in
+   ordinary Go tests, before the design; no separate specification tool
+   unless a rule cannot be settled this way
+   (`docs/research/prior-art/07-requirements-and-verification.md`). A rule
+   that cannot be made to pass is recorded with its smallest counterexample
+   and becomes a stated limit or a changed requirement. The scenarios: A
    posts, B takes a copy, A goes offline, C receives it from B and handles
    it, C goes offline, A learns it was handled through B; then lost
    responses, B restarting, expiry, and a machine restored from an old
@@ -319,6 +325,9 @@ Still open. Each line says what happens if the owner says nothing.
 | 2 | The owner suggested the system assign a new admin when one is lost. Two reviewers found no safe way to do that on a timer (T10); several admins from the start is the substitute | T10 stands |
 | 3 | Section 6 as a whole: any limit there you do not accept? | Proceed on the text |
 | 4 | Retention | 30 days for every room, no setting |
-| 5 | Licence | Apache-2.0, with a signed-off-by line on commits; replaces provisional MIT |
-| 6 | Commit the current tree locally as a baseline (no push, no release) | Not done until you say so |
-| 7 | Start step 0 of section 9 | Not started until you say so |
+
+On 2026-11-23 the owner told the lead to proceed autonomously. Done on that
+basis: the licence is Apache-2.0 with a signed-off-by line on commits
+(`DECISIONS.md` D23); the tree is committed locally, not pushed; step 0 of
+section 9 has started. Rows 1 to 4 above stand as written unless the owner
+objects. Pushing to a remote and making a release still wait for the owner.
