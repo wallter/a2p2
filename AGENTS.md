@@ -92,7 +92,7 @@ injects faults (`internal/node/memnet_test.go`).
   paths to about 100 bytes).
 - Call harness behaviour verified only after a real end-to-end run, and
   record the harness version in the
-  [harness notes](docs/research/03-harness-integration.md).
+  [harness notes](docs/HARNESSES.md).
 - Before committing a non-trivial change, get a review of the diff from a
   different model family (`make review`). Address each finding or record
   why you declined it. Sign off commits as described in

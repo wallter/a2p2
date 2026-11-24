@@ -5,8 +5,9 @@ import (
 	"testing"
 )
 
-// The schedules from the second review
-// (docs/research/decisions/model-delivery-rereview-sol.md), one test each.
+// The schedules from the second review (an independent review by another
+// model family, kept in the project's working notes, not in this
+// repository), one test each.
 
 // Rereview 1. Requirements: D5
 func TestOnlyAnAgentShownTheTextMayReportHandled(t *testing.T) {

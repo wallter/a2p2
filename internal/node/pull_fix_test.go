@@ -1,7 +1,8 @@
 package node
 
-// Tests of the step 5a fix round (docs/research/decisions/step5a-review-sol.md
-// and the coordinator's rulings): release rebuilds, a restored server's
+// Tests of the step 5a fix round (an independent review by another model
+// family, kept in the project's working notes, not in this repository, and
+// the coordinator's rulings): release rebuilds, a restored server's
 // catch-up, wire budgets, convergence, response validation, observation
 // order, the textless floor, forked streams and the short first request.
 

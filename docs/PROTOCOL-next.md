@@ -8,7 +8,7 @@ The design cites these sections as "PROTOCOL n".
 
 - [Conventions](#0-conventions), [record header](#1-record-header), and [receiving a record](#2-receiving-a-record)
 - [Log entry](#3-log-entry), [pull](#4-pull), and [join](#5-join)
-- [MCP tools](#6-mcp-tools-golden-file), [local API and CLI](#7-local-api-and-cli), [schema](#8-schema-migrations-2-to-9), and [golden vectors](#9-golden-vectors)
+- [MCP tools](#6-mcp-tools-golden-file), [local API and CLI](#7-local-api-and-cli), [schema](#8-schema-migrations-2-to-10), and [golden vectors](#9-golden-vectors)
 
 ## 0. Conventions
 
@@ -757,18 +757,18 @@ prints the response unchanged.
 | `history` (changed) | `{"room","before"?,"limit"?}`; `before` is a message id, and paging is by (created, id), so a boundary withdrawn or expired since still works | `{"entries":[Entry]}`; marks nothing |
 | `trace` (changed) | `{"id"}` | `{"id","room","saved","reason","copies":[{"node","at","member","evidence"}],"handled":[{"agent","at"}]}`. `saved`: this machine holds the record's header; `reason`: the state of its text here. A copy's `at` is when this machine observed it, `member` is membership now, and `evidence` is `position` (the holder reported that position of the stream, section 4.3). A handled `at` is when the report was written. An unknown id is an error |
 | `unread` (changed) | `{"agent","lines"?}` | `{"count","rooms":[…],"first"?:[…]}`; marks nothing (U4) |
-| `alerts` (new) | `{"wait_ms"?}` (≤ 120,000) | `{"alerts":[{"kind":"request"\|"fork"\|"missing","id","room","text","since"}]}`; `missing`: text wanted for a day and still not here |
+| `alerts` (new) | `{"wait_ms"?}` (≤ 120,000) | `{"alerts":[{"kind":"request"\|"fork"\|"missing"\|"question"\|"network"\|"removed","id","room","text","since"}]}`; `missing`: text wanted for a day and still not here; `question`: a message for this machine's person (addressed to `human` by name, or carrying choices) not yet answered or dismissed, `id` the message, `text` `<from> asks: <text>`; a replacement of a question is a question with its new text; `network`: networking is on but this machine does not listen, `text` says why; `removed`: every other member of `room` has refused this machine as not a member for at least 10 minutes, so it may have been removed |
 | `requests` (new) | `{}` | `{"requests":[{"id","kind","action","room","room_label","node","fingerprint","name","role","history","seconding","created","deadline","text"}]}`; `kind` `network` is a recorded decision about networking |
 | `confirm` (new) | `{"id","approve":bool,"not_caught_up_ok"?:true}` | `{"id","state":"approved"\|"declined"\|"failed","reason"?,"entries"?,"effect"?}`; `reason` `not_caught_up` means this machine has not checked the room's log with another member since it started (DESIGN 3); the surface shows the warning and may repeat with `not_caught_up_ok`, which is recorded |
-| `net` (changed) | `{"state":"off"\|"outbound"\|"on","listen"?}` | `{"state","listen","request","text","applies"}`; a person's decision with the same authority as `confirm`, recorded as a decided request |
-| `status` (changed) | `{"show_notice"?}` | machine, version, `network {state, listen, request}`, rooms (each with `agents`: `[{"agent","last_seen"}]`, the agents of members seen writing there, newest first), agents, `waiting` (requests for a person), and once ever `notice` |
+| `net` (changed) | `{"state":"off"\|"outbound"\|"on","listen"?}` | `{"state","listen","request","text","applies"}`; a person's decision with the same authority as `confirm`, recorded as a decided request. The daemon applies it at once, without a restart; `applies` is `"now: the daemon applies it at once"` |
+| `status` (changed) | `{"show_notice"?,"notice_shown"?}`; `show_notice`: a person will be shown this status, so the one-time notice is returned while it has not been recorded as shown (returning it records nothing); `notice_shown`: the caller printed or drew the notice, which is recorded as shown before the status is read | machine, version, `network {state, listen, request, applied?, reason?}`, rooms (as in `room/list`, each also with `agents`: `[{"agent","last_seen"}]`, the agents of members seen writing there, newest first), agents, `waiting` (requests for a person), and `notice` until it is recorded as shown. `network` is the latest decision; `applied` and `reason` appear only when what runs differs from it: while a decision is being applied (`applied` is the state still running, `reason` `being applied`), or when `on` cannot listen (`applied` `outbound`, `reason` the listener's error) |
 | `room/invite` (changed) | `{"room","history"?,"role"?}` | `{"token","expires","room"}`; refused while networking is off |
 | `room/join` (changed) | `{"token"}` | the previewed answer of 5.3 plus `preview`, the preview's identifier; refused while networking is off |
 | `room/join/accept` (new) | `{"token","preview","wait_ms"?}` | `{"state":"accepted"\|"signed"\|"refused"\|"expired"\|"removed","room"?,"reason"?,"role"?,"history"?,"note"?}`; `role` and `history` are what the joiner's own log shows, `note` says if they differ from the preview |
 | `room/admin` (new) | `{"room","node"}` | `{"request","state":"waiting","text","terms"}`: raises a request; nothing is signed until `confirm` |
 | `room/remove` (changed) | `{"room","node"}` | as `room/admin` |
 | `room/leave` (new) | `{"room"}` | `{}` |
-| `room/list` (new) | `{"room"?}` | `{"rooms":[{"id","label","members":[…],"admins":[…],"pending":[…],"no_effect":[{"entry","reason"}],"forks":[…],"limits":[…]}]}` |
+| `room/list` (new) | `{"room"?}` | `{"rooms":[{"id","label","members":[…],"admins":[…],"pending":[…],"no_effect":[{"entry","reason"}],"forks":[…],"limits":[…],"waiting","may_be_removed"?}]}`; `waiting` counts the room's requests for this machine's person; `may_be_removed: true` when every other member has refused this machine as not a member for at least 10 minutes (never for `local`). It only changes what the surfaces show |
 
 At first start each machine creates `local` with itself as the only
 member. The room cannot be shared by invite or left.
@@ -782,6 +782,14 @@ Networking states:
 The socket is open to any program running as the same user: `confirm`, `net`
 and `room/join/accept` are kept out of the agent tools and hooks and every
 use is recorded, which is a guard rail and not a lock (REQUIREMENTS 6).
+
+The web page (`a2p2 ui`) uses its own routes on loopback, each requiring
+the page's token as a bearer token: `GET /api/state`, `/api/history`, `/api/thread` and
+`/api/trace`, and `POST /api/send`, `/api/seen`, `/api/ack`,
+`/api/confirm` and `/api/notice-shown`. `GET /api/state` reads the status
+as shown to a person, so it carries the one-time `notice` until the page
+reports with `POST /api/notice-shown` (answer `{}`) that it drew it. Questions and the person's unread messages come back without being
+marked seen; the page confirms what it showed.
 
 `Entry`: `{"key","version","kind":"message"|"withdrawn"|"replaced"|"expired"|"voided","id","room","room_label","from","from_node","author_removed","to","parent","thread","parent_state":"here"|"missing"|"expired"|"withdrawn","late","created","text","choices"}`.
 `Wait`: `{"room","author","have","known","since","reason":"text"|"link"|"gap"}`.
@@ -802,37 +810,45 @@ The CLI follows the socket calls above. See `a2p2 help` for the full syntax.
 `confirm`, `net` and the approval step of `join` require a terminal on
 stdin. Without one, `join` prints the preview and stops.
 
-## 8. Schema (migrations 2 to 9)
+## 8. Schema (migrations 2 to 10)
 
 | Table | Columns | Keys |
 |---|---|---|
 | `rooms` | `id`, `label`, `create_id` (pinned), `gen` int, `joined_at` | `id` |
 | `log` | `room`, `id`, `author`, `seq`, `bytes`, `sig`, `state` (`accepted`, `held`, `refused`, `invalid`: kept for replay, never passed on), `batch` int, `batch_pos` int | unique (`room`,`id`); index (`room`,`author`,`seq`), not unique, so both branches of a fork fit |
-| `room_members` | `room`, `node`, `admin`, `name`, `addrs`, `seen_at` (cache of `Resolve`; named apart from v0.2's `members` table while both exist) | (`room`,`node`) |
+| `room_members` | `room`, `node`, `admin`, `name`, `addrs`, `seen_at` (cache of `Resolve`; named apart from v0.2's `members` table, which migration 10 dropped) | (`room`,`node`) |
 | `records` | `room`, `id`, `author`, `epoch`, `seq`, `kind`, `ref`, `parent`, `thread`, `agent`, `created`, `hdr`, `sig`, `body` nullable, `reason` (`live`, `expired`, `withdrawn`, `not_admitted`, `missing`), `effect` (`ok`, `bad_reference`, `unresolved`) | unique (`room`,`id`); unique (`room`,`author`,`epoch`,`seq`); (`room`,`ref`); (`room`,`parent`); (`room`,`thread`) |
 | `streams` | `room`, `author`, `epoch`, `contig`, `known`, `known_at`, `known_from` (the peer whose report set `known`; its later report can lower it) | (`room`,`author`,`epoch`) |
 | `observed` | `room`, `peer`, `author`, `digest`, `detail` json, `at`; the row with an empty `author` holds the peer's last log heads and extra | (`room`,`peer`,`author`) |
 | `refusals` | `room`, `peer`, `reason`, `count`, `last_at` | (`room`,`peer`,`reason`) |
 | `peer_addrs` (migration 8) | `node`, `addr`, `source` (`self`, `peer`), `seen_at`, `failed_at`, `fails`; only for members of a room this machine is in | (`node`,`addr`) |
 | index `records_history` (migration 9) | `records (room, kind, created, id)`, for `history` | |
-| `agents` | as v0.2 | `id` |
+| `agents` | `id`, `label`, `harness`, `cwd`, `first_seen_at`, `last_seen_at` (v0.2's table without `joined_n`, which migration 10 dropped) | `id` |
 | `cursors` | `agent`, `room`, `author`, `epoch`, `start`, `pos` | (`agent`,`room`,`author`,`epoch`) |
 | `reads` | `agent`, `room`, `key`, `version`, `msg` (indexed) | (`agent`,`room`,`key`) |
 | `read_heads` | `agent`, `room`, `author`, `record` | (`agent`,`room`,`author`,`record`) |
 | `forks` | `room`, `author`, `epoch`, `seq`, `id`, `hdr`, `sig` (at most 3 refused records per position, as evidence) | (`room`,`author`,`epoch`,`seq`,`id`) |
 | `registrations` | `agent`, `room`, `at` (when an agent's cursors were first set) | (`agent`,`room`) |
-| `room_invites` (named apart from v0.2's `invites` while both exist) | `secret_hash`, `room`, `role`, `history`, `created_at`, `expires_at`, `bound_key`, `name`, `addrs`, `state` (`issued`, `previewed`, `accepted`, `expired`, `revoked`; signed and declined are read from the request), `request`, `reason`, `shown_member`, `shown_role`, `shown_history` (the terms the last preview showed) | `secret_hash` |
+| `room_invites` (named apart from v0.2's `invites`, which migration 10 dropped) | `secret_hash`, `room`, `role`, `history`, `created_at`, `expires_at`, `bound_key`, `name`, `addrs`, `state` (`issued`, `previewed`, `accepted`, `expired`, `revoked`; signed and declined are read from the request), `request`, `reason`, `shown_member`, `shown_role`, `shown_history` (the terms the last preview showed) | `secret_hash` |
 | `joins` (joiner side) | `invite` (SHA-256 of the secret), `room`, `label`, `create_id`, `role`, `history`, `member`, `admin` (full key), `addrs`, `gen`, `expires_at`, `state`, `reason`, `created_at`, `updated_at`; written before `accept` is sent and kept afterwards, so an invite is used once | `invite` |
 | `requests` | `id`, `kind`, `not_caught_up` (the person approved although this machine had not checked the room's log with another member since starting), `action` (admit, admit as admin, promote, remove, second, rejoin), `room`, `node`, `name`, `role`, `history`, `created_at`, `state`, `decided_at`, `entries`, `admins` (how many admins the room had when a request that makes an admin was raised; if that has changed at approval the request fails) | `id` |
-| `meta` | `key`, `value`; `v02_dropped_notice` shown once | `key` |
+| `meta` | `key`, `value`; `v02_removed`: migration 10 removed v0.2 messages or rooms; `v02_dropped_notice`: a person has been shown the notice saying so | `key` |
 
 Migration 4 adds `observed` and `refusals`, migration 5 `streams.known_from`
 (step 5a); migration 6 `room_invites`, `joins` and `requests.admins`, and
 migration 7 `log.arrival` (a position allocated once per stored entry, from
 the counter `rooms.arrivals`, never reused: the join's paging cursor) and
 `joins.pinned_gen` (step 4b). Migration 2 holds the record tables (step 3a); migration 3 the log tables,
-`rooms.left_at` and requests. Per room at most 32 requests wait, and 256
-refused dependants and 256 invalid entries are kept.
+`rooms.left_at` and requests. Migration 8 adds `peer_addrs` (step 5b) and
+migration 9 the index `records_history`. Migration 10 removes v0.2: it
+first sets `meta` `v02_removed` if v0.2 held any messages or rooms (rooms
+with no create entry and `gen` 0), then deletes those rooms and the `meta`
+key `seq`, drops the tables `marks`, `deliveries`, `messages`, `members` and
+`invites`, and drops `rooms.owner`, `rooms.version`, `rooms.created_at` and
+`agents.joined_n`. While `v02_removed` is set and `v02_dropped_notice` is
+not, `status` with `show_notice` and the page return the notice (section
+7). Per room at most 32 requests wait, and 256 refused dependants and 256
+invalid entries are kept.
 
 `gen` increases on leave and on join. `batch` and `batch_pos` record
 arrival order for replaying `members.Machine`; accepted offers are applied

@@ -7,7 +7,7 @@
 > the old code has been deleted (in progress).
 
 Status: v0.2 (2026-11-22), revised after two independent design reviews
-(`research/04-design-review.md`). This is the source of truth for what a2p2 is and
+(kept in the project's working notes, not in this repository). This is the source of truth for what a2p2 is and
 is not. Decisions and their reasons live in [DECISIONS.md](DECISIONS.md); how we
 prove it works lives in [TESTING.md](TESTING.md).
 
@@ -270,7 +270,7 @@ An adapter is: how to register the MCP server, which hook to install for
 `next_turn`, optionally how to `wake`, and how to undo all of it. Installation
 backs up the file it edits, changes only its own entries, and is reversible with
 `uninstall`. Verified facts per harness are in
-[research/03-harness-integration.md](research/03-harness-integration.md).
+[HARNESSES.md](HARNESSES.md).
 
 ## 7. Observability
 

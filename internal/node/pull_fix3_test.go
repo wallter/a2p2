@@ -1,7 +1,8 @@
 package node
 
-// Tests of the step 5a third round (docs/research/decisions/
-// step5a-rereview-sol.md and the coordinator's rulings): seen only after a
+// Tests of the step 5a third round (a re-review by another model family,
+// kept in the project's working notes, not in this repository, and the
+// coordinator's rulings): seen only after a
 // clean round, release and expiry, the detail budget, cuts by stream,
 // progress, refusal state, validation, permission before expiry, Admitted
 // after apply.
