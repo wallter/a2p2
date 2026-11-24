@@ -230,7 +230,7 @@ usable grant (permission closed) is given no text at all.
 {"v":2,"room":"r_…",
  "authors":["<node id>",…],
  "digests":{"<node id>":"<64 hex>",…},
- "snap":"<64 hex>","detail":{"<node id>":[{"e":"<epoch>","c":12,"nb":[3,7],"w":[7]}]},
+ "snap":"<64 hex>","detail":{"<node id>":[{"e":"<epoch>","c":12,"x":2,"nb":[3,7],"w":[7]}]},
  "log":{"heads":["<entry id>",…],"extra":["<entry id>",…],"entries":[{"h":…,"s":…}]},
  "offer":[{"h":…,"s":…,"b":…}],"offer_more":true,
  "addrs":["192.0.2.4:7443"],
@@ -241,6 +241,7 @@ usable grant (permission closed) is given no text at all.
 |---|---|---|
 | `authors` | the requester's `Admitted` set [R3] | 1–1,024 |
 | `digests` | for each author in `authors` it holds anything of (4.3) | ≤ 1,024 |
+| `sum` | short form of a round's first request: replaces `authors` and `digests` (4.3) | 64 hex |
 | `snap` | the server's `snap` from the round's first response; present iff `detail` is | |
 | `detail` | the requester's detail for the next authors of that round's `differ`, in order; `[]` for an author it holds nothing of | ≤ 16 authors |
 | `log.heads` | accepted entries no accepted entry names as parent | 1–64 |
@@ -251,7 +252,8 @@ usable grant (permission closed) is given no text at all.
 | `addrs` | requester's addresses | ≤ 8, each ≤ 255 bytes |
 | `wait_ms` | 0 to 60,000 | |
 
-Request ≤ 1 MiB.
+Exactly one of `sum`, or `authors` with `digests`, is present. Request ≤ 1 MiB,
+counted over the whole encoded message.
 
 ### 4.2 Response (200)
 
@@ -268,6 +270,8 @@ Request ≤ 1 MiB.
 
 | Field | Meaning | Limit |
 |---|---|---|
+| `same` | answer to `sum`: the summaries are equal; only `v`, `same` and `log` are present | |
+| `full` | answer to `sum`: they differ; only `v`, `full` and `log` are present; repeat in the full form | |
 | `authors` | the server's `Admitted` set | |
 | `digests` | the server's, for every author in the request's `authors` it holds | |
 | `snap`, `differ` | on a request without `detail`: `snap` = SHA-256 over the server's sorted `author:digest\n` lines, and every author in either `digests` whose digests differ, sorted | ≤ 1,024 |
@@ -279,12 +283,29 @@ Request ≤ 1 MiB.
 
 ### 4.3 Summary exchange
 
-Detail of one author: its streams sorted by `e`; `c` contiguous position,
-`nb` positions held without text (ascending), `w` the subset of `nb` wanted
-[R3, R6]. An author with nothing held has detail `[]` and no digest.
+Detail of one author: its streams sorted by `e`; `c` contiguous position;
+`x` the floor, the largest position at or below which no record is held
+with text (`c` when the stream holds no text, so a stream whose text has
+all expired costs one number); `nb` the positions above `x` held without
+text (ascending); `w` the subset of `nb` wanted [R3, R6]. Text is held at
+position p iff `x` < p ≤ `c` and p is not in `nb`. Checks: 0 ≤ `x` ≤ `c`;
+`nb` strictly ascending within (`x`, `c`]; `w` a subset of `nb`. An author
+with nothing held has detail `[]` and no digest.
 Digest: SHA-256(`"a2p2 digest v2"` ‖ `0x00` ‖ lines), 64 hex, one line per
-stream `<e>:<c>:<nb comma-joined>:<w comma-joined>\n`. Equal digests are
+stream `<e>:<c>:<x>:<nb comma-joined>:<w comma-joined>\n`. Equal digests are
 treated as equal summaries.
+
+Short form. `sum` = SHA-256(`"a2p2 sum v2"` ‖ `0x00` ‖ the sorted
+`author:digest\n` lines of every author in the sender's `Admitted` it holds
+anything of), 64 hex. A round may open with a request carrying `sum` in
+place of `authors` and `digests`. After steps 4 to 6 of 4.4 the server
+answers `same` if its accepted log heads equal the request's `log.heads` as
+sets and its own `sum` equals the request's, recording that the peer's
+digests equalled its own at that time; otherwise `full`, and the requester
+repeats at once in the full form. A requester that knows of a difference
+(it has an offer, or the round is under way) uses the full form directly.
+A waiting pull (4.4 step 9) is a short-form request whose answer would be
+`same`.
 
 1. A request without `detail` (first of a round) gets `snap` and `differ`.
 2. The requester sends its detail for every author in `differ`, 16 per

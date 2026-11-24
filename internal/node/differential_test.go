@@ -60,6 +60,8 @@ type sim struct {
 	path   string
 	st     *store.Store
 	m      *Machine
+	r      *Rooms    // with the real exchange (pull_differential_test.go)
+	x      *Exchange // with the real exchange
 }
 
 type backup struct {
@@ -68,6 +70,7 @@ type backup struct {
 	path    string // a copy of the database files, never written again
 	reg     map[streamKey]int64
 	isReg   bool
+	px      *pxBackup // with the real exchange
 }
 
 type agentKey struct {
@@ -115,10 +118,14 @@ type harness struct {
 	// registered (its cursors right after registration).
 	reg     map[delivery.MachineID]map[streamKey]int64
 	epochs  uint64 // mirrors the model's epoch counter
+	ids     uint64 // other random bytes
 	texts   int
 	log     []string
 	stopped bool
 	c       *counts
+	// px, when set, runs the real exchange and the room log instead of
+	// pull below (pull_differential_test.go).
+	px *pxState
 }
 
 // keys returns one key per name whose node ids sort as the names do, so
@@ -190,6 +197,12 @@ func (h *harness) start(s *sim, out map[string]string) {
 			return diffBase.Add(time.Duration(h.w.Now+h.w.Machine(name).Skew) * time.Hour)
 		},
 		Rand: func(b []byte) {
+			if len(b) != 8 { // not an epoch (request ids): keep the epoch counter in step
+				h.ids++
+				x := sha256.Sum256([]byte(fmt.Sprintf("differential ids %s %d", name, h.ids)))
+				copy(b, x[:])
+				return
+			}
 			h.epochs++
 			clear(b)
 			binary.BigEndian.PutUint64(b[len(b)-8:], (h.epochs*2654435761)%4294967291)
@@ -197,6 +210,9 @@ func (h *harness) start(s *sim, out map[string]string) {
 	})
 	for room, e := range out {
 		s.m.out[room] = e
+	}
+	if h.px != nil {
+		h.px.open(h, s)
 	}
 }
 
@@ -229,6 +245,9 @@ func (h *harness) clone() *harness {
 	}
 	c.backups = slices.Clone(h.backups)
 	c.log = slices.Clone(h.log)
+	if h.px != nil {
+		c.px = h.px.clone()
+	}
 	for n, s := range h.sims {
 		cs := &sim{name: n, agents: slices.Clone(s.agents), key: s.key, path: filepath.Join(h.t.TempDir(), "a2p2.db")}
 		copyDB(h.t, s.path, cs.path)
@@ -264,6 +283,7 @@ const (
 	opRegister // lateAgent is registered here (implementation only)
 	opPull     // machine pulls from server
 	opInject   // a record the model cannot express is placed (implementation only)
+	opMore     // the real exchange's operations follow (pull_differential_test.go)
 )
 
 // What opInject places. Every one is a reference that does not check out.
@@ -325,11 +345,11 @@ func (o op) String() string {
 	case opRegister:
 		return fmt.Sprintf("%s register %s", o.machine, lateAgent)
 	case opPull:
-		return fmt.Sprintf("%s pulls from %s", o.machine, o.server)
+		return fmt.Sprintf("%s pulls from %s%s", o.machine, o.server, pullFlags(o.n))
 	case opInject:
 		return fmt.Sprintf("%s inject %d #%d", o.machine, o.n, o.target)
 	}
-	return "?"
+	return o.moreString()
 }
 
 func (h *harness) fail(format string, a ...any) {
@@ -355,7 +375,8 @@ func (h *harness) target(i int) (delivery.RecordID, string, bool) {
 
 // registered says whether agent may act on machine m on both sides.
 func (h *harness) registered(m delivery.MachineID, agent string) bool {
-	return slices.Contains(h.sims[m].agents, agent)
+	s := h.sims[m]
+	return s != nil && slices.Contains(s.agents, agent)
 }
 
 // errClass maps both sides' errors to one vocabulary.
@@ -493,6 +514,9 @@ func (h *harness) do(o op, variant int) {
 	if !o.same {
 		h.advance(delivery.Hour)
 	}
+	if h.px != nil && h.px.skip(h, o) {
+		return // the machine is asleep: neither side acts
+	}
 	s := h.sims[o.machine]
 	text := func(prefix string) string {
 		h.texts++
@@ -569,6 +593,9 @@ func (h *harness) do(o op, variant int) {
 		b := backup{machine: o.machine, model: h.w.Backup(o.machine), path: filepath.Join(h.t.TempDir(), "backup.db"),
 			reg: cloneMap(h.reg[o.machine]), isReg: h.registered(o.machine, lateAgent)}
 		copyDB(h.t, s.path, b.path)
+		if h.px != nil {
+			b.px = h.px.backup(o.machine)
+		}
 		h.backups = append(h.backups, b)
 	case opRestore:
 		var b *backup
@@ -582,6 +609,9 @@ func (h *harness) do(o op, variant int) {
 			return
 		}
 		h.w.Restore(o.machine, b.model)
+		if h.px != nil {
+			h.px.restore(o.machine, b.px)
+		}
 		// What agents were shown before the restore stays shown: a Seen
 		// after it confirms entries the restored store may not hold.
 		h.reopen(s, b.path)
@@ -598,12 +628,21 @@ func (h *harness) do(o op, variant int) {
 		// daemon's hourly pass ran in it, before the clock was changed.
 		h.prune(s)
 		h.w.SetSkew(o.machine, delivery.Time(o.n))
+		if h.px != nil {
+			h.px.skews[o.machine] = append(h.px.skews[o.machine], skewChange{h.w.Now, delivery.Time(o.n)})
+		}
 	case opRegister:
 		h.register(s)
 	case opPull:
-		h.pull(o.machine, o.server)
+		if h.px != nil {
+			h.px.pull(h, o)
+		} else {
+			h.pull(o.machine, o.server)
+		}
 	case opInject:
 		h.inject(s, o)
+	default:
+		h.px.do(h, o)
 	}
 }
 
@@ -800,13 +839,18 @@ func (h *harness) all(s *sim) map[string]store.Held {
 		if err != nil {
 			return err
 		}
+		und, err := s.m.undecided(rd) // missing text not yet decided does not expire (reading.go)
+		if err != nil {
+			return err
+		}
 		for _, st := range ss {
 			hs, err := rd.RecordsFrom(diffRoom, st.Author, st.Epoch, 1)
 			if err != nil {
 				return err
 			}
 			for _, x := range hs {
-				if (x.Reason == store.ReasonLive || x.Reason == store.ReasonMissing) && store.TextExpired(x.Record.Fields().Created, now) {
+				if (x.Reason == store.ReasonLive || x.Reason == store.ReasonMissing && !und[[2]string{diffRoom, st.Author}]) &&
+					store.TextExpired(x.Record.Fields().Created, now) {
 					x.Reason = store.ReasonExpired
 				}
 				out[x.Record.ID()] = x
@@ -925,7 +969,9 @@ func (h *harness) advance(d delivery.Time) {
 	h.w.Advance(d)
 	if d > delivery.Hour {
 		for _, n := range h.order {
-			h.prune(h.sims[n])
+			if h.px == nil || !h.px.asleep[n] {
+				h.prune(h.sims[n])
+			}
 		}
 	}
 }
@@ -994,7 +1040,7 @@ func (h *harness) inbox(m delivery.MachineID, agent string) (delivery.View, Inbo
 			reason = WaitText
 			at = fmt.Sprintf("%s.%s.%d", g.At.Stream.Author, epochHex(g.At.Stream.Epoch), g.At.Seq)
 		default:
-			since = fmt.Sprint(int64(g.Since))
+			since = fmt.Sprint(int64(g.Since + h.skewAt(m, g.Since)))
 		}
 		mw = append(mw, fmt.Sprintf("%s.%s have=%d known=%d %s %s %s", g.Stream.Author, epochHex(g.Stream.Epoch), g.Have, g.Known, reason, at, since))
 	}
@@ -1012,6 +1058,9 @@ func (h *harness) inbox(m delivery.MachineID, agent string) (delivery.View, Inbo
 	}
 	sort.Strings(mw)
 	sort.Strings(iw)
+	if h.px != nil && h.px.gapsUnknown[m] {
+		mw = h.px.knownGaps(h, mw, iw)
+	}
 	if !slices.Equal(mw, iw) {
 		h.fail("waiting %s/%s:\nmodel %v\nimplementation %v", m, agent, mw, iw)
 	}
@@ -1093,6 +1142,9 @@ func (h *harness) compare() {
 	ctx := context.Background()
 	for _, n := range h.order {
 		s := h.sims[n]
+		if h.px != nil && h.px.asleep[n] {
+			continue // the model reads nothing of a sleeping machine
+		}
 		for _, a := range s.agents {
 			_, iv := h.inbox(n, a)
 			fromStart := h.inboxFromStart(s, a)
@@ -1128,8 +1180,11 @@ func (h *harness) compare() {
 			if st.Saved != ok {
 				h.fail("%s: model holds %s %v, implementation %v", n, h.id(x.impl), st.Saved, ok)
 			}
-			if ok && modelReason[st.Dropped] != got.Reason {
+			if ok && modelReason[st.Dropped] != got.Reason && !(h.px != nil && h.px.undecided(h, n, x, modelReason[st.Dropped], got.Reason)) {
 				h.fail("%s: %s is %s in the model, %s in the implementation", n, h.id(x.impl), modelReason[st.Dropped], got.Reason)
+			}
+			if ok && h.px != nil {
+				h.px.sameCopies(h, n, x, st.Copies)
 			}
 		}
 		if s.m.PruneDue() {

@@ -260,7 +260,16 @@ func insertLog(tx *sql.Tx, room string, r LogRow) error {
 // transaction (see LogBatch). It returns the batch number given.
 func (s *Store) ApplyLog(ctx context.Context, b LogBatch) (int64, error) {
 	var batch int64
-	err := s.tx(ctx, func(tx *sql.Tx) error {
+	err := s.tx(ctx, func(tx *sql.Tx) (err error) {
+		batch, err = applyLog(tx, b)
+		return err
+	})
+	return batch, err
+}
+
+func applyLog(tx *sql.Tx, b LogBatch) (int64, error) {
+	var batch int64
+	err := func() error {
 		if err := checkGen(tx, b.Room, b.Gen); err != nil {
 			return err
 		}
@@ -325,7 +334,7 @@ func (s *Store) ApplyLog(ctx context.Context, b LogBatch) (int64, error) {
 			}
 		}
 		return nil
-	})
+	}()
 	return batch, err
 }
 
@@ -448,33 +457,38 @@ func (s *Store) PutRecordPlanned(ctx context.Context, r *core.VerifiedRecord, ge
 		return "", ErrUnverified
 	}
 	var out Outcome
-	err := s.tx(ctx, func(tx *sql.Tx) error {
-		room := r.Fields().Room
-		if err := checkGen(tx, room, gen); err != nil {
-			return err
-		}
-		p, err := plan(&Reader{tx: tx})
-		if err != nil {
-			return err
-		}
-		if p.Refuse != "" {
-			out = p.Refuse
-			return nil
-		}
-		opts, rec := PutOpts{Now: p.Now, MayRead: p.Text != TextHidden}, r
-		if p.Text == TextUndecided {
-			rec = r.WithoutBody()
-		}
-		if out, err = place(tx, rec, opts); err != nil {
-			return err
-		}
-		if (out == OutcomeStored || out == OutcomeRepaired) && p.Access != nil {
-			return applyAccess(tx, room, *p.Access)
-		}
-		return nil
+	err := s.tx(ctx, func(tx *sql.Tx) (err error) {
+		out, err = putPlanned(tx, r, gen, plan)
+		return err
 	})
 	if err != nil {
 		return "", err
+	}
+	return out, nil
+}
+
+func putPlanned(tx *sql.Tx, r *core.VerifiedRecord, gen int64, plan func(*Reader) (RecordPlan, error)) (Outcome, error) {
+	room := r.Fields().Room
+	if err := checkGen(tx, room, gen); err != nil {
+		return "", err
+	}
+	p, err := plan(&Reader{tx: tx})
+	if err != nil {
+		return "", err
+	}
+	if p.Refuse != "" {
+		return p.Refuse, nil
+	}
+	opts, rec := PutOpts{Now: p.Now, MayRead: p.Text != TextHidden}, r
+	if p.Text == TextUndecided {
+		rec = r.WithoutBody()
+	}
+	out, err := place(tx, rec, opts)
+	if err != nil {
+		return "", err
+	}
+	if (out == OutcomeStored || out == OutcomeRepaired) && p.Access != nil {
+		return out, applyAccess(tx, room, *p.Access)
 	}
 	return out, nil
 }
@@ -691,6 +705,7 @@ func (s *Store) LeaveRoom(ctx context.Context, room string, now time.Time) (int6
 			`DELETE FROM reads WHERE room = ?`, `DELETE FROM read_heads WHERE room = ?`,
 			`DELETE FROM log WHERE room = ?`, `DELETE FROM room_members WHERE room = ?`,
 			`DELETE FROM requests WHERE room = ?`,
+			`DELETE FROM observed WHERE room = ?`, `DELETE FROM refusals WHERE room = ?`,
 		} {
 			if _, err := tx.Exec(q, room); err != nil {
 				return err

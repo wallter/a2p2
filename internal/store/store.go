@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/wallter/a2p2/internal/core"
@@ -77,10 +78,22 @@ CREATE TABLE marks (
 `
 
 // migrations[i] upgrades the schema from version i to i+1. Append only.
-var migrations = []string{schema, schemaRecords, schemaLog}
+var migrations = []string{schema, schemaRecords, schemaLog, schemaPull}
 
 // Store wraps the database. Safe for concurrent use.
-type Store struct{ db *sql.DB }
+type Store struct {
+	db *sql.DB
+	// changes counts write transactions, raised inside each one just
+	// before its commit. With one connection, a read that starts after
+	// changes was read sees every write counted by then (see Changes).
+	changes atomic.Int64
+}
+
+// Changes is the number of write transactions begun committing. Read it
+// before a read transaction: if it is the same later, nothing that read
+// saw has changed since (a raise for a commit that failed only makes the
+// caller look again).
+func (s *Store) Changes() int64 { return s.changes.Load() }
 
 // Open opens (creating and migrating if needed) the database at path.
 func Open(path string) (*Store, error) {
@@ -153,6 +166,7 @@ func (s *Store) tx(ctx context.Context, fn func(*sql.Tx) error) error {
 		tx.Rollback()
 		return err
 	}
+	s.changes.Add(1)
 	return tx.Commit()
 }
 

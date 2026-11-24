@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"sync"
@@ -84,6 +85,11 @@ type Rooms struct {
 	// a room's machine decided and what the store holds never diverge.
 	mu    sync.Mutex
 	rooms map[string]*roomLog
+	// fmu guards fronts, each room's reading frontier for Machine.fronts.
+	// It is taken alone, inside store transactions too, never with mu
+	// waited for.
+	fmu    sync.Mutex
+	fronts map[string]readFront
 	// signs counts membership entries signed (create entries excluded);
 	// tests read it.
 	signs int
@@ -111,7 +117,13 @@ type roomLog struct {
 // store, replaying each room's log in its arrival batches, and refreshes
 // the member cache from the result.
 func OpenRooms(ctx context.Context, m *Machine) (*Rooms, error) {
-	r := &Rooms{m: m, rooms: map[string]*roomLog{}}
+	r := &Rooms{m: m, rooms: map[string]*roomLog{}, fronts: map[string]readFront{}}
+	m.fronts = r.frontiers
+	m.locked = func(fn func() error) error {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return fn()
+	}
 	lrs, err := m.st.LogRooms(ctx)
 	if err != nil {
 		return nil, err
@@ -208,7 +220,71 @@ func (r *Rooms) replay(rl *roomLog) error {
 	rl.st = mach.State()
 	rl.perm = r.permKey(rl.st)
 	rl.cache = r.memberCache(rl.st, rl.lookup(nil))
+	r.setFrontier(rl)
 	return nil
+}
+
+// setFrontier publishes rl's reading frontier for Machine.fronts.
+//
+// Removed, this machine keeps reading by the grants that admitted it
+// (removedPermission): what it held back waiting for a head stays held
+// back, and is decided when the head arrives, as for a member.
+func (r *Rooms) setFrontier(rl *roomLog) {
+	var f readFront
+	p, ok := rl.st.Permissions[r.m.ID]
+	if !ok && slices.Contains(rl.st.Admitted, r.m.ID) {
+		p, ok = r.removedPermission(rl), true
+	}
+	if ok {
+		f = readFront{From: readFrom(p, rl.lookup(nil)), All: p.All, perm: p}
+	}
+	r.fmu.Lock()
+	defer r.fmu.Unlock()
+	if len(f.From) == 0 {
+		delete(r.fronts, rl.id)
+	} else {
+		r.fronts[rl.id] = f
+	}
+}
+
+// removedPermission is the permission of this machine, no longer a
+// member, from every applied grant that targets it: the union of their
+// heads, the more restrictive (members.permissionOf for one period).
+func (r *Rooms) removedPermission(rl *roomLog) members.Permission {
+	var grants []string
+	for _, id := range sortedIDs(rl.ents) {
+		ef := rl.ents[id].Fields()
+		if (ef.Kind == core.EntryAdd || ef.Kind == core.EntryAdmin) && ef.Target == r.m.ID && rl.st.Effects[id].Applied {
+			grants = append(grants, id)
+		}
+	}
+	p := members.Permission{Grants: grants, All: len(grants) > 0, Closed: len(grants) == 0}
+	for _, g := range grants {
+		ef := rl.ents[g].Fields()
+		if ef.History {
+			continue
+		}
+		p.All = false
+		for a, ids := range ef.From {
+			if p.From == nil {
+				p.From = map[string][]string{}
+			}
+			for _, id := range ids {
+				if !slices.Contains(p.From[a], id) {
+					p.From[a] = append(p.From[a], id)
+				}
+			}
+		}
+	}
+	return p
+}
+
+// frontiers returns every room's reading frontier; the maps are replaced,
+// never changed, so the caller may keep them.
+func (r *Rooms) frontiers() map[string]readFront {
+	r.fmu.Lock()
+	defer r.fmu.Unlock()
+	return maps.Clone(r.fronts)
 }
 
 // restore puts rl's machine back to exactly what the store holds, after
@@ -348,6 +424,9 @@ func (r *Rooms) Leave(ctx context.Context, room string) error {
 		return err
 	}
 	delete(r.rooms, room)
+	r.fmu.Lock()
+	delete(r.fronts, room)
+	r.fmu.Unlock()
 	return nil
 }
 
@@ -425,6 +504,18 @@ func (r *Rooms) Receive(ctx context.Context, room string, gen int64, wires ...[]
 type completion struct{ request, entry string }
 
 func (r *Rooms) ingest(ctx context.Context, rl *roomLog, gen int64, wires [][]byte, done *completion) ([]EntryResult, error) {
+	return r.ingestWith(ctx, rl, gen, wires, done, nil)
+}
+
+// commitFn writes a decided batch (nil when no kept entry changed) together
+// with whatever else its caller writes in the same transaction (the pull
+// exchange: an offer or a page, and an observation). st and look are the
+// room's membership as the batch leaves it. It returns the batch number
+// the store gave. An error writes nothing and leaves the room as it was.
+type commitFn func(ctx context.Context, b *store.LogBatch, st members.State, look func(string) *core.VerifiedEntry) (int64, error)
+
+// ingestWith is ingest with the store write done by commit, if not nil.
+func (r *Rooms) ingestWith(ctx context.Context, rl *roomLog, gen int64, wires [][]byte, done *completion, commit commitFn) ([]EntryResult, error) {
 	out := make([]EntryResult, len(wires))
 	idx := make([]string, len(wires)) // the verified entry of each wire
 	var fresh []*core.VerifiedEntry
@@ -474,6 +565,11 @@ func (r *Rooms) ingest(ctx context.Context, rl *roomLog, gen int64, wires [][]by
 	}
 	if len(fresh) == 0 {
 		fill() // nothing new: nothing to decide or write
+		if commit != nil {
+			if _, err := commit(ctx, nil, rl.st, rl.lookup(nil)); err != nil {
+				return nil, err
+			}
+		}
 		return out, nil
 	}
 
@@ -508,13 +604,26 @@ func (r *Rooms) ingest(ctx context.Context, rl *roomLog, gen int64, wires [][]by
 		b, publish, err := r.stage(ctx, rl, gen, batch, final, done)
 		if err == nil && b == nil {
 			fill() // decided, but nothing kept changed: the machine is as the store
+			if commit != nil {
+				if _, err := commit(ctx, nil, rl.st, rl.lookup(nil)); err != nil {
+					return nil, err
+				}
+			}
 			return out, nil
 		}
 		if err == nil {
 			err = hookAt("ingest:apply")
 		}
 		var n int64
-		if err == nil {
+		switch {
+		case err != nil:
+		case commit != nil:
+			byID := map[string]*core.VerifiedEntry{}
+			for _, v := range batch {
+				byID[v.ID()] = v
+			}
+			n, err = commit(ctx, b, rl.mach.State(), rl.lookup(byID))
+		default:
 			n, err = r.m.st.ApplyLog(ctx, *b)
 		}
 		if err != nil {
@@ -523,9 +632,10 @@ func (r *Rooms) ingest(ctx context.Context, rl *roomLog, gen int64, wires [][]by
 		}
 		publish(n)
 		fill()
-		// After the commit memory and disk agree; a failure here is
-		// reported but changes nothing.
-		return out, hookAt("ingest:committed")
+		// After the commit memory and disk agree: a failure here changes
+		// nothing, and the committed batch is not reported as failed.
+		_ = hookAt("ingest:committed")
+		return out, nil
 	}
 }
 
@@ -649,6 +759,7 @@ func (r *Rooms) stage(ctx context.Context, rl *roomLog, gen int64, batch []*core
 			delete(rl.state, id)
 		}
 		rl.st, rl.perm, rl.cache = st, perm, cache
+		r.setFrontier(rl)
 	}
 	return b, publish, nil
 }

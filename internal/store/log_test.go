@@ -109,7 +109,7 @@ func TestDatabaseAtVersionTwoUpgradesToTheLogSchema(t *testing.T) {
 	}
 	defer s.Close()
 	s.db.QueryRow(`PRAGMA user_version`).Scan(&v)
-	if v != 3 {
+	if v != len(migrations) {
 		t.Fatalf("after upgrade: version %d", v)
 	}
 	if _, err := s.LogRooms(ctx); err != nil {

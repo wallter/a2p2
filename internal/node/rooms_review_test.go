@@ -40,8 +40,9 @@ func logRows(t *testing.T, n *lnode, room string) []store.LogRow {
 // A batch that fails at any point before its commit leaves memory and the
 // store exactly as they were, and a retry of the same batch acts as a
 // first attempt: the vote is decided and the second admin's request
-// raised. A cancelled context does not evict the room. A failure reported
-// after the commit leaves memory equal to the store.
+// raised. A cancelled context does not evict the room. A failure
+// after the commit leaves memory equal to the store and is not reported
+// as a failure (step 5a review).
 //
 // Requirements: DESIGN-next section 5; review blocker 2
 func TestIngressFailureLeavesTheRoomAsItWasAndARetryActsAsTheFirst(t *testing.T) {
@@ -67,10 +68,12 @@ func TestIngressFailureLeavesTheRoomAsItWasAndARetryActsAsTheFirst(t *testing.T)
 			}
 			_, err := b.r.Receive(ctx, room, 0, w)
 			testHook = nil
-			if err == nil {
-				t.Fatal("failure not reported")
-			}
 			if point == "ingest:committed" {
+				// Step 5a review: a failure after the commit is not
+				// reported as a failure of what was committed.
+				if err != nil {
+					t.Fatalf("committed batch reported as failed: %v", err)
+				}
 				// Committed: memory is the store, and a restart agrees.
 				after := b.state(room)
 				b.restart()
@@ -82,6 +85,9 @@ func TestIngressFailureLeavesTheRoomAsItWasAndARetryActsAsTheFirst(t *testing.T)
 					t.Fatalf("retry after commit: %+v %v", res, err)
 				}
 				return
+			}
+			if err == nil {
+				t.Fatal("failure not reported")
 			}
 			if _, err := b.r.State(room); err != nil {
 				t.Fatalf("room evicted: %v", err)
@@ -270,8 +276,10 @@ func TestUndecidedHistoryKeepsTheReaderWaitingUntilTheHeadArrives(t *testing.T) 
 		t.Fatalf("undecided text: %+v", h)
 	}
 	v, err := e.m.Inbox(context.Background(), room, "erin")
-	if err != nil || len(v.Entries) != 0 || len(v.Waiting) != 1 || v.Waiting[0].At != x1 {
-		t.Fatalf("erin waits: %+v %v", v, err)
+	// Nothing is shown and nothing waits until the head arrives: erin's
+	// cursors start at it (U3; step 5a, which the delivery model decided).
+	if err != nil || len(v.Entries) != 0 || len(v.Waiting) != 0 {
+		t.Fatalf("erin before the head: %+v %v", v, err)
 	}
 	if _, err := e.m.Seen(context.Background(), room, "erin", nil); err != nil {
 		t.Fatal(err)

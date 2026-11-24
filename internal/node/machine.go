@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/wallter/a2p2/internal/core"
+	"github.com/wallter/a2p2/internal/members"
 	"github.com/wallter/a2p2/internal/store"
 )
 
@@ -55,6 +56,65 @@ type Machine struct {
 	// pruneDue is set when a read found text past retention that is not yet
 	// marked expired; the daemon runs Prune when it sees it (PruneDue).
 	pruneDue atomic.Bool
+
+	// fronts, set by OpenRooms, is this machine's reading frontier in each
+	// room with a log (see readFront).
+	fronts func() map[string]readFront
+	// locked, set by OpenRooms, runs fn with no membership change and no
+	// frontier published meanwhile, so that Prune reads the frontier and
+	// writes expiry as one decision.
+	locked func(fn func() error) error
+}
+
+// readFront is this machine's reading frontier in a room: per author, the
+// from heads of its grants (readFrom), and whether it may read all text.
+// While a head of an author is not held, the cursors of its streams are
+// not seeded yet: reading holds back those streams without a cursor
+// (roomView.unseeded); without all text readable their text is also
+// undecided (access.go) and missing text of the author does not expire
+// (undecided).
+type readFront struct {
+	From map[string][]string
+	All  bool
+	perm members.Permission // the permission it comes from
+}
+
+// undecided lists the (room, author) pairs with a head of this machine's
+// reading frontier not held: whether it may read their text is undecided.
+func (m *Machine) undecided(rd *store.Reader) (map[[2]string]bool, error) {
+	if m.fronts == nil {
+		return nil, nil
+	}
+	out := map[[2]string]bool{}
+	for room, f := range m.fronts() {
+		if f.All {
+			continue
+		}
+		for author, heads := range f.From {
+			u, err := headsMissing(rd, room, author, heads)
+			if err != nil {
+				return nil, err
+			}
+			if u {
+				out[[2]string{room, author}] = true
+			}
+		}
+	}
+	return out, nil
+}
+
+// headsMissing reports whether some head of author is not held in room.
+func headsMissing(rd *store.Reader, room, author string, heads []string) (bool, error) {
+	for _, head := range heads {
+		h, ok, err := rd.Record(room, head)
+		if err != nil {
+			return false, err
+		}
+		if !ok || h.Record.Author() != author {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // NewMachine returns the record behaviour over st for the node whose key is
@@ -89,7 +149,17 @@ func (m *Machine) Register(ctx context.Context, agent string) (bool, error) {
 // expired when the clock is set back.
 func (m *Machine) Prune(ctx context.Context) error {
 	m.pruneDue.Store(false)
-	if _, err := m.st.ExpireText(ctx, m.now()); err != nil {
+	run := func() error {
+		_, err := m.st.ExpireTextWith(ctx, m.now(), m.undecided)
+		return err
+	}
+	var err error
+	if m.locked != nil {
+		err = m.locked(run)
+	} else {
+		err = run()
+	}
+	if err != nil {
 		m.pruneDue.Store(true)
 		return err
 	}

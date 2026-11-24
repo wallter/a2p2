@@ -220,15 +220,16 @@ func (m *Machine) Seen(ctx context.Context, room, agent string, reads []store.Re
 }
 
 // Thread returns the messages of the thread started by root, root
-// included, oldest first: root must be a message held here, and a reply
-// counts only if its parent and thread check out. Withdrawn messages,
-// messages whose text is not here, and messages whose newest text is still
-// on its way (Inbox waits for it) are left out. It marks nothing.
+// included, oldest first: root, if held, must be a message, and a reply
+// counts unless its parent or thread is known not to check out (one whose
+// parent is not held yet is listed, gap G3). Withdrawn messages, messages
+// whose text is not here, and messages whose newest text is still on its
+// way (Inbox waits for it) are left out. It marks nothing.
 func (m *Machine) Thread(ctx context.Context, room, root string) ([]Entry, error) {
 	var out []Entry
 	err := m.view(ctx, room, func(v *roomView) error {
 		r, err := v.get(root)
-		if err != nil || r == nil || r.f.Kind != core.KindMessage {
+		if err != nil || r != nil && r.f.Kind != core.KindMessage {
 			return err
 		}
 		hs, err := v.rd.ByThread(room, root)
@@ -237,7 +238,7 @@ func (m *Machine) Thread(ctx context.Context, room, root string) ([]Entry, error
 		}
 		for _, h := range hs {
 			x := v.keep(h)
-			if v.hidden(x.author) || x.id != root && x.h.Effect != store.EffectOK {
+			if v.hidden(x.author) || x.id != root && x.h.Effect == store.EffectBadReference {
 				continue
 			}
 			e, err := v.threadEntry(x)
@@ -344,6 +345,53 @@ type roomView struct {
 	members map[string]store.RoomMember
 	// hiddenAuthors: some held stream's author is hidden (see hidden).
 	hiddenAuthors bool
+	// front is this machine's reading frontier (Machine.fronts), and
+	// undecided caches, per author, whether a head of it is not held.
+	front     readFront
+	undecided map[string]bool
+}
+
+// undecidedAuthor reports whether a head of author's reading frontier is
+// not held: until it is, missing text of author is not shown as expired
+// (it may be text this machine may not read: not_admitted).
+func (v *roomView) undecidedAuthor(author string) bool {
+	if v.front.All || len(v.front.From[author]) == 0 {
+		return false
+	}
+	if u, ok := v.undecided[author]; ok {
+		return u
+	}
+	u, err := headsMissing(v.rd, v.room, author, v.front.From[author])
+	if err != nil {
+		u = true // fail closed: the read that follows reports the error
+	}
+	if v.undecided == nil {
+		v.undecided = map[string]bool{}
+	}
+	v.undecided[author] = u
+	return u
+}
+
+// unseeded reports whether the agent has no cursor in stream k while a
+// head of its author's reading frontier is not held: its cursor will be
+// seeded at that head when it arrives (Access.Frontier), so until then
+// nothing of the stream is shown and nothing waits in it, as an agent
+// admitted then starts at the admitter's positions (U3), with or without
+// history.
+func (v *roomView) unseeded(g *agentState, k streamKey) (bool, error) {
+	if _, ok := g.cursor[k]; ok {
+		return false, nil
+	}
+	for _, head := range v.front.From[k.author] {
+		h, err := v.get(head)
+		if err != nil {
+			return false, err
+		}
+		if h == nil || h.author != k.author {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // hidden reports whether author's records are hidden here: it is not this
@@ -361,7 +409,11 @@ func (v *roomView) removed(author string) bool {
 }
 
 func (m *Machine) newView(rd *store.Reader, room string, now time.Time) *roomView {
-	return &roomView{rd: rd, room: room, self: m.ID, now: now, contig: map[streamKey]int64{},
+	var front readFront
+	if m.fronts != nil {
+		front = m.fronts()[room]
+	}
+	return &roomView{rd: rd, room: room, self: m.ID, now: now, front: front, contig: map[streamKey]int64{},
 		first: map[streamKey]*rec{}, byID: map[string]*rec{}, absent: map[string]bool{},
 		byPos: map[streamKey]map[int64]*rec{}, loaded: map[streamKey]int64{}, byRef: map[string][]*rec{}}
 }
@@ -450,7 +502,8 @@ func (v *roomView) keep(h store.Held) *rec {
 		return r
 	}
 	r := &rec{h: h, f: h.Record.Fields(), id: id, author: h.Record.Author(), reason: h.Reason}
-	if (r.reason == store.ReasonLive || r.reason == store.ReasonMissing) && store.TextExpired(r.f.Created, v.now) {
+	if (r.reason == store.ReasonLive || r.reason == store.ReasonMissing && !v.undecidedAuthor(r.author)) &&
+		store.TextExpired(r.f.Created, v.now) {
 		r.reason = store.ReasonExpired
 		v.expiredByClock = true
 	}
@@ -961,6 +1014,11 @@ func (v *roomView) walk(g *agentState, agent string, advance bool) ([]Entry, map
 		progress = false
 		for _, s := range v.streams {
 			k := streamKey{s.Author, s.Epoch}
+			if u, err := v.unseeded(g, k); err != nil {
+				return nil, nil, nil, err
+			} else if u {
+				continue
+			}
 			for {
 				n := pos[k] + 1
 				h, err := v.at(k, n)

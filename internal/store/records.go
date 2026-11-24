@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/wallter/a2p2/internal/core"
@@ -635,10 +636,37 @@ func idAt(tx *sql.Tx, room, author, epoch string, seq int64) (string, error) {
 // machine's clock) is marked expired. Nothing turns an expired record back.
 // It returns how many records changed.
 func (s *Store) ExpireText(ctx context.Context, now time.Time) (int64, error) {
+	return s.ExpireTextWith(ctx, now, nil)
+}
+
+// ExpireTextWith is ExpireText leaving missing records alone whose room
+// and author undecided returns, read in the same transaction: whether this
+// machine may read them is not decided yet. A missing record arrived before
+// its retention passed (one that arrives later is stored expired); if it
+// turns out to be text this machine may not read, it is not_admitted, which
+// expiry never overrides [R6].
+func (s *Store) ExpireTextWith(ctx context.Context, now time.Time, undecided func(*Reader) (map[[2]string]bool, error)) (int64, error) {
 	var n int64
+	cutoff := ms(now.Add(-Retention))
 	err := s.tx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.Exec(`UPDATE records SET body = NULL, reason = ? WHERE reason IN ('live', 'missing') AND created <= ?`,
-			ReasonExpired, ms(now.Add(-Retention)))
+		var keep []any
+		if undecided != nil {
+			u, err := undecided(&Reader{tx: tx})
+			if err != nil {
+				return err
+			}
+			for k := range u {
+				keep = append(keep, k[0]+"/"+k[1])
+			}
+		}
+		q := `UPDATE records SET body = NULL, reason = ? WHERE reason IN ('live', 'missing') AND created <= ?`
+		args := []any{ReasonExpired, cutoff}
+		if len(keep) > 0 {
+			q += ` AND NOT (reason = 'missing' AND room || '/' || author IN (` +
+				strings.TrimSuffix(strings.Repeat("?,", len(keep)), ",") + `))`
+			args = append(args, keep...)
+		}
+		res, err := tx.Exec(q, args...)
 		if err != nil {
 			return err
 		}

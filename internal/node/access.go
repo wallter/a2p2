@@ -48,20 +48,43 @@ func (r *Rooms) ReceiveRecord(ctx context.Context, gen int64, rec *core.Verified
 	if gen != 0 && gen != rl.gen {
 		return "", ErrStaleGeneration
 	}
-	author, id := rec.Author(), rec.ID()
-	if author != r.m.ID && !slices.Contains(rl.st.Admitted, author) {
+	plan := r.recordPlan(rl.st, rl.lookup(nil), rec, r.m.now())
+	if plan == nil {
 		return store.OutcomeAuthorNotAdmitted, nil
 	}
-	perm, member := rl.st.Permissions[r.m.ID]
-	from := readFrom(perm, rl.lookup(nil))
-	now := r.m.now()
-	return r.m.st.PutRecordPlanned(ctx, rec, gen, func(rd *store.Reader) (store.RecordPlan, error) {
+	return r.m.st.PutRecordPlanned(ctx, rec, gen, plan)
+}
+
+// recordPlan is ReceiveRecord's decision for rec under membership st (look
+// finds its entries): nil if rec's author was never admitted; otherwise
+// the plan to place it with, run inside the placing transaction.
+func (r *Rooms) recordPlan(st members.State, look func(string) *core.VerifiedEntry, rec *core.VerifiedRecord,
+	now time.Time) func(*store.Reader) (store.RecordPlan, error) {
+	f := rec.Fields()
+	author, id := rec.Author(), rec.ID()
+	if author != r.m.ID && !slices.Contains(st.Admitted, author) {
+		return nil
+	}
+	perm, member := st.Permissions[r.m.ID]
+	from := readFrom(perm, look)
+	var last *readFront // removed: the frontier it had (Rooms.setFrontier)
+	if !member {
+		if fr, ok := r.frontiers()[f.Room]; ok {
+			last = &fr
+		}
+	}
+	return func(rd *store.Reader) (store.RecordPlan, error) {
 		p := store.RecordPlan{Now: now}
 		switch {
 		case author == r.m.ID:
 			return p, nil
 		case !member:
 			p.Text = store.TextHidden // not a member here: headers only
+			// A head of the frontier it had still decides what it held back.
+			if last != nil && slices.Contains(last.From[author], id) {
+				a := r.access(rd, f.Room, last.perm, last.From)
+				p.Access = &a
+			}
 			return p, nil
 		}
 		v := r.m.newView(rd, f.Room, now)
@@ -77,7 +100,7 @@ func (r *Rooms) ReceiveRecord(ctx context.Context, gen int64, rec *core.Verified
 			p.Access = &a
 		}
 		return p, nil
-	})
+	}
 }
 
 // readFrom is where this machine's agents start reading: the union per
@@ -173,7 +196,10 @@ func textAccess(v *roomView, perm members.Permission, author string, f core.Reco
 
 // frontier is where an agent of this machine starts reading stream s: the
 // last position at or before a head of its reading frontier, or 0 (no
-// seeding) when there is none for the author or no head is held yet.
+// seeding) when there is none for the author or not every head of the
+// author is held yet: a cursor seeded from some of them could not be
+// seeded again when the rest arrive (reading holds the streams back until
+// then, roomView.unseeded).
 func frontier(v *roomView, from map[string][]string, s store.Stream) (int64, error) {
 	var n int64
 	for _, head := range from[s.Author] {
@@ -182,7 +208,7 @@ func frontier(v *roomView, from map[string][]string, s store.Stream) (int64, err
 			return 0, err
 		}
 		if h == nil || h.author != s.Author {
-			continue
+			return 0, nil
 		}
 		if p := reach(v, h)[s.Epoch]; p > n {
 			n = p
