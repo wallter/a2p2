@@ -259,9 +259,6 @@ func entryFields(top jvalue) (*Entry, *Refusal) {
 			return nil, refuse("S7", k)
 		}
 	}
-	if has["history"] && has["from"] {
-		return nil, refuse("S7", "from")
-	}
 	if has["prev"] && !slices.Contains(f.Parents, f.Prev) {
 		return nil, refuse("S7", "parents")
 	}

@@ -385,7 +385,7 @@ func TestRecordAndEntryCannotBeTakenForEachOther(t *testing.T) {
 }
 
 // TestEntryFieldsPerKind: section 3's table, including parents containing
-// prev and from excluding history.
+// prev, and from allowed with or without history.
 // Requirements: T3, T5, U3
 func TestEntryFieldsPerKind(t *testing.T) {
 	base := EntryFields{Room: vRoom, Seq: 2, Prev: fakeID("prev"), Parents: []string{fakeID("prev")}, Target: nodeB, Created: vCreated}
@@ -399,11 +399,8 @@ func TestEntryFieldsPerKind(t *testing.T) {
 		"create label too long": func(f *EntryFields) {
 			*f = EntryFields{Room: vRoom, Seq: 1, Kind: EntryCreate, Label: strings.Repeat("x", 65), Created: vCreated}
 		},
-		"add without name":    func(f *EntryFields) { f.Kind = EntryAdd },
-		"add without parents": func(f *EntryFields) { f.Kind, f.Name, f.Parents = EntryAdd, "n", nil },
-		"add with history and from": func(f *EntryFields) {
-			f.Kind, f.Name, f.History, f.From = EntryAdd, "n", true, map[string][]string{nodeA: {fakeID("h")}}
-		},
+		"add without name":        func(f *EntryFields) { f.Kind = EntryAdd },
+		"add without parents":     func(f *EntryFields) { f.Kind, f.Name, f.Parents = EntryAdd, "n", nil },
 		"add with label":          func(f *EntryFields) { f.Kind, f.Name, f.Label = EntryAdd, "n", "x" },
 		"prev not in parents":     func(f *EntryFields) { f.Kind, f.Name, f.Parents = EntryAdd, "n", []string{fakeID("other")} },
 		"seq 2 without prev":      func(f *EntryFields) { f.Kind, f.Name, f.Prev = EntryAdd, "n", "" },
@@ -428,6 +425,12 @@ func TestEntryFieldsPerKind(t *testing.T) {
 	}
 	for name, mutate := range map[string]func(*EntryFields){
 		"admin with only target": func(f *EntryFields) { f.Kind = EntryAdmin },
+		"add with history and from": func(f *EntryFields) {
+			f.Kind, f.Name, f.History, f.From = EntryAdd, "n", true, map[string][]string{nodeA: {fakeID("h")}}
+		},
+		"admin with history and from": func(f *EntryFields) {
+			f.Kind, f.History, f.From = EntryAdmin, true, map[string][]string{nodeA: {fakeID("h")}}
+		},
 		"admin with name and from": func(f *EntryFields) {
 			f.Kind, f.Name, f.From = EntryAdmin, "n", map[string][]string{nodeA: {fakeID("h")}}
 		},

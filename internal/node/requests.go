@@ -43,7 +43,7 @@ const (
 // internal/core refuses from together with history today (PROTOCOL-next
 // section 3, S7), so a grant with history carries none and its grantee's
 // agents start at 0; set this once core accepts both.
-const fromWithHistory = false
+const fromWithHistory = true
 
 // maxHeadsPerAuthor is PROTOCOL-next section 3's bound on from heads.
 const maxHeadsPerAuthor = 16

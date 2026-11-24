@@ -266,6 +266,10 @@ func buildVectors() []namedVector {
 	ead := mustEntry(keyA, EntryFields{Room: vRoom, Seq: 5, Prev: er.ID(), Parents: []string{er.ID()}, Kind: EntryAdmin,
 		Target: nodeB, Name: "codex", Created: vCreated})
 	ent("entry-admin", "admin of an existing member", "", ead)
+	eafh := mustEntry(keyA, EntryFields{Room: vRoom, Seq: 6, Prev: ead.ID(), Parents: []string{ead.ID()}, Kind: EntryAdd,
+		Target: nodeC, Name: "gemini", History: true, Created: vCreated,
+		From: map[string][]string{nodeA: {rr.ID()}}})
+	ent("entry-add-from-history", "add with history and from: from is where reading starts, history whether earlier text is readable", "", eafh)
 	e2 := mustEntry(keyB, EntryFields{Room: vRoom, Seq: 1, Kind: EntryCreate, Label: "impostor", Created: vCreated})
 	ent("entry-second-create", "C1: a create entry that is not the room's pinned create", CodeSecondCreate, e2)
 
