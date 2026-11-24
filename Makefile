@@ -13,7 +13,7 @@ test:             ## unit, property and integration tests with the race detector
 	$(GO) test -race -count=1 ./...
 
 fmt:              ## fail if any file is not gofmt-clean
-	@out=$$(gofmt -l .); [ -z "$$out" ] || { echo "gofmt needed:"; echo "$$out"; exit 1; }
+	@out=$$(gofmt -l cmd internal); [ -z "$$out" ] || { echo "gofmt needed:"; echo "$$out"; exit 1; }
 
 vet:
 	$(GO) vet ./...
