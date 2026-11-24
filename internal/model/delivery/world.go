@@ -39,6 +39,16 @@ type World struct {
 
 	tamper func(server MachineID, it wire) wire // test hook: a relay that alters what it passes on
 
+	// Attachments (attach.go): files on each machine's disk outside a2p2,
+	// requests to send them waiting for a person, and a test hook for a
+	// member that serves wrong bytes.
+	localFiles map[MachineID]map[string]string
+	proposals  []*proposal
+	tamperFile func(server MachineID, hash, data string) string
+	anyFiles   bool // some record has files: pulls then exchange them (exchangeFiles)
+	nextSalt   int
+	transfers  []Transfer
+
 	// continueStreams switches on the rejected rule, for the test that shows
 	// why it is rejected: after a start, keep writing the stream of the last
 	// own record on disk instead of beginning a new one.
@@ -87,6 +97,21 @@ func (w *World) Clone() *World {
 	c.admission = map[MachineID]Admission{}
 	for k, v := range w.admission {
 		c.admission[k] = v
+	}
+	if w.localFiles != nil {
+		c.localFiles = map[MachineID]map[string]string{}
+		for k, v := range w.localFiles {
+			c.localFiles[k] = map[string]string{}
+			for p, d := range v {
+				c.localFiles[k][p] = d
+			}
+		}
+	}
+	c.transfers = append([]Transfer(nil), w.transfers...)
+	c.proposals = make([]*proposal, len(w.proposals))
+	for i, p := range w.proposals {
+		q := *p
+		c.proposals[i] = &q
 	}
 	return &c
 }
@@ -188,6 +213,7 @@ func (w *World) Crash(id MachineID) {
 	if m := w.machines[id]; m != nil && !m.Gone {
 		m.epoch, m.seq, m.last = 0, 0, nil
 		m.Awake = true
+		m.st.files.reconcile() // F10: a start finishes deletions and removes files no row names
 		m.prune(w.Now)
 	}
 }
@@ -228,6 +254,7 @@ func (w *World) SetSkew(id MachineID, skew Time) {
 func (w *World) Restore(id MachineID, s *Snapshot) {
 	m := w.machines[id]
 	m.st = s.st.clone()
+	m.st.files.reconcile()
 	m.epoch, m.seq, m.last = 0, 0, nil
 	m.Awake = true
 	m.prune(w.Now)
@@ -321,6 +348,12 @@ type Msg struct {
 
 // Send writes a message. Once it returns, the message is on disk (D1).
 func (w *World) Send(id MachineID, agent string, msg Msg) (RecordID, error) {
+	return w.send(id, agent, msg, "")
+}
+
+// send writes a message whose header commits to manifest (or none), whose
+// bytes the caller (Decide, after a person's approval) then holds for it.
+func (w *World) send(id MachineID, agent string, msg Msg, manifest string) (RecordID, error) {
 	m, err := w.awake(id)
 	if err != nil {
 		return "", err
@@ -328,7 +361,7 @@ func (w *World) Send(id MachineID, agent string, msg Msg) (RecordID, error) {
 	if msg.Body == "" || (msg.Everyone && len(msg.To) > 0) {
 		return "", ErrNotAllow // no empty text; a room-wide post names no addressees
 	}
-	r := &Record{Kind: Message, Agent: agent, AskHandled: msg.AskHandled}
+	r := &Record{Kind: Message, Agent: agent, AskHandled: msg.AskHandled, Manifest: manifest}
 	if !msg.Everyone {
 		r.To = append([]Addr(nil), msg.To...)
 	}
@@ -395,15 +428,17 @@ func (w *World) Handle(id MachineID, agent string, ref RecordID) (RecordID, erro
 
 // Withdraw takes back one of this machine's own messages.
 func (w *World) Withdraw(id MachineID, agent string, ref RecordID) (RecordID, error) {
-	return w.amend(id, agent, ref, Withdraw, "")
+	return w.amend(id, agent, ref, Withdraw, "", "")
 }
 
 // Replace gives new text for one of this machine's own messages.
+// A replacement has no files unless its writer lists them again
+// (ReplaceWithFiles, F8).
 func (w *World) Replace(id MachineID, agent string, ref RecordID, text string) (RecordID, error) {
-	return w.amend(id, agent, ref, Replace, text)
+	return w.amend(id, agent, ref, Replace, text, "")
 }
 
-func (w *World) amend(id MachineID, agent string, ref RecordID, k Kind, body string) (RecordID, error) {
+func (w *World) amend(id MachineID, agent string, ref RecordID, k Kind, body, manifest string) (RecordID, error) {
 	m, err := w.awake(id)
 	if err != nil {
 		return "", err
@@ -428,6 +463,7 @@ func (w *World) amend(id MachineID, agent string, ref RecordID, k Kind, body str
 			}
 		}
 		r.Version++
+		r.Manifest = manifest
 	}
 	return w.write(m, r, body).ID, nil
 }
@@ -591,5 +627,6 @@ func (w *World) release(x *exchange) (PullResult, error) {
 		}
 	}
 	p.observe(s.ID, resp, s.takes(), w.Now, w.Tick)
+	w.exchangeFiles(p, s)
 	return res, nil
 }

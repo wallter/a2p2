@@ -101,6 +101,9 @@ type agentState struct {
 	// (Showed). The agent may report them handled. It is not seen and
 	// moves no cursor.
 	shown map[RecordID]bool
+	// shownVer: the versions whose text a read showed; an agent fetches
+	// only files of a version it was shown (attach.go).
+	shownVer map[RecordID]bool
 }
 
 func newAgent(start map[StreamID]int) *agentState {
@@ -112,6 +115,7 @@ func newAgent(start map[StreamID]int) *agentState {
 		heads:    map[MachineID][]RecordID{},
 		skip:     map[RecordID]bool{},
 		shown:    map[RecordID]bool{},
+		shownVer: map[RecordID]bool{},
 		receipts: map[string]RecordID{},
 	}
 }
@@ -141,6 +145,10 @@ func (a *agentState) clone() *agentState {
 	for k, v := range a.shown {
 		b.shown[k] = v
 	}
+	b.shownVer = make(map[RecordID]bool, len(a.shownVer))
+	for k, v := range a.shownVer {
+		b.shownVer[k] = v
+	}
 	return &b
 }
 
@@ -159,6 +167,7 @@ type store struct {
 	known     map[StreamID]known
 	obs       map[MachineID]observation
 	view      view // who this machine believes is, and was, a member
+	files     *fileState
 }
 
 func newStore() *store {
@@ -174,6 +183,7 @@ func newStore() *store {
 		known:     map[StreamID]known{},
 		obs:       map[MachineID]observation{},
 		view:      newView(),
+		files:     newFileState(),
 	}
 }
 
@@ -193,6 +203,7 @@ func (s *store) clone() *store {
 	c.contig = copyInts(s.contig)
 	c.adm = s.adm // replaced, never modified
 	c.view = s.view.clone()
+	c.files = s.files.clone()
 	c.withdrawn = copyLists(s.withdrawn)
 	c.replaced = copyLists(s.replaced)
 	c.handled = copyLists(s.handled)
@@ -384,6 +395,7 @@ func (m *Machine) prune(now Time) {
 			h.dropped, h.body = Expired, ""
 		}
 	}
+	m.dropFiles(now)
 }
 
 // descends reports whether a comes after b in its author's history: b is
@@ -475,6 +487,7 @@ func (m *Machine) insert(r *Record, body string, hasBody bool, now Time) {
 		}
 	}
 	m.setBody(h, body, hasBody, now)
+	m.dropFiles(now) // a withdraw or a replacement may end a file's reference (F1)
 }
 
 // accept is the receiving rule. A record is stored only if it verifies and

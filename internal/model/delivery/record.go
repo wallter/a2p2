@@ -121,6 +121,10 @@ type Record struct {
 	Parent     RecordID
 	Thread     RecordID
 	Created    Time // by the author's clock
+	// Manifest, for a message or a replacement with files only, is the
+	// SHA-256 of its salted manifest (attach.go; 0.2 draft): all the header
+	// says about its files.
+	Manifest string
 
 	BodyHash string
 	ID       RecordID
@@ -165,6 +169,9 @@ func (r *Record) computeID() RecordID {
 		r.Author, r.Epoch, r.Seq, r.Prev, strings.Join(links, ","), r.Version,
 		r.Kind, r.Agent, strings.Join(to, ","), r.AskHandled,
 		r.Ref, r.Parent, r.Thread, r.Created, r.BodyHash)
+	if r.Manifest != "" { // absent for a record without files, so those ids are unchanged
+		s += "|files:" + r.Manifest
+	}
 	h := sha256.Sum256([]byte(s))
 	return RecordID(hex.EncodeToString(h[:8]))
 }

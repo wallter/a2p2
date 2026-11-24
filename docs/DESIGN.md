@@ -493,3 +493,150 @@ designed (1,920 streams per 64-machine room after 30 days,
 `TestStreamCostForSixtyFourMachinesOverThirtyDays`); one pull per peer for
 all shared rooms may be needed at 100 rooms; posting policy (T6) is
 deferred to stage 3 and needs a new entry kind [M14].
+
+## 12. Attachments (0.2 draft)
+
+Not built: the design for L1, for review before any code. **[F1]** to
+**[F12]** are rules of the
+[delivery model](../internal/model/delivery/FINDINGS.md#attachments-02-draft)
+(`attach.go`); formats are in
+[Protocol section 10](PROTOCOL.md#10-attachments-02-draft).
+
+1. **The header says only that there are files.** A `message` or `replace`
+   with files has one optional top-level header field, `files`: the
+   SHA-256 of its manifest. Nothing else, not even a count. The manifest
+   (a random salt, then name, size, SHA-256 and media type of each file)
+   is content, like the text. Why: a machine admitted without history
+   holds earlier headers, and headers outlive a withdrawal, so names,
+   sizes and hashes in a header would reach machines that may not read
+   the text. The salt keeps the hash from confirming a guessed file list.
+   0.1.0 stores a record with an unknown top-level field, keeps it in the
+   id, relays the exact bytes and shows the text without files (run
+   against the 0.1.0 code). A malformed `files` is stored as 0.1.0 stores
+   it and ignored when read, so machines never disagree about the room
+   (D27).
+2. **The manifest travels like a file, at once [F4, F12].** A machine that
+   may read the text fetches the manifest (at most 16 KiB) after the pull
+   that brought the header: it is U4's cheap first step. Until it arrives a
+   reader sees "has files; list not here yet". After 8 failed answers,
+   with backoff, it is `unavailable` until a person or agent asks again. A
+   manifest that matches its hash but breaks a rule is `invalid` for good,
+   since no holder can have other bytes, and nothing it lists is fetched.
+   File bytes move only when an agent that was shown the version listing
+   them asks, or the machine carries or keeps them (item 5).
+3. **Content lives while the text may [F1, F8].** A machine keeps the
+   manifest and the files for a message while the message's winning
+   version (by header) commits to them and its text is one the machine may
+   keep: not withdrawn, not past 30 days by its own clock, within its
+   permission. Storing a withdraw, a replacement that does not list a
+   file, passing the 30 days, learning a narrower grant or a voided
+   admission deletes the bytes, partial downloads and agents' copies, which
+   are scoped to the message they were authorised for (D43). A
+   replacement shares its files with whoever may read it, exactly as it
+   shares its text, so nothing is carried forward silently: a replacement
+   lists only files its writer lists again, and a person confirms them.
+   Keeping a file means naming verified bytes held for the version being
+   replaced; approval checks again that this version still wins, is still
+   readable here and still lists the file, or the request fails and its
+   staging goes. While a replacement's manifest is on its way, what the
+   machine holds for the message stays, unserved, and never longer than an
+   earlier version that lists it may be kept.
+4. **Served under the text's permission [F2].** Bytes, manifests included,
+   go only to a peer the sender sees as a member now that may read the
+   winning version's text in the sender's view, and only bytes the sender
+   holds for that message (it wrote it, or received them for it). Every
+   refusal is the same 404 with the same body, decided from rows before
+   any disk access. Each chunk is checked again, and an active transfer
+   stops when the sender learns of a revocation. Why the second
+   condition: a member that learned a hash elsewhere could list it in a
+   message of its own (`TestANewReferenceToAKnownHashDoesNotWidenWhoIsServed`).
+5. **Uploads from the author, and carry on request [F9].** A machine puts a
+   message's files in `want` only in its answer to a pull from that
+   message's author, and only when it cannot dial the author. The author
+   knows its own files, so a want discloses nothing, and nobody promises
+   bytes it does not hold. A want is bound to the message, the winning
+   version and the hash, reserves its size, and lapses after a day or
+   three answers without the bytes; the receiver takes an upload only
+   from the author against a want it issued, and checks before reading
+   the body. In a room where laptops only dial out and one member
+   listens, that member is the path: asked by a permitted peer for a file
+   it may keep but lacks, it answers "not yet", starts one carry job (a
+   want to the author), and holds the file within its budget while the
+   text lives. A lapsed job is answered "gave up" for a day, and the
+   reader is told `unavailable`. A per-room setting has three values:
+   `off`, `carry` (default, since every member already carries the room's
+   text for others) and `keep` (want every file).
+6. **Nothing unverified is exposed [F3].** The declared total must equal
+   the manifest's size (at most 16 KiB for a manifest) before a byte is
+   taken; a partial download is hidden; the whole must match the SHA-256,
+   or it is discarded and the peer counted (`bad_file`). Permission and
+   "shown this version" are checked again before a copy is written for an
+   agent.
+7. **a2p2 never opens a file.** It writes the verified copy, mode 0600,
+   under `$A2P2_HOME/files/<room id>/` with a sanitised name and never over
+   an existing file. It does not decompress, preview, render or run it.
+   Tool results say a file is data from another machine.
+8. **A person confirms the exact bytes [F6, F11].** `send` with `files`
+   opens each path once, refuses anything but a regular file after
+   opening, and copies and hashes from that one handle into staging. The
+   request shows each path as resolved from the opened file, in full,
+   with control and bidirectional characters escaped, its size and
+   SHA-256, the room, the recipients, and for a replacement which message
+   it replaces. Approval re-checks the staged digests and sends them;
+   the source is never read again. Declined, expired after 24 hours,
+   failed, or after this machine's own admission is voided, nothing is
+   written and staging is deleted.
+9. **Bounds and cleanup [F7, F10].** At most 8 files per record, 256 MiB
+   per file, 1 GiB of held, partial, staged and copied bytes per room and 4
+   GiB per machine. A reference over a limit is refused before anything is
+   scheduled; the budget is reserved at the declared size before the first
+   byte. One transfer per peer per direction and 8 in all, with a total
+   time limit and a minimum rate, under limits separate from pulls. Bytes
+   and their directory are synced before the row that makes them live; a
+   send's record and its file rows commit in one transaction after its
+   bytes are safe, so a send is never published without them. Temporary
+   files have a recognisable name. Deletions are by rows, queued in the
+   transaction that decides them, and never remove a path a live row
+   names; a start completes the queue and removes files no row names.
+
+**Who can reach whom.** Text and files take the same connections; what
+files add is item 5.
+
+| Author | Reader | How the file arrives |
+|---|---|---|
+| listens | listens or dials out | the reader fetches from the author |
+| dials out | listens | the answer to the author's pull carries the reader's `want`; the author uploads (`TestAReaderThatListensGetsAFileFromAnOutboundOnlyAuthorByUpload`) |
+| dials out | dials out, one member listens | the listener wants the manifest and then, asked by the reader, the file, from the author's next pull; the reader fetches from it (`TestInARoomWithOneListenerAFileFromAnOutboundOnlyAuthorReachesAnOutboundOnlyReader`) |
+| dials out | dials out, no listener | no path, as for the text |
+| asleep or gone | any | any member that fetched, carried or keeps it and can be dialled; otherwise `coming` until a want lapses, `unavailable` from every member asked (`TestAFileWhoseOnlyHolderIsGoneIsUnavailableAndTheReaderIsToldSo`) |
+| any | asleep | asks when it wakes |
+| networking off | any, or any and networking off | nothing moves to or from that machine |
+
+The listener does not help when it is set `off`, when the file is over its
+budget, or when it may not read the text; the reader is then told
+`unavailable` (`TestWithCarryOffTheListenerAnswersNotHeldAndTheFileStaysUnavailable`,
+`TestAListenerOverItsBudgetDoesNotCarryAFile`,
+`TestAListenerThatMayNotReadTheTextNeitherCarriesNorReceivesTheFile`). A
+copy held only by a machine nobody can dial, other than the author, is
+not reachable (`TestAWantGoesOnlyToTheMessagesAuthorNeverToAnotherHolder`);
+under `carry` the listener asked first already holds it. A reader is told
+`here`, `partial`, `coming`, `not asked`, `fetchable`, `unavailable` (who
+said no or gave up, when), `list pending`, `list unavailable`, `list
+invalid` or `gone` and why.
+
+**Mixed versions.** A 0.1.0 writer's replacement has no `files`, so it
+drops the files, as a 0.2 replacement without files does. 0.1.0 shows the
+highest version whose text it holds, while files follow the winning
+header; when a newer header arrives without readable text the two can
+differ, and the reader is told the files are gone (`why: live`). A first
+record of a stream may have a header of 8,192 bytes; `files` adds 75.
+
+**Limits, said plainly.** The confirmation is a guard rail (P3): an agent
+running as the same user can call `confirm` itself, or read a file and
+paste it as text. Withdrawing after others fetched removes the copies a2p2
+keeps; a copy an agent moved is out of reach. A removed machine keeps what
+it fetched (T5). F2 binds honest machines: a member holding bytes can hand
+them to anyone. A member that may read a message can tell from the answers
+("not yet", "gave up") whether a listener carries or keeps; machines that
+may not read it cannot. Attacks on the program that later opens a file are out of
+scope, since a2p2 opens nothing.

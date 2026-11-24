@@ -100,6 +100,7 @@ func (m *Machine) apply(c Change, now Time) {
 			for _, h := range m.st.recs {
 				m.setBody(h, h.body, h.dropped == Live, now)
 			}
+			m.dropFiles(now) // a narrower permission drops the files it hides
 		}
 	case Remove:
 		delete(v.now, c.Machine)
@@ -112,6 +113,12 @@ func (m *Machine) apply(c Change, now Time) {
 		delete(v.ever, c.Machine)
 		if c.Machine != m.ID {
 			m.dropAuthor(c.Machine)
+			m.dropFiles(now) // with its records go the files they referred to
+		} else {
+			for n := range m.st.files.staged { // F11: nothing staged here can be sent now
+				m.dropStaged(n)
+			}
+			m.st.files.flush()
 		}
 	}
 }

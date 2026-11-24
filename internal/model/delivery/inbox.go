@@ -49,6 +49,11 @@ type Entry struct {
 	// AuthorRemoved: the author was a member and, in this machine's view,
 	// is no longer.
 	AuthorRemoved bool
+	// Files are the files of the version shown, from its manifest
+	// (attach.go); FilesPending: it has files whose list has not arrived.
+	// What became of each file is FileStatus.
+	Files        []FileRef
+	FilesPending bool
 }
 
 // Gap is a stream this machine knows is longer than what it holds.
@@ -198,6 +203,7 @@ func (m *Machine) decide(g *agentState, agent string, h *held, heads map[Machine
 			}
 			e = m.entry(h, Shown, string(r.ID))
 			e.Text, e.Version = text, ver
+			e.Files, e.FilesPending = m.filesOf(ver)
 		}
 	case Withdraw:
 		if _, saw := g.seenMsg[r.Ref]; !saw {
@@ -231,6 +237,7 @@ func (m *Machine) decide(g *agentState, agent string, h *held, heads map[Machine
 		}
 		e = m.entry(h, ReplacedNotice, string(r.ID))
 		e.Text, e.Version = h.body, r.ID
+		e.Files, e.FilesPending = m.filesOf(r.ID)
 	default:
 		return nil, nil // handled reports are for Status, not the inbox
 	}
@@ -401,6 +408,7 @@ func (g *agentState) noteShown(es []Entry) {
 	for _, e := range es {
 		if e.Kind == Shown || e.Kind == ReplacedNotice {
 			g.shown[e.Message] = true
+			g.shownVer[e.Version] = true
 		}
 	}
 }
@@ -545,6 +553,7 @@ func (m *Machine) threadEntry(h *held) *Entry {
 	case Live:
 		e := m.entry(h, Shown, string(h.rec.ID))
 		e.Text, e.Version, _ = m.currentText(h)
+		e.Files, e.FilesPending = m.filesOf(e.Version)
 		return e
 	}
 	return nil
