@@ -50,28 +50,32 @@ func twoSynced(t *testing.T) (a, b *pnode, net *memNet, room string) {
 	return a, b, net, room
 }
 
-// [R5] Equal summaries: one request, carrying digests only; the response
-// says nothing differs and carries no page, no detail and no entries.
+// [R5, N1] Equal summaries cost one small request each way: the opening
+// carries the sum only, the answer is same with the log heads.
 func TestPullWithEqualSummariesSendsNothing(t *testing.T) {
 	a, b, net, room := twoSynced(t)
 	l := capture(net)
 	st := b.mustPull(room, a, PullOpts{Offer: true})
-	if st.Requests != 1 || st.Rounds != 1 || st.Stored != 0 || st.Offered != 0 {
+	if st.Requests != 1 || st.Rounds != 1 || st.Stored != 0 || st.Offered != 0 || st.Same != 1 || !st.Closed {
 		t.Fatalf("stats: %+v", st)
 	}
 	q, r := l.reqs[0], l.resps[0]
-	if q.Detail != nil || len(q.Log.Entries) != 0 || len(q.Offer) != 0 || len(q.Digests) == 0 {
+	if q.Sum == "" || q.Detail != nil || len(q.Log.Entries) != 0 || len(q.Offer) != 0 {
 		t.Fatalf("request: %+v", q)
 	}
-	if len(r.Differ) != 0 || len(r.Page) != 0 || r.Detail != nil || len(r.Log.Entries) != 0 || r.More {
+	if !r.Same || r.Authors != nil || r.Digests != nil || len(r.Page) != 0 || r.Detail != nil || len(r.Log.Entries) != 0 {
 		t.Fatalf("response: %+v", r)
+	}
+	if up, down := net.reqBytes[len(net.reqBytes)-1], net.respBytes[len(net.respBytes)-1]; up > 300 || down > 200 {
+		t.Fatalf("not small: %d and %d bytes", up, down)
 	}
 	t.Logf("idle pull of a two-machine room: request %d bytes, response %d bytes",
 		net.reqBytes[len(net.reqBytes)-1], net.respBytes[len(net.respBytes)-1])
 }
 
-// [R5] One author differs: the first response names it, the second
-// request carries its detail only (with the snap of the first response),
+// [R5] One author differs: the opening is answered with the server's
+// digests and sum, the requester finds the author whose digest differs,
+// the continuing request carries its detail only (snap: the server's sum)
 // and the page answers it.
 func TestPullDetailRoundAsksOnlyForTheAuthorsThatDiffer(t *testing.T) {
 	a, b, net, room := twoSynced(t)
@@ -81,16 +85,11 @@ func TestPullDetailRoundAsksOnlyForTheAuthorsThatDiffer(t *testing.T) {
 	if st.Stored != 1 {
 		t.Fatalf("stats: %+v", st)
 	}
-	// The short form is answered full; the full form names a; its detail
-	// follows.
-	if len(l.reqs) < 3 || l.reqs[0].Sum == "" || !l.resps[0].Full || l.reqs[1].Sum != "" {
+	if len(l.reqs) < 2 || l.reqs[0].Sum == "" || l.resps[0].Same || l.resps[0].Sum == "" || len(l.resps[0].Page) != 0 {
 		t.Fatalf("opening: %+v %+v", l.reqs[0], l.resps[0])
 	}
-	if !slices.Equal(l.resps[1].Differ, []string{a.id}) || len(l.resps[1].Page) != 0 {
-		t.Fatalf("first exchange: %+v %+v", l.reqs[1], l.resps[1])
-	}
-	q, r := l.reqs[2], l.resps[2]
-	if len(q.Detail) != 1 || q.Detail[a.id] == nil || q.Snap != l.resps[1].Snap {
+	q, r := l.reqs[1], l.resps[1]
+	if len(q.Detail) != 1 || q.Detail[a.id] == nil || q.Snap != l.resps[0].Sum || q.Sum != "" {
 		t.Fatalf("detail request: %+v", q)
 	}
 	if len(r.Page) != 1 || r.Detail[a.id] == nil {
@@ -129,12 +128,6 @@ func TestPullWithMoreThanSixteenDifferingAuthorsSplitsTheDetail(t *testing.T) {
 	if st.Stored != 20 {
 		t.Fatalf("stats: %+v", st)
 	}
-	var differ []string // the round that learned of the 20 from the log
-	for _, r := range l.resps {
-		if len(r.Differ) > len(differ) {
-			differ = r.Differ
-		}
-	}
 	asked := map[string]int{}
 	var sizes []int
 	for _, q := range l.reqs {
@@ -145,13 +138,9 @@ func TestPullWithMoreThanSixteenDifferingAuthorsSplitsTheDetail(t *testing.T) {
 			}
 		}
 	}
-	if len(differ) < 20 || len(sizes) < 2 || !slices.Equal(sizes[len(sizes)-2:], []int{16, len(differ) - 16}) {
-		t.Fatalf("differ %d, detail requests %v", len(differ), sizes)
-	}
-	for _, a := range differ {
-		if asked[a] < 1 {
-			t.Fatalf("author %.8s never asked", a)
-		}
+	// The round that learned of the 20 from the log asks for them in two.
+	if len(asked) < 20 || len(sizes) < 2 || !slices.Equal(sizes[len(sizes)-2:], []int{16, len(asked) - 16}) {
+		t.Fatalf("asked %d, detail requests %v", len(asked), sizes)
 	}
 	if es := b.inbox(room, "bob"); len(es) != 20 {
 		t.Fatalf("bob: %d entries", len(es))
@@ -160,7 +149,8 @@ func TestPullWithMoreThanSixteenDifferingAuthorsSplitsTheDetail(t *testing.T) {
 
 // [R5] The server's records are refused by the puller every time (a relay
 // altering text): the digests go on differing, and the exchange ends after
-// the round that changed nothing instead of running to its bound.
+// the round that changed nothing instead of running to its bound; the next
+// exchange is answered same to seen, in one request.
 func TestPullRoundThatCannotMakeProgressEnds(t *testing.T) {
 	a, b, net, room := twoSynced(t)
 	a.send(room, "alice", "again")
@@ -174,11 +164,11 @@ func TestPullRoundThatCannotMakeProgressEnds(t *testing.T) {
 		}
 	}
 	st, err := b.pullFrom(room, a, PullOpts{})
-	if err != nil || st.Rounds != 2 || st.Stored != 0 {
+	if err != nil || st.Rounds != 1 || st.Stored != 0 || st.Same != 0 {
 		t.Fatalf("stats: %+v %v", st, err)
 	}
 	st, err = b.pullFrom(room, a, PullOpts{})
-	if err != nil || st.Rounds != 1 || st.Stored != 0 {
+	if err != nil || st.Rounds != 1 || st.Requests != 1 || st.SeenSame != 1 {
 		t.Fatalf("again: %+v %v", st, err)
 	}
 }
@@ -252,8 +242,7 @@ func TestPullSizesInASixtyFourMachineRoomAfterThirtyDaysOfDailyRestarts(t *testi
 		}
 		t.Logf("%s: %d requests, %d bytes up, %d bytes down, stored %d", what, st.Requests, total[0], total[1], st.Stored)
 	}
-	report("64 machines, 1920 streams, idle, short form", PullOpts{})
-	report("64 machines, 1920 streams, idle, full form", PullOpts{Offer: true})
+	report("64 machines, 1920 streams, idle", PullOpts{Offer: true})
 	last[7] = write(authors[7], 30, last[7])
 	a.take(last[7])
 	report("64 machines, 1920 streams, one new message", PullOpts{Offer: true})
@@ -264,8 +253,7 @@ func TestPullSizesInASixtyFourMachineRoomAfterThirtyDaysOfDailyRestarts(t *testi
 			t.Fatal(err)
 		}
 	}
-	report("64 machines, 1920 streams, half fully expired, idle, full form", PullOpts{Offer: true})
-	report("64 machines, 1920 streams, half fully expired, idle, short form", PullOpts{})
+	report("64 machines, 1920 streams, half fully expired, idle", PullOpts{Offer: true})
 	last[7] = write(authors[7], 45, last[7])
 	a.take(last[7])
 	report("64 machines, 1920 streams, half fully expired, one new message", PullOpts{Offer: true})

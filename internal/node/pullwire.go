@@ -50,14 +50,15 @@ var (
 	maxResponseBytes = MaxResponseBytes
 )
 
-// PullRequest is the body of POST /p/v2/pull (PROTOCOL-next 4.1). Fields
-// whose value would be zero or empty are omitted, as section 0 requires.
+// PullRequest is the body of POST /p/v2/pull (PROTOCOL-next 4.1): the
+// opening request of a round carries sum (and seen), a continuing request
+// snap and detail. Fields whose value would be zero or empty are omitted,
+// as section 0 requires.
 type PullRequest struct {
 	V         int                             `json:"v"`
 	Room      string                          `json:"room"`
-	Authors   []string                        `json:"authors,omitempty"`
-	Digests   map[string]string               `json:"digests,omitempty"`
-	Sum       string                          `json:"sum,omitempty"` // the short form (4.3)
+	Sum       string                          `json:"sum,omitempty"`
+	Seen      string                          `json:"seen,omitempty"`
 	Snap      string                          `json:"snap,omitempty"`
 	Detail    map[string][]store.StreamDetail `json:"detail,omitempty"`
 	Log       PullLog                         `json:"log"`
@@ -75,15 +76,15 @@ type PullLog struct {
 	More    bool              `json:"more,omitempty"` // response only
 }
 
-// PullResponse is the 200 response (PROTOCOL-next 4.2).
+// PullResponse is the 200 response (PROTOCOL-next 4.2): to an opening
+// request same, or the server's authors, digests and sum; to a continuing
+// one its detail and page.
 type PullResponse struct {
 	V       int                             `json:"v"`
-	Same    bool                            `json:"same,omitempty"` // to sum: equal summaries
-	Full    bool                            `json:"full,omitempty"` // to sum: repeat in the full form
+	Same    bool                            `json:"same,omitempty"`
 	Authors []string                        `json:"authors,omitempty"`
 	Digests map[string]string               `json:"digests,omitempty"`
-	Snap    string                          `json:"snap,omitempty"`
-	Differ  []string                        `json:"differ,omitempty"`
+	Sum     string                          `json:"sum,omitempty"`
 	Detail  map[string][]store.StreamDetail `json:"detail,omitempty"`
 	Log     PullLog                         `json:"log"`
 	Page    []json.RawMessage               `json:"page,omitempty"`
@@ -99,14 +100,11 @@ type PullPeer struct {
 }
 
 // PullError is a pull refused with a status (PROTOCOL-next 4.5). Detail
-// never carries a body.
+// never carries a body; not_member carries nothing else at all.
 type PullError struct {
 	Status int    `json:"-"`
 	Code   string `json:"error"`
 	Detail string `json:"detail,omitempty"`
-	// Log, on not_member, is the server's log heads: the requester tries
-	// again with its whole log only once they have changed (4.5).
-	Log *PullLog `json:"log,omitempty"`
 }
 
 func (e *PullError) Error() string {
@@ -135,14 +133,12 @@ func badRequest(format string, a ...any) *PullError {
 	return pullErr(400, CodeBadRequest, fmt.Sprintf(format, a...))
 }
 
-var errNotMember = pullErr(403, CodeNotMember, "")
+// notMember is the one not_member refusal: the same bytes for a room not
+// carried here, a peer never a member and one removed (4.4), so a
+// non-member learns nothing of the room or its log.
+func notMember() *PullError { return pullErr(403, CodeNotMember, "") }
 
-// notMember is not_member with the server's log heads.
-func notMember(heads []string) *PullError {
-	e := pullErr(403, CodeNotMember, "")
-	e.Log = &PullLog{Heads: heads}
-	return e
-}
+var errNotMember = notMember()
 
 // digestOf is an author's digest: SHA-256 of the domain, a zero byte and
 // one line per stream, in epoch order (PROTOCOL-next 4.3).
@@ -156,7 +152,8 @@ func digestOf(d []store.StreamDetail) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// sumOf is the short form's sum over digests (4.3).
+// sumOf is a summary's sum (and a round's snap) over the digests of the
+// authors held anything of (4.3).
 func sumOf(digests map[string]string) string {
 	h := sha256.New()
 	h.Write([]byte(sumDomain))
@@ -175,25 +172,12 @@ func joinInts(xs []int64) string {
 	return strings.Join(parts, ",")
 }
 
-// snapOf is SHA-256 over the sorted "author:digest\n" lines.
-func snapOf(digests map[string]string) string {
-	h := sha256.New()
-	for _, a := range sortedIDs(digests) {
-		fmt.Fprintf(h, "%s:%s\n", a, digests[a])
-	}
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-// differ lists every author in either digests whose digests differ, sorted.
-func differ(a, b map[string]string) []string {
+// differ lists, sorted, every author in takes whose digest in a and b
+// differs (one holding nothing of it has none).
+func differ(takes []string, a, b map[string]string) []string {
 	var out []string
-	for k, v := range a {
-		if b[k] != v {
-			out = append(out, k)
-		}
-	}
-	for k := range b {
-		if _, ok := a[k]; !ok {
+	for _, k := range takes {
+		if a[k] != b[k] {
 			out = append(out, k)
 		}
 	}
@@ -279,14 +263,12 @@ func (q *PullRequest) validate() *PullError {
 		return badRequest("v")
 	case len(q.Room) != 34 || q.Room[:2] != "r_" || !isLowerHex(q.Room[2:]):
 		return badRequest("room")
-	case (q.Sum == "") == (len(q.Authors) == 0):
-		return badRequest("exactly one of sum or authors")
-	case q.Sum != "" && (len(q.Digests) > 0 || q.Detail != nil || len(q.Sum) != 64 || !isLowerHex(q.Sum)):
-		return badRequest("sum")
-	case len(q.Authors) > MaxPullAuthors || !uniqueNodes(q.Authors):
-		return badRequest("authors")
-	case len(q.Digests) > MaxPullAuthors:
-		return badRequest("digests")
+	case (q.Sum == "") == (q.Snap == ""):
+		return badRequest("exactly one of sum or snap")
+	case !hash(q.Sum) || !hash(q.Snap) || !hash(q.Seen):
+		return badRequest("sum, seen or snap")
+	case q.Seen != "" && q.Sum == "":
+		return badRequest("seen goes with sum")
 	case (q.Snap == "") != (q.Detail == nil):
 		return badRequest("snap and detail go together")
 	case len(q.Detail) > MaxDetailAuthors:
@@ -308,14 +290,6 @@ func (q *PullRequest) validate() *PullError {
 	case q.WaitMS < 0 || q.WaitMS > MaxWaitMS:
 		return badRequest("wait_ms")
 	}
-	if q.Snap != "" && (len(q.Snap) != 64 || !isLowerHex(q.Snap)) {
-		return badRequest("snap")
-	}
-	for a, d := range q.Digests {
-		if !slices.Contains(q.Authors, a) || len(d) != 64 || !isLowerHex(d) {
-			return badRequest("digest")
-		}
-	}
 	for a, d := range q.Detail {
 		if !core.ValidNode(a) || d == nil || checkDetail(d) != nil {
 			return badRequest("detail")
@@ -328,6 +302,9 @@ func (q *PullRequest) validate() *PullError {
 	}
 	return nil
 }
+
+// hash reports whether s is empty or a SHA-256 in lowercase hex.
+func hash(s string) bool { return s == "" || len(s) == 64 && isLowerHex(s) }
 
 func isLowerHex(s string) bool {
 	for _, c := range s {

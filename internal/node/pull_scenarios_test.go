@@ -330,6 +330,9 @@ func TestARelayThatAltersOrStripsTextIsNotBelieved(t *testing.T) {
 		t.Fatalf("refusals: %+v %v", rs, err)
 	}
 	alter = false
+	// The pull stored nothing, so b remembers the relay's sum as seen and
+	// would be answered same until something changes: as after a change.
+	b.x.setSeen([2]string{room, relay.id}, nil)
 	b.mustPull(room, relay, PullOpts{})
 	if h, ok := b.held(room, m1); !ok || h.Reason != store.ReasonMissing {
 		t.Fatalf("stripped record: %+v %v", h, ok)

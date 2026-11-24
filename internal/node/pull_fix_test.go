@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -141,13 +142,14 @@ func TestALeaveAndRejoinBetweenBuildAndReleaseReleasesNothingOfTheOldGeneration(
 // junkNode is a valid node id that no machine holds.
 func junkNode(i int) string { return fmt.Sprintf("%064x", 0xa2b2c3d400+i) }
 
-// [T4; stated limit] A server that knows the room only as it was before a
-// peer's admission, more than 256 entries ago (restored from an old copy,
-// or asleep), refuses that peer: the peer's entries do not make it a
-// member in one batch. The peer is not asked again while the server's log
-// heads stay as they were. The server catches up by pulling the log, in
-// several log.more pages, from a member it knows, and then serves the
-// peer.
+// [T4, 4.5; stated limit] A server that knows the room only as it was
+// before a peer's admission, more than 256 entries ago (restored from an
+// old copy, or asleep), refuses that peer: its entries do not make it a
+// member in one batch. Each refusal goes back to the caller, one request
+// each: the first attempt, then the whole log once (cut at 256 entries),
+// then openings with no entries while nothing changes. The server catches
+// up by pulling the log, in several log.more pages, from a member it
+// knows; the peer's next attempt succeeds.
 func TestARestoredServerPagesTheLogFromAMemberThenServesANewPeer(t *testing.T) {
 	clock := lclock()
 	net := newMemNet()
@@ -166,16 +168,16 @@ func TestARestoredServerPagesTheLogFromAMemberThenServesANewPeer(t *testing.T) {
 	n.pin(room, a.lnode)
 	n.pull(room, a.lnode)
 
-	for i := 0; i < 3; i++ {
-		r0 := len(net.reqBytes)
+	var entries []int
+	for i := 0; i < 4; i++ {
 		_, err := n.pullFrom(room, s, PullOpts{})
-		var pe *PullError
-		if !errors.As(err, &pe) || pe.Code != CodeNotMember {
-			t.Fatalf("pull %d from the stale server: %v", i, err)
+		if !isNotMember(err) || len(net.heard) != i+1 {
+			t.Fatalf("pull %d from the stale server: %v, %d requests in all", i, err, len(net.heard))
 		}
-		if got := len(net.reqBytes) - r0; got > 2 || i > 0 && got != 1 {
-			t.Fatalf("pull %d from the stale server: %d requests", i, got)
-		}
+		entries = append(entries, len(net.heard[i].Log.Entries))
+	}
+	if entries[1] != MaxLogEntries || entries[2] != 0 || entries[3] != 0 {
+		t.Fatalf("entries sent: %v", entries)
 	}
 	l := capture(net)
 	s.mustPull(room, a, PullOpts{})
@@ -188,7 +190,6 @@ func TestARestoredServerPagesTheLogFromAMemberThenServesANewPeer(t *testing.T) {
 	if more < 1 || !slices.Contains(s.state(room).Members, n.id) {
 		t.Fatalf("the server did not page the log: %d cut responses, members %v", more, s.state(room).Members)
 	}
-	net.lose = nil
 	n.mustPull(room, s, PullOpts{})
 }
 
@@ -233,8 +234,8 @@ func TestAnAuthorWhoseDetailCannotFitIsSkippedAsTooLarge(t *testing.T) {
 	b.mustPull(room, a, PullOpts{})
 	a.send(room, "alice", "y")
 	defer func(v int) { maxRequestBytes = v }(maxRequestBytes)
-	maxRequestBytes = 4*wireMargin + 900
-	st, err := b.pullFrom(room, a, PullOpts{FullForm: true})
+	maxRequestBytes = 4*wireMargin + 500
+	st, err := b.pullFrom(room, a, PullOpts{})
 	if err != nil || st.TooLarge == 0 {
 		t.Fatalf("pull: %+v %v", st, err)
 	}
@@ -286,7 +287,7 @@ func TestABlockedStreamDoesNotHoldBackTheOthersInItsChunk(t *testing.T) {
 		}
 	}
 	a.x.pageLimit = 1
-	st, err := b.pullFrom(room, a, PullOpts{FullForm: true})
+	st, err := b.pullFrom(room, a, PullOpts{})
 	if err != nil {
 		t.Fatalf("pull: %+v %v", st, err)
 	}
@@ -307,7 +308,7 @@ func TestReachingTheRoundCapIsCountedNotAnError(t *testing.T) {
 			a.send(room, "alice", "more") // after the response was built
 		}
 	}
-	st, err := b.pullFrom(room, a, PullOpts{FullForm: true})
+	st, err := b.pullFrom(room, a, PullOpts{})
 	if err != nil || !st.Capped || st.Rounds != pullRoundsPerPull {
 		t.Fatalf("pull: %+v %v", st, err)
 	}
@@ -325,7 +326,7 @@ func TestAContinuationThatDoesNotAdvanceEndsQuietly(t *testing.T) {
 			r.Page, r.More = nil, true
 		}
 	}
-	st, err := b.pullFrom(room, a, PullOpts{FullForm: true})
+	st, err := b.pullFrom(room, a, PullOpts{})
 	if err != nil || st.Stalled == 0 {
 		t.Fatalf("pull: %+v %v", st, err)
 	}
@@ -347,9 +348,15 @@ func TestAResponseThatDoesNotFitItsRequestIsRefusedBeforeAnythingIsApplied(t *te
 				r.Detail = map[string][]store.StreamDetail{}
 			}
 		},
-		"differ not computed from the digests": func(q *PullRequest, r *PullResponse) {
-			if q.Detail == nil {
-				r.Differ = nil
+		"a sum that is not the digests' sum": func(q *PullRequest, r *PullResponse) {
+			if q.Sum != "" && !r.Same {
+				r.Sum = strings.Repeat("0", 64)
+			}
+		},
+		"a same with log entries": func(q *PullRequest, r *PullResponse) {
+			if q.Sum != "" && !r.Same {
+				r.Same, r.Authors, r.Digests, r.Sum = true, nil, nil, ""
+				r.Log.Entries = append(r.Log.Entries, json.RawMessage(`{}`))
 			}
 		},
 		"detail of an author not asked": func(q *PullRequest, r *PullResponse) {
@@ -357,10 +364,10 @@ func TestAResponseThatDoesNotFitItsRequestIsRefusedBeforeAnythingIsApplied(t *te
 				r.Detail[junkNode(1)] = []store.StreamDetail{}
 			}
 		},
-		"detail inconsistent with the digest": func(q *PullRequest, r *PullResponse) {
+		"malformed detail": func(q *PullRequest, r *PullResponse) {
 			for a, d := range r.Detail {
 				if len(d) > 0 {
-					d[0].C++
+					d[0].X = d[0].C + 1
 					r.Detail[a] = d
 				}
 			}
@@ -369,7 +376,6 @@ func TestAResponseThatDoesNotFitItsRequestIsRefusedBeforeAnythingIsApplied(t *te
 			if q.Detail != nil {
 				r.Peers = nil
 				r.Log.Extra = nil
-				r.Snap = ""
 				big := strings.Repeat("a", maxResponseBytes)
 				r.Page = append(r.Page, json.RawMessage(`"`+big+`"`))
 			}
@@ -382,7 +388,7 @@ func TestAResponseThatDoesNotFitItsRequestIsRefusedBeforeAnythingIsApplied(t *te
 			var q *PullRequest
 			net.lose = func(_, _ string, req *PullRequest, _ *PullResponse) bool { q = req; return false }
 			net.tamper = func(_, _ string, r *PullResponse) { tamper(q, r) }
-			if _, err := b.pullFrom(room, a, PullOpts{FullForm: true}); err == nil {
+			if _, err := b.pullFrom(room, a, PullOpts{}); err == nil {
 				t.Fatal("accepted")
 			}
 			if _, ok := b.held(room, id); ok {
@@ -399,8 +405,7 @@ func TestKnownPositionsAreNotedOnlyForAdmittedAuthors(t *testing.T) {
 	a, b, _, room := pairWithHistory(t)
 	fake := junkNode(7)
 	d := []store.StreamDetail{{E: "0123456789abcdef", C: 9}}
-	q := &PullRequest{V: PullVersion, Room: room, Authors: []string{a.id, b.id, fake},
-		Digests: map[string]string{fake: digestOf(d)}, Snap: snapOf(map[string]string{fake: digestOf(d)}),
+	q := &PullRequest{V: PullVersion, Room: room, Snap: sumOf(map[string]string{fake: digestOf(d)}),
 		Detail: map[string][]store.StreamDetail{fake: d}}
 	q.Log.Heads, q.Log.Extra = a.r.rooms[room].logHeads()
 	if _, err := a.x.Serve(context.Background(), b.id, q); err != nil {
@@ -439,7 +444,7 @@ func TestRefusedRecordsAreCountedOnBothPaths(t *testing.T) {
 	}
 	a.change(room, Change{Kind: core.EntryAdd, Target: junkNode(3), Name: "j", History: true})
 	net.tamper = func(_, _ string, r *PullResponse) { strip(r.Page); strip(r.Log.Entries) }
-	_, _ = b.pullFrom(room, a, PullOpts{FullForm: true})
+	_, _ = b.pullFrom(room, a, PullOpts{})
 	if rs, _ := b.st.Refusals(context.Background(), room); !slices.ContainsFunc(rs, func(r store.Refusal) bool {
 		return r.Peer == a.id && strings.HasPrefix(r.Reason, "entry_")
 	}) {
@@ -537,7 +542,7 @@ func TestAnOlderObservationNeverReplacesALaterOne(t *testing.T) {
 	ctx := context.Background()
 	gen, _ := b.r.Gen(room)
 	build := func() (prepared, *PullResponse) {
-		p, err := b.x.prepare(ctx, room, a.id, gen, formFirst, nil, "", false, nil, map[string]bool{}, nil, false)
+		p, err := b.x.prepare(ctx, room, a.id, gen, nil, "", false, false, nil, map[string]bool{}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -650,7 +655,7 @@ func TestKnownGapForkedStreamsLookEqualAndGiveAWrongCopyReport(t *testing.T) {
 	if y == "" || y == x {
 		t.Fatal("no fork")
 	}
-	st := b.mustPull(room, c, PullOpts{FullForm: true})
+	st := b.mustPull(room, c, PullOpts{})
 	if _, ok := b.held(room, y); ok || st.Stored != 0 {
 		t.Fatalf("the fork was exchanged: %+v", st)
 	}
@@ -661,54 +666,17 @@ func TestKnownGapForkedStreamsLookEqualAndGiveAWrongCopyReport(t *testing.T) {
 	}
 }
 
-// ---- item 12: the short first request ----
+// ---- second round, B: sum, seen and the digests answer ----
 
-// [N1] Equal summaries cost one short request each way.
-func TestEqualSummariesCostOneShortRequestEachWay(t *testing.T) {
-	a, b, net, room := twoSynced(t)
-	l := capture(net)
-	st := b.mustPull(room, a, PullOpts{})
-	if len(l.reqs) != 1 || l.reqs[0].Sum == "" || l.reqs[0].Authors != nil || !l.resps[0].Same || st.Same != 1 {
-		t.Fatalf("exchange: %+v %+v %+v", st, l.reqs, l.resps)
-	}
-}
-
-// [N1] A difference costs one extra short round trip (answered full),
-// then the full form converges.
-func TestADifferenceCostsOneShortRoundTripThenConverges(t *testing.T) {
-	a, b, net, room := twoSynced(t)
-	id := a.send(room, "alice", "new")
-	l := capture(net)
-	b.mustPull(room, a, PullOpts{})
-	if len(l.reqs) < 2 || l.reqs[0].Sum == "" || !l.resps[0].Full || l.reqs[1].Sum != "" {
-		t.Fatalf("opening: %+v %+v", l.reqs, l.resps)
-	}
-	if _, ok := b.held(room, id); !ok {
-		t.Fatal("did not converge")
-	}
-}
-
-// [N1] A requester that knows there is a difference (it has an offer to
-// make) sends the full form directly.
-func TestARequesterWithAnOfferSendsTheFullFormDirectly(t *testing.T) {
-	a, b, net, room := twoSynced(t)
-	b.send(room, "bob", "to offer")
-	l := capture(net)
-	b.mustPull(room, a, PullOpts{Offer: true})
-	if len(l.reqs) == 0 || l.reqs[0].Sum != "" || len(l.reqs[0].Offer) == 0 {
-		t.Fatalf("first request: %+v", l.reqs)
-	}
-}
-
-// [R5] A peer that answers same wrongly cannot make the requester store
-// or drop anything.
+// [R5] A server that answers same wrongly cannot make the requester store
+// or drop anything; at worst it delays it until the next exchange.
 func TestAWrongSameCannotMakeTheRequesterStoreOrDropAnything(t *testing.T) {
 	a, b, net, room := twoSynced(t)
 	id := a.send(room, "alice", "new")
 	before := len(b.records(room))
 	net.tamper = func(_, _ string, r *PullResponse) {
-		if r.Full {
-			r.Full, r.Same, r.Log.Entries, r.Log.More = false, true, nil, false
+		if r.Authors != nil {
+			r.Same, r.Authors, r.Digests, r.Sum, r.Log.Entries, r.Log.More = true, nil, nil, "", nil, false
 		}
 	}
 	if _, err := b.pullFrom(room, a, PullOpts{}); err != nil {
@@ -717,18 +685,180 @@ func TestAWrongSameCannotMakeTheRequesterStoreOrDropAnything(t *testing.T) {
 	if _, ok := b.held(room, id); ok || len(b.records(room)) != before {
 		t.Fatal("a wrong same changed what the requester holds")
 	}
-	a.change(room, Change{Kind: core.EntryAdd, Target: junkNode(3), Name: "j", History: true})
-	net.tamper = func(_, _ string, r *PullResponse) {
-		if r.Full {
-			r.Full, r.Same = false, true
+	net.tamper = nil
+	b.mustPull(room, a, PullOpts{})
+	if _, ok := b.held(room, id); !ok {
+		t.Fatal("the next exchange did not repair it")
+	}
+}
+
+// newcomerPair is a full member a and n, admitted without history after a
+// wrote: n holds headers where a holds text, so their summaries differ for
+// ever, for a legitimate reason.
+func newcomerPair(t *testing.T) (a, n *pnode, net *memNet, room string) {
+	t.Helper()
+	clock := lclock()
+	net = newMemNet()
+	a = newPNode(t, net, "a", newLNode(t, "a", clock))
+	n = newPNode(t, net, "n", newLNode(t, "n", clock))
+	room = a.create("team")
+	a.register("alice")
+	a.send(room, "alice", "before n")
+	a.change(room, Change{Kind: core.EntryAdd, Target: n.id, Name: "en"})
+	n.pin(room, a.lnode)
+	n.pull(room, a.lnode)
+	n.register("nina")
+	return a, n, net, room
+}
+
+// [R5, N1] A newcomer without history and a full member, after one round
+// that stores nothing, exchange only same answers (to seen), in one small
+// request each way, until either side stores something: a new record on
+// the server changes its sum; one on the requester changes the
+// requester's, so it drops seen.
+func TestANewcomerAndAFullMemberAreIdleAfterOneFruitlessRound(t *testing.T) {
+	a, n, net, room := newcomerPair(t)
+	n.mustPull(room, a, PullOpts{}) // takes the headers
+	n.mustPull(room, a, PullOpts{}) // a round that stores nothing
+	a.mustPull(room, n, PullOpts{})
+	for i := 0; i < 2; i++ {
+		for _, c := range [][2]*pnode{{n, a}, {a, n}} {
+			r0 := len(net.reqBytes)
+			st := c[0].mustPull(room, c[1], PullOpts{Offer: true})
+			if st.Requests != 1 || st.SeenSame != 1 {
+				t.Fatalf("%s from %s, idle: %+v", c[0].name, c[1].name, st)
+			}
+			if i == 1 {
+				t.Logf("%s from %s, idle: %d bytes up, %d down", c[0].name, c[1].name, net.reqBytes[r0], net.respBytes[r0])
+			}
 		}
 	}
-	if _, err := b.pullFrom(room, a, PullOpts{}); err == nil {
-		t.Fatal("a same carrying log entries was accepted")
+	id := a.send(room, "alice", "new on the server")
+	if st := n.mustPull(room, a, PullOpts{}); st.SeenSame != 0 || st.Stored != 1 {
+		t.Fatalf("after a new record on the server: %+v", st)
 	}
-	net.tamper = nil
-	b.mustPull(room, a, PullOpts{FullForm: true})
-	if _, ok := b.held(room, id); !ok {
-		t.Fatal("the full form did not repair it")
+	if _, ok := n.held(room, id); !ok {
+		t.Fatal("not stored")
+	}
+	n.mustPull(room, a, PullOpts{})
+	n.send(room, "nina", "new on the requester")
+	l := capture(net)
+	if st := n.mustPull(room, a, PullOpts{Offer: true}); st.SeenSame != 0 || l.reqs[0].Seen != "" {
+		t.Fatalf("after a new record on the requester: %+v %+v", st, l.reqs[0])
+	}
+}
+
+// [R5] A seen that is stale (the server changed since) gets the digests
+// answer, and the round goes on as without it.
+func TestAStaleSeenGetsTheDigestsAnswer(t *testing.T) {
+	a, n, net, room := newcomerPair(t)
+	n.mustPull(room, a, PullOpts{})
+	n.mustPull(room, a, PullOpts{})
+	a.change(room, Change{Kind: core.EntryAdd, Target: junkNode(1), Name: "j", History: true})
+	a.send(room, "alice", "a change on the server")
+	l := capture(net)
+	st := n.mustPull(room, a, PullOpts{})
+	if l.reqs[0].Seen == "" || l.resps[0].Same || l.resps[0].Authors == nil || st.Stored != 1 {
+		t.Fatalf("stale seen: %+v %+v %+v", st, l.reqs[0], l.resps[0])
+	}
+}
+
+// ---- second round, A: a not_member refusal carries nothing ----
+
+// [T4] The 403 to a room not carried here, to a peer never a member and to
+// a removed one are the same bytes.
+func TestTheThreeNotMemberRefusalsAreTheSameBytes(t *testing.T) {
+	a, b, _, room := pairWithHistory(t)
+	c := newLNode(t, "c", a.clock)
+	ctx := context.Background()
+	q := func(room string) *PullRequest {
+		heads, _ := a.r.rooms[room].logHeads()
+		return &PullRequest{V: PullVersion, Room: room, Sum: sumOf(nil), Log: PullLog{Heads: heads}}
+	}
+	body := func(peer string, q *PullRequest) string {
+		_, err := a.x.Serve(ctx, peer, q)
+		var pe *PullError
+		if !errors.As(err, &pe) || pe.Status != 403 {
+			t.Fatalf("not refused: %v", err)
+		}
+		raw, _ := json.Marshal(pe)
+		return string(raw)
+	}
+	unknown := q(room)
+	unknown.Room = "r_" + strings.Repeat("e", 32)
+	bodies := []string{body(b.id, unknown), body(c.id, q(room))}
+	a.change(room, Change{Kind: core.EntryRemove, Target: b.id})
+	bodies = append(bodies, body(b.id, q(room)))
+	if bodies[0] != bodies[1] || bodies[1] != bodies[2] {
+		t.Fatalf("bodies differ: %q", bodies)
+	}
+}
+
+// snapshot copies n's store, to put it back later with restoreFrom.
+func snapshot(t *testing.T, n *pnode) string {
+	t.Helper()
+	n.st.Close()
+	raw, err := os.ReadFile(n.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyPath := n.path + ".copy"
+	if err := os.WriteFile(copyPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n.restartP()
+	return copyPath
+}
+
+func restoreFrom(t *testing.T, n *pnode, copyPath string) {
+	t.Helper()
+	n.st.Close()
+	raw, err := os.ReadFile(copyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sfx := range []string{"-wal", "-shm"} {
+		_ = os.Remove(n.path + sfx)
+	}
+	if err := os.WriteFile(n.path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n.restartP()
+}
+
+// [T4, 4.5] A server restored to before the requester's admission, with
+// few entries missing: the first request is refused (its entries start
+// where the requester last saw the server), the requester forgets that,
+// and its next attempt, carrying the whole log, makes it a member there.
+func TestAServerRestoredWithFewEntriesMissingIsHealedByOneResend(t *testing.T) {
+	clock := lclock()
+	net := newMemNet()
+	a := newPNode(t, net, "a", newLNode(t, "a", clock))
+	s := newPNode(t, net, "s", newLNode(t, "s", clock))
+	n := newPNode(t, net, "n", newLNode(t, "n", clock))
+	room := a.create("team")
+	a.change(room, Change{Kind: core.EntryAdd, Target: s.id, Name: "ess", History: true})
+	s.pin(room, a.lnode)
+	s.pull(room, a.lnode)
+	old := snapshot(t, s)
+	for i := 0; i < 10; i++ {
+		a.change(room, Change{Kind: core.EntryAdd, Target: junkNode(i), Name: "j", History: true})
+	}
+	a.change(room, Change{Kind: core.EntryAdd, Target: n.id, Name: "en", History: true})
+	n.pin(room, a.lnode)
+	n.pull(room, a.lnode)
+	s.pull(room, a.lnode)
+	n.mustPull(room, s, PullOpts{}) // n has seen s's log as it is now
+	restoreFrom(t, s, old)
+	_, err := n.pullFrom(room, s, PullOpts{})
+	if !isNotMember(err) {
+		t.Fatalf("first attempt: %v", err)
+	}
+	l := capture(net)
+	if _, err := n.pullFrom(room, s, PullOpts{}); err != nil {
+		t.Fatalf("the resend: %v", err)
+	}
+	if len(l.reqs[0].Log.Entries) < 11 {
+		t.Fatalf("the resend carried %d entries", len(l.reqs[0].Log.Entries))
 	}
 }

@@ -226,102 +226,145 @@ usable grant (permission closed) is given no text at all.
 
 ### 4.1 Request
 
+A round opens with:
+
 ```json
 {"v":2,"room":"r_…",
- "authors":["<node id>",…],
- "digests":{"<node id>":"<64 hex>",…},
- "snap":"<64 hex>","detail":{"<node id>":[{"e":"<epoch>","c":12,"x":2,"nb":[3,7],"w":[7]}]},
+ "sum":"<64 hex>","seen":"<64 hex>",
  "log":{"heads":["<entry id>",…],"extra":["<entry id>",…],"entries":[{"h":…,"s":…}]},
  "offer":[{"h":…,"s":…,"b":…}],"offer_more":true,
  "addrs":["192.0.2.4:7443"],
  "wait_ms":60000}
 ```
 
+and continues with:
+
+```json
+{"v":2,"room":"r_…",
+ "snap":"<64 hex>","detail":{"<node id>":[{"e":"<epoch>","c":12,"x":2,"nb":[3,7],"w":[7]}]},
+ "log":{…},"offer":[…],"offer_more":true}
+```
+
 | Field | Meaning | Limit |
 |---|---|---|
-| `authors` | the requester's `Admitted` set [R3] | 1–1,024 |
-| `digests` | for each author in `authors` it holds anything of (4.3) | ≤ 1,024 |
-| `sum` | short form of a round's first request: replaces `authors` and `digests` (4.3) | 64 hex |
-| `snap` | the server's `snap` from the round's first response; present iff `detail` is | |
-| `detail` | the requester's detail for the next authors of that round's `differ`, in order; `[]` for an author it holds nothing of | ≤ 16 authors |
+| `sum` | the requester's summary hash (4.3) | 64 hex |
+| `seen` | optional, only with `sum`: the server's `sum` from the last round with this server that ended having stored nothing on either side; sent only while the requester's own `sum` is what it was then | 64 hex |
+| `snap` | the server's `sum` from the answer that opened this round; present iff `detail` is | |
+| `detail` | the requester's detail for the next differing authors, in order; `[]` for an author it holds nothing of. These are the authors the requester takes [R3] | ≤ 16 authors |
 | `log.heads` | accepted entries no accepted entry names as parent | 1–64 |
 | `log.extra` | held and refused entry ids | ≤ 256 |
-| `log.entries` | entries not at or before the server's last `log.heads` and not in its last `log.extra` | ≤ 256 |
-| `offer` | records for the server [RM3]: only authors in the server's last `authors`, built against the server's last detail, within its permission, ordered as a page | ≤ 512 |
+| `log.entries` | entries not at or before the server's last `log.heads` and not in its last `log.extra`, in causal order | ≤ 256, cut by bytes too |
+| `offer` | records for the server [RM3]: only authors in the server's last `authors`, built against the server's detail as observed when the round began, within its permission, ordered as a page | ≤ 512 |
 | `offer_more` | the offer was cut; the rest follows in the next request | |
 | `addrs` | requester's addresses | ≤ 8, each ≤ 255 bytes |
-| `wait_ms` | 0 to 60,000 | |
+| `wait_ms` | 0 to 60,000; only with `sum` | |
 
-Exactly one of `sum`, or `authors` with `digests`, is present. Request ≤ 1 MiB,
+Exactly one of `sum`, or `snap` with `detail`, is present. Request ≤ 1 MiB,
 counted over the whole encoded message.
 
 ### 4.2 Response (200)
+
+To an opening request, either
+
+```json
+{"v":2,"same":true,"log":{"heads":[…],"extra":[…]}}
+```
+
+or
 
 ```json
 {"v":2,
  "authors":["<node id>",…],
  "digests":{"<node id>":"<64 hex>",…},
- "snap":"<64 hex>","differ":["<node id>",…],
- "detail":{"<node id>":[…]},
+ "sum":"<64 hex>",
  "log":{"heads":[…],"extra":[…],"entries":[…],"more":true},
- "page":[{"h":…,"s":…,"b":…}],"more":true,
  "peers":[{"node":"<node id>","addrs":["…"],"seen":"<time>"}]}
+```
+
+and to a continuing request
+
+```json
+{"v":2,
+ "detail":{"<node id>":[…]},
+ "log":{…},
+ "page":[{"h":…,"s":…,"b":…}],"more":true}
 ```
 
 | Field | Meaning | Limit |
 |---|---|---|
-| `same` | answer to `sum`: the summaries are equal; only `v`, `same` and `log` are present | |
-| `full` | answer to `sum`: they differ; only `v`, `full` and `log` are present; repeat in the full form | |
-| `authors` | the server's `Admitted` set | |
-| `digests` | the server's, for every author in the request's `authors` it holds | |
-| `snap`, `differ` | on a request without `detail`: `snap` = SHA-256 over the server's sorted `author:digest\n` lines, and every author in either `digests` whose digests differ, sorted | ≤ 1,024 |
+| `same` | nothing to exchange (4.3); carries no entries | |
+| `authors` | the server's `Admitted` set | ≤ 1,024 |
+| `digests` | one for each author in `authors` the server holds anything of | ≤ 1,024 |
+| `sum` | the server's summary hash; must equal the hash recomputed from `digests` | |
 | `detail` | the server's detail for exactly the authors of the request's `detail` | |
-| `log.entries` | not at or before the request's `log.heads`, not in its `log.extra`: accepted in causal order, then held and refused as evidence | ≤ 256; `log.more` |
-| `page` | for the authors of the request's `detail` [R3] (4.4 step 8) | ≤ 512 records; response ≤ 4 MiB |
+| `log.entries` | not at or before the request's `log.heads`, not in its `log.extra`: accepted in causal order, then held and refused as evidence | ≤ 256, cut by bytes too; `log.more` |
+| `page` | for the authors of the request's `detail` that are in the server's `Admitted` [R3] (4.4 step 8) | ≤ 512 records |
 | `more` | page cut at a limit | |
 | `peers` | other members with addresses | ≤ 64 |
+
+Response ≤ 4 MiB, counted over the whole encoded message. A requester
+refuses, and counts, a response whose shape does not fit its request.
 
 ### 4.3 Summary exchange
 
 Detail of one author: its streams sorted by `e`; `c` contiguous position;
-`x` the floor, the largest position at or below which no record is held
-with text (`c` when the stream holds no text, so a stream whose text has
-all expired costs one number); `nb` the positions above `x` held without
-text (ascending); `w` the subset of `nb` wanted [R3, R6]. Text is held at
-position p iff `x` < p ≤ `c` and p is not in `nb`. Checks: 0 ≤ `x` ≤ `c`;
-`nb` strictly ascending within (`x`, `c`]; `w` a subset of `nb`. An author
-with nothing held has detail `[]` and no digest.
-Digest: SHA-256(`"a2p2 digest v2"` ‖ `0x00` ‖ lines), 64 hex, one line per
-stream `<e>:<c>:<x>:<nb comma-joined>:<w comma-joined>\n`. Equal digests are
-treated as equal summaries.
+`x` the floor, the length of the longest run of positions from 1 that are
+held without text and not wanted (`c` when the stream holds no text and
+wants none, so a stream whose text has all expired costs one number); `nb`
+the positions above `x` held without text (ascending); `w` the subset of
+`nb` wanted [R3, R6]. Text is held at position p iff `x` < p ≤ `c` and p is
+not in `nb`. Checks: 0 ≤ `x` ≤ `c`; `nb` strictly ascending within
+(`x`, `c`]; `w` a subset of `nb`. An author with nothing held has detail
+`[]` and no digest.
 
-Short form. `sum` = SHA-256(`"a2p2 sum v2"` ‖ `0x00` ‖ the sorted
-`author:digest\n` lines of every author in the sender's `Admitted` it holds
-anything of), 64 hex. A round may open with a request carrying `sum` in
-place of `authors` and `digests`. After steps 4 to 6 of 4.4 the server
-answers `same` if its accepted log heads equal the request's `log.heads` as
-sets and its own `sum` equals the request's, recording that the peer's
-digests equalled its own at that time; otherwise `full`, and the requester
-repeats at once in the full form. A requester that knows of a difference
-(it has an offer, or the round is under way) uses the full form directly.
-A waiting pull (4.4 step 9) is a short-form request whose answer would be
-`same`.
+Digest of one author: SHA-256(`"a2p2 digest v2"` ‖ `0x00` ‖ lines), 64 hex,
+one line per stream `<e>:<c>:<x>:<nb comma-joined>:<w comma-joined>\n`.
+Equal digests are treated as equal summaries.
 
-1. A request without `detail` (first of a round) gets `snap` and `differ`.
-2. The requester sends its detail for every author in `differ`, 16 per
-   request in `differ` order, each request carrying `snap`. The server
-   answers each with its own detail for those authors and their page; it
-   does not compare `snap` with its current state.
-3. When every author in `differ` has been covered, the round ends. If the
-   round stored no record, text or entry on either side, the exchange ends
-   until the next trigger (DESIGN 4); otherwise a new round starts with
-   fresh digests.
-4. A cached detail of a peer's author is discarded when that author's digest
+`sum`: SHA-256(`"a2p2 sum v2"` ‖ `0x00` ‖ the sorted `author:digest\n` lines
+of every author in the sender's `Admitted` it holds anything of), 64 hex.
+
+1. The requester opens a round with its `sum`. Call the exchange *quiet* if
+   the request's entries and offer stored nothing and the server has no log
+   entry to send. If it is quiet and the server's own `sum` equals the
+   request's `sum`, the server answers `same` and records that the peer's
+   digests equalled its own at that time. If it is quiet and the server's
+   own `sum` equals the request's `seen`, it answers `same` and records
+   nothing. Otherwise it answers with its `authors`, `digests` and `sum`.
+2. The requester works out the authors whose digests differ (present on one
+   side only counts as differing), among the authors in both its own
+   `Admitted` and the server's `authors`, sorted, and sends its detail for them,
+   16 per request, each request carrying `snap`. The server answers each
+   with its own detail for those authors and their page; it does not
+   compare `snap` with its current state.
+3. When every differing author has been covered, the round ends. If the
+   round stored a record, text or entry on either side (for the server's
+   side the requester counts records and entries it gave that it had not
+   given earlier in the exchange), a new round opens.
+   If it stored nothing, the requester keeps the server's `sum` as `seen`
+   for that peer and the exchange ends until the next trigger (DESIGN 4).
+   Two machines whose summaries differ for a lasting reason (one was
+   admitted without history and holds headers where the other holds text)
+   are therefore idle against each other after one round.
+4. A cut page, offer or log batch justifies another request; only something
+   stored counts as progress. A stream blocked by a refused record does not
+   hold back other streams. A continuation that does not advance ends the
+   exchange quietly and is counted.
+5. A cached detail of a peer's author is discarded when that author's digest
    from the peer changes. One author's detail must fit in one request;
    otherwise that author is skipped and counted as `too_large`.
+6. What a peer holds is recorded only from `same` answers and from detail,
+   each dated by when the request was built or received; an observation
+   made earlier never replaces one made later. A copy report for an author
+   that was equal during a differing round appears at the closing `same`.
+   From a `same` answer to a request that carried `seen` the requester
+   records only the log, since it cannot tell which hash matched. Between
+   two machines with a lasting difference, the server side therefore learns
+   what the requester holds only for the differing authors.
+7. `seen` and the refusal state of 4.4 are kept in memory and start empty
+   after a restart.
 
-Sizes, 64 machines, one restart a day, 30 days: first request about 9 KB;
-detail about 40 bytes per stream, 1.2 KB per author.
+Sizes are measured by `TestPullSizesInASixtyFourMachineRoomAfterThirtyDaysOfDailyRestarts`.
 
 ### 4.4 Server order
 
@@ -330,19 +373,26 @@ detail about 40 bytes per stream, 1.2 KB per author.
 | 1 | TLS peer key → node id | handshake fails |
 | 2 | size, strict JSON, `v`, field limits | 413 `too_large`, 400 `bad_request` |
 | 3 | rate limit for this peer | 429 `rate_limited` |
-| 4 | room known; apply `log.entries` (section 3), from a non-member only if, applied, they make it a member | 403 `not_member` (also for an unknown room) |
+| 4 | room known; apply `log.entries` (section 3), from a non-member all or none: only if, applied, they make it a member | 403 `not_member` (also for an unknown room) |
 | 5 | peer is a member now | 403 `not_member` |
-| 6 | store `offer` (section 2) and the observed summary | |
+| 6 | store `offer` (section 2) and what the request shows the peer holds | |
 | 7 | steps 4 and 6 in one transaction | 503 `unavailable` |
-| 8 | prune; build the response: `snap` and `differ` if no `detail`; else server detail and page for those authors: wanted text first, then later records per stream, predecessors and links first, stopping a stream at anything not sent, text only within the peer's current permission (section 3) | |
-| 9 | if `wait_ms` > 0, `offer_more` absent, no page, no `differ`, no log entries: hold until a digest for the request's `authors` or the log changes, or `wait_ms` passes | |
-| 10 | on release, repeat steps 5 and 8 [RM2] | 403 `not_member` |
+| 8 | prune; build the response: `same`, or the digests answer, or for a continuing request the server's detail and the page for those authors: wanted text first, then later records per stream, predecessors and links first, stopping a stream at anything not sent, text only within the peer's current permission (section 3) | |
+| 9 | if `wait_ms` > 0 and the answer is `same`: hold until it would no longer be, or `wait_ms` passes | |
+| 10 | on release, repeat step 5; if anything was written since step 8, repeat step 8 [RM2] | 403 `not_member` |
 
 Requester on 200: discard if the room's local generation changed since the
 request; otherwise in one transaction apply `log.entries`, then `page`
-(section 2), then store the server's digests and detail. Send the next
-request at once while `differ` is not covered, or `more`, `log.more` or
-its own offer was cut.
+(section 2), then store what the response shows the server holds. Send the
+next request at once while differing authors are not covered, or `more`,
+`log.more` or its own offer was cut.
+
+Requester on 403 from a peer it believes is a member: forget what it had
+observed of that peer's log; the next attempt sends its accepted log from
+the start, once. If that is refused too, later attempts carry no entries
+until its own accepted log changes or a request from that peer shows
+different log heads. A server that is behind catches up through its own
+pulls, where `log.more` pages without limit.
 
 ### 4.5 Status codes
 
@@ -350,7 +400,7 @@ its own offer was cut.
 |---|---|---|
 | 200 | | apply |
 | 400 | `bad_request` | back off |
-| 403 | `not_member` | stop pulling this room from this peer until its log changes |
+| 403 | `not_member` | see 4.4; the body is the same in every 403 case and says nothing about the room |
 | 413 | `too_large` | halve the offer and retry |
 | 429 | `rate_limited`, with `Retry-After` (seconds) | wait that long |
 | 503 | `unavailable`, with `Retry-After` | wait that long |
@@ -641,7 +691,7 @@ shows the preview, asks on the terminal, then waits unless `--no-wait`),
 `send --reply-to --ask-handled --replaces`, `inbox --thread`, `trace`,
 `room list`. `confirm` refuses unless stdin is a terminal.
 
-## 8. Schema (migrations 2 and 3)
+## 8. Schema (migrations 2 to 4)
 
 | Table | Columns | Keys |
 |---|---|---|
@@ -650,7 +700,7 @@ shows the preview, asks on the terminal, then waits unless `--no-wait`),
 | `room_members` | `room`, `node`, `admin`, `name`, `addrs`, `seen_at` (cache of `Resolve`; named apart from v0.2's `members` table while both exist) | (`room`,`node`) |
 | `records` | `room`, `id`, `author`, `epoch`, `seq`, `kind`, `ref`, `parent`, `thread`, `agent`, `created`, `hdr`, `sig`, `body` nullable, `reason` (`live`, `expired`, `withdrawn`, `not_admitted`, `missing`), `effect` (`ok`, `bad_reference`, `unresolved`) | unique (`room`,`id`); unique (`room`,`author`,`epoch`,`seq`); (`room`,`ref`); (`room`,`parent`); (`room`,`thread`) |
 | `streams` | `room`, `author`, `epoch`, `contig`, `known`, `known_at` | (`room`,`author`,`epoch`) |
-| `observed` | `room`, `peer`, `author`, `digest`, `detail` json, `at` | (`room`,`peer`,`author`) |
+| `observed` | `room`, `peer`, `author`, `digest`, `detail` json, `at`; the row with an empty `author` holds the peer's last log heads and extra | (`room`,`peer`,`author`) |
 | `refusals` | `room`, `peer`, `reason`, `count`, `last_at` | (`room`,`peer`,`reason`) |
 | `agents` | as v0.2 | `id` |
 | `cursors` | `agent`, `room`, `author`, `epoch`, `start`, `pos` | (`agent`,`room`,`author`,`epoch`) |
@@ -662,7 +712,7 @@ shows the preview, asks on the terminal, then waits unless `--no-wait`),
 | `requests` | `id`, `kind`, `action` (admit, admit as admin, promote, remove, second), `room`, `node`, `name`, `role`, `history`, `created_at`, `state`, `decided_at`, `entries` | `id` |
 | `meta` | `key`, `value`; `v02_dropped_notice` shown once | `key` |
 
-Migration 2 holds the record tables (step 3a); migration 3 the log tables,
+Migration 4 adds `observed` and `refusals` (step 5a). Migration 2 holds the record tables (step 3a); migration 3 the log tables,
 `rooms.left_at` and requests. Per room at most 32 requests wait, and 256
 refused dependants and 256 invalid entries are kept.
 

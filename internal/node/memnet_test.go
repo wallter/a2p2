@@ -25,8 +25,10 @@ type memNet struct {
 	lose func(from, to string, req *PullRequest, resp *PullResponse) bool
 	// tamper, if set, rewrites a response before the requester decodes it.
 	tamper func(from, to string, resp *PullResponse)
-	// sizes of every request and response, in bytes, in order
+	// sizes of every request and response, in bytes, in order, and every
+	// request as the server decoded it
 	reqBytes, respBytes []int
+	heard               []*PullRequest
 	// texts sent: ids of records whose text went in a page, or in an offer
 	pageText, offerText []string
 }
@@ -75,6 +77,7 @@ func (l memLink) Pull(ctx context.Context, peer string, req *PullRequest) (*Pull
 		return nil, pullErr(400, CodeBadRequest, "json")
 	}
 	n.mu.Lock()
+	n.heard = append(n.heard, &q)
 	n.offerText = append(n.offerText, withText(q.Offer)...)
 	n.mu.Unlock()
 	resp, err := x.Serve(ctx, l.from, &q)

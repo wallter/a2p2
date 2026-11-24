@@ -71,7 +71,6 @@ const (
 	pullOffer = 1 << iota
 	pullLimit1
 	pullLost
-	pullShort // open rounds with the short form
 )
 
 func deepModel() bool { return os.Getenv("A2P2_MODEL_DEEP") == "1" }
@@ -86,9 +85,6 @@ func pullFlags(n int) string {
 	}
 	if n&pullLost != 0 {
 		out = append(out, "response lost")
-	}
-	if n&pullShort != 0 {
-		out = append(out, "short form")
 	}
 	if len(out) == 0 {
 		return ""
@@ -123,7 +119,7 @@ type pxChange struct {
 // pxCounts are shared by a harness and its clones.
 type pxCounts struct {
 	pulls, failed, lost, removedServer, modelPulls, requests, copies, texts, repaired, undecided, uncompared, same int
-	offerDropped                                                                                                   int
+	offerDropped, seenSame, seenSkipped, reoffered, resent                                                         int
 }
 
 // pxState is the real exchange's side of the harness.
@@ -149,6 +145,7 @@ type pxState struct {
 	// of its own removal; see knownGaps.
 	gapsUnknown map[delivery.MachineID]bool
 	c           *pxCounts
+	offers      int // records offered by the requests up to a lost response
 }
 
 // knownGaps is the model's waiting list mw of a machine that served, after
@@ -484,12 +481,12 @@ func (p *pxState) pull(h *harness, o op) {
 	p.c.pulls++
 	ctx := context.Background()
 	opt := delivery.PullOpt{Offer: o.n&pullOffer != 0, LostReply: o.n&pullLost != 0}
-	full := o.n&pullShort == 0
 	offers := 0
 	if o.n&pullLimit1 != 0 {
 		opt.Limit = 1
 	}
 	real := func() (PullStats, error) {
+		defer func() { p.offers = offers }()
 		ps.x.pageLimit, ps.x.offerLimit = MaxPageRecords, MaxOfferRecords
 		ss.x.pageLimit, ss.x.offerLimit = MaxPageRecords, MaxOfferRecords
 		if opt.Limit == 1 {
@@ -509,17 +506,18 @@ func (p *pxState) pull(h *harness, o op) {
 		p.net.lose = nil
 		offers = 0
 		if opt.LostReply {
-			// The response that carries the page is lost (to the first
-			// detail request, or to the first request when nothing
-			// differs): the server has then seen the whole summary and
-			// built its page, as the model's server has; the requester has
-			// applied the log entries and digests before it, no page.
+			// The response that carries the page is lost: the first to a
+			// continuing request. The server has then had the detail of
+			// every author that differs and built its page, as the model's
+			// server has; the requester has applied the opening's log
+			// entries and digests, no page. With nothing differing nothing
+			// is lost (the exchange is then compared as a whole).
 			lost := false
 			p.net.lose = func(_, _ string, q *PullRequest, resp *PullResponse) bool {
 				if !lost {
 					offers += len(q.Offer)
 				}
-				if !lost && (q.Detail != nil || len(resp.Differ) == 0) {
+				if !lost && q.Detail != nil {
 					lost = true
 				}
 				return lost
@@ -527,13 +525,26 @@ func (p *pxState) pull(h *harness, o op) {
 		}
 		n0 := len(p.net.reqBytes)
 		p.net.pageText, p.net.offerText = nil, nil
-		st, err := ps.x.Pull(ctx, diffRoom, ss.m.ID, PullOpts{Offer: opt.Offer, FullForm: full})
+		st, err := ps.x.Pull(ctx, diffRoom, ss.m.ID, PullOpts{Offer: opt.Offer})
 		p.c.same += st.Same
+		p.c.seenSame += st.SeenSame
 		p.c.requests += len(p.net.reqBytes) - n0
 		p.c.repaired += st.Repaired
 		return st, err
 	}
 	var textTo, textFrom []delivery.RecordID
+	// The requester's observation of the server may be older than the
+	// model's (made as server, of authors whose digests did not differ; see
+	// sameCopies), or newer. An offer built on either may offer again what
+	// the server held already; see sameTexts.
+	state := func(x store.Held) string { return fmt.Sprintf("%s/%v", x.Reason, x.Record.Body() != nil) }
+	var heldBefore map[string]string
+	if p.lostAfter[[2]delivery.MachineID{pm, sm}] {
+		heldBefore = map[string]string{}
+		for id, x := range h.all(ss) {
+			heldBefore[id] = state(x)
+		}
+	}
 	sameTexts := func() {
 		h.t.Helper()
 		for _, c := range []struct {
@@ -542,12 +553,31 @@ func (p *pxState) pull(h *harness, o op) {
 			impl  []string
 		}{{"pages", textTo, p.net.pageText}, {"offers", textFrom, p.net.offerText}} {
 			want, got := map[string]bool{}, map[string]bool{}
+			// With the requester's observation older on one side, either
+			// side may offer what the server held already and the offer
+			// left as it was (a wasted copy): only those are left out.
+			after := map[string]store.Held{}
+			if c.what == "offers" && heldBefore != nil {
+				after = h.all(ss)
+			}
+			again := func(id string) bool {
+				x, ok := after[id]
+				return ok && heldBefore[id] != "" && heldBefore[id] == state(x)
+			}
 			for _, id := range c.model {
 				if x, ok := h.pair[id]; ok && h.hasText(x) {
+					if again(x) {
+						p.c.reoffered++
+						continue
+					}
 					want[h.id(x)] = true
 				}
 			}
 			for _, id := range c.impl {
+				if again(id) {
+					p.c.reoffered++
+					continue
+				}
 				got[h.id(id)] = true
 			}
 			if a, b := slices.Sorted(maps.Keys(want)), slices.Sorted(maps.Keys(got)); !slices.Equal(a, b) {
@@ -605,7 +635,7 @@ func (p *pxState) pull(h *harness, o op) {
 		// server serves, the requester applies the first response's log
 		// entries, learns of the removal and takes nothing more. Each has
 		// seen only the other's digests.
-		full, opt.LostReply = true, false // the response that matters is the first: not lost here
+		opt.LostReply = false // the response that matters is the first: not lost here
 		st, err := real()
 		if !errors.Is(err, ErrPeerNotMember) || st.Responses != 1 || st.Entries != 1 {
 			h.fail("implementation pull from a server that knows of its own removal: %+v %v", st, err)
@@ -621,67 +651,124 @@ func (p *pxState) pull(h *harness, o op) {
 			textTo, textFrom = nil, r.TextFrom
 		}
 		p.c.modelPulls++
-		p.partial[[2]delivery.MachineID{sm, pm}] = true
+		p.lostAfter[[2]delivery.MachineID{sm, pm}] = true
 		p.partial[[2]delivery.MachineID{pm, sm}] = true
 		p.gapsUnknown[sm] = true
 		p.c.removedServer++
-	case opt.LostReply:
-		full = true
-		st, err := real()
-		if !errors.Is(err, errLost) {
-			h.fail("implementation pull with the response lost: %+v %v", st, err)
-		}
+	default:
+		p.pullRest(h, pm, sm, kp2, opt, real, &textTo, &textFrom)
+	}
+	sameTexts()
+	h.prune(ps)
+	h.prune(ss)
+}
+
+// sumOfSim is s's sum of the room now.
+func sumOfSim(h *harness, s *sim) string {
+	h.t.Helper()
+	rl, err := s.r.room(diffRoom)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	var sum string
+	if err := s.m.view(context.Background(), diffRoom, func(v *roomView) error {
+		own, err := s.r.summarize(v, rl.st)
+		sum = own.sum()
+		return err
+	}); err != nil {
+		h.t.Fatal(err)
+	}
+	return sum
+}
+
+// pullRest maps a pull between members onto the model: the real exchange
+// first; then, with its page-carrying response lost, one lost model pull;
+// answered same to seen, nothing; otherwise model pulls repeated while
+// they store something, at least as many as the real rounds.
+func (p *pxState) pullRest(h *harness, pm, sm delivery.MachineID, kp2 int, opt delivery.PullOpt,
+	real func() (PullStats, error), textTo, textFrom *[]delivery.RecordID) {
+	h.t.Helper()
+	st, err := real()
+	requesterOlder := false
+	if isNotMember(err) {
+		// The requester's entries began where it last saw the server's log,
+		// which the server no longer has (it, or the requester, was
+		// restored): refused before anything was done. The next attempt
+		// carries the whole log (4.5), as the model's one pull does.
+		p.c.resent++
+		st, err = real()
+	}
+	switch {
+	case opt.LostReply && errors.Is(err, errLost):
 		// The model's one request offers what the real requests up to the
 		// lost one offered, counted on the wire.
 		mopt := opt
 		if opt.Limit > 0 {
-			mopt.Limit = max(offers, 1)
+			mopt.Limit = max(p.offers, 1)
 		}
 		r, err := h.w.Pull(pm, sm, mopt)
 		if err != nil {
 			h.fail("model pull: %v", err)
 		}
-		textTo, textFrom = r.TextTo, r.TextFrom
+		*textTo, *textFrom = r.TextTo, r.TextFrom
 		p.c.modelPulls++
 		if st.Responses > 0 {
 			p.learnTo(h, pm, kp2)
 			p.lostAfter[[2]delivery.MachineID{pm, sm}] = true
 		}
+		p.lostAfter[[2]delivery.MachineID{sm, pm}] = true
 		p.c.lost++
-	default:
-		st, err := real()
+		return
+	case err != nil:
+		h.fail("implementation pull: %+v %v", st, err)
+	case st.SeenSame == 1 && st.Requests == 1 && sumOfSim(h, h.sims[pm]) != sumOfSim(h, h.sims[sm]):
+		// Answered same to seen: nothing changed on either side since a
+		// round that stored nothing, and neither records an observation.
+		// The model's pull would store nothing either, only observe again:
+		// it is not run.
+		p.c.seenSkipped++
+		return
+	case st.SeenSame == 1 && st.Requests == 1:
+		// Answered same to its sum, though it carried seen too: the server
+		// recorded the observation, the requester (which cannot tell which
+		// matched) only the log.
+		requesterOlder = true
+	}
+	opt.LostReply = false // nothing differed: nothing was lost
+	// A real round is a model pull; the model goes on while a pull
+	// stores something, as a real exchange does.
+	for i := 0; ; i++ {
+		if i == 64 {
+			h.fail("model pulls do not end")
+		}
+		hd, err := h.w.Hold(pm, sm, opt)
 		if err != nil {
-			h.fail("implementation pull: %+v %v", st, err)
+			h.fail("model pull: %v", err)
 		}
-		// A real round is a model pull; the model goes on while a pull
-		// stores something, as a real exchange does.
-		for i := 0; ; i++ {
-			if i == 64 {
-				h.fail("model pulls do not end")
-			}
-			hd, err := h.w.Hold(pm, sm, opt)
-			if err != nil {
-				h.fail("model pull: %v", err)
-			}
-			p.learnTo(h, pm, kp2)
-			r, err := h.w.Release(hd)
-			if err != nil {
-				h.fail("model release: %v", err)
-			}
-			textTo, textFrom = append(textTo, r.TextTo...), append(textFrom, r.TextFrom...)
-			p.c.modelPulls++
-			if r.Stored == 0 && r.OfferStored == 0 && i+1 >= st.Rounds {
-				break
-			}
+		p.learnTo(h, pm, kp2)
+		r, err := h.w.Release(hd)
+		if err != nil {
+			h.fail("model release: %v", err)
 		}
-		for _, k := range [][2]delivery.MachineID{{sm, pm}, {pm, sm}} {
-			delete(p.partial, k)
-			delete(p.lostAfter, k)
+		*textTo, *textFrom = append(*textTo, r.TextTo...), append(*textFrom, r.TextFrom...)
+		p.c.modelPulls++
+		if r.Stored == 0 && r.OfferStored == 0 && i+1 >= st.Rounds {
+			break
 		}
 	}
-	sameTexts()
-	h.prune(ps)
-	h.prune(ss)
+	for _, k := range [][2]delivery.MachineID{{sm, pm}, {pm, sm}} {
+		delete(p.partial, k)
+		delete(p.lostAfter, k)
+	}
+	// The server knows what the requester holds of the authors whose
+	// digests differed (their detail); of the rest it learns only from
+	// a same at the end (4.3). The model's server observes it all.
+	if !st.Closed {
+		p.lostAfter[[2]delivery.MachineID{sm, pm}] = true
+	}
+	if requesterOlder {
+		p.lostAfter[[2]delivery.MachineID{pm, sm}] = true
+	}
 }
 
 // sameCopies compares machine n's copy reports of record x with the
@@ -695,9 +782,12 @@ func (p *pxState) sameCopies(h *harness, n delivery.MachineID, x written, model 
 	// the whole summary. Only those reports are left out.
 	unknown := func(peer delivery.MachineID) bool {
 		if p.lostAfter[[2]delivery.MachineID{n, peer}] {
-			// It applied the responses before the lost one, which the
-			// model's lost pull does not: none of its reports of that peer
-			// compare until they exchange again.
+			// As requester, it applied the responses before a lost one,
+			// which the model's lost pull does not; as server, it learned
+			// only the detail of the authors that differed, and learns the
+			// rest at a closing same (4.3), where the model's server
+			// observes the whole summary each pull. None of its reports
+			// of that peer compare until such a same.
 			return true
 		}
 		if !p.partial[[2]delivery.MachineID{n, peer}] {
@@ -759,7 +849,7 @@ func pullAlphabet() []op {
 		{kind: opWithdraw, machine: "M", agent: "alice", target: 0},
 		{kind: opSeenAll, machine: "P", agent: "pat"},
 		{kind: opHandled, machine: "P", agent: "pat", target: -1},
-		{kind: opPull, machine: "P", server: "M", n: pullShort},
+		{kind: opPull, machine: "P", server: "M"},
 		{kind: opPull, machine: "M", server: "P", n: pullOffer},
 		{kind: opPull, machine: "P", server: "M", n: pullLimit1 | pullOffer},
 		{kind: opPull, machine: "P", server: "M", n: pullLost | pullOffer},
@@ -843,9 +933,6 @@ func randomPullOp(r *rand.Rand, h *harness, agents map[delivery.MachineID][]stri
 		if r.IntN(8) == 0 {
 			flags |= pullLost
 		}
-		if r.IntN(2) == 0 {
-			flags |= pullShort
-		}
 		return op{kind: opPull, machine: m, server: peers[r.IntN(len(peers))], n: flags}
 	}
 	o := randomOp(r, m, agents[m], peers, []int{0, -10, 10})
@@ -856,9 +943,10 @@ func randomPullOp(r *rand.Rand, h *harness, agents map[delivery.MachineID][]stri
 }
 
 func (p *pxState) report(t testing.TB, what string, d time.Duration, n int, h *counts) {
-	t.Logf("%s: %d in %v; %d pulls (%d refused on both sides, %d with the page-carrying response lost, %d from a server that knew of its own removal while the puller did not, %d of them without the offer asked for, %d rounds answered same), %d real requests, %d model pulls, %d copy reports and %d texts sent compared, %d copy reports left out (detail unknown after a cut exchange), %d texts repaired, %d records pending a permission decision checked; %d writes retried for id order, %d stopped",
-		what, n, d.Round(time.Millisecond), p.c.pulls, p.c.failed, p.c.lost, p.c.removedServer, p.c.offerDropped, p.c.same, p.c.requests,
-		p.c.modelPulls, p.c.copies, p.c.texts, p.c.uncompared, p.c.repaired, p.c.undecided, h.retries, h.stopped)
+	t.Logf("%s: %d in %v; %d pulls (%d refused on both sides, %d with the page-carrying response lost, %d from a server that knew of its own removal while the puller did not, %d of them without the offer asked for, %d rounds answered same, %d of them to seen, %d pulls answered same to seen not run in the model, %d refused once and sent again with the whole log), %d real requests, %d model pulls, %d copy reports and %d texts sent compared, %d copy reports left out (observation older or partial on one side), %d texts offered again from an older observation, %d texts repaired, %d records pending a permission decision checked; %d writes retried for id order, %d stopped",
+		what, n, d.Round(time.Millisecond), p.c.pulls, p.c.failed, p.c.lost, p.c.removedServer, p.c.offerDropped, p.c.same,
+		p.c.seenSame, p.c.seenSkipped, p.c.resent, p.c.requests, p.c.modelPulls, p.c.copies, p.c.texts, p.c.uncompared, p.c.reoffered,
+		p.c.repaired, p.c.undecided, h.retries, h.stopped)
 }
 
 // [R3, R4, R5, RM1, RM2, RM3, D2, D3, D4, D5, T3, T5, N1] Every sequence of

@@ -310,7 +310,13 @@ func (t *Tx) NoteKnown(room, author, epoch string, known int64, at time.Time) er
 // made later (node.Exchange orders them by when they were made, not by
 // the clock, which can step back).
 func (t *Tx) Observe(room, peer string, at time.Time, obs []Observation) error {
-	return t.observe(room, peer, at, obs)
+	return t.observe(room, peer, at, obs, true)
+}
+
+// ObservePart replaces only the rows of obs (authors whose detail a peer
+// sent, and its log), keeping the rest of what was observed of it.
+func (t *Tx) ObservePart(room, peer string, at time.Time, obs []Observation) error {
+	return t.observe(room, peer, at, obs, false)
 }
 
 // ObserveLog replaces only peer's log row.
@@ -321,7 +327,7 @@ func (t *Tx) ObserveLog(room, peer string, at time.Time, log PeerLog) error {
 	return err
 }
 
-func (t *Tx) observe(room, peer string, at time.Time, obs []Observation) error {
+func (t *Tx) observe(room, peer string, at time.Time, obs []Observation, whole bool) error {
 	keep := map[string]bool{}
 	for _, o := range obs {
 		keep[o.Author] = true
@@ -337,6 +343,9 @@ func (t *Tx) observe(room, peer string, at time.Time, obs []Observation) error {
 			at = excluded.at`, room, peer, o.Author, o.Digest, detail, ms(at)); err != nil {
 			return err
 		}
+	}
+	if !whole {
+		return nil
 	}
 	rows, err := t.tx.Query(`SELECT author FROM observed WHERE room = ? AND peer = ?`, room, peer)
 	if err != nil {
