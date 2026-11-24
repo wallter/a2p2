@@ -4,52 +4,93 @@
 Antigravity CLI, or any command) that coordinate through one a2p2 room,
 watches them, stops them and measures the run. It is an optional layer on
 top of a2p2 and uses only the `a2p2` CLI and its MCP server; nothing in the
-daemon knows about it ([D-team](../../docs/DECISIONS.md)). It needs
+daemon knows about it ([D40](../../docs/DECISIONS.md)). It needs
 Python 3 and nothing else.
 
 ## What it does
 
-- **`team up`** checks the manifest, starts the daemon for the manifest's
-  `a2p2_home` if needed, creates the room if it is missing, registers
-  every label, posts a kickoff message as the lead, and starts each member
-  in its own working directory (or a git worktree) with its own label,
-  model, sandbox or permission profile, wall-clock limit and brief. The
-  a2p2 MCP server is given to each harness for that run only, on its
-  command line; for Antigravity, in `.agents/mcp_config.json` inside a
-  directory the launcher created. No harness configuration is edited.
-  `--wait` waits until every member has finished and prints the report.
-- **The watcher** runs in the background and posts ordinary room messages
-  from the label `team`:
-  - `started`, once the member's tool server has connected: its label was
-    registered again under the harness's name after launch, which only
-    that member's MCP server does (the launcher registered the label
-    earlier as `cli`). It is seen within one poll interval.
+- **`team up`** checks the manifest, claims the state directory (a second
+  `up` on it is refused), creates each member's working directory and
+  per-run files, starts the daemon for the manifest's `a2p2_home` if
+  needed, creates the room if it is missing, registers every label, posts
+  a kickoff message as the lead, and starts the supervisor. The a2p2 MCP
+  server is given to each harness for that run only, on its command line;
+  for Antigravity, in `.agents/mcp_config.json` in the member's directory.
+  No harness configuration is edited. `--wait` waits until every member
+  has finished and prints the report.
+- **The supervisor** starts each member under a small guard process that
+  leads the member's process group, and records each launch as it
+  happens. It alone signals members, and only process groups whose
+  leader it started and has not yet reaped. It ends a member's group when
+  the member passes its limit, when `team stop` asks, and when the
+  supervisor itself gets SIGTERM, SIGINT or SIGHUP or fails. If the
+  supervisor is killed outright, each guard sees its pipe from the
+  supervisor close and ends its own group.
+- **The watcher**, a thread of the supervisor, reads the room and posts
+  ordinary messages from the label `team`:
+  - `started`, once the member's tool server has connected (see
+    [readiness](#readiness)). It is seen within one poll interval.
   - `done` or `failed`, with the exit status, the wall-clock time and where
-    the final answer was saved, and a note if the tool server never
-    connected.
-  - `limit` when a member passes its wall-clock limit; its process group
-    gets SIGTERM, then SIGKILL five seconds later.
+    the final answer was saved.
+  - `not ready` when a member exits without its tool server ever having
+    connected, whatever its exit status.
+  - `limit` when a member passes its wall-clock limit.
   - `silent` when a member has posted nothing in the room for
     `silence_seconds`, once per quiet spell.
   - `needs input` when a member sends a question to the person.
-  - `stopped` after `team stop`.
+  - `stopped` after `team stop`, or when the supervisor was ended.
 
   It uses exit statuses, the files a harness writes and what the room
   shows. It does not read a harness's screen, and it never acts on what
   members write.
-- **`team status`** lists the roster: label, harness, pid, state, the last
-  room message and the elapsed time.
-- **`team stop [LABEL]`** ends one member, or all of them.
+- **`team status`** lists the roster: label, harness, guard pid, state,
+  the last room message and the elapsed time.
+- **`team stop [LABEL]`** asks the live supervisor, through a request file
+  in the state directory that only the supervisor answers, to end one
+  member or all of them. If no supervisor answers within three seconds,
+  it says the run is not live, marks the roster ended and signals
+  nothing. It never signals a pid read from disk.
 - **`team logs LABEL [-n N]`** prints a member's output and error logs.
 - **`team report`** writes `report.json` and `report.md` in the state
   directory. For each member it gives the wall-clock time, how long the
-  tool server took to connect, messages sent, replies that reached more
-  than one inbox, questions to the person, refusals by code and empty
-  inbox polls (both counted from the harness's log), the exit state and
-  whether its last report began `DONE:` or `BLOCKED:`. For the run it
-  counts messages from the lead, the watcher and the person, and requests
-  waiting for the person. The watcher writes the report when the last
-  member finishes.
+  tool server took to be seen connected, messages sent, replies that
+  reached more than one inbox, questions to the person, refusals by code
+  and empty inbox polls (both counted from the harness's log), the exit
+  state and whether its last report began `DONE:` or `BLOCKED:`. For the
+  run it counts messages from the lead, the watcher and the person, and
+  requests waiting for the person. The supervisor writes the report when
+  the last member finishes.
+
+## Readiness
+
+a2p2 has no per-launch readiness event, so `started` is inferred from
+what `a2p2 status` shows. A member is ready when its label is registered
+under the harness's own name (`claude`, `codex`, `agy`, or `mcp_harness`
+for a command), with the member's working directory of this run, and
+with a last-seen time at or after the launch time, which is taken before
+the process starts. The launcher registers each label earlier through the
+CLI as `cli`; a CLI call keeps an earlier harness name and directory, so
+a label left from another run or directory does not count. A process
+that registers the same label with the same harness name from the same
+directory would still pass; the launcher cannot tell it apart.
+
+## Limits and what is guaranteed
+
+- Limits (`limit_seconds`, `silence_seconds`, `poll_seconds`,
+  `max_budget_usd`) must be finite numbers above zero.
+- While the supervisor runs, a member that passes `limit_seconds` gets
+  SIGTERM to its process group within a tenth of a second on the
+  supervisor's monotonic clock, and SIGKILL five seconds later. Room
+  polling and slow or blocked a2p2 calls do not delay this; they only
+  delay the room messages.
+- Processes that leave the member's process group (for example with
+  `setsid`) are not ended by the launcher.
+- If the supervisor is killed, guards end their groups within about a
+  fifth of a second, plus the five-second grace. If a guard is killed too,
+  or the machine reboots, nothing is ended by the launcher, and `team
+  stop` will not signal anything; check for leftover processes yourself.
+- `max_budget_usd` is Claude Code's own limit. Codex and Antigravity have
+  only the wall-clock limit here.
 
 Every member's brief starts with [prelude.md](prelude.md): call `whoami`,
 read the kickoff, reply with a plan, check `inbox` between steps, send
@@ -95,8 +136,11 @@ Member keys: `label`, `harness` (`claude`, `codex`, `agy` or `command`),
 `model`, `brief` or `brief_file`, `limit_seconds` (default 900),
 `silence_seconds`, and one of `workdir` (an existing directory) or
 `worktree` (a repository: the launcher runs `git worktree add --detach`
-under the state directory; remove it afterwards with `git worktree
-remove`). Without either, the member gets an empty directory. Per harness:
+under the state directory). `git worktree add` also writes metadata into
+the source repository's `.git/worktrees`; remove the worktree afterwards
+with `git worktree remove`. Without either, the member gets an empty
+directory. Unknown keys, and keys that do not apply to the member's
+harness, are refused. Per harness:
 
 | Harness | How it is started | Profile keys |
 |---|---|---|
@@ -105,8 +149,28 @@ remove`). Without either, the member gets an empty directory. Per harness:
 | `agy` | `agy --settings '{"permissions":{"allow":["mcp(a2p2/*)"]}}' --model M --print-timeout <limit>s -p=<prompt>` from a directory with `.agents/mcp_config.json` | none |
 | `command` | `command`, a list of arguments with `{a2p2}`, `{home}`, `{label}`, `{room}`, `{workdir}`, `{final}`, `{prompt_file}` and `{team_dir}` filled in | `mcp_harness`: the `--harness` name its MCP server registers with |
 
-The state directory holds `roster.json`, `watcher.log`, the reports, and
-per member `prompt.md`, `out.log`, `err.log` and `final.txt`.
+Only profiles that keep the harness's own permission and sandbox
+controls are accepted; anything else is refused with the allowed values:
+
+- Claude Code `permission_mode`: `default`, `acceptEdits` or `plan`
+  (`bypassPermissions` and others are refused). `allowed_tools` may not
+  name `*`, unscoped `Bash` or `Bash(*)`; name scoped tools such as
+  `Read` or `Bash(git status:*)`.
+- Codex `sandbox`: `read-only` (the default) or `workspace-write`
+  (`danger-full-access` is refused).
+- Antigravity has no profile key; its MCP tools are allowed for the run.
+- A `command` member runs exactly what the manifest says. It is trusted
+  input: the person who writes the manifest vouches for it, as for any
+  program they run.
+
+The launcher writes a harness's per-run file only where nothing exists
+yet: if the member's directory already has `.agents/mcp_config.json`
+(for example from a checked-out worktree), or it or `.agents` is a
+symlink, `up` is refused and the file is left as it was.
+
+The state directory holds `roster.json`, `supervisor.log`, a `control`
+directory for stop requests, the reports, and per member `launch.json`,
+`prompt.md`, `out.log`, `err.log` and `final.txt`.
 
 ## Example
 
@@ -133,8 +197,8 @@ in 25 and 15 seconds.
   room with `inbox`.
 - It does not approve joins, turn networking on or answer the person's
   questions; those stay with the person.
-- It does not keep running after a reboot, and it is not tested on Linux
-  with real harnesses.
+- It does not survive a reboot, and it is not tested on Linux with real
+  harnesses.
 - It does not count tokens or cost; harness logs differ and are kept for
   that.
 
@@ -150,4 +214,6 @@ relies on formations.
 `make team-test` (part of `make check`) runs [test_team.py](test_team.py)
 against [fake_harness.py](fake_harness.py), which starts `a2p2 mcp` and
 calls its tools like a harness would, then exits 0, exits non-zero, hangs,
-never connects, asks the person or posts text that looks like commands.
+never connects, only refreshes its label with the CLI, asks the person or
+posts text that looks like commands. The tests put stub `claude`, `codex`
+and `agy` commands first on the `PATH`, so no model is ever called.

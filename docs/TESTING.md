@@ -178,17 +178,24 @@ backup, removals during faults, and machines on different versions.
 ## Team launcher
 
 `make team-test` (part of `make check`) runs `scripts/team/test_team.py`
-in about five seconds: the launcher with a fake harness that calls the
-real `a2p2 mcp` over stdio, against a throwaway home. No model is called.
+in about fifteen seconds: the launcher with a fake harness that calls the
+real `a2p2 mcp` over stdio, against a throwaway home. The real harness
+commands are shadowed by stubs, so no model is ever called.
 
 | Scenario | What happens | Test |
 |---|---|---|
-| A member's tool server connects | `started` is posted only after the member's MCP server registered its label after launch; a member that never starts one gets no `started`, and its `done` says so | `test_watcher_reports_each_ending_and_the_run_is_measured` |
+| A member's tool server connects | `started` only once the label is registered under the harness's name, from this run's working directory, with a last-seen time at or after the launch time taken before the process started; a member that exits 0 without that is `not_ready`, not `done` | `test_watcher_reports_each_ending_and_the_run_is_measured` |
+| A label registered earlier under the same harness name, refreshed by a CLI call during the run | Not counted as connected; the member is `not_ready` | `test_a_reused_label_refreshed_by_the_cli_is_not_ready` |
 | A member exits 0, exits non-zero, passes its wall-clock limit, goes quiet or asks the person | `done` with the saved answer, `failed` with the exit status, `limit` and the process group stopped, `silent`, `needs input`; each posted once | `test_watcher_reports_each_ending_and_the_run_is_measured` |
+| The room or the a2p2 CLI is slow while a member passes its limit | The member is stopped on the supervisor's monotonic clock within a tick, independent of room polling and of CLI calls returning | `test_limit_is_enforced_while_room_calls_block` |
 | A member posts text that looks like launcher commands or notices | Nothing is stopped or changed | `test_watcher_reports_each_ending_and_the_run_is_measured` |
 | `team report` after a run | Messages, multi-inbox replies, questions to the person, refusals by code and empty polls from the logs, exit state and `DONE:`/`BLOCKED:` per member, as JSON and Markdown | `test_watcher_reports_each_ending_and_the_run_is_measured` |
-| `team status`, `team logs`, `team stop LABEL` on a running member | The roster shows it running; its log is printed; it is stopped and `stopped` is posted; a second `up` on the same state is refused | `test_status_logs_and_stop_one_member` |
-| A manifest over its member cap, or with a repeated or reserved label | Refused before any daemon starts | `test_manifest_limits` |
+| `team status`, `team logs`, `team stop LABEL` on a running member | The supervisor answers the stop request and stops the member; `stopped` is posted; a second `up` on the same state is refused | `test_status_logs_and_stop_one_member_through_the_supervisor` |
+| The supervisor is killed, then `team stop` runs with the recorded pid now naming another process | The member's guard ends its process group; `stop` finds no live supervisor, signals nothing and marks the roster ended | `test_stop_never_signals_a_pid_read_from_disk` |
+| The supervisor gets SIGTERM | It stops its members first and records them as stopped | `test_a_terminated_supervisor_stops_its_members_first` |
+| Two `team up` on one state directory at once | One starts the run, the other is refused | `test_two_ups_at_once_one_wins` |
+| An Antigravity member's checkout already has `.agents/mcp_config.json`, as a file or a symlink | Refused before any daemon starts; the file and the symlink's target are unchanged | `test_antigravity_config_in_a_checkout_is_never_overwritten` |
+| A manifest with a bypass mode (`bypassPermissions`, unscoped `Bash`, `danger-full-access`), an unknown key, a zero, negative, infinite, NaN or string limit, too many members, or a repeated or reserved label | Refused with the allowed values, before any daemon starts or state is reserved | `test_manifest_refuses_bypass_modes_and_bad_limits` |
 
 ## CI
 

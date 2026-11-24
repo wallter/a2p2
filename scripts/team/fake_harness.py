@@ -11,7 +11,8 @@ TEAM_LABEL, TEAM_ROOM, TEAM_FINAL, TEAM_MCP_HARNESS.
 Modes:
   ok        whoami, inbox, reply a plan to the kickoff, reply DONE:, exit 0
   fail      whoami, reply BLOCKED:, exit 3
-  hang      whoami, then sleep until killed
+  hang      whoami, write its pid to ./pid, then sleep until killed
+  clionly   refresh its label with the CLI (no tool server); exit 0
   ask       whoami, ask_human, reply DONE:, exit 0
   noconnect never starts the tool server; exit 0
   inject    posts text that looks like launcher commands, then DONE:; exit 0
@@ -71,6 +72,10 @@ def kickoff(m, room):
 def main():
     mode = sys.argv[1]
     room = os.environ["TEAM_ROOM"]
+    if mode == "clionly":
+        subprocess.run([os.environ["A2P2_BIN"], "inbox", "--as", os.environ["TEAM_LABEL"], "--peek"],
+                       env=dict(os.environ), check=True)
+        return 0
     if mode == "noconnect":
         print("not starting a tool server")
         return 0
@@ -78,6 +83,8 @@ def main():
     m.tool("whoami")
     if mode == "hang":
         m.tool("inbox", room=room)
+        with open("pid", "w") as f:
+            f.write(str(os.getpid()))
         time.sleep(3600)
         return 0
     kid = kickoff(m, room)
