@@ -92,6 +92,11 @@ func TestEveryToolMakesOnlyAgentCalls(t *testing.T) {
 	bob := agentID(t, b)
 	out := ok(t, a, "send", map[string]any{"text": "hi", "to": []string{bob}})
 	id := idOf(t, out)
+	file := filepath.Join(t.TempDir(), "a.log")
+	if err := os.WriteFile(file, []byte("abc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sha := "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" // of "abc"
 	for _, step := range []struct {
 		cs   string
 		tool string
@@ -116,6 +121,15 @@ func TestEveryToolMakesOnlyAgentCalls(t *testing.T) {
 		{"a", "inbox", map[string]any{"room": "nope", "wait_seconds": 1, "limit": 3}},
 		{"a", "whoami", map[string]any{}},
 		{"a", "peers", map[string]any{}},
+		// files: a send with files only raises a request; fetch never
+		// confirms, and nothing reaches the room's files setting
+		{"a", "send", map[string]any{"text": "the log", "files": []string{file}}},
+		{"a", "send", map[string]any{"text": "v3", "replaces": id, "files": []string{"sha256:" + sha}}},
+		{"a", "send", map[string]any{"text": "x", "files": []string{"relative"}}},
+		{"b", "inbox", map[string]any{"fetch": sha}},
+		{"b", "inbox", map[string]any{"fetch": sha, "room": "local", "wait_seconds": 1}},
+		{"b", "inbox", map[string]any{"fetch": "nothex"}},
+		{"a", "inbox", map[string]any{}},
 	} {
 		cs := a
 		if step.cs == "b" {
@@ -123,7 +137,7 @@ func TestEveryToolMakesOnlyAgentCalls(t *testing.T) {
 		}
 		call(t, cs, step.tool, step.args)
 	}
-	allowed := []string{"register", "send", "inbox", "seen", "thread", "history", "ack", "status", "level", "unread"}
+	allowed := []string{"register", "send", "inbox", "seen", "thread", "history", "ack", "status", "level", "unread", "fetch"}
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	if len(rec.calls) < 15 {

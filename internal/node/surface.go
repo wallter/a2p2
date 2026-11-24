@@ -841,7 +841,7 @@ func (s *Surface) Inbox(ctx context.Context, agent, room string, limit int, wait
 				v.Entries = v.Entries[:limit]
 			}
 			if err == nil {
-				err = s.showed(ctx, label, v.Entries, true)
+				err = s.showed(ctx, label, withoutRequests(v.Entries), true)
 			}
 			return v, err
 		}
@@ -879,10 +879,25 @@ func (s *Surface) inbox(ctx context.Context, label, room string) (InboxView, err
 		out.Entries = append(out.Entries, v.Entries...)
 		out.Waiting = append(out.Waiting, v.Waiting...)
 	}
+	reqs, err := s.requestEntries(ctx, label, room)
+	if err != nil {
+		return InboxView{}, err
+	}
+	out.Entries = append(out.Entries, reqs...)
 	sortEntries(out.Entries)
-	var err error
 	out.Entries, err = s.withLabels(ctx, out.Entries, nil)
 	return out, err
+}
+
+// withoutRequests leaves out request entries, which keep no receipt.
+func withoutRequests(es []Entry) []Entry {
+	out := make([]Entry, 0, len(es))
+	for _, e := range es {
+		if e.Kind != EntryRequest {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // Listed keeps a receipt for agent of entries a surface listed to it from
@@ -975,6 +990,12 @@ func (s *Surface) Seen(ctx context.Context, agent string, reads []store.Read) ([
 	var order []string
 	for i, rd := range reads {
 		out[i] = SeenResult{Key: rd.Key, Version: rd.Version, Reason: SeenNotShown}
+		if strings.HasPrefix(rd.Key, "q_") {
+			if out[i], err = s.seenRequest(ctx, label, rd.Key); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		room, err := s.roomOf(ctx, rd.Key)
 		if errors.Is(err, ErrNotHeld) {
 			continue
@@ -1185,6 +1206,8 @@ type TraceView struct {
 	Reason  string // its text here: live, expired, withdrawn, not_admitted or missing
 	Copies  []CopyView
 	Handled []HandledView
+	// Files are the files of the winning version, with holders' answers.
+	Files []TraceFile
 }
 
 // CopyView is a machine that showed this one it holds the author's stream
@@ -1253,7 +1276,8 @@ func (s *Surface) Trace(ctx context.Context, id string) (TraceView, error) {
 	for _, c := range cs {
 		t.Copies = append(t.Copies, CopyView{Node: c.Peer, At: c.At, Member: slices.Contains(st.Members, c.Peer)})
 	}
-	return t, nil
+	t.Files, err = s.traceFiles(ctx, room, id)
+	return t, err
 }
 
 // UnreadView is the cheap summary for hooks (U4): counts per room and,
@@ -1370,6 +1394,10 @@ type StatusView struct {
 	Reach Reach
 	// Mapping is the router's port mapping, when a person asked for one.
 	Mapping *PortMapping
+	// Files is what files take on this machine; RoomFiles each room's
+	// setting and use, by room id.
+	Files     FilesUsage
+	RoomFiles map[string]RoomFilesView
 }
 
 // WriterView is an agent seen writing in a room.
@@ -1442,9 +1470,13 @@ func (s *Surface) Status(ctx context.Context, show bool) (StatusView, error) {
 	if err != nil {
 		return StatusView{}, err
 	}
+	files, roomFiles, err := s.filesStatus(ctx, rooms)
+	if err != nil {
+		return StatusView{}, err
+	}
 	return StatusView{Node: s.m.ID, Name: s.name, Human: s.HumanID(), Local: s.local, Rooms: rooms, Agents: agents,
 		Peers: peers, Waiting: waiting, Network: s.net, Decided: decided, Fault: s.fault(), Notice: notice, Writers: writers,
-		Levels: levels, Reach: s.ReachNow(), Mapping: s.MappingNow()}, nil
+		Levels: levels, Reach: s.ReachNow(), Mapping: s.MappingNow(), Files: files, RoomFiles: roomFiles}, nil
 }
 
 // mayBeRemoved: every other member of r has refused this machine as not a

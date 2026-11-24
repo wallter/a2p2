@@ -1,22 +1,30 @@
 // Package web is the loopback page for the person who runs this machine:
-// rooms, members and admins, messages with threads, alerts, and requests
-// waiting for a person with approve and decline (DESIGN sections 6
-// and 7). The person acts as the human agent of this machine. Every call is
-// one call into node.Surface.
+// rooms, members and admins, messages with threads and their files, each
+// room's files setting, alerts, and requests waiting for a person with
+// approve and decline (DESIGN sections 6, 7 and 12). The person acts as
+// the human agent of this machine. Every call is one call into
+// node.Surface.
 package web
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/wallter/a2p2/internal/localapi"
 	"github.com/wallter/a2p2/internal/node"
@@ -53,6 +61,8 @@ func Handler(s *node.Surface, token string) http.Handler {
 	mux.HandleFunc("POST /api/ack", sv.api(sv.ack))
 	mux.HandleFunc("POST /api/confirm", sv.api(sv.confirm))
 	mux.HandleFunc("POST /api/notice-shown", sv.api(sv.noticeShown))
+	mux.HandleFunc("GET /api/file", sv.raw(sv.file))
+	mux.HandleFunc("POST /api/room-files", sv.api(sv.roomFiles))
 	return sv.guard(mux)
 }
 
@@ -95,36 +105,66 @@ func (sv *server) guard(next http.Handler) http.Handler {
 	})
 }
 
+// allowed applies the checks every API route shares: the Bearer token,
+// and for a POST a JSON content type and the body limit. It answers a
+// refusal itself and reports whether the request may go on.
+func (sv *server) allowed(w http.ResponseWriter, r *http.Request) bool {
+	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || subtle.ConstantTimeCompare([]byte(got), []byte(sv.token)) != 1 {
+		writeJSON(w, 401, map[string]string{"error": "missing or invalid token; run `a2p2 ui` for a fresh link"})
+		return false
+	}
+	if r.Method == http.MethodPost {
+		if mt, _, _ := strings.Cut(r.Header.Get("Content-Type"), ";"); strings.TrimSpace(strings.ToLower(mt)) != "application/json" {
+			writeJSON(w, 415, map[string]string{"error": "content-type must be application/json"})
+			return false
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+	}
+	return true
+}
+
 // api wraps a JSON handler with token auth, content-type checks and error mapping.
 func (sv *server) api(fn func(*http.Request) (any, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || subtle.ConstantTimeCompare([]byte(got), []byte(sv.token)) != 1 {
-			writeJSON(w, 401, map[string]string{"error": "missing or invalid token; run `a2p2 ui` for a fresh link"})
+		if !sv.allowed(w, r) {
 			return
-		}
-		if r.Method == http.MethodPost {
-			if mt, _, _ := strings.Cut(r.Header.Get("Content-Type"), ";"); strings.TrimSpace(strings.ToLower(mt)) != "application/json" {
-				writeJSON(w, 415, map[string]string{"error": "content-type must be application/json"})
-				return
-			}
-			r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 		v, err := fn(r.WithContext(ctx))
-		var ue *node.UserError
-		var mbe *http.MaxBytesError
-		switch {
-		case errors.As(err, &ue):
-			writeJSON(w, 400, map[string]string{"error": ue.Msg})
-		case errors.As(err, &mbe):
-			writeJSON(w, 413, map[string]string{"error": "request too large"})
-		case err != nil:
-			writeJSON(w, 500, map[string]string{"error": "internal error"})
-		default:
-			writeJSON(w, 200, v)
+		if err != nil {
+			writeErr(w, err)
+			return
 		}
+		writeJSON(w, 200, v)
+	}
+}
+
+// raw is api for a handler that writes its own response (a file's bytes),
+// with the same checks. A handler that fails before writing anything
+// returns the error, answered as api answers it.
+func (sv *server) raw(fn func(http.ResponseWriter, *http.Request) error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !sv.allowed(w, r) {
+			return
+		}
+		if err := fn(w, r); err != nil {
+			writeErr(w, err)
+		}
+	}
+}
+
+func writeErr(w http.ResponseWriter, err error) {
+	var ue *node.UserError
+	var mbe *http.MaxBytesError
+	switch {
+	case errors.As(err, &ue):
+		writeJSON(w, 400, map[string]string{"error": ue.Msg})
+	case errors.As(err, &mbe):
+		writeJSON(w, 413, map[string]string{"error": "request too large"})
+	default:
+		writeJSON(w, 500, map[string]string{"error": "internal error"})
 	}
 }
 
@@ -311,4 +351,120 @@ func (sv *server) confirm(r *http.Request) (any, error) {
 	}
 	c, err := sv.s.Confirm(r.Context(), in.ID, in.Approve, in.NotCaughtUpOK)
 	return localapi.ConfirmResp{ID: c.ID, State: c.State, Reason: c.Reason, Entries: c.Entries, Effect: c.Effect}, err
+}
+
+// roomFiles reads a room's files setting and, with mode (off, carry or
+// keep), first sets it. It is a person's decision, so, as confirm, it
+// must carry the page's exact Origin.
+func (sv *server) roomFiles(r *http.Request) (any, error) {
+	var in struct {
+		Room string `json:"room"`
+		Mode string `json:"mode"`
+	}
+	if err := decode(r, &in); err != nil {
+		return nil, err
+	}
+	if in.Mode != "" && r.Header.Get("Origin") != "http://"+r.Host {
+		return nil, &node.UserError{Msg: "a files setting must come from the page itself (its exact Origin)"}
+	}
+	v, err := sv.s.RoomFiles(r.Context(), in.Room, in.Mode)
+	return localapi.RoomFilesOf(v), err
+}
+
+// fileWait bounds the fetch that file asks for: the bytes of a file not
+// here are asked for, and the page is told the state.
+const fileWait = 10 * time.Second
+
+// file hands the person one file of a message, fetched as the human agent
+// (node.Surface.Fetch, which checks that the human was shown the version
+// listing it). Only a file whose state is here is sent, as an attachment
+// the browser saves and never renders: application/octet-stream, nosniff,
+// a sandboxing CSP and Content-Disposition attachment with the name
+// sanitised. Any other state is answered 409 with the fetch's JSON
+// (localapi.FetchResp without a path), so the page can say why. The copy
+// is checked against its SHA-256 before a byte is sent, since a copy under
+// files/ is one a person or program may have changed.
+func (sv *server) file(w http.ResponseWriter, r *http.Request) error {
+	q := r.URL.Query()
+	sha := q.Get("sha")
+	ctx, cancel := context.WithTimeout(r.Context(), fileWait)
+	res, err := sv.s.Fetch(ctx, sv.s.HumanID(), q.Get("room"), sha, q.Get("msg"), 0)
+	cancel()
+	if err != nil {
+		return err
+	}
+	if res.State != node.FetchHere {
+		out := localapi.FetchOf(res)
+		out.Path = ""
+		writeJSON(w, http.StatusConflict, out)
+		return nil
+	}
+	f, err := os.Open(res.Path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return err
+	}
+	if hex.EncodeToString(h.Sum(nil)) != sha || n != res.Size {
+		writeJSON(w, http.StatusConflict, map[string]string{"state": "changed",
+			"error": "this machine's copy of the file no longer matches its sha256"})
+		return nil
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	hd := w.Header()
+	hd.Set("Content-Type", "application/octet-stream")
+	hd.Set("Content-Disposition", "attachment; filename*=UTF-8''"+percentName(safeName(res.Name)))
+	hd.Set("Content-Length", strconv.FormatInt(n, 10))
+	hd.Set("X-Content-Type-Options", "nosniff")
+	hd.Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, f) // the status is sent; a cut copy is the browser's to discard
+	return nil
+}
+
+// safeName is a file's name as a download offers it: no controls, format
+// characters (bidirectional marks among them), quotes, slashes or
+// backslashes, no leading or trailing dots or spaces, at most 200 bytes.
+func safeName(name string) string {
+	var b strings.Builder
+	for _, c := range name {
+		switch {
+		case c == utf8.RuneError, unicode.IsControl(c), unicode.Is(unicode.Cf, c),
+			strings.ContainsRune("\"'/\\:*?<>|", c):
+			b.WriteByte('_')
+		default:
+			b.WriteRune(c)
+		}
+	}
+	out := strings.Trim(b.String(), ". ")
+	for len(out) > 200 {
+		_, size := utf8.DecodeLastRuneInString(out)
+		out = out[:len(out)-size]
+	}
+	if out == "" {
+		return "file"
+	}
+	return out
+}
+
+// percentName encodes name for filename* (RFC 8187): every byte outside
+// the attr-char set is written %XX.
+func percentName(name string) string {
+	const attr = "!#$&+-.^_`|~"
+	var b strings.Builder
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || strings.IndexByte(attr, c) >= 0 {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
 }

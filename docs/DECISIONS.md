@@ -1315,3 +1315,38 @@ a `grep -q` under `pipefail` made the `printf` feeding it fail; that
 script was fixed. Revisit if a second person can push tags, if timing
 failures keep recurring, or if a release goes out that the local gate
 did not cover.
+
+## D51. Attachments, the surfaces (2026-11-24)
+
+The mechanism of D49 had no way in for a person or an agent. Each
+addition is the one PROTOCOL 10.6 and 10.7 name, needed now because
+without it L1 cannot be used:
+
+- **Local API:** `send` takes `files`; `fetch` and `room/files` are new
+  calls; `requests` describes a `send_files` request term by term; `trace`
+  and `status` show files and budgets; an `Entry` has `files`,
+  `files_pending` and `files_note`. A new entry kind, `request`, tells the
+  agent that asked whether its send was `sent` or `declined`; it is
+  confirmed with `seen` like any entry, recorded as a row of the `shown`
+  table with key `q:<request id>` (no new table or column).
+- **CLI:** `a2p2 send --file`, `a2p2 fetch` and `a2p2 room files`. The
+  files setting is a person's command, like `room create`; it asks for no
+  terminal confirmation, since it moves no bytes off this machine.
+- **MCP:** no new tool; `send` has `files` and `inbox` has `fetch`, and
+  hints equal to the MCP default are left out of `tools/list` by a
+  middleware, because SDK 1.7 and later write them and the list would
+  otherwise pass 4,000 bytes.
+- **Page:** `GET /api/file` serves a file that is `here`, as an attachment,
+  and `POST /api/room-files` reads or sets the setting, both behind the
+  page's token and origin checks.
+
+Two small changes in `node` that the surfaces needed: a thread, history
+or skipped view now records a text mark for a message with files, so an
+agent may fetch what such a view showed it (a handled report still needs
+an addressee or `ask_handled`); and a fetch after a withdraw of a
+message the agent confirmed answers `gone`, since a confirmed read
+replaces the receipt it looked for.
+
+**Revisit if** agents need to be told of a decided request without
+reading their inbox (a hook line), or the files setting should need a
+terminal like `net`.

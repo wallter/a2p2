@@ -27,6 +27,27 @@ function btn(label, cls, fn, title) {
   return b;
 }
 const fp = (id) => String(id || "").slice(0, 8);
+// escapeDisplay writes the characters that can hide or reorder what a
+// person reads as \u{...}, as node.EscapeDisplay does (PROTOCOL 10.8).
+function escapeDisplay(s) {
+  let out = "";
+  for (const ch of String(s == null ? "" : s)) {
+    const c = ch.codePointAt(0);
+    const hides = c < 0x20 || (c >= 0x7f && c <= 0x9f) || c === 0x61c || c === 0x200e || c === 0x200f ||
+      (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069);
+    out += hides ? "\\u{" + c.toString(16) + "}" : ch;
+  }
+  return out;
+}
+// sizeText is cmd/a2p2 sizeText: bytes, with a rounded size above 1 KiB.
+function sizeText(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + " bytes";
+  const units = ["KiB", "MiB", "GiB"];
+  let v = n / 1024, u = 0;
+  while (v >= 1024 && u < units.length - 1) { v /= 1024; u++; }
+  return v.toFixed(1) + " " + units[u] + " (" + n + " bytes)";
+}
 function fmt(t) {
   const d = new Date(t), now = new Date();
   if (isNaN(d)) return "";
@@ -135,6 +156,7 @@ function renderSide() {
     box.append(el("div", "sub", "Reachable by peers: " + rc.state + (rc.checked ? ", checked " + ago(rc.checked) : "") +
       (rc.why ? " (" + rc.why + ")" : "")));
   }
+  if (S.st.files) box.append(el("div", "sub", "Files: " + sizeText(S.st.files.held) + " of " + sizeText(S.st.files.budget) + " held"));
   for (const a of listen) {
     const loopback = /^(127\.|\[::1\]:|localhost:)/i.test(a);
     box.append(el("div", "sub", a + (loopback ? " (this machine only)" : "")));
@@ -159,6 +181,47 @@ function renderSide() {
   }
 }
 
+// The room's files setting (PROTOCOL 10.6, room/files): a person's
+// decision. It is drawn again only when it changes, and not while its
+// control has focus, so a poll does not take the choice away.
+const FILE_MODES = {
+  off: "off: does not fetch a file it lacks for a member who asks",
+  carry: "carry: fetches a file a member asks it for from the author and holds it while the text lives (the default)",
+  keep: "keep: fetches every file of the room",
+};
+let filesNote = "";
+function renderRoomFiles() {
+  const box = $("roomfiles"), r = room(), f = r && r.files;
+  if (box.contains(document.activeElement) && box.dataset.room === S.room) return;
+  const sig = JSON.stringify([S.room, f, filesNote]);
+  if (sig === S.sigs.files) return;
+  S.sigs.files = sig;
+  box.dataset.room = S.room;
+  box.replaceChildren();
+  if (!f) return;
+  box.append(el("h2", "", "Files in " + r.label),
+    el("div", "", "Setting: " + (FILE_MODES[f.mode] || f.mode)),
+    el("div", "sub", sizeText(f.held) + " of " + sizeText(f.budget) + " held for this room"));
+  const sel = el("select");
+  sel.id = "files-mode";
+  for (const m of ["off", "carry", "keep"]) { const o = el("option", "", m); o.value = m; sel.append(o); }
+  sel.value = f.mode;
+  const label = el("label", "", "Change setting");
+  label.htmlFor = "files-mode";
+  const rid = r.id;
+  box.append(el("div", "row", label, sel, btn("Set files setting", "", () => setRoomFiles(rid, sel.value))));
+  if (filesNote) box.append(el("div", "sub", filesNote));
+}
+async function setRoomFiles(rid, mode) {
+  try {
+    const v = await api("/api/room-files", { room: rid, mode });
+    filesNote = "Files setting is now " + v.mode + ".";
+  } catch (e) { filesNote = "Could not change the files setting: " + e.message; }
+  S.sigs.files = "";
+  if (document.activeElement) document.activeElement.blur();
+  await refresh(true);
+}
+
 // ---- banner and needs you ----
 // The notice is reported shown only once it is drawn; it stays on screen
 // for the life of the page, since the server stops returning it then.
@@ -180,10 +243,37 @@ function renderNotice() {
 function requestCard(r, row) {
   // These are the exact terms compared by the daemon when the person decides.
   const c = el("div", "qcard", el("div", "sub", "Request " + fp(r.id)), el("div", "txt", r.text));
-  if (r.name && r.kind !== "network") c.append(el("div", "sub", "The machine chose its own name."));
-  if (r.deadline && !String(r.deadline).startsWith("0001")) c.append(el("div", "sub", "Invite expires " + (fmt(r.deadline) || r.deadline)));
+  const due = r.deadline && !String(r.deadline).startsWith("0001") ? (fmt(r.deadline) || r.deadline) : "";
+  if (r.kind === "send_files") {
+    c.append(sendTerms(r));
+    if (due) c.append(el("div", "sub", "Expires " + due + ", declined unless approved"));
+  } else {
+    if (r.name && r.kind !== "network") c.append(el("div", "sub", "The machine chose its own name."));
+    if (due) c.append(el("div", "sub", "Invite expires " + due));
+  }
   c.append(row);
   return c;
+}
+// sendTerms shows every term of a send with files, as a2p2 confirm does
+// (cmd/a2p2 printSendTerms). The daemon has escaped controls and
+// bidirectional characters in paths, names and lines; the room's label is
+// escaped here the same way.
+function sendTerms(r) {
+  const t = el("dl", "terms");
+  const row = (k, ...v) => t.append(el("dt", "", k), el("dd", "", ...v));
+  row("agent", r.agent || "");
+  row("room", escapeDisplay(r.room_label) + " (" + r.room + ")");
+  const to = r.to || [];
+  if (to.length === 1 && to[0] === "everyone") row("to", "everyone in the room (" + (r.members || 0) + " members)");
+  else if (to.length) row("to", to.join(", "));
+  else if (r.reply_to) row("to", "the author of message " + r.reply_to);
+  if (r.replaces) row("replaces", r.replaces.id + ": \"" + r.replaces.line + "\"",
+    el("div", "sub", "the replacement has only the files listed here"));
+  row("text", "\"" + (r.text_line || "") + "\"");
+  (r.files || []).forEach((f, i) => row("file " + (i + 1), el("div", "path", f.path),
+    el("div", "sub", f.name + ", " + sizeText(f.size) + ", sha256 " + f.sha256 + (f.kept ? ", kept from the message replaced" : ""))));
+  row("terms", r.terms || "");
+  return t;
 }
 function renderNeeds() {
   const qs = S.questions;
@@ -210,8 +300,9 @@ function renderNeeds() {
         btn("Decline request", "", () => decide(r, false, row)));
     } else {
       const remove = r.action === "remove";
+      const label = remove ? "Approve removal" : r.kind === "send_files" ? "Approve send with files" : "Approve request";
       row.append(
-        btn(remove ? "Approve removal" : "Approve request", remove ? "danger" : "pri", () => decide(r, true, row)),
+        btn(label, remove ? "danger" : "pri", () => decide(r, true, row)),
         btn("Decline request", "", () => decide(r, false, row))
       );
     }
@@ -322,12 +413,80 @@ function entryMeta(m) {
   if (m.ask_handled) meta.append(el("span", "mark", "asks for handled reports"));
   return meta;
 }
+// ---- files on a message ----
+const FILE_STATES = {
+  here: "on this machine", not_fetched: "not fetched yet", partial: "downloading",
+  coming: "asked of its author", unavailable: "unavailable: no member served it",
+};
+const FETCH_STATES = {
+  partial: "still downloading; try again shortly", coming: "asked of its author, who sends it when it next connects",
+  fetching: "downloading; try again shortly", unavailable: "unavailable: no member served it",
+  gone: "gone", too_large: "too large for this machine's file budget", changed: "this machine's copy changed; it is not served",
+};
+// fileNotes: what the last download of a file answered, keyed message and
+// sha256, so a redraw keeps it.
+const fileNotes = new Map();
+// redraw draws the view the files are in again (the stream by default).
+function filesOf(m, redraw) {
+  if (!(m.files || []).length && !m.files_pending && !m.files_note) return null;
+  const box = el("ul", "files");
+  box.setAttribute("aria-label", "Files");
+  for (const f of m.files || []) {
+    const key = m.id + "/" + f.sha256;
+    const li = el("li", "", el("span", "fname", escapeDisplay(f.name)), " ",
+      el("span", "sub", sizeText(f.size) + ", " + (FILE_STATES[f.state] || f.state)));
+    if (f.state === "here") li.append(" ", btn("Download", "link", () => download(m, f, redraw), "Save " + escapeDisplay(f.name) + " to this computer"));
+    else if (f.state === "not_fetched" || f.state === "unavailable") li.append(" ", btn("Fetch", "link", () => download(m, f, redraw), "Ask the room's members for this file"));
+    if (fileNotes.has(key)) li.append(el("div", "sub", fileNotes.get(key)));
+    box.append(li);
+  }
+  if (m.files_pending) box.append(el("li", "sub", "The list of files is on its way."));
+  if (m.files_note) box.append(el("li", "sub", "Files: " + m.files_note));
+  return box;
+}
+// download asks for one file as the person. The page cannot send its token
+// with a plain link, so it fetches the bytes with the token and saves them
+// through a blob URL and the download attribute; nothing is opened.
+async function download(m, f, redraw) {
+  const again = redraw || (() => renderStream(true));
+  const key = m.id + "/" + f.sha256;
+  fileNotes.set(key, "Getting the file...");
+  again();
+  try {
+    const q = "room=" + encodeURIComponent(m.room) + "&msg=" + encodeURIComponent(m.id) + "&sha=" + encodeURIComponent(f.sha256);
+    const r = await fetch("/api/file?" + q, { headers: { Authorization: "Bearer " + token } });
+    if (r.status === 401) { showAuthFail(); return; }
+    const ct = r.headers.get("Content-Type") || "";
+    if (!r.ok || !ct.startsWith("application/octet-stream")) {
+      let j = null;
+      try { j = await r.json(); } catch (e) { /* non-JSON */ }
+      const state = j && j.state;
+      fileNotes.set(key, state ? "Not saved: " + (FETCH_STATES[state] || state) + (j.reason ? " (" + j.reason + ")" : "")
+        : "Not saved: " + ((j && j.error) || "request failed (" + r.status + ")"));
+    } else {
+      const url = URL.createObjectURL(await r.blob());
+      const a = el("a");
+      a.href = url;
+      a.download = escapeDisplay(f.name).replace(/["'\/\\:*?<>|]/g, "_").replace(/^[. ]+|[. ]+$/g, "") || "file";
+      a.hidden = true;
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      fileNotes.set(key, "Saved by the browser as a download.");
+    }
+  } catch (e) { fileNotes.set(key, "Not saved: " + e.message); }
+  again();
+  refresh(true);
+}
+
 // Notices stay in S.notes until the room is left, so they remain visible
 // after being confirmed.
 function renderStream(force) {
   const list = all().filter((m) => m.text);
   const notes = S.notes;
-  const sig = S.room + "|" + list.map((m) => m.id + "@" + m.version).join() + "|" + notes.map((m) => m.key + "@" + m.version).join() + "|" + S.more;
+  const sig = S.room + "|" + list.map((m) => m.id + "@" + m.version + (m.files || []).map((f) => ":" + f.state).join("") +
+    (m.files_pending ? ":p" : "") + (m.files_note || "")).join() + "|" + notes.map((m) => m.key + "@" + m.version).join() + "|" + S.more;
   if (sig === S.sigs.s && !force) return;
   S.sigs.s = sig;
   S.onscreen = new Map(list.map((m) => [m.key, m.version]));
@@ -339,7 +498,7 @@ function renderStream(force) {
     const meta = entryMeta(m);
     meta.append(el("span", "actions", btn("Reply", "link", () => setReply(m)), btn("Thread", "link", () => openThread(m.thread || m.id)),
       btn("Trace", "link", () => openTrace(m.id))));
-    const d = el("div", "msg" + (m.from === S.st.human ? " mine" : ""), meta, el("div", "body", m.text));
+    const d = el("div", "msg" + (m.from === S.st.human ? " mine" : ""), meta, el("div", "body", m.text), filesOf(m));
     box.append(d);
   }
   // A notice is drawn with what it says: a replacement with its new text,
@@ -425,7 +584,7 @@ async function openThread(id) {
   try {
     const t = await api("/api/thread?id=" + encodeURIComponent(id));
     const kids = [el("h2", "", "Thread " + fp(id))];
-    for (const m of t.entries || []) kids.push(el("div", "thr", entryMeta(m), el("div", "body", m.text || m.kind)));
+    for (const m of t.entries || []) kids.push(el("div", "thr", entryMeta(m), el("div", "body", m.text || m.kind), filesOf(m, () => openThread(id))));
     if (kids.length === 1) kids.push(el("div", "sub", "Nothing in this thread."));
     showDialog(...kids);
   } catch (e) { showDialog(el("h2", "", "Could not open thread"), el("p", "", e.message)); }
@@ -499,7 +658,7 @@ async function refresh(force) {
         if (gen !== S.gen) { again = true; return; }
       }
     }
-    renderNotice(); renderSide(); renderNeeds(); renderHead(); renderStream(force);
+    renderNotice(); renderSide(); renderRoomFiles(); renderNeeds(); renderHead(); renderStream(force);
     $("connection").hidden = true;
   } catch (e) {
     if (e.message !== "unauthorized") {

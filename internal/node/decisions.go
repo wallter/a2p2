@@ -27,6 +27,9 @@ type RequestView struct {
 	Created     time.Time
 	Deadline    time.Time // the invite's expiry, for a request an invite raised
 	Text        string
+	// Send is a send with files (kind store.RequestSendFiles), every term
+	// as the person approves it.
+	Send *SendView
 }
 
 // Describe renders q for a person.
@@ -39,9 +42,17 @@ func (s *Surface) Describe(ctx context.Context, q store.Request) (RequestView, e
 		}
 		label = lr.Label
 	}
-	return RequestView{ID: q.ID, Kind: q.Kind, Action: q.Action, Room: q.Room, RoomLabel: label, Machine: q.Node,
+	v := RequestView{ID: q.ID, Kind: q.Kind, Action: q.Action, Room: q.Room, RoomLabel: label, Machine: q.Node,
 		Fingerprint: Fingerprint(q.Node), Name: q.Name, Role: q.Role, History: q.History, Seconding: q.Seconds != "",
-		Created: q.Created, Deadline: q.Deadline, Text: requestText(q, label)}, nil
+		Created: q.Created, Deadline: q.Deadline, Text: requestText(q, label)}
+	if q.Kind == store.RequestSendFiles {
+		v.Machine, v.Fingerprint = "", ""
+		v.Deadline = q.Created.Add(core.StagingLife)
+		if err := s.describeSend(ctx, q, &v); err != nil {
+			return RequestView{}, err
+		}
+	}
+	return v, nil
 }
 
 // Waiting lists the requests waiting for this machine's person, rendered.
