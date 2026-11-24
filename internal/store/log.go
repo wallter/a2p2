@@ -341,8 +341,10 @@ func applyLog(tx *sql.Tx, b LogBatch) (int64, error) {
 // applyAccess re-decides text access and seeds cursors (see Access).
 func applyAccess(tx *sql.Tx, room string, a Access) error {
 	if a.Readable != nil {
+		// Expired too: text that becomes hidden reads as not this machine's
+		// (before its time), whatever its expiry mark says.
 		rows, err := tx.Query(`SELECT id, hdr, sig, reason FROM records WHERE room = ?
-			AND reason IN ('live', 'missing', 'not_admitted')`, room)
+			AND reason IN ('live', 'missing', 'not_admitted', 'expired')`, room)
 		if err != nil {
 			return err
 		}
@@ -479,7 +481,7 @@ func putPlanned(tx *sql.Tx, r *core.VerifiedRecord, gen int64, plan func(*Reader
 	if p.Refuse != "" {
 		return p.Refuse, nil
 	}
-	opts, rec := PutOpts{Now: p.Now, MayRead: p.Text != TextHidden}, r
+	opts, rec := PutOpts{Now: p.Now, MayRead: p.Text != TextHidden, Undecided: p.Text == TextUndecided}, r
 	if p.Text == TextUndecided {
 		rec = r.WithoutBody()
 	}

@@ -111,9 +111,10 @@ func TestPullWithMoreThanSixteenDifferingAuthorsSplitsTheDetail(t *testing.T) {
 	a.change(room, Change{Kind: core.EntryAdd, Target: b.id, Name: "bee", History: true})
 	b.pin(room, a.lnode)
 	b.register("bob")
-	var ids []string
+	var ids, ws []string
 	for i := 0; i < 20; i++ {
 		w := newLNode(t, fmt.Sprintf("w%02d", i), clock)
+		ws = append(ws, w.id)
 		a.change(room, Change{Kind: core.EntryAdd, Target: w.id, Name: fmt.Sprintf("w%02d", i), History: true})
 		w.pin(room, a.lnode)
 		w.pull(room, a.lnode)
@@ -138,9 +139,15 @@ func TestPullWithMoreThanSixteenDifferingAuthorsSplitsTheDetail(t *testing.T) {
 			}
 		}
 	}
-	// The round that learned of the 20 from the log asks for them in two.
-	if len(asked) < 20 || len(sizes) < 2 || !slices.Equal(sizes[len(sizes)-2:], []int{16, len(asked) - 16}) {
-		t.Fatalf("asked %d, detail requests %v", len(asked), sizes)
+	// The round that learned of the 20 from the log asks for each once,
+	// in two requests.
+	for _, w := range ws {
+		if asked[w] != 1 {
+			t.Fatalf("author %.8s asked %d times; detail requests %v", w, asked[w], sizes)
+		}
+	}
+	if !slices.Equal(sizes, []int{16, 4}) {
+		t.Fatalf("detail requests %v", sizes)
 	}
 	if es := b.inbox(room, "bob"); len(es) != 20 {
 		t.Fatalf("bob: %d entries", len(es))
@@ -149,8 +156,9 @@ func TestPullWithMoreThanSixteenDifferingAuthorsSplitsTheDetail(t *testing.T) {
 
 // [R5] The server's records are refused by the puller every time (a relay
 // altering text): the digests go on differing, and the exchange ends after
-// the round that changed nothing instead of running to its bound; the next
-// exchange is answered same to seen, in one request.
+// the round that changed nothing instead of running to its bound. A round
+// with a refusal keeps no seen, so the next exchange tries again, again
+// in one round.
 func TestPullRoundThatCannotMakeProgressEnds(t *testing.T) {
 	a, b, net, room := twoSynced(t)
 	a.send(room, "alice", "again")
@@ -168,7 +176,7 @@ func TestPullRoundThatCannotMakeProgressEnds(t *testing.T) {
 		t.Fatalf("stats: %+v %v", st, err)
 	}
 	st, err = b.pullFrom(room, a, PullOpts{})
-	if err != nil || st.Rounds != 1 || st.Requests != 1 || st.SeenSame != 1 {
+	if err != nil || st.Rounds != 1 || st.SeenSame != 0 || st.Stored != 0 {
 		t.Fatalf("again: %+v %v", st, err)
 	}
 }

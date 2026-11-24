@@ -44,10 +44,12 @@ const (
 	pullRoundsPerPull = 32 // a safety bound on rounds in one exchange
 )
 
-// The whole-message limits in force; tests lower them.
+// The whole-message limits in force, and the extra a machine lists; tests
+// lower them.
 var (
 	maxRequestBytes  = MaxRequestBytes
 	maxResponseBytes = MaxResponseBytes
+	maxLogExtra      = MaxLogExtra
 )
 
 // PullRequest is the body of POST /p/v2/pull (PROTOCOL-next 4.1): the

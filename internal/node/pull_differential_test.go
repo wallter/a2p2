@@ -119,7 +119,7 @@ type pxChange struct {
 // pxCounts are shared by a harness and its clones.
 type pxCounts struct {
 	pulls, failed, lost, removedServer, modelPulls, requests, copies, texts, repaired, undecided, uncompared, same int
-	offerDropped, seenSame, seenSkipped, reoffered, resent                                                         int
+	offerDropped, seenSame, seenSkipped, reoffered, resent, resolved, unreachable                                  int
 }
 
 // pxState is the real exchange's side of the harness.
@@ -947,6 +947,120 @@ func (p *pxState) report(t testing.TB, what string, d time.Duration, n int, h *c
 		what, n, d.Round(time.Millisecond), p.c.pulls, p.c.failed, p.c.lost, p.c.removedServer, p.c.offerDropped, p.c.same,
 		p.c.seenSame, p.c.seenSkipped, p.c.resent, p.c.requests, p.c.modelPulls, p.c.copies, p.c.texts, p.c.uncompared, p.c.reoffered,
 		p.c.repaired, p.c.undecided, h.retries, h.stopped)
+	if p.c.resolved+p.c.unreachable > 0 {
+		t.Logf("after settling: %d pending records resolved, %d whose head no member holds", p.c.resolved, p.c.unreachable)
+	}
+}
+
+// settle ends a schedule (the model is not consulted after it): every
+// machine awake and reachable, every member pulls from every other it
+// sees as a member until a pass stores nothing. Then every record held
+// pending a permission decision must have been decided, unless no member
+// holds the head its frontier names (its head cannot arrive).
+func (p *pxState) settle(h *harness) {
+	h.t.Helper()
+	ctx := context.Background()
+	names := slices.Sorted(maps.Keys(h.sims))
+	members := func(s *sim) []string {
+		rl, err := s.r.room(diffRoom)
+		if err != nil {
+			return nil
+		}
+		return rl.st.Members
+	}
+	holds := func(s *sim, id string) (store.Held, bool) {
+		var x store.Held
+		var ok bool
+		_ = s.st.View(ctx, func(rd *store.Reader) (err error) {
+			x, ok, err = rd.Record(diffRoom, id)
+			return err
+		})
+		return x, ok
+	}
+	// pending is, per machine still a member, the records held pending a
+	// permission decision, with the heads their frontier names.
+	pending := func() map[[2]string][]string {
+		out := map[[2]string][]string{}
+		for _, n := range names {
+			s := h.sims[n]
+			if s == nil {
+				continue
+			}
+			rl, err := s.r.room(diffRoom)
+			if err != nil {
+				continue
+			}
+			perm, member := rl.st.Permissions[s.m.ID]
+			if !member {
+				continue // removed: its frontier is kept, nothing more arrives
+			}
+			for _, w := range h.writes {
+				held, ok := holds(s, w.impl)
+				if !ok {
+					continue
+				}
+				var acc store.TextAccess
+				if err := s.st.View(ctx, func(rd *store.Reader) error {
+					v := s.m.newView(rd, diffRoom, time.Time{})
+					if err := v.load(); err != nil {
+						return err
+					}
+					var err error
+					acc, err = textAccess(v, perm, held.Record.Author(), held.Record.Fields(), w.impl)
+					return err
+				}); err != nil {
+					h.t.Fatal(err)
+				}
+				if acc == store.TextUndecided {
+					out[[2]string{string(n), w.impl}] = perm.From[held.Record.Author()]
+				}
+			}
+		}
+		return out
+	}
+	before := pending()
+	p.net.noInbound, p.net.down, p.net.lose = map[string]bool{}, map[string]bool{}, nil
+	for pass := 0; pass < 8; pass++ {
+		stored := 0
+		for _, a := range names {
+			for _, b := range names {
+				sa, sb := h.sims[a], h.sims[b]
+				if a == b || sa == nil || sb == nil || !slices.Contains(members(sa), sb.m.ID) {
+					continue
+				}
+				sa.x.pageLimit, sa.x.offerLimit = MaxPageRecords, MaxOfferRecords
+				sb.x.pageLimit, sb.x.offerLimit = MaxPageRecords, MaxOfferRecords
+				st, _ := sa.x.Pull(ctx, diffRoom, sb.m.ID, PullOpts{Offer: true})
+				stored += st.Stored + st.Repaired + st.Entries
+			}
+		}
+		if stored == 0 {
+			break
+		}
+	}
+	after := pending()
+	for k := range before {
+		if _, still := after[k]; !still {
+			p.c.resolved++
+		}
+	}
+	for k, heads := range after {
+		reachable := false
+		for _, head := range heads {
+			for _, n := range names {
+				if s := h.sims[n]; s != nil && slices.Contains(members(s), s.m.ID) {
+					if _, ok := holds(s, head); ok {
+						reachable = true
+					}
+				}
+			}
+		}
+		if reachable {
+			h.fail("%s: %s still pending a permission decision after settling, its head held by a member", k[0], h.id(k[1]))
+		} else {
+			p.c.unreachable++
+		}
+	}
 }
 
 // [R3, R4, R5, RM1, RM2, RM3, D2, D3, D4, D5, T3, T5, N1] Every sequence of
@@ -1039,6 +1153,9 @@ func TestRealExchangeAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T) {
 				h = h.apply(o)
 				total++
 			}
+		}
+		if !h.stopped {
+			h.px.settle(h)
 		}
 		h.close()
 	}

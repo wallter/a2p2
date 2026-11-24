@@ -66,8 +66,9 @@ func (s Summary) HoldsBody(p Pos) bool {
 }
 
 type known struct {
-	Seq int
-	At  Time
+	Seq  int
+	At   Time
+	From MachineID // the peer whose report set it
 }
 
 type observation struct {
@@ -298,16 +299,17 @@ func (m *Machine) withdrawnRef(ref RecordID, author MachineID) bool {
 }
 
 // textGone says why this machine must not hold r's text, from its own
-// evidence, or Live if it may.
+// evidence, or Live if it may. Permission comes before expiry: text from
+// before this machine's time is NotAdmitted however old it is.
 func (m *Machine) textGone(r *Record, now Time) Reason {
 	switch {
 	case r.Kind == Message && m.withdrawnRef(r.ID, r.Author),
 		r.Kind == Replace && m.withdrawnRef(r.Ref, r.Author):
 		return Withdrawn
-	case m.clock(now) >= r.Created+Retention:
-		return Expired
 	case !mayRead(m.st.adm, r):
 		return NotAdmitted
+	case m.clock(now) >= r.Created+Retention:
+		return Expired
 	}
 	return Live
 }
@@ -336,7 +338,7 @@ func (m *Machine) setBody(h *held, body string, hasBody bool, now Time) {
 	if !hasBody && h.rec.BodyHash == hashBody("") {
 		body, hasBody = "", true // an empty body needs no copy
 	}
-	if h.dropped == Expired && m.textGone(h.rec, now) != Withdrawn {
+	if g := m.textGone(h.rec, now); h.dropped == Expired && g != Withdrawn && g != NotAdmitted {
 		return // expired here stays expired, whatever the clock says later
 	}
 	if g := m.textGone(h.rec, now); g != Live {
@@ -489,12 +491,19 @@ func (m *Machine) accept(w *World, it wire) (stored, fork bool) {
 }
 
 // observe records what a peer said it held, and the highest positions it
-// knows of, so gaps can be shown.
+// knows of, so gaps can be shown. A known position is a hint: a higher
+// report from any peer raises it, and the peer whose report set it lowers
+// it by reporting less, or nothing, of a stream of an author it takes.
 func (m *Machine) observe(peer MachineID, s Summary, authors map[MachineID]bool, now Time, tick int) {
 	m.st.obs[peer] = observation{At: now, Tick: tick, Have: s, Authors: authors}
 	for sid, h := range s {
-		if k := m.st.known[sid]; h.Contig > k.Seq {
-			m.st.known[sid] = known{Seq: h.Contig, At: now}
+		if k := m.st.known[sid]; h.Contig > k.Seq || k.From == peer && h.Contig < k.Seq {
+			m.st.known[sid] = known{Seq: h.Contig, At: now, From: peer}
+		}
+	}
+	for sid, k := range m.st.known {
+		if _, ok := s[sid]; !ok && k.From == peer && (authors == nil || authors[sid.Author]) {
+			delete(m.st.known, sid)
 		}
 	}
 }

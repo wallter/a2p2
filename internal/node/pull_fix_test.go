@@ -91,7 +91,7 @@ func TestAnAuthorVoidedBetweenBuildAndReleaseIsNotSent(t *testing.T) {
 	c.pin(room, al)
 	c.pull(room, al)
 	c.register("carol")
-	msg := c.send(room, "carol", "from c")
+	c.send(room, "carol", "from c")
 	for _, r := range c.records(room) {
 		a.take(r)
 	}
@@ -104,12 +104,17 @@ func TestAnAuthorVoidedBetweenBuildAndReleaseIsNotSent(t *testing.T) {
 			t.Fatal("c is still admitted")
 		}
 	})
+	l := capture(net)
 	_, _ = d.pullFrom(room, a, PullOpts{})
 	if *fired != 1 {
 		t.Fatal("no data page was built")
 	}
-	if _, ok := d.held(room, msg); ok {
-		t.Fatal("a record of the voided author was released")
+	for _, resp := range l.resps {
+		for _, w := range resp.Page {
+			if r, err := core.ParseRecord(w); err != nil || r.Author() == c.id {
+				t.Fatalf("a record of the voided author went out: %v", err)
+			}
+		}
 	}
 }
 
@@ -438,7 +443,15 @@ func TestRefusedRecordsAreCountedOnBothPaths(t *testing.T) {
 		for i, w := range ws {
 			var m map[string]any
 			_ = json.Unmarshal(w, &m)
-			m["sig"] = strings.Repeat("A", 86)
+			// The same signature with one character changed: well formed, and
+			// it does not verify.
+			sig := []byte(m["s"].(string))
+			if sig[0] == 'A' {
+				sig[0] = 'B'
+			} else {
+				sig[0] = 'A'
+			}
+			m["s"] = string(sig)
 			ws[i], _ = json.Marshal(m)
 		}
 	}
@@ -459,9 +472,9 @@ func TestRefusedRecordsAreCountedOnBothPaths(t *testing.T) {
 		n    *pnode
 		peer string
 	}{{b, a.id}, {a, b.id}} {
-		rs, err := c.n.st.Refusals(context.Background(), room)
-		if err != nil || !slices.ContainsFunc(rs, func(r store.Refusal) bool { return r.Peer == c.peer && r.Count > 0 }) {
-			t.Fatalf("%s's refusals: %+v %v", c.n.name, rs, err)
+		if !refusedBy(t, c.n, room, c.peer, CodeBadSignature) {
+			rs, _ := c.n.st.Refusals(context.Background(), room)
+			t.Fatalf("%s's refusals of records: %+v", c.n.name, rs)
 		}
 	}
 }

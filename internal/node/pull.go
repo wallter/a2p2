@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -55,6 +56,13 @@ type Exchange struct {
 	refused map[[2]string]*refusal
 	heard   map[[2]string][]string
 	seen    map[[2]string]seenSums
+	// As a server, per room and peer: evidence, the held and refused log
+	// entries sent that the peer cannot list in its extra (sent once until
+	// its log heads change); pages, the streams of the last page and those
+	// found blocked at the peer in its continuation (until its next
+	// opening request).
+	evidence map[[2]string]map[string]bool
+	pages    map[[2]string]*pageMemory
 	// made counts observations as they are made: a request built, or one
 	// received. latest is, per room and peer, the count of the observation
 	// stored last; a response to a request built before it is not stored
@@ -72,7 +80,8 @@ type Exchange struct {
 // NewExchange returns the exchange of the machine behind r over t.
 func NewExchange(r *Rooms, t PullTransport, o ExchangeOpts) *Exchange {
 	x := &Exchange{r: r, t: t, pageLimit: o.PageLimit, offerLimit: o.OfferLimit, refused: map[[2]string]*refusal{},
-		heard: map[[2]string][]string{}, seen: map[[2]string]seenSums{}, latest: map[[2]string]int64{}}
+		heard: map[[2]string][]string{}, seen: map[[2]string]seenSums{}, latest: map[[2]string]int64{},
+		evidence: map[[2]string]map[string]bool{}, pages: map[[2]string]*pageMemory{}}
 	if x.pageLimit <= 0 || x.pageLimit > MaxPageRecords {
 		x.pageLimit = MaxPageRecords
 	}
@@ -196,11 +205,11 @@ func (it pageItem) wire() []byte {
 // then every record past the peer's position in each stream, predecessors
 // and links first, stopping a stream at anything not sent, with text only
 // where readable (the peer's permission as this machine sees it) says so.
-// Records in skip were sent already and count as held by the peer. It
-// returns at most limit records and maxBytes of wire objects, and whether
-// it cut.
+// Records in skip were sent already and count as held by the peer;
+// streams in blocked are left out. It returns at most limit records and
+// maxBytes of wire objects, and whether it cut.
 func (x *Exchange) buildPage(v *roomView, readable func(*rec) (bool, error), want map[string][]store.StreamDetail,
-	authors []string, skip map[string]bool, limit, maxBytes int) ([]pageItem, bool, error) {
+	authors []string, skip map[string]bool, blocked map[streamKey]bool, limit, maxBytes int) ([]pageItem, bool, error) {
 	reqC := func(k streamKey) int64 {
 		for _, s := range want[k.author] {
 			if s.E == k.epoch {
@@ -211,8 +220,8 @@ func (x *Exchange) buildPage(v *roomView, readable func(*rec) (bool, error), wan
 	}
 	var streams []streamKey
 	for _, s := range v.streams {
-		if s.Contig > 0 && slices.Contains(authors, s.Author) {
-			streams = append(streams, streamKey{s.Author, s.Epoch})
+		if k := (streamKey{s.Author, s.Epoch}); s.Contig > 0 && slices.Contains(authors, s.Author) && !blocked[k] {
+			streams = append(streams, k)
 		}
 	}
 	slices.SortFunc(streams, func(a, b streamKey) int {
@@ -363,8 +372,8 @@ func (rl *roomLog) logHeads() (heads, extra []string) {
 	if len(heads) > MaxLogHeads {
 		heads = heads[:MaxLogHeads]
 	}
-	if len(extra) > MaxLogExtra {
-		extra = extra[:MaxLogExtra]
+	if len(extra) > maxLogExtra {
+		extra = extra[:maxLogExtra]
 	}
 	return heads, extra
 }
@@ -373,9 +382,15 @@ func (rl *roomLog) logHeads() (heads, extra []string) {
 // held and refused as evidence), the entries not at or before heads and
 // not in extra, at most MaxLogEntries and maxBytes of wire objects, and
 // whether more were left out. With known false (nothing is known of the
-// peer's log) every entry goes.
-func (rl *roomLog) entriesFor(heads, extra []string, known bool, maxBytes int) ([]json.RawMessage, bool) {
+// peer's log) every entry goes. Evidence goes only if evidence says so
+// (nil: all of it); unlisted says whether the peer could hold it without
+// listing it (its extra is full, or its log is not known), and the ids of
+// such evidence sent are returned, for the caller to send once.
+func (rl *roomLog) entriesFor(heads, extra []string, known bool, maxBytes int,
+	evidence func(id string, unlisted bool) bool) (out []json.RawMessage, more bool, unlisted []string) {
 	have := map[string]bool{}
+	full := !known || len(extra) >= maxLogExtra
+	var top string // the highest id the peer listed
 	if known {
 		todo := slices.Clone(heads)
 		for len(todo) > 0 {
@@ -390,22 +405,34 @@ func (rl *roomLog) entriesFor(heads, extra []string, known bool, maxBytes int) (
 		}
 		for _, id := range extra {
 			have[id] = true
+			top = max(top, id)
 		}
 	}
-	var out []json.RawMessage
 	size := 0
 	for _, v := range rl.mach.Offer() {
-		if have[v.ID()] {
+		id := v.ID()
+		if have[id] {
+			continue
+		}
+		ev := rl.state[id].State != store.LogAccepted
+		un := ev && full && (!known || id > top)
+		if ev && evidence != nil && !evidence(id, un) {
 			continue
 		}
 		w := v.Wire()
 		if size += len(w) + 1; len(out) == MaxLogEntries || size > maxBytes {
-			return out, true
+			return out, true, unlisted
 		}
 		out = append(out, json.RawMessage(w))
+		if un {
+			unlisted = append(unlisted, id)
+		}
 	}
-	return out, false
+	return out, false, unlisted
 }
+
+// acceptedOnly is an evidence filter that sends none.
+func acceptedOnly(string, bool) bool { return false }
 
 func rawBytes(xs []json.RawMessage) [][]byte {
 	out := make([][]byte, len(xs))
@@ -418,18 +445,18 @@ func rawBytes(xs []json.RawMessage) [][]byte {
 // ---- placing records ----
 
 // placed counts what placing a page or an offer did; blocked are the
-// authors of records that could not be stored (refused, or behind one that
-// was), whose streams a continuation moves past.
+// streams of records that could not be stored (refused, or behind one
+// that was).
 type placed struct {
 	stored, repaired int
-	blocked          map[string]bool
+	blocked          map[streamKey]bool
 }
 
 // place checks and places each received record wire (PROTOCOL-next
 // section 2) inside tx under membership st, counting refusals by code.
 func (r *Rooms) place(tx *store.Tx, rl *roomLog, st members.State, look func(string) *core.VerifiedEntry,
 	wires []json.RawMessage, refused map[string]int, now time.Time) (placed, error) {
-	p := placed{blocked: map[string]bool{}}
+	p := placed{blocked: map[streamKey]bool{}}
 	for _, w := range wires {
 		rec, err := core.ParseRecord(w)
 		if err != nil {
@@ -437,6 +464,7 @@ func (r *Rooms) place(tx *store.Tx, rl *roomLog, st members.State, look func(str
 			continue
 		}
 		a := rec.Author()
+		k := streamKey{a, rec.Fields().Epoch}
 		if rec.Fields().Room != rl.id {
 			refused[CodeWrongRoom]++
 			continue
@@ -448,7 +476,7 @@ func (r *Rooms) place(tx *store.Tx, rl *roomLog, st members.State, look func(str
 		v, err := rec.Verified()
 		if err != nil {
 			refused[CodeBadSignature]++
-			p.blocked[a] = true
+			p.blocked[k] = true
 			continue
 		}
 		out, err := tx.PutRecordPlanned(v, 0, r.recordPlan(st, look, v, now))
@@ -461,11 +489,9 @@ func (r *Rooms) place(tx *store.Tx, rl *roomLog, st members.State, look func(str
 		case store.OutcomeRepaired:
 			p.repaired++
 		case store.OutcomeHeld:
-		case store.OutcomeFork, store.OutcomeFuture:
+		default: // fork, future, not_next, link_missing
 			refused[string(out)]++
-			p.blocked[a] = true
-		default:
-			p.blocked[a] = true
+			p.blocked[k] = true
 		}
 	}
 	return p, nil
@@ -598,9 +624,10 @@ func (x *Exchange) stored(room, peer string, n int64) {
 	}
 }
 
-// observe writes the rows, an observation dated at, and raises the known
+// observe writes the rows, an observation dated at, and notes the known
 // position of every stream a known detail reports for an author admitted
-// here, as the model's observe does. whole replaces what was observed of
+// here, as the model's observe does: a hint, which the same peer's later
+// report lowers. whole replaces what was observed of
 // the peer; otherwise only the rows given (and the log) are.
 func observe(tx *store.Tx, room, peer string, st members.State, rows []store.Observation, log store.PeerLog, at time.Time,
 	whole bool) error {
@@ -613,13 +640,15 @@ func observe(tx *store.Tx, room, peer string, st members.State, rows []store.Obs
 		return err
 	}
 	for _, o := range rows {
-		if !slices.Contains(st.Admitted, o.Author) {
+		if !slices.Contains(st.Admitted, o.Author) || o.Detail == nil {
 			continue
 		}
+		known := map[string]int64{}
 		for _, s := range o.Detail {
-			if err := tx.NoteKnown(room, o.Author, s.E, s.C, at); err != nil {
-				return err
-			}
+			known[s.E] = s.C
+		}
+		if err := tx.NoteKnown(room, peer, o.Author, known, at); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -639,12 +668,14 @@ type served struct {
 
 // built is a response as step 8 built it, and what it was built from.
 type built struct {
-	rl    *roomLog
-	gen   int64
-	ver   int64 // store.Changes the response reflects
-	sv    served
-	resp  *PullResponse
-	items []pageItem
+	rl       *roomLog
+	gen      int64
+	ver      int64 // store.Changes the response reflects
+	sv       served
+	resp     *PullResponse
+	items    []pageItem
+	blocked  map[streamKey]bool // streams left out of the page
+	unlisted []string           // evidence sent the peer could hold unlisted
 }
 
 // Answers to an opening request.
@@ -656,14 +687,15 @@ const (
 
 // answer decides the answer to the opening request q (PROTOCOL-next 4.3):
 // same if the request was quiet (its entries and offer stored nothing,
-// and this machine has no log entry the requester lacks) and this
-// machine's sum equals the request's sum, or its seen; otherwise the
-// digests. A waiting pull (step 5b) is held exactly while this is same.
-func answer(rl *roomLog, q *PullRequest, own summary, stored bool) int {
+// and this machine has no log entry the requester lacks and evidence lets
+// it send) and this machine's sum equals the request's sum, or its seen;
+// otherwise the digests. A waiting pull (step 5b) is held exactly while
+// this is same.
+func answer(rl *roomLog, q *PullRequest, own summary, stored bool, evidence func(string, bool) bool) int {
 	if stored {
 		return answerDigests
 	}
-	if es, _ := rl.entriesFor(q.Log.Heads, q.Log.Extra, true, maxResponseBytes); len(es) > 0 {
+	if es, _, _ := rl.entriesFor(q.Log.Heads, q.Log.Extra, true, maxResponseBytes, evidence); len(es) > 0 {
 		return answerDigests
 	}
 	switch own.sum() {
@@ -765,7 +797,7 @@ func (x *Exchange) serve(ctx context.Context, peer string, q *PullRequest) (*bui
 			case q.Sum == "":
 				// What it holds of the authors of its detail.
 				err = observe(tx, rl.id, peer, st, detailRows(q.Detail), plog, now, false)
-			case answer(rl, q, own, sv.stored) == answerSame:
+			case answer(rl, q, own, sv.stored, x.evidenceFor(rl.id, peer, false)) == answerSame:
 				// Its digests equal this machine's, as of now.
 				err = observe(tx, rl.id, peer, st, own.rows(), plog, now, true)
 			default:
@@ -844,7 +876,8 @@ func (x *Exchange) respond(ctx context.Context, rl *roomLog, peer string, q *Pul
 	resp := &PullResponse{V: PullVersion, Log: PullLog{Heads: heads, Extra: extra}}
 	b.resp = resp
 	entries := func(budget int) {
-		resp.Log.Entries, resp.Log.More = rl.entriesFor(q.Log.Heads, q.Log.Extra, true, budget)
+		resp.Log.Entries, resp.Log.More, b.unlisted = rl.entriesFor(q.Log.Heads, q.Log.Extra, true, budget,
+			x.evidenceFor(rl.id, peer, false))
 	}
 	own := sv.own
 	if q.Sum != "" {
@@ -856,7 +889,7 @@ func (x *Exchange) respond(ctx context.Context, rl *roomLog, peer string, q *Pul
 				return nil, err
 			}
 		}
-		if answer(rl, q, own, sv.stored) != answerDigests {
+		if answer(rl, q, own, sv.stored, x.evidenceFor(rl.id, peer, false)) != answerDigests {
 			resp.Same = true
 			return b, nil
 		}
@@ -873,20 +906,31 @@ func (x *Exchange) respond(ctx context.Context, rl *roomLog, peer string, q *Pul
 		if err != nil {
 			return err
 		}
+		// Detail first, in the order asked: the first author's in the
+		// whole budget, the others' while the detail stays within half of
+		// it, so the page has room; the rest is left out for the requester
+		// to ask again (4.3 step 5).
 		resp.Detail = map[string][]store.StreamDetail{}
+		budget := maxResponseBytes - jsonSize(resp) - wireMargin
+		whole := budget
 		var authors []string
-		for _, a := range sortedIDs(q.Detail) {
-			resp.Detail[a] = own.detailOf(a)
+		for i, a := range sortedIDs(q.Detail) {
+			d := own.detailOf(a)
+			n := jsonSize(d) + len(a) + 4
+			if n > budget || i > 0 && whole-budget+n > whole/2 {
+				break
+			}
+			resp.Detail[a], budget = d, budget-n
 			if slices.Contains(st.Admitted, a) {
 				authors = append(authors, a)
 			}
 		}
-		budget := maxResponseBytes - jsonSize(resp) - wireMargin
 		entries(budget / 2)
 		budget -= wiresSize(resp.Log.Entries)
 		var cut bool
+		b.blocked = x.blockedFor(rl.id, peer, q)
 		b.items, cut, err = x.buildPage(v, readableBy(v, st.Permissions[peer]), q.Detail, authors, nil,
-			x.pageLimit, budget)
+			b.blocked, x.pageLimit, budget)
 		resp.More = cut
 		return err
 	})
@@ -898,8 +942,10 @@ func (x *Exchange) respond(ctx context.Context, rl *roomLog, peer string, q *Pul
 
 // release is step 10: the room must be the one the response was built in
 // (not left and joined again) and the peer still a member; if anything was
-// written since, the response is built again (prune, log, digests, page),
-// so no text withdrawn, voided or no longer permitted meanwhile goes out.
+// written since, or text chosen for the page has passed its retention
+// time, the response is built again (prune, log, digests, page), so no
+// text withdrawn, voided, expired or no longer permitted meanwhile goes
+// out.
 func (x *Exchange) release(ctx context.Context, peer string, q *PullRequest, b *built) (*PullResponse, error) {
 	r := x.r
 	if err := r.m.pruneIfDue(ctx); err != nil {
@@ -916,7 +962,13 @@ func (x *Exchange) release(ctx context.Context, peer string, q *PullRequest, b *
 	case !slices.Contains(rl.st.Members, peer):
 		return nil, notMember()
 	}
-	if r.m.st.Changes() != b.ver {
+	expired := false
+	for _, it := range b.items {
+		if it.text && hasText(it.r.f.Kind) && store.TextExpired(it.r.f.Created, r.m.now()) {
+			expired = true
+		}
+	}
+	if r.m.st.Changes() != b.ver || expired {
 		sv := b.sv
 		sv.ok = false
 		nb, err := x.respond(ctx, rl, peer, q, sv)
@@ -930,6 +982,13 @@ func (x *Exchange) release(ctx context.Context, peer string, q *PullRequest, b *
 	for _, it := range b.items {
 		resp.Page = append(resp.Page, json.RawMessage(it.wire()))
 	}
+	// What goes out is noted: evidence the peer cannot list, once; the
+	// page's streams, to find those blocked at the peer.
+	note := x.evidenceFor(rl.id, peer, true)
+	for _, id := range b.unlisted {
+		note(id, true)
+	}
+	x.paged(rl.id, peer, q, b.blocked, b.items)
 	return resp, nil
 }
 
@@ -971,8 +1030,17 @@ type refusal struct {
 }
 
 // seenSums is a peer's sum, and this machine's, after a round with it
-// that stored nothing on either side.
-type seenSums struct{ server, own string }
+// that stored nothing on either side and refused, skipped or cut nothing;
+// for the room's generation gen, from at, for at most seenFor.
+type seenSums struct {
+	server, own string
+	gen         int64
+	at          time.Time
+}
+
+// seenFor bounds how long seen is kept: a safety net against a change
+// that moves neither hash.
+const seenFor = time.Hour
 
 // Pull runs one exchange with peer for room: rounds of an opening request
 // with this machine's sum (and seen, an offer and the log entries the peer
@@ -1023,10 +1091,11 @@ type prepared struct {
 	req      *PullRequest
 	own      summary
 	old      map[string]store.Observation
-	at       time.Time // when it was built: the date of what its response tells
-	order    int64     // and its count among observations (Exchange.next)
-	base     int       // its size without entries and offer
-	sentNew  int       // records and entries not given to the peer before
+	at       time.Time       // when it was built: the date of what its response tells
+	order    int64           // and its count among observations (Exchange.next)
+	base     int             // its size without entries and offer
+	heads    []string        // the peer's log heads it was built against (nil: not known)
+	offered  map[string]bool // authors of the records offered
 	offerCut bool
 	logCut   bool
 }
@@ -1036,8 +1105,10 @@ type prepared struct {
 // if offer is set (built against base, the peer's summary as observed when
 // the round began, less what sent holds: one offer for the round, sent in
 // pages); and with the log entries not at or before peerLog (the peer's
-// heads; nil: as last observed), or after a refusal as refused says; all
-// within the request limit: detail first, then entries, then the offer.
+// heads; nil: as last observed), evidence the peer could hold unlisted at
+// most once in the exchange; or after a refusal as refused says (the
+// accepted log from the start, then nothing; never an offer); all within
+// the request limit: detail first, then entries, then the offer.
 func (x *Exchange) prepare(ctx context.Context, room, peer string, gen int64, chunk []string, snap string, useSeen,
 	offer bool, base map[string]store.Observation, sent map[string]bool, peerLog *store.PeerLog) (prepared, error) {
 	r := x.r
@@ -1070,7 +1141,7 @@ func (x *Exchange) prepare(ctx context.Context, room, peer string, gen int64, ch
 		q := &PullRequest{V: PullVersion, Room: room, Log: PullLog{Heads: heads, Extra: extra}}
 		if snap == "" {
 			q.Sum = own.sum()
-			if s, ok := x.seenOf(key); useSeen && ok && s.own == q.Sum {
+			if s, ok := x.seenOf(key, gen); useSeen && ok && s.own == q.Sum {
 				q.Seen = s.server
 			}
 		} else {
@@ -1084,7 +1155,8 @@ func (x *Exchange) prepare(ctx context.Context, room, peer string, gen int64, ch
 		if base == nil {
 			base = p.old
 		}
-		offering := offer && len(base) > 0
+		rf := x.refusalOf(key, heads)
+		offering := offer && len(base) > 0 && rf == nil
 		entryBudget := budget
 		if offering {
 			entryBudget = budget / 2
@@ -1093,21 +1165,21 @@ func (x *Exchange) prepare(ctx context.Context, room, peer string, gen int64, ch
 		if pl == nil {
 			pl = oldLog
 		}
-		switch rf := x.refusalOf(key, heads); {
-		case snap == "" && rf != nil && rf.full:
-			q.Log.Entries, p.logCut = rl.entriesFor(nil, nil, false, entryBudget)
-		case snap == "" && rf != nil:
+		once := func(id string, unlisted bool) bool { return !unlisted || !sent["x:"+id] }
+		var unlisted []string
+		switch {
+		case rf != nil && rf.full:
+			q.Log.Entries, p.logCut, _ = rl.entriesFor(nil, nil, false, budget, acceptedOnly)
+		case rf != nil:
 			// Refused even the whole log: none until something changes.
 		case pl == nil:
-			q.Log.Entries, p.logCut = rl.entriesFor(nil, nil, false, entryBudget)
+			q.Log.Entries, p.logCut, unlisted = rl.entriesFor(nil, nil, false, entryBudget, once)
 		default:
-			q.Log.Entries, p.logCut = rl.entriesFor(pl.Heads, pl.Extra, true, entryBudget)
+			p.heads = pl.Heads
+			q.Log.Entries, p.logCut, unlisted = rl.entriesFor(pl.Heads, pl.Extra, true, entryBudget, once)
 		}
-		for _, e := range q.Log.Entries {
-			if k := "e:" + string(e); !sent[k] {
-				sent[k] = true
-				p.sentNew++
-			}
+		for _, id := range unlisted {
+			sent["x:"+id] = true
 		}
 		budget -= wiresSize(q.Log.Entries)
 		if offering {
@@ -1119,15 +1191,16 @@ func (x *Exchange) prepare(ctx context.Context, room, peer string, gen int64, ch
 						want[a], authors = d, append(authors, a)
 					}
 				}
-				items, cut, err := x.buildPage(v, readableBy(v, perm), want, authors, sent, x.offerLimit, budget)
+				items, cut, err := x.buildPage(v, readableBy(v, perm), want, authors, sent, nil, x.offerLimit, budget)
 				if err != nil {
 					return err
 				}
+				p.offered = map[string]bool{}
 				for _, it := range items {
 					q.Offer = append(q.Offer, json.RawMessage(it.wire()))
 					sent[it.r.id] = true
+					p.offered[it.r.author] = true
 				}
-				p.sentNew += len(items)
 				q.OfferMore, p.offerCut = cut && len(items) > 0, cut
 			}
 		}
@@ -1135,6 +1208,53 @@ func (x *Exchange) prepare(ctx context.Context, room, peer string, gen int64, ch
 		return nil
 	})
 	return p, err
+}
+
+// offerable says whether an offer built against detail, the peer's detail
+// as learned in a round, would carry a record not in sent.
+func (x *Exchange) offerable(ctx context.Context, room, peer string, gen int64, detail map[string][]store.StreamDetail,
+	sent map[string]bool) (bool, error) {
+	r := x.r
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rl := r.rooms[room]
+	if rl == nil || rl.gen != gen {
+		return false, ErrStaleGeneration
+	}
+	perm, ok := rl.st.Permissions[peer]
+	if !ok {
+		return false, nil
+	}
+	var authors []string
+	for _, a := range sortedIDs(detail) {
+		if slices.Contains(rl.st.Admitted, a) {
+			authors = append(authors, a)
+		}
+	}
+	found := false
+	err := r.m.view(ctx, room, func(v *roomView) error {
+		items, _, err := x.buildPage(v, readableBy(v, perm), detail, authors, sent, nil, 1, maxRequestBytes)
+		found = len(items) > 0
+		return err
+	})
+	return found, err
+}
+
+// ownSummary is this machine's summary of room now.
+func (x *Exchange) ownSummary(ctx context.Context, room string, gen int64) (summary, error) {
+	r := x.r
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rl := r.rooms[room]
+	if rl == nil || rl.gen != gen {
+		return summary{}, ErrStaleGeneration
+	}
+	var own summary
+	err := r.m.view(ctx, room, func(v *roomView) (err error) {
+		own, err = r.summarize(v, rl.st)
+		return err
+	})
+	return own, err
 }
 
 // refusalOf is the refusal state for key, nil if none or no longer in
@@ -1151,12 +1271,13 @@ func (x *Exchange) refusalOf(key [2]string, heads []string) *refusal {
 	return rf
 }
 
-// opened records how the peer answered an opening request q (4.5): on
-// not_member, the next opening sends the whole log; refused that too, the
-// openings after carry no entries.
-func (x *Exchange) opened(key [2]string, q *PullRequest, err error) {
+// answered records how the peer answered request q (4.4): any not_member
+// forgets what was observed of the peer's log; the first, the next
+// request sends the accepted log from the start; refused that too, the
+// requests after carry neither entries nor offers. A success clears it.
+func (x *Exchange) answered(ctx context.Context, room, peer string, gen int64, q *PullRequest, err error) error {
+	key := [2]string{room, peer}
 	x.mu.Lock()
-	defer x.mu.Unlock()
 	switch rf := x.refused[key]; {
 	case err == nil:
 		delete(x.refused, key)
@@ -1166,18 +1287,118 @@ func (x *Exchange) opened(key [2]string, q *PullRequest, err error) {
 	case rf.full:
 		x.refused[key] = &refusal{muted: true, own: q.Log.Heads, heard: x.heard[key]}
 	}
+	x.mu.Unlock()
+	if !isNotMember(err) {
+		return nil
+	}
+	_, ferr := x.r.m.st.Exchange(ctx, room, gen, func(tx *store.Tx) error { return tx.ForgetLog(room, peer) })
+	return ferr
 }
 
+// hear records the log heads of a request from peer; when they change,
+// the evidence it could not list is sent again.
 func (x *Exchange) hear(room, peer string, heads []string) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	x.heard[[2]string{room, peer}] = slices.Clone(heads)
+	key := [2]string{room, peer}
+	if !sameSet(x.heard[key], heads) {
+		delete(x.evidence, key)
+	}
+	x.heard[key] = slices.Clone(heads)
 }
 
-func (x *Exchange) seenOf(key [2]string) (seenSums, bool) {
+// evidenceFor is the server's evidence filter for peer: evidence the peer
+// could hold unlisted goes once (record: what passes is noted as sent).
+func (x *Exchange) evidenceFor(room, peer string, record bool) func(string, bool) bool {
+	key := [2]string{room, peer}
+	return func(id string, unlisted bool) bool {
+		if !unlisted {
+			return true
+		}
+		x.mu.Lock()
+		defer x.mu.Unlock()
+		if x.evidence[key][id] {
+			return false
+		}
+		if record {
+			if x.evidence[key] == nil {
+				x.evidence[key] = map[string]bool{}
+			}
+			x.evidence[key][id] = true
+		}
+		return true
+	}
+}
+
+// pageMemory is, for one peer's continuation, the streams of the last
+// page with the peer's position in each when it was built, and the
+// streams found blocked at the peer: sent its next record, the peer's
+// position did not move.
+type pageMemory struct {
+	last    map[streamKey]int64
+	blocked map[streamKey]bool
+}
+
+// blockedFor is the streams to leave out of the page for continuing
+// request q from peer.
+func (x *Exchange) blockedFor(room, peer string, q *PullRequest) map[streamKey]bool {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	out := map[streamKey]bool{}
+	m := x.pages[[2]string{room, peer}]
+	if m == nil {
+		return out
+	}
+	for k := range m.blocked {
+		out[k] = true
+	}
+	for k, c := range m.last {
+		if detailC(q.Detail[k.author], k.epoch) == c {
+			out[k] = true
+		}
+	}
+	return out
+}
+
+// paged notes the page released to peer for q: its streams, and those
+// left out as blocked; an opening request forgets both.
+func (x *Exchange) paged(room, peer string, q *PullRequest, blocked map[streamKey]bool, items []pageItem) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	key := [2]string{room, peer}
+	if q.Sum != "" {
+		delete(x.pages, key)
+		return
+	}
+	m := &pageMemory{last: map[streamKey]int64{}, blocked: blocked}
+	for _, it := range items {
+		k := it.r.stream()
+		if c := detailC(q.Detail[k.author], k.epoch); it.r.f.Seq > c {
+			m.last[k] = c
+		}
+	}
+	x.pages[key] = m
+}
+
+func detailC(d []store.StreamDetail, epoch string) int64 {
+	for _, s := range d {
+		if s.E == epoch {
+			return s.C
+		}
+	}
+	return 0
+}
+
+// seenOf is seen for key in the room's generation gen, if still in force.
+func (x *Exchange) seenOf(key [2]string, gen int64) (seenSums, bool) {
+	now := x.r.m.now()
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	s, ok := x.seen[key]
+	if ok && (s.gen != gen || !now.Before(s.at.Add(seenFor)) || now.Before(s.at)) {
+		delete(x.seen, key)
+		return seenSums{}, false
+	}
 	return s, ok
 }
 
@@ -1216,16 +1437,26 @@ func chunks(own summary, base int, differ []string) (out [][]string, tooLarge []
 }
 
 // round runs one round of an exchange and reports whether it made
-// progress: a record, text or entry stored here, or one given to the peer
-// that it had not been given in this exchange. Cuts only justify the next
-// request of the round; one that does not advance ends quietly. A round
-// that made no progress leaves the peer's sum as seen.
+// progress: a record, text or entry stored here, or stored by the peer as
+// its response shows (its log heads moved after entries were given, or
+// its digest or detail of an author whose records were offered changed);
+// or, when it stored nothing, whether the peer's detail first learned in
+// it lets the next round offer something (4.3 step 3). Cuts only justify
+// the next request of the round; one that does not advance ends quietly.
+// A round that stored nothing and was clean (nothing refused, skipped,
+// stalled or too large) leaves the peer's sum as seen.
 func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o PullOpts, st *PullStats,
 	sent map[string]bool) (bool, error) {
 	key := [2]string{room, peer}
 	var peerLog *store.PeerLog
 	var base map[string]store.Observation // the observation the round's offer is built on
 	progress := false
+	clean := true
+	// What the peer was last seen to hold of each author, to tell whether
+	// it stored what it was given; and its detail learned in this round
+	// that differs from base.
+	digest, detail, baseDetail := map[string]string{}, map[string]string{}, map[string]string{}
+	learned := map[string][]store.StreamDetail{}
 	send := func(chunk []string, snap string, useSeen bool) (prepared, *PullResponse, error) {
 		p, err := x.prepare(ctx, room, peer, gen, chunk, snap, useSeen, o.Offer, base, sent, peerLog)
 		if err != nil {
@@ -1236,25 +1467,31 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 			if base == nil {
 				base = map[string]store.Observation{}
 			}
+			for a, ob := range base {
+				digest[a] = ob.Digest
+				if ob.Detail != nil {
+					detail[a] = string(mustJSON(ob.Detail))
+					baseDetail[a] = detail[a]
+				}
+			}
 		}
 		st.Requests++
 		st.Offered += len(p.req.Offer)
-		if p.sentNew > 0 {
-			progress = true
-		}
 		resp, err := x.t.Pull(ctx, peer, p.req)
-		if snap == "" {
-			x.opened(key, p.req, err)
+		if aerr := x.answered(ctx, room, peer, gen, p.req, err); aerr != nil {
+			return p, nil, errors.Join(err, aerr)
 		}
 		if err != nil {
 			return p, nil, err
 		}
 		if err := checkResponse(resp, p.req); err != nil {
-			return p, nil, err
+			return p, nil, errors.Join(err, x.refuse(ctx, room, peer, gen, CodeBadResponse, 1))
 		}
 		return p, resp, nil
 	}
-	apply := func(p prepared, resp *PullResponse) (appliedResp, error) {
+	// apply applies resp and says whether something was stored, here or
+	// by the peer as resp shows.
+	apply := func(p prepared, resp *PullResponse) (appliedResp, bool, error) {
 		// What the peer sent, it holds: never offer it back.
 		for _, w := range resp.Page {
 			if rec, err := core.ParseRecord(w); err == nil {
@@ -1264,7 +1501,7 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 		peerLog = &store.PeerLog{Heads: resp.Log.Heads, Extra: resp.Log.Extra}
 		a, err := x.apply(ctx, room, peer, gen, p, resp)
 		if err != nil {
-			return a, err
+			return a, false, err
 		}
 		st.Responses++
 		st.Stored += a.stored
@@ -1273,17 +1510,39 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 			st.Entries++
 		}
 		if a.gone {
-			return a, ErrPeerNotMember
+			return a, false, ErrPeerNotMember
 		}
-		if a.entries || a.stored+a.repaired > 0 {
+		moved := a.entries || a.stored+a.repaired > 0
+		if len(p.req.Log.Entries) > 0 && !resp.Same && p.heads != nil && !sameSet(p.heads, resp.Log.Heads) {
+			moved = true
+		}
+		if p.req.Sum != "" && !resp.Same {
+			for au := range p.offered {
+				if resp.Digests[au] != digest[au] {
+					moved = true
+				}
+			}
+			digest = maps.Clone(resp.Digests)
+		}
+		for au, d := range resp.Detail {
+			j := string(mustJSON(d))
+			if p.offered[au] && j != detail[au] {
+				moved = true
+			}
+			if j != baseDetail[au] {
+				learned[au] = d
+			} else {
+				delete(learned, au)
+			}
+			detail[au] = j
+		}
+		if moved {
 			progress = true
 		}
-		return a, nil
-	}
-	// advanced: the request p and its response moved something on.
-	advanced := func(p prepared, resp *PullResponse, a appliedResp, prevHeads []string) bool {
-		return a.entries || a.stored+a.repaired > 0 || p.sentNew > 0 ||
-			(p.logCut && !sameSet(prevHeads, resp.Log.Heads))
+		if a.refused > 0 || len(a.blocked) > 0 {
+			clean = false
+		}
+		return a, moved, nil
 	}
 	same := func(p prepared) {
 		st.Same++
@@ -1298,7 +1557,7 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 	if err != nil {
 		return false, err
 	}
-	a, err := apply(p, resp)
+	a, _, err := apply(p, resp)
 	if err != nil {
 		return false, err
 	}
@@ -1307,75 +1566,118 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 		return progress, nil
 	}
 	open := resp
+	fresh := a.entries // the room log changed: Admitted may have
 	// The opening again while its log or offer was cut.
 	for resp.Log.More || p.logCut || p.offerCut {
-		prev := resp.Log.Heads
+		var moved bool
 		if p, resp, err = send(nil, "", false); err != nil {
 			return false, err
 		}
-		if a, err = apply(p, resp); err != nil {
+		if a, moved, err = apply(p, resp); err != nil {
 			return false, err
 		}
 		if resp.Same {
 			same(p)
 			return progress, nil
 		}
-		open = resp
-		if !advanced(p, resp, a, prev) {
+		open, fresh = resp, fresh || a.entries
+		if !moved {
 			st.Stalled++
+			clean = false
 			break
 		}
 	}
+	own := p.own
+	if fresh {
+		if own, err = x.ownSummary(ctx, room, gen); err != nil {
+			return false, err
+		}
+	}
 	var takes []string
-	for _, au := range p.own.authors {
+	for _, au := range own.authors {
 		if slices.Contains(open.Authors, au) {
 			takes = append(takes, au)
 		}
 	}
-	cs, tooLarge := chunks(p.own, p.base, differ(takes, p.own.digests, open.Digests))
-	if len(tooLarge) > 0 {
-		st.TooLarge += len(tooLarge)
-		if err := x.refuse(ctx, room, peer, gen, CodeTooLarge, len(tooLarge)); err != nil {
+	tooLarge := func(n int) error {
+		st.TooLarge += n
+		clean = false
+		return x.refuse(ctx, room, peer, gen, CodeTooLarge, n)
+	}
+	queue, big := chunks(own, p.base, differ(takes, own.digests, open.Digests))
+	if len(big) > 0 {
+		if err := tooLarge(len(big)); err != nil {
 			return false, err
 		}
 	}
-	for _, chunk := range cs {
-		for active := chunk; len(active) > 0; {
-			prev := resp.Log.Heads
+	for len(queue) > 0 {
+		active := queue[0]
+		queue = queue[1:]
+		blocked := map[streamKey]bool{}
+		for len(active) > 0 {
+			var moved bool
 			if p, resp, err = send(active, open.Sum, false); err != nil {
 				return false, err
 			}
-			if a, err = apply(p, resp); err != nil {
+			if a, moved, err = apply(p, resp); err != nil {
 				return false, err
 			}
-			if !resp.More && !resp.Log.More && !p.offerCut && !p.logCut {
+			// Detail the response left out is asked for again; an author
+			// whose detail alone did not fit is skipped (4.3 step 5).
+			if n := len(resp.Detail); n < len(active) {
+				rest := active[n:]
+				if n == 0 {
+					if err := tooLarge(1); err != nil {
+						return false, err
+					}
+					rest = rest[1:]
+				}
+				if len(rest) > 0 {
+					queue = append([][]string{rest}, queue...)
+				}
+				active = active[:n]
+			}
+			if len(active) == 0 || !resp.More && !resp.Log.More && !p.offerCut && !p.logCut {
 				break
 			}
-			// Move past streams that cannot be stored: the rest of the chunk
-			// goes on without their authors.
-			var rest []string
-			for _, au := range active {
-				if !resp.More || !a.blocked[au] {
-					rest = append(rest, au)
+			// A stream newly blocked here: the peer leaves it out of the next
+			// page, so the others go on.
+			grew := false
+			for k := range a.blocked {
+				if !blocked[k] {
+					blocked[k], grew = true, true
 				}
 			}
-			if len(rest) < len(active) {
-				active = rest
-				continue
-			}
-			if !advanced(p, resp, a, prev) {
+			if !moved && !grew {
 				st.Stalled++
+				clean = false
 				break
 			}
 		}
 	}
-	if progress {
+	if !progress && o.Offer && len(learned) > 0 {
+		ok, err := x.offerable(ctx, room, peer, gen, learned, sent)
+		if err != nil {
+			return false, err
+		}
+		progress = ok // one more round carries the offer
+	}
+	if progress || !clean {
 		x.setSeen(key, nil)
 	} else {
-		x.setSeen(key, &seenSums{server: open.Sum, own: p.own.sum()})
+		x.setSeen(key, &seenSums{server: open.Sum, own: p.own.sum(), gen: gen, at: x.r.m.now()})
 	}
 	return progress, nil
 }
+
+func mustJSON(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}
+
+// CodeBadResponse counts a response refused because its shape did not fit
+// its request (PROTOCOL-next 4.2).
+const CodeBadResponse = "bad_response"
 
 // refuse counts n of code against peer.
 func (x *Exchange) refuse(ctx context.Context, room, peer string, gen int64, code string, n int) error {
@@ -1388,8 +1690,9 @@ func (x *Exchange) refuse(ctx context.Context, room, peer string, gen int64, cod
 // checkResponse checks a response against its request before anything of
 // it is applied: its form for the request's form; to an opening, same
 // with no entries, or authors and digests whose sum is the one sent; to a
-// continuing request, the detail of exactly the authors asked; the limits
-// and the whole size (PROTOCOL-next 4.2).
+// continuing request, the detail of the first authors asked, in order,
+// and page records only by them; the limits and the whole size
+// (PROTOCOL-next 4.2, 4.3 step 5).
 func checkResponse(resp *PullResponse, q *PullRequest) error {
 	bad := func(what string) error { return fmt.Errorf("pull: bad response: %s", what) }
 	if resp == nil || resp.V != PullVersion {
@@ -1426,12 +1729,24 @@ func checkResponse(resp *PullResponse, q *PullRequest) error {
 		}
 		return checkSize(resp, bad)
 	}
-	if resp.Same || resp.Authors != nil || resp.Digests != nil || resp.Sum != "" || len(resp.Detail) != len(q.Detail) {
+	if resp.Same || resp.Authors != nil || resp.Digests != nil || resp.Sum != "" {
 		return bad("detail form")
 	}
-	for a, d := range resp.Detail {
-		if _, asked := q.Detail[a]; !asked || d == nil || checkDetail(d) != nil {
+	// The detail of the first authors asked, in order: the rest left out.
+	asked, got := sortedIDs(q.Detail), sortedIDs(resp.Detail)
+	if len(got) > len(asked) || !slices.Equal(got, asked[:len(got)]) {
+		return bad("detail")
+	}
+	for _, d := range resp.Detail {
+		if d == nil || checkDetail(d) != nil {
 			return bad("detail")
+		}
+	}
+	for _, w := range resp.Page {
+		if rec, err := core.ParseRecord(w); err == nil {
+			if _, ok := resp.Detail[rec.Author()]; !ok {
+				return bad("page record of an author not in the detail")
+			}
 		}
 	}
 	return checkSize(resp, bad)
@@ -1448,7 +1763,8 @@ func checkSize(resp *PullResponse, bad func(string) error) error {
 type appliedResp struct {
 	entries          bool
 	stored, repaired int
-	blocked          map[string]bool
+	blocked          map[streamKey]bool
+	refused          int  // records and entries of it refused
 	gone             bool // the peer is not a member here: its page was not taken
 	observed         bool // what the peer said it holds was stored
 }
@@ -1510,6 +1826,9 @@ func (x *Exchange) apply(ctx context.Context, room, peer string, gen int64, p pr
 			if err != nil {
 				return err
 			}
+			for _, n := range refused {
+				a.refused += n
+			}
 			return refuseAll(tx, room, peer, refused, now)
 		})
 		if err == nil && a.observed {
@@ -1523,6 +1842,11 @@ func (x *Exchange) apply(ctx context.Context, room, peer string, gen int64, p pr
 	}
 	if err := r.countInvalid(ctx, rl, peer, res, now); err != nil {
 		return appliedResp{}, err
+	}
+	for _, x := range res {
+		if x.Disposition == members.Invalid {
+			a.refused++
+		}
 	}
 	return a, nil
 }

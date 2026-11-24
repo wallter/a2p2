@@ -747,13 +747,29 @@ func (h *harness) pull(puller, server delivery.MachineID) {
 	p, s := h.sims[puller], h.sims[server]
 	at := diffBase.Add(time.Duration(h.w.Now) * time.Hour)
 	note := func(to, from *sim) {
+		// What from reports, author by author: a known position is a hint
+		// the same peer's later report lowers (Tx.NoteKnown).
+		known := map[string]map[string]int64{}
+		for _, st := range append(h.streams(from), h.streams(to)...) {
+			if known[st.Author] == nil {
+				known[st.Author] = map[string]int64{}
+			}
+		}
 		for _, st := range h.streams(from) {
 			// Injected streams are not reported: the model has no gap for them.
 			if st.Contig > 0 && !strings.HasPrefix(st.Epoch, "ff") {
-				if err := to.st.NoteKnown(ctx, diffRoom, st.Author, st.Epoch, st.Contig, at); err != nil {
-					h.t.Fatal(err)
+				known[st.Author][st.Epoch] = st.Contig
+			}
+		}
+		if _, err := to.st.Exchange(ctx, diffRoom, 0, func(tx *store.Tx) error {
+			for a, k := range known {
+				if err := tx.NoteKnown(diffRoom, from.m.ID, a, k, at); err != nil {
+					return err
 				}
 			}
+			return nil
+		}); err != nil {
+			h.t.Fatal(err)
 		}
 	}
 	note(s, p) // the server learns from the request

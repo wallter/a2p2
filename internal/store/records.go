@@ -131,6 +131,11 @@ type PutOpts struct {
 	// permission). False stores the header as not_admitted. Local writes
 	// always may.
 	MayRead bool
+	// Undecided says whether this machine may hold the text is not known
+	// yet (a head of its admission frontier is not held): the header is
+	// stored as missing whatever its age, and decided when the head
+	// arrives.
+	Undecided bool
 }
 
 // Held is one record as this machine holds it: the signed header (verified
@@ -533,11 +538,13 @@ func reasonFor(rd *Reader, id, author string, f core.RecordFields, o PutOpts, ha
 			return ReasonWithdrawn, nil
 		}
 	}
-	switch {
-	case TextExpired(f.Created, o.Now):
-		return ReasonExpired, nil
+	switch { // permission first: what is not this machine's to read is not_admitted, expired or not
 	case !o.MayRead:
 		return ReasonNotAdmitted, nil
+	case o.Undecided:
+		return ReasonMissing, nil
+	case TextExpired(f.Created, o.Now):
+		return ReasonExpired, nil
 	case hasBody || (f.Kind != core.KindMessage && f.Kind != core.KindReplace):
 		return ReasonLive, nil
 	}

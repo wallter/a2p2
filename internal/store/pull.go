@@ -22,7 +22,8 @@ import (
 // reported for that author, its detail (PROTOCOL-next 4.3, as JSON) when
 // known, and when this machine learned it (its own clock). detail is NULL
 // while unknown: the digest changed and the detail has not arrived yet.
-// Beyond section 8: a row with an empty digest and detail '[]' says the
+// streams.known_from is the peer whose report set a stream's known
+// position (Tx.NoteKnown); ” if none. Beyond section 8: a row with an empty digest and detail '[]' says the
 // peer takes the author but holds nothing of it; and the row with an empty author
 // holds the peer's last log heads and held or refused entry ids, as JSON
 // {"heads":[…],"extra":[…]}, so a request carries only the entries the
@@ -36,6 +37,12 @@ CREATE TABLE refusals (
   room TEXT NOT NULL, peer TEXT NOT NULL, reason TEXT NOT NULL,
   count INTEGER NOT NULL, last_at INTEGER NOT NULL,
   PRIMARY KEY (room, peer, reason));
+`
+
+// schemaKnownFrom is migration 5: the peer whose report set a stream's
+// known position, so that the same peer's later report can lower it.
+const schemaKnownFrom = `
+ALTER TABLE streams ADD COLUMN known_from TEXT NOT NULL DEFAULT '';
 `
 
 // StreamDetail is one stream of an author's detail (PROTOCOL-next 4.3):
@@ -294,12 +301,50 @@ func (t *Tx) PutRecordPlanned(r *core.VerifiedRecord, gen int64, plan func(*Read
 	return putPlanned(t.tx, r, gen, plan)
 }
 
-// NoteKnown is Store.NoteKnown inside the transaction.
-func (t *Tx) NoteKnown(room, author, epoch string, known int64, at time.Time) error {
-	_, err := t.tx.Exec(`INSERT INTO streams (room, author, epoch, contig, known, known_at) VALUES (?,?,?,0,?,?)
-		ON CONFLICT (room, author, epoch) DO UPDATE SET known = excluded.known, known_at = excluded.known_at
-		WHERE excluded.known > streams.known`, room, author, epoch, known, ms(at))
-	return err
+// NoteKnown records peer's report, at at, of the positions it holds of
+// author's streams in room (epoch to contiguous position): a stream not
+// held yet is created with contig 0; a known position (and its date)
+// rises to a higher report from any peer, and the peer whose report set it
+// can lower it, also by no longer reporting the stream. Known positions
+// are hints.
+func (t *Tx) NoteKnown(room, peer, author string, known map[string]int64, at time.Time) error {
+	for epoch, c := range known {
+		if _, err := t.tx.Exec(`INSERT INTO streams (room, author, epoch, contig, known, known_at, known_from)
+			VALUES (?,?,?,0,?,?,?)
+			ON CONFLICT (room, author, epoch) DO UPDATE SET known = excluded.known, known_at = excluded.known_at,
+				known_from = excluded.known_from
+			WHERE excluded.known > streams.known
+				OR excluded.known < streams.known AND streams.known_from = excluded.known_from`,
+			room, author, epoch, c, ms(at), peer); err != nil {
+			return err
+		}
+	}
+	rows, err := t.tx.Query(`SELECT epoch FROM streams WHERE room = ? AND author = ? AND known_from = ?`, room, author, peer)
+	if err != nil {
+		return err
+	}
+	var gone []string
+	for rows.Next() {
+		var e string
+		if err := rows.Scan(&e); err != nil {
+			rows.Close()
+			return err
+		}
+		if _, ok := known[e]; !ok {
+			gone = append(gone, e)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, e := range gone {
+		if _, err := t.tx.Exec(`UPDATE streams SET known = 0, known_from = '' WHERE room = ? AND author = ? AND epoch = ?`,
+			room, author, e); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Observe replaces what peer reported in room with obs, an observation
@@ -324,6 +369,13 @@ func (t *Tx) ObserveLog(room, peer string, at time.Time, log PeerLog) error {
 	_, err := t.tx.Exec(`INSERT INTO observed (room, peer, author, digest, detail, at) VALUES (?,?,'','',?,?)
 		ON CONFLICT (room, peer, author) DO UPDATE SET detail = excluded.detail, at = excluded.at`,
 		room, peer, jsonText(log), ms(at))
+	return err
+}
+
+// ForgetLog deletes what was observed of peer's log in room, so the next
+// request sends the accepted log from the start (PROTOCOL-next 4.4).
+func (t *Tx) ForgetLog(room, peer string) error {
+	_, err := t.tx.Exec(`DELETE FROM observed WHERE room = ? AND peer = ? AND author = ''`, room, peer)
 	return err
 }
 
