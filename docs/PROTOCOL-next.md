@@ -37,7 +37,11 @@ are never re-encoded: they are stored and passed on exactly as received.
 A peer's key is its node id, learned from the room log or an invite token;
 every outbound TLS connection is pinned to it. Addresses are hints, learned
 from the token, a peer's `addrs`, and `peers` in responses, stored per
-member and tried most recent success first.
+node (`peer_addrs`, section 8) and tried most recent success first. At most
+8 per node; an address a node reports for itself takes a slot before one
+heard from a third party; one that has failed for 24 hours and at least 5
+attempts is dropped. Dials to addresses that have never completed a pinned
+handshake share one budget for the daemon (2 a second, burst 8).
 
 ## 1. Record header
 
@@ -257,6 +261,7 @@ and continues with:
 | `offer` | records for the server [RM3]: only authors in the server's last `authors`, built against the server's detail as observed when the round began, within its permission, ordered as a page | ≤ 512 |
 | `offer_more` | the offer was cut; the rest follows in the next request | |
 | `addrs` | requester's addresses | ≤ 8, each ≤ 255 bytes |
+| `peers` | `true`, only with `sum`: asks for `peers` in the answer. Sent when the requester has no address for some current member, and otherwise at most once an hour per peer | |
 | `wait_ms` | 0 to 60,000; only with `sum` | |
 
 Exactly one of `sum`, or `snap` with `detail`, is present. Request ≤ 1 MiB,
@@ -300,7 +305,7 @@ and to a continuing request
 | `log.entries` | not at or before the request's `log.heads`, not in its `log.extra`: accepted in causal order, then held and refused as evidence | ≤ 256, cut by bytes too; `log.more` |
 | `page` | for the authors of the request's `detail` that are in the server's `Admitted` [R3] (4.4 step 8) | ≤ 512 records |
 | `more` | page cut at a limit | |
-| `peers` | other members with addresses | ≤ 64 |
+| `peers` | other members with addresses; only when the request asked, with a `same` answer or a digests answer | ≤ 64 |
 
 Response ≤ 4 MiB, counted over the whole encoded message. A requester
 refuses, and counts, a response whose shape does not fit its request.
@@ -381,15 +386,15 @@ Sizes are measured by `TestPullSizesInASixtyFourMachineRoomAfterThirtyDaysOfDail
 | Step | Action | Failure |
 |---|---|---|
 | 1 | TLS peer key → node id | handshake fails |
-| 2 | size, strict JSON, `v`, field limits | 413 `too_large`, 400 `bad_request` |
-| 3 | rate limit for this peer | 429 `rate_limited` |
+| 2 | declared size, then the rate limit for this peer, both before the body is read | 413 `too_large`, 429 `rate_limited` |
+| 3 | strict JSON at every level, `v`, field limits, the shape of 4.1 | 400 `bad_request` |
 | 4 | room known; apply `log.entries` (section 3), from a non-member all or none: only if, applied, they make it a member | 403 `not_member` (also for an unknown room) |
 | 5 | peer is a member now | 403 `not_member` |
 | 6 | store `offer` (section 2) and what the request shows the peer holds | |
 | 7 | steps 4 and 6 in one transaction | 503 `unavailable` |
 | 8 | prune; build the response: `same`, or the digests answer, or for a continuing request the server's detail and the page for those authors: wanted text first, then later records per stream, predecessors and links first, stopping a stream at anything not sent, text only within the peer's current permission (section 3) | |
 | 9 | if `wait_ms` > 0 and the answer is `same`: hold until it would no longer be, or `wait_ms` passes | |
-| 10 | on release, repeat step 5; if anything was written since step 8, or text chosen for the page has passed its retention time, repeat step 8 [RM2] | 403 `not_member` |
+| 10 | on release, repeat step 5; if anything was written since step 8, or text chosen for the page has passed its retention time, repeat step 8; the answer of a held request is always worked out again [RM2] | 403 `not_member` |
 
 Requester on 200: discard if the room's local generation changed since the
 request; otherwise in one transaction apply `log.entries`, then `page`
@@ -428,7 +433,8 @@ Error body: `{"error":"<code>","detail":"<≤ 200 bytes>"}`.
 | Client, other requests | 30 s; dial 3 s; TLS 5 s |
 | Probe of a rotating anchor | 10 s |
 | Back-off | 1 s doubling to 5 min, ±20 % jitter |
-| Per peer | one waiting pull per room; 4 other concurrent; 20 per s, burst 40 |
+| Per peer | one waiting pull per room (a new one releases the old); 4 other concurrent (a request counts until it enters a hold); 20 per s, burst 40 |
+| Requester pacing | a waiting pull answered `same` well before its wait, with nothing stored either way, counts as a failure for back-off |
 | Inbound connections | 256 |
 
 ## 5. Join
@@ -710,7 +716,7 @@ Socket calls are `POST /v1/<name>`, JSON in and out; errors `{"error"}` with
 | `trace` (changed) | `{"id"}` | `{"id","room","saved","reason","copies":[{"node","at","member"}],"handled":[{"agent","at"}]}` |
 | `alerts` (new) | `{"wait_ms"?}` (≤ 120,000) | `{"alerts":[{"kind":"request"\|"fork"\|"missing","id","room","text","since"}]}` |
 | `requests` (new) | `{}` | `{"requests":[{"id","kind","room","node","name","role","history","created"}]}` |
-| `confirm` (new) | `{"id","approve":bool}` | `{"id","state":"approved"\|"declined"\|"failed","reason"?}` |
+| `confirm` (new) | `{"id","approve":bool,"not_caught_up_ok"?:true}` | `{"id","state":"approved"\|"declined"\|"failed","reason"?}`; `reason` `not_caught_up` means this machine has not checked the room's log with another member since it started (DESIGN 3); the surface shows the warning and may repeat with `not_caught_up_ok`, which is recorded |
 | `room/invite` (changed) | `{"room","history"?,"role"?}` | `{"token","expires","room"}` |
 | `room/join` (changed) | `{"token"}` | the previewed answer of 5.3 |
 | `room/join/accept` (new) | `{"token","wait_ms"?}` | `{"state":"accepted"\|"signed"\|"refused"\|"expired"\|"removed","room"?,"reason"?}` |
@@ -729,7 +735,7 @@ shows the preview, asks on the terminal, then waits unless `--no-wait`),
 `send --reply-to --ask-handled --replaces`, `inbox --thread`, `trace`,
 `room list`. `confirm` refuses unless stdin is a terminal.
 
-## 8. Schema (migrations 2 to 7)
+## 8. Schema (migrations 2 to 8)
 
 | Table | Columns | Keys |
 |---|---|---|
@@ -740,6 +746,7 @@ shows the preview, asks on the terminal, then waits unless `--no-wait`),
 | `streams` | `room`, `author`, `epoch`, `contig`, `known`, `known_at`, `known_from` (the peer whose report set `known`; its later report can lower it) | (`room`,`author`,`epoch`) |
 | `observed` | `room`, `peer`, `author`, `digest`, `detail` json, `at`; the row with an empty `author` holds the peer's last log heads and extra | (`room`,`peer`,`author`) |
 | `refusals` | `room`, `peer`, `reason`, `count`, `last_at` | (`room`,`peer`,`reason`) |
+| `peer_addrs` (migration 8) | `node`, `addr`, `source` (`self`, `peer`), `seen_at`, `failed_at`, `fails`; only for members of a room this machine is in | (`node`,`addr`) |
 | `agents` | as v0.2 | `id` |
 | `cursors` | `agent`, `room`, `author`, `epoch`, `start`, `pos` | (`agent`,`room`,`author`,`epoch`) |
 | `reads` | `agent`, `room`, `key`, `version`, `msg` (indexed) | (`agent`,`room`,`key`) |

@@ -114,9 +114,15 @@ index allows both branches of a fork.
   hold back settling another (`TestOneOpenForkDoesNotHoldBackSettlingAnother`).
 - Entries are passed on in causal order, evidence after them.
 - **Not modelled: pull before signing.** Since starting, a daemon signs no
-  entry for a room until it has pulled that room's log from another member
-  (creation and sole-member rooms exempt). It narrows the restore problem
-  and cannot detect a restore.
+  entry for a room until an exchange with a current member has left it
+  holding every log head that member advertised (rooms it created or just
+  joined, and rooms where it is the only member, are exempt). It narrows
+  the restore problem and cannot detect a restore. If no other member can
+  be reached, the request fails with `not_caught_up`; the person may
+  approve it again with an explicit, recorded override after a warning
+  that names the risk (a machine restored from a backup may sign over a
+  position it has already used). Without the override an admin whose
+  peers are all gone could never remove them.
 - **History permission.** A machine's current permission comes from the
   effective grants of its current membership period (after its latest
   effective removal). When they differ the more restrictive applies [RM2]:
