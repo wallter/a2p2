@@ -57,36 +57,46 @@ func parseIfInet6(r io.Reader) map[string]v6Flags {
 	return m
 }
 
-// defaultGateway reads the IPv4 default route from /proc/net/route.
-func defaultGateway() (netip.Addr, error) {
+// defaultGateway reads the IPv4 default route from /proc/net/route: its
+// next hop and its interface.
+func defaultGateway() (netip.Addr, string, error) {
 	f, err := os.Open("/proc/net/route")
 	if err != nil {
-		return netip.Addr{}, err
+		return netip.Addr{}, "", err
 	}
 	defer f.Close()
 	return parseProcRoute(f)
 }
 
-// parseProcRoute finds the line with destination 0 and the gateway flag;
-// addresses are hex in host (little-endian) order.
-func parseProcRoute(r io.Reader) (netip.Addr, error) {
+// parseProcRoute picks, among the lines with destination 0, mask 0 and
+// the up and gateway flags, the one with the lowest metric (the route the
+// kernel uses; the first of equals); addresses are hex in host
+// (little-endian) order.
+func parseProcRoute(r io.Reader) (netip.Addr, string, error) {
 	sc := bufio.NewScanner(r)
+	var gw netip.Addr
+	iface := ""
+	best := uint64(1 << 63)
 	for sc.Scan() {
 		fs := strings.Fields(sc.Text())
 		if len(fs) < 8 || fs[1] != "00000000" || fs[7] != "00000000" {
 			continue
 		}
 		flags, err := strconv.ParseUint(fs[3], 16, 32)
-		if err != nil || flags&0x2 == 0 { // RTF_GATEWAY
+		if err != nil || flags&0x3 != 0x3 { // RTF_UP | RTF_GATEWAY
 			continue
 		}
-		g, err := strconv.ParseUint(fs[2], 16, 32)
-		if err != nil {
+		g, err1 := strconv.ParseUint(fs[2], 16, 32)
+		metric, err2 := strconv.ParseUint(fs[6], 10, 32)
+		if err1 != nil || err2 != nil || metric >= best {
 			continue
 		}
 		var b [4]byte
 		binary.LittleEndian.PutUint32(b[:], uint32(g))
-		return netip.AddrFrom4(b), nil
+		gw, iface, best = netip.AddrFrom4(b), fs[0], metric
 	}
-	return netip.Addr{}, errors.New("no default route")
+	if !gw.IsValid() {
+		return netip.Addr{}, "", errors.New("no default route")
+	}
+	return gw, iface, nil
 }

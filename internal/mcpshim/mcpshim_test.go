@@ -31,7 +31,7 @@ func startDaemon(t *testing.T) *localapi.Client {
 // the daemon's readiness barrier, not for a poll to succeed.
 func startDaemonHome(t *testing.T) (*localapi.Client, string) {
 	t.Helper()
-	home, err := os.MkdirTemp("/tmp", "a2p2")
+	home, err := os.MkdirTemp(sockTemp(), "a2p2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func startDaemonHome(t *testing.T) (*localapi.Client, string) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("daemon did not start")
 	}
-	c := localapi.NewClient(daemon.SockPath(home))
+	c := daemon.Client(home)
 	t.Cleanup(func() { // stopped with its own stop call
 		if err := c.Call(context.Background(), "stop", nil, nil); err != nil {
 			t.Errorf("stop: %v", err)

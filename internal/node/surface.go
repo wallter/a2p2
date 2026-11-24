@@ -557,7 +557,8 @@ func (s *Surface) AgentFor(ctx context.Context, harness, cwd string) (store.Agen
 		if a.Harness != harness || a.Cwd == "" {
 			continue
 		}
-		if cwd == a.Cwd || strings.HasPrefix(cwd, strings.TrimSuffix(a.Cwd, "/")+"/") {
+		sep := string(filepath.Separator) // "/", and on Windows "\"
+		if cwd == a.Cwd || strings.HasPrefix(cwd, strings.TrimSuffix(a.Cwd, sep)+sep) {
 			if !found || len(a.Cwd) > len(best.Cwd) {
 				best, found = a, true
 			}

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -37,8 +38,10 @@ func (r *rec) run(name string, args ...string) error {
 
 func setup(t *testing.T) (Options, *rec) {
 	r := &rec{fail: map[string]bool{"mcp remove": true}}
+	// OS: these tests are of the Unix layout on every system; windows_test.go
+	// sets "windows".
 	return Options{HomeDir: t.TempDir(), StateDir: filepath.Join(t.TempDir(), "installs"), Binary: "/opt/a2p2", Run: r.run,
-		LookPath: func(f string) (string, error) { return "/bin/" + f, nil }}, r
+		LookPath: func(f string) (string, error) { return "/bin/" + f, nil }, OS: "linux"}, r
 }
 
 func hookPath(name string, o Options) string {
@@ -268,7 +271,7 @@ func hookEnv(t *testing.T) (c *localapi.Client, send func(), unread func() int) 
 		t.Fatal(err)
 	}
 	hookNode = m.ID
-	dir, _ := os.MkdirTemp("/tmp", "a2p2")
+	dir, _ := os.MkdirTemp(sockTemp(), "a2p2")
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "s")
 	ln, err := net.Listen("unix", sock)
@@ -408,6 +411,9 @@ func TestNoticeSanitisesLabels(t *testing.T) {
 // --- security review fixes ---
 
 func TestHookCmdShellSafe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("runs the hook command with sh; Windows installs write only plain words (windows_test.go)")
+	}
 	for _, dir := range []string{"plain", "with space", "$(touch x)", "back`touch x`tick", `dq"uote`, "sq'uote", `both"'$HOME`} {
 		work := t.TempDir()
 		d := filepath.Join(work, dir)
@@ -471,6 +477,9 @@ func TestOwnershipIsExact(t *testing.T) {
 }
 
 func TestWriteSymlinkAndMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("checks Unix file modes, which Windows does not have")
+	}
 	o, _ := setup(t)
 	p := hookPath("claude", o)
 	real := filepath.Join(t.TempDir(), "dotfiles", "settings.json")

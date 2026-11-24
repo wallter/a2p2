@@ -2,9 +2,12 @@ package main
 
 // a2p2 net check: observe, decide nothing. Without an argument the daemon
 // tries its members and asks them to dial back (local API net/check).
-// With HOST:PORT or --invite this process tries the addresses itself, as
-// a fresh throwaway key, completing a TLS handshake and sending nothing
-// else: no daemon, no invite used, nothing about this machine revealed.
+// With HOST:PORT or --invite this process tries the addresses itself,
+// with no daemon: a TCP connection (after a DNS lookup if HOST is a
+// name) and a TLS handshake presenting a certificate of a fresh throwaway
+// key, then closed without an HTTP request. The other side sees this
+// machine's source address and that certificate; never the invite, which
+// stays unused, nor this machine's key.
 
 import (
 	"context"
@@ -103,10 +106,10 @@ func addrLine(r node.AddrCheck) string {
 		node.ProbeReached:     "an a2p2 machine answered",
 		node.ProbeRefused:     "refused",
 		node.ProbeTimeout:     "timed out",
-		node.ProbeWrongKey:    "wrong key",
+		node.ProbeWrongKey:    "certificate key mismatch",
 		node.ProbeNotA2P2:     "not an a2p2 machine",
 		node.ProbeUnreachable: "unreachable",
-		node.ProbeNotTried:    "not tried (over the limit of one check)",
+		node.ProbeNotTried:    "not tried",
 	}[r.Result]
 	if what == "" {
 		what = r.Result
@@ -135,12 +138,12 @@ func addrAdvice(out addrCheckOut) string {
 	switch best {
 	case node.ProbeReached:
 		if out.Invite {
-			return "The invite's admin machine answers at " + addr + " with the key the invite names; " +
-				"nothing was sent, and the invite is unused."
+			return "The invite's admin machine answers at " + addr + " with the key the invite names; the check " +
+				"stopped after the TLS handshake (a throwaway certificate, no request), and the invite is unused."
 		}
 		return "An a2p2 machine answers at " + addr + "; compare the key above with the one its person reads to you."
 	case node.ProbeWrongKey:
-		return "An a2p2 machine answers at " + addr + ", but not with the key this invite names: do not use the " +
+		return "The certificate offered at " + addr + " names another key than this invite's: do not use the " +
 			"invite there; ask its person for a new one."
 	case node.ProbeNotA2P2:
 		return "Something answers at " + addr + ", but it is not an a2p2 machine: check the port."
@@ -155,8 +158,15 @@ func addrAdvice(out addrCheckOut) string {
 
 // mappingText is the router's port mapping in one line.
 func mappingText(m *node.PortMapping) string {
+	left := ""
+	if len(m.NotRemoved) > 0 {
+		left = "; not removed yet, retried at stop and at the next start: " + strings.Join(m.NotRemoved, "; ")
+	}
 	if m.External == "" {
-		return "port mapping: none (" + m.Error + ")"
+		if m.Error == "" {
+			return "port mapping: none" + left
+		}
+		return "port mapping: none (" + m.Error + ")" + left
 	}
 	s := "port mapping: " + m.Protocol + ", " + m.External
 	if m.Expires != "" {
@@ -169,7 +179,7 @@ func mappingText(m *node.PortMapping) string {
 	} else {
 		s += "; not advertised until a member reaches it"
 	}
-	return s
+	return s + left
 }
 
 // printNetCheck prints the daemon's check in plain words.
@@ -183,6 +193,10 @@ func printNetCheck(nc node.NetCheck) {
 		fmt.Println("network    outbound only, listening on nothing")
 	default:
 		fmt.Println("network    off: nothing was tried")
+	}
+	if nc.IPv4Only {
+		fmt.Println("           IPv4 only: this decision was recorded before a2p2 listened on IPv6; run a2p2 net on " +
+			"again to add it")
 	}
 	if len(nc.Advertised) > 0 {
 		fmt.Println("advertised", strings.Join(nc.Advertised, ", "))
@@ -220,8 +234,14 @@ func printNetCheck(nc node.NetCheck) {
 	if nc.Mapping != nil {
 		fmt.Println(mappingText(nc.Mapping))
 	}
+	if len(nc.Reach.NotTried) > 0 {
+		fmt.Println("not tried by members:", strings.Join(nc.Reach.NotTried, ", "), "("+node.NotTriedText+")")
+	}
 	if len(nc.Reach.Saw) > 0 {
-		fmt.Println("seen from outside as", strings.Join(nc.Reach.Saw, ", "), "(as members report it; a hint)")
+		fmt.Println("members see this machine as", strings.Join(nc.Reach.Saw, ", "), "(what they say; shown, never advertised)")
+	}
+	if nc.Forward != "" {
+		fmt.Println("if the router forwards the port by hand, config.json needs:", nc.Forward)
 	}
 	fmt.Println(nc.Advice)
 }

@@ -11,6 +11,7 @@ package daemon
 import (
 	"encoding/binary"
 	"errors"
+	"net"
 	"net/netip"
 	"syscall"
 	"unsafe"
@@ -60,20 +61,26 @@ func ioctlFlags(fd int, iface string, ip netip.Addr) v6Flags {
 		unusable: f&(in6IffTentative|in6IffDuplicated|in6IffDetached|in6IffDeprecated) != 0}
 }
 
+// rtfIfScope marks a route scoped to one interface (a secondary
+// uplink's default route), not the one the system uses by default.
+const rtfIfScope = 0x1000000
+
 // defaultGateway reads the IPv4 default route from the routing table (a
-// sysctl; no packet is sent).
-func defaultGateway() (netip.Addr, error) {
+// sysctl; no packet is sent): the unscoped one, which the system uses,
+// with its interface.
+func defaultGateway() (netip.Addr, string, error) {
 	rib, err := syscall.RouteRIB(syscall.NET_RT_DUMP, 0)
 	if err != nil {
-		return netip.Addr{}, err
+		return netip.Addr{}, "", err
 	}
 	msgs, err := syscall.ParseRoutingMessage(rib)
 	if err != nil {
-		return netip.Addr{}, err
+		return netip.Addr{}, "", err
 	}
 	for _, m := range msgs {
 		rm, ok := m.(*syscall.RouteMessage)
-		if !ok || rm.Header.Flags&syscall.RTF_GATEWAY == 0 {
+		if !ok || rm.Header.Flags&syscall.RTF_GATEWAY == 0 || rm.Header.Flags&syscall.RTF_UP == 0 ||
+			rm.Header.Flags&rtfIfScope != 0 {
 			continue
 		}
 		sas, err := syscall.ParseRoutingSockaddr(rm)
@@ -85,7 +92,11 @@ func defaultGateway() (netip.Addr, error) {
 		if !ok1 || !ok2 || dst.Addr != [4]byte{} {
 			continue
 		}
-		return netip.AddrFrom4(gw.Addr), nil
+		name := ""
+		if ifc, err := net.InterfaceByIndex(int(rm.Header.Index)); err == nil {
+			name = ifc.Name
+		}
+		return netip.AddrFrom4(gw.Addr), name, nil
 	}
-	return netip.Addr{}, errors.New("no default route")
+	return netip.Addr{}, "", errors.New("no default route")
 }

@@ -62,7 +62,7 @@ func Home() string {
 // that other users could read or that belongs to someone else: the socket in
 // it grants full control of the node.
 func PrepareHome(home string) error {
-	if err := os.MkdirAll(home, 0o700); err != nil {
+	if err := makeHome(home); err != nil {
 		return err
 	}
 	return CheckHome(home)
@@ -79,13 +79,7 @@ func CheckHome(home string) error {
 	if !fi.IsDir() {
 		return fmt.Errorf("%s is not a directory (symlinks are not followed)", home)
 	}
-	if err := checkOwner(fi, home); err != nil {
-		return err
-	}
-	if fi.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("%s is accessible to other users (mode %o); run: chmod 700 %s", home, fi.Mode().Perm(), home)
-	}
-	return nil
+	return checkPrivate(fi, home) // sys_unix.go, sys_windows.go
 }
 
 func LoadConfig(home string) (Config, error) {
@@ -121,8 +115,9 @@ func newToken() (string, error) {
 	return hex.EncodeToString(raw[:]), nil
 }
 
-// advertised works out which addresses other nodes should dial.
-func advertised(cfg Config, ln net.Listener) []string {
+// advertised works out which addresses other nodes should dial; IPv4
+// only for a decision recorded before IPv6 (DESIGN 11).
+func advertised(cfg Config, ln net.Listener, ipv4Only bool) []string {
 	if ln == nil {
 		return nil
 	}
@@ -139,12 +134,12 @@ func advertised(cfg Config, ln net.Listener) []string {
 	}
 	// Unspecified: one dual-stack socket; IPv4 and global IPv6 addresses
 	// (DESIGN 11).
-	return chooseAdvertised(localAddrs(), tcp.Port)
+	return advertisable(localAddrs(), tcp.Port, ipv4Only)
 }
 
-// advert is what this run advertises: external addresses a member
-// reached (a mapped port, or the address members see) first, then the
-// interface addresses, at most node.MaxAddrs.
+// advert is what this run advertises: the router's mapped address while
+// a member has recently reached it first, then the interface addresses,
+// at most node.MaxAddrs. Nothing members say they see is ever in it.
 type advert struct {
 	base     []string
 	verified func() []string
@@ -182,6 +177,8 @@ type RunOpts struct {
 	// Handler, if set, is called as a local API or page request enters
 	// its handler (enter) and as it leaves.
 	Handler func(path string, enter bool)
+	// LocalKey requires the local key (localkey.go) as on Windows.
+	LocalKey bool
 }
 
 // Run is the daemon. It returns when ctx ends or a stop is requested.
@@ -300,15 +297,22 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	// file is stale and safe to remove.
 	sock := sockPath(home)
 	_ = os.Remove(sock)
-	old := umask(0o177)
-	apiLn, err := net.Listen("unix", sock)
-	umask(old)
+	var api http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { cur.Load().api.ServeHTTP(w, r) })
+	_ = os.Remove(localKeyPath(home))
+	if localKeyRequired || o.LocalKey { // Windows: localkey.go
+		key, err := writeLocalKey(home)
+		if err != nil {
+			return fmt.Errorf("local key: %w", err)
+		}
+		defer os.Remove(localKeyPath(home))
+		api = requireKey(key, api)
+	}
+	apiLn, err := listenLocal(sock)
 	if err != nil {
 		return fmt.Errorf("local socket: %w", err)
 	}
 	defer os.Remove(sock)
-	apiSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, BaseContext: base,
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { cur.Load().api.ServeHTTP(w, r) })}
+	apiSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, BaseContext: base, Handler: api}
 	servers = append(servers, apiSrv)
 	go apiSrv.Serve(apiLn)
 
@@ -387,8 +391,13 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	}
 	var peerLn net.Listener
 	if netw.State == node.NetworkOn {
-		// "tcp": an unspecified host gives one socket for IPv4 and IPv6.
-		listen := func(addr string) (net.Listener, error) { return net.Listen("tcp", addr) }
+		// "tcp": an unspecified host gives one socket for IPv4 and IPv6; a
+		// decision from before IPv6 keeps its IPv4 scope ("tcp4").
+		family := "tcp"
+		if netw.IPv4Only {
+			family = "tcp4"
+		}
+		listen := func(addr string) (net.Listener, error) { return net.Listen(family, addr) }
 		if o.Listen != nil {
 			listen = o.Listen
 		}
@@ -403,7 +412,7 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 			peerLn.Close()
 		}
 	}()
-	addrs := advertised(r.cfg, peerLn)
+	addrs := advertised(r.cfg, peerLn, netw.IPv4Only)
 	if len(addrs) > node.MaxAddrs {
 		addrs = addrs[:node.MaxAddrs]
 	}
@@ -414,30 +423,34 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	if err != nil {
 		return false, err
 	}
+	usable := liveUsable() // unique-local IPv6 only within its own site, on every dial path
 	pulls := peer.NewPullClient(r.id, book)
-	pulls.Usable = usableFrom(localAddrs()) // unique-local IPv6 only within its own site
+	pulls.Usable = usable
 	defer pulls.Close()
-	// Port mapping, when a person asked for it (a2p2 net on --map-port).
-	var keeper *portmap.Keeper
-	var mapErr string
-	if netw.MapPort && peerLn != nil {
-		keeper, mapErr = r.keeper(peerLn)
-	}
+	// Port mapping, when a person asked for it (a2p2 net on --map-port),
+	// and the removal of any an earlier run left (DESIGN 11).
+	var reach *node.Reacher
+	keeper, mapErr := r.keeper(netw, peerLn, func() {
+		if reach != nil {
+			reach.Nudge()
+		}
+	})
 	adv := &advert{base: addrs}
 	x := node.NewExchange(rooms, pulls, node.ExchangeOpts{Book: book, Addrs: addrs, AddrsNow: adv.now})
 	if o.Exchange != nil {
 		o.Exchange(x)
 	}
-	joiner := node.NewJoiner(rooms, peer.NewJoinClient(r.id), node.JoinerOpts{Name: r.cfg.Name, Addrs: addrs})
+	jc := peer.NewJoinClient(r.id)
+	jc.Usable = usable
+	joiner := node.NewJoiner(rooms, jc, node.JoinerOpts{Name: r.cfg.Name, Addrs: addrs})
 	// Reachability (PROTOCOL 4.7): the prober tries members' addresses for
 	// a2p2 net check and dials back for members that ask; a run that
 	// listens asks members to dial back to it.
 	prober := peer.NewProber(r.id)
-	var reach *node.Reacher
+	prober.Usable = usable
 	if peerLn != nil {
 		reach = node.NewReacher(pulls, node.ReachOpts{Members: rooms.OtherMembers, Book: book,
-			Addrs: func() []string { return addrs }, Port: peerLn.Addr().(*net.TCPAddr).Port,
-			Candidates: func() []string { return mappedAddr(keeper) }})
+			Addrs: func() []string { return addrs }, Candidates: func() []string { return mappedAddr(keeper) }})
 		adv.verified = reach.Verified
 	}
 	surf, err := node.OpenSurface(parent, m, rooms, node.SurfaceOpts{Name: r.cfg.Name, Joiner: joiner, Book: book,
@@ -475,11 +488,20 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 		g.close()
 		wg.Wait()
 	}()
+	keeping := false
 	if peerLn != nil {
-		h := peerHandler{JoinServer: node.NewJoinServer(rooms), x: x, g: g, db: node.NewDialBackServer(rooms, prober)}
+		h := peerHandler{JoinServer: node.NewJoinServer(rooms), x: x, g: g, db: node.NewDialBackServer(rooms, prober, book)}
 		ln := peerLn
 		peerLn = nil // Serve owns it now
+		lnCtx, lnStop := context.WithCancel(ctx)
+		if keeper != nil && netw.MapPort {
+			// The mapping lives exactly as long as the listener it forwards
+			// to, however that ends.
+			keeping = true
+			start(func() { keeper.Run(lnCtx) })
+		}
 		start(func() {
+			defer lnStop()
 			if err := peer.Serve(ctx, ln, r.id, h); err != nil && ctx.Err() == nil {
 				r.setFault("not listening: the listener stopped: " + err.Error())
 				slog.Error("peer listener stopped", "err", err)
@@ -493,7 +515,7 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	if reach != nil {
 		start(func() { reach.Run(ctx) })
 	}
-	if keeper != nil { // removes the mapping as the run ends: net off, another decision, or a stop
+	if keeper != nil && !keeping { // only removes what an earlier run left
 		start(func() { keeper.Run(ctx) })
 	}
 	start(func() { prune(ctx, m) })
@@ -516,9 +538,19 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	}
 }
 
-// keeper prepares the port mapping of a run that listens on ln, or says
-// why there is none.
-func (r *run) keeper(ln net.Listener) (*portmap.Keeper, string) {
+// keeper prepares this run's port mapping, or only the removal of what
+// an earlier run left (internal port 0), or says why there is neither.
+// A mapping is made only under a decision with --map-port, for a listener
+// bound to the wildcard address or to this machine's address on the
+// gateway's network: never for one that would forward to another service.
+// changed is called when the mapped address changes.
+func (r *run) keeper(netw node.Network, ln net.Listener, changed func()) (*portmap.Keeper, string) {
+	rec := &mapRecord{path: filepath.Join(r.home, "portmap.json")}
+	left, _ := rec.Load()
+	want := netw.MapPort && ln != nil
+	if !want && len(left) == 0 {
+		return nil, ""
+	}
 	gwf := gatewayLocal
 	if r.o.Gateway != nil {
 		gwf = r.o.Gateway
@@ -531,16 +563,78 @@ func (r *run) keeper(ln net.Listener) (*portmap.Keeper, string) {
 	if r.o.Mapper != nil {
 		m = r.o.Mapper(gw, local)
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	k := portmap.NewKeeper(m, uint16(port), func(st portmap.State) {
+	port := uint16(0)
+	why := ""
+	if want {
+		tcp := ln.Addr().(*net.TCPAddr)
+		ip, _ := netip.AddrFromSlice(tcp.IP)
+		if ip = ip.Unmap(); ip.IsUnspecified() || ip == local {
+			port = uint16(tcp.Port)
+		} else {
+			why = "not mapped: the listener is on " + ip.String() + ", but the router would forward to " +
+				local.String() + "; listen on 0.0.0.0 or on " + local.String()
+		}
+	}
+	if port == 0 && len(left) == 0 {
+		return nil, why
+	}
+	last := ""
+	k := portmap.NewKeeper(m, port, rec, func(st portmap.State) {
 		if st.Err != "" {
 			slog.Warn("port mapping", "err", st.Err)
-		} else if st.Mapping != nil {
-			slog.Info("port mapping", "protocol", st.Mapping.Protocol, "external", st.Mapping.External.String(),
-				"lifetime", st.Mapping.Lifetime.String())
+		}
+		if len(st.Left) > 0 {
+			slog.Warn("port mapping not removed", "left", portmap.LeftText(st.Left))
+		}
+		ext := ""
+		if st.Mapping != nil {
+			ext = st.Mapping.External.String()
+			if ext != last {
+				slog.Info("port mapping", "protocol", st.Mapping.Protocol, "external", ext,
+					"lifetime", st.Mapping.Lifetime.String())
+			}
+		}
+		if ext != last {
+			last = ext
+			changed()
 		}
 	})
-	return k, ""
+	return k, why
+}
+
+// mapRecord is home/portmap.json: every mapping this machine may have on
+// a router, written before each request so that a later run removes what
+// a crash left.
+type mapRecord struct{ path string }
+
+func (m *mapRecord) Load() ([]portmap.Mapping, error) {
+	b, err := os.ReadFile(m.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []portmap.Mapping
+	return out, json.Unmarshal(b, &out)
+}
+
+func (m *mapRecord) Save(held []portmap.Mapping) error {
+	if len(held) == 0 {
+		if err := os.Remove(m.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	b, err := json.Marshal(held)
+	if err != nil {
+		return err
+	}
+	tmp := m.path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, m.path)
 }
 
 // mappedAddr is the mapped external address, to verify by a dial-back
@@ -555,7 +649,8 @@ func mappedAddr(k *portmap.Keeper) []string {
 	return nil
 }
 
-// mappingView is the mapping as status and net check show it.
+// mappingView is the mapping as status and net check show it: nil when
+// there is nothing to say.
 func mappingView(k *portmap.Keeper, why string) *node.PortMapping {
 	if k == nil {
 		if why == "" {
@@ -564,15 +659,19 @@ func mappingView(k *portmap.Keeper, why string) *node.PortMapping {
 		return &node.PortMapping{Error: why}
 	}
 	st := k.State()
-	if st.Mapping == nil {
-		if st.Err == "" {
-			return nil // not tried yet
+	v := &node.PortMapping{NotRemoved: st.Left}
+	switch {
+	case st.Mapping != nil:
+		v.Protocol, v.External, v.Error = st.Mapping.Protocol, st.Mapping.External.String(), st.Err
+		if !st.Mapping.Expires.IsZero() && st.Mapping.Lifetime > 0 {
+			v.Expires = st.Mapping.Expires.UTC().Format("2006-01-02T15:04:05.000Z")
 		}
-		return &node.PortMapping{Error: st.Err}
-	}
-	v := &node.PortMapping{Protocol: st.Mapping.Protocol, External: st.Mapping.External.String()}
-	if !st.Mapping.Expires.IsZero() {
-		v.Expires = st.Mapping.Expires.UTC().Format("2006-01-02T15:04:05.000Z")
+	case st.Err != "":
+		v.Error = st.Err
+	case why != "":
+		v.Error = why
+	case len(st.Left) == 0:
+		return nil // not tried yet, or nothing left
 	}
 	return v
 }
@@ -707,7 +806,7 @@ func Connect(ctx context.Context, home string) (*localapi.Client, error) {
 	if err := PrepareHome(home); err != nil {
 		return nil, err
 	}
-	c := localapi.NewClient(sockPath(home))
+	c := Client(home)
 	if ping(ctx, c) == nil {
 		return c, nil
 	}
@@ -723,8 +822,8 @@ func Connect(ctx context.Context, home string) (*localapi.Client, error) {
 	cmd := exec.Command(exe, "daemon")
 	cmd.Env = append(os.Environ(), "A2P2_HOME="+home)
 	cmd.Stdout, cmd.Stderr = logf, logf
-	detach(cmd) // survive the caller's terminal
-	if err := cmd.Start(); err != nil {
+	if cmd, err = startDetached(cmd); err != nil { // survive the caller's terminal
+
 		return nil, fmt.Errorf("start daemon: %w", err)
 	}
 	go cmd.Wait()
@@ -768,6 +867,6 @@ func ping(ctx context.Context, c *localapi.Client) error {
 
 // Running reports whether a daemon is serving home, without starting one.
 func Running(ctx context.Context, home string) (*localapi.Client, bool) {
-	c := localapi.NewClient(sockPath(home))
+	c := Client(home)
 	return c, CheckHome(home) == nil && ping(ctx, c) == nil
 }

@@ -327,8 +327,10 @@ type (
 		Listen  string `json:"listen,omitempty"`
 		Request string `json:"request,omitempty"`
 		MapPort bool   `json:"map_port,omitempty"`
-		Applied string `json:"applied,omitempty"`
-		Reason  string `json:"reason,omitempty"`
+		// IPv4Only: a decision from before IPv6 (DESIGN 11): IPv4 only until decided again.
+		IPv4Only bool   `json:"ipv4_only,omitempty"`
+		Applied  string `json:"applied,omitempty"`
+		Reason   string `json:"reason,omitempty"`
 	}
 	NetResp struct {
 		Network
@@ -577,7 +579,7 @@ func RequestOf(q node.RequestView) Request {
 
 // NetworkOf renders a networking state.
 func NetworkOf(n node.Network) Network {
-	return Network{State: n.State, Listen: n.Listen, Request: n.Request, MapPort: n.MapPort}
+	return Network{State: n.State, Listen: n.Listen, Request: n.Request, MapPort: n.MapPort, IPv4Only: n.IPv4Only}
 }
 
 // AlertOf renders an alert.
@@ -843,7 +845,18 @@ func Handler(s *node.Surface, info Info) http.Handler {
 
 // Client talks to a daemon over its Unix socket.
 type Client struct {
-	hc *http.Client
+	hc  *http.Client
+	key func() string
+}
+
+// KeyHeader carries the local key, on Windows: the daemon writes a fresh
+// key into its home at each start and refuses a request without it.
+const KeyHeader = "A2P2-Local-Key"
+
+// WithKey makes c present key() on every call, when it is not empty.
+func (c *Client) WithKey(key func() string) *Client {
+	c.key = key
+	return c
 }
 
 // NewClient returns a client for the daemon listening on sock.
@@ -905,6 +918,11 @@ func (c *Client) CallRaw(ctx context.Context, name string, req, resp any) ([]byt
 	hr, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://a2p2/v1/"+name, &body)
 	if err != nil {
 		return nil, err
+	}
+	if c.key != nil {
+		if k := c.key(); k != "" {
+			hr.Header.Set(KeyHeader, k)
+		}
 	}
 	res, err := c.hc.Do(hr)
 	if err != nil {

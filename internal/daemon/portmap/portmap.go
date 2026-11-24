@@ -26,20 +26,53 @@ const (
 	UPnP   = "upnp"
 )
 
-// Mapping is a TCP port the router forwards to this machine.
+// Mapping is a TCP port the router forwards to this machine, or one it
+// may forward because it was asked: what Unmap needs to remove it. It is
+// written to disk before each request (Note), so a later run can remove
+// it.
 type Mapping struct {
-	Protocol string
-	Internal uint16
-	// External is the router's external address and the port it forwards.
-	External netip.AddrPort
-	// Lifetime is what the router granted; Expires when it ends.
-	Lifetime time.Duration
-	Expires  time.Time
+	Protocol string     `json:"protocol"`
+	Gateway  netip.Addr `json:"gateway"` // the router asked
+	Internal uint16     `json:"internal"`
+	// External is the router's external address and the port it forwards
+	// (the address is unknown until the router says it).
+	External netip.AddrPort `json:"external"`
+	// Lifetime is what the router granted (0 with UPnP: permanent);
+	// Expires when it ends.
+	Lifetime time.Duration `json:"lifetime"`
+	Expires  time.Time     `json:"expires"`
 
-	nonce   [12]byte // PCP
-	control string   // UPnP control URL
-	service string   // UPnP service type
+	Nonce   [12]byte `json:"nonce"`             // PCP
+	Control string   `json:"control,omitempty"` // UPnP control URL
+	Service string   `json:"service,omitempty"` // UPnP service type
 }
+
+// Key says which mappings are one on the router: PCP by nonce, NAT-PMP
+// by internal port (how each deletes), UPnP by control URL and external
+// port.
+func (m Mapping) Key() string {
+	switch m.Protocol {
+	case PCP:
+		return fmt.Sprintf("pcp %s %x", m.Gateway, m.Nonce)
+	case NATPMP:
+		return fmt.Sprintf("nat-pmp %s %d", m.Gateway, m.Internal)
+	}
+	return fmt.Sprintf("upnp %s %d", m.Control, m.External.Port())
+}
+
+// String describes m for a person.
+func (m Mapping) String() string {
+	ext := m.External.String()
+	if !m.External.Addr().IsValid() {
+		ext = fmt.Sprintf("port %d", m.External.Port())
+	}
+	return fmt.Sprintf("%s mapping %s on router %s", m.Protocol, ext, m.Gateway)
+}
+
+// Note is told about a request before it is sent (asking: something may
+// be created that Unmap(m) removes) and after a definite answer that it
+// created nothing (asking false). A Note that fails stops the request.
+type Note func(m Mapping, asking bool) error
 
 // Client talks to one gateway.
 type Client struct {
@@ -101,20 +134,24 @@ var errNoAnswer = errors.New("no answer")
 
 // Map asks for internal to be forwarded for lifetime, renewing prev if
 // given (same protocol first). It tries PCP, then NAT-PMP if the router
-// speaks only that, then UPnP, and says why each failed.
-func (c *Client) Map(ctx context.Context, internal uint16, lifetime time.Duration, prev *Mapping) (Mapping, error) {
+// speaks only that, then UPnP, and says why each failed. note is told of
+// every request that could create a mapping before it is sent.
+func (c *Client) Map(ctx context.Context, internal uint16, lifetime time.Duration, prev *Mapping, note Note) (Mapping, error) {
 	if !c.Gateway.IsValid() {
 		return Mapping{}, errors.New("portmap: no gateway found")
 	}
+	if note == nil {
+		note = func(Mapping, bool) error { return nil }
+	}
 	var why []string
 	if prev == nil || prev.Protocol != UPnP {
-		m, err := c.mapPCP(ctx, internal, lifetime, prev)
+		m, err := c.mapPCP(ctx, internal, lifetime, prev, note)
 		var old *oldVersion
 		switch {
 		case err == nil:
 			return m, nil
 		case errors.As(err, &old):
-			m, err := c.mapNATPMP(ctx, internal, lifetime, prev)
+			m, err := c.mapNATPMP(ctx, internal, lifetime, prev, note)
 			if err == nil {
 				return m, nil
 			}
@@ -126,7 +163,7 @@ func (c *Client) Map(ctx context.Context, internal uint16, lifetime time.Duratio
 	if ctx.Err() != nil {
 		return Mapping{}, ctx.Err()
 	}
-	m, err := c.mapUPnP(ctx, internal, lifetime, prev)
+	m, err := c.mapUPnP(ctx, internal, lifetime, prev, note)
 	if err == nil {
 		return m, nil
 	}
@@ -134,8 +171,12 @@ func (c *Client) Map(ctx context.Context, internal uint16, lifetime time.Duratio
 	return Mapping{}, fmt.Errorf("the router did not forward the port (%s)", strings.Join(why, "; "))
 }
 
-// Unmap removes m.
+// Unmap removes m. A mapping the router no longer holds counts as
+// removed; one on another router than this client's cannot be.
 func (c *Client) Unmap(ctx context.Context, m Mapping) error {
+	if m.Gateway.IsValid() && m.Gateway != c.Gateway {
+		return fmt.Errorf("it is on router %s, not on this network's router %s", m.Gateway, c.Gateway)
+	}
 	switch m.Protocol {
 	case PCP:
 		_, err := c.pcp(ctx, m.Internal, 0, &m)

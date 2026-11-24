@@ -2,7 +2,8 @@ package node
 
 // The dial-back (PROTOCOL 4.7): a member asks another member to connect
 // back to addresses it says are its own, and hears which of them completed
-// a pinned handshake with its own key. It is how a machine learns whether
+// a pinned handshake with its own key. Only the asker's source address and
+// addresses the responder's book already holds for it are ever dialled. It is how a machine learns whether
 // others can reach it, which it cannot see from inside. The rules of who
 // may ask, for which addresses and how often live here; the dialling
 // itself (TCP and TLS) is internal/peer's, behind Handshaker.
@@ -44,20 +45,26 @@ type DialBackRequest struct {
 }
 
 // DialBackResponse is its answer: the asked addresses at which the
-// asker's own key completed a handshake, in the order asked; and the
-// IP address the responder saw the request come from (a hint, never an
-// identity: PROTOCOL 4.7).
+// asker's own key completed a handshake, in the order asked; those the
+// responder would not dial for this asker (not its source IP address and
+// not in the responder's address book for its key); and the IP address
+// the responder saw the request come from (shown, never advertised:
+// PROTOCOL 4.7).
 type DialBackResponse struct {
-	V       int      `json:"v"`
-	Reached []string `json:"reached,omitempty"`
-	Saw     string   `json:"saw,omitempty"`
+	V        int      `json:"v"`
+	Reached  []string `json:"reached,omitempty"`
+	NotTried []string `json:"not_tried,omitempty"`
+	Saw      string   `json:"saw,omitempty"`
 }
+
+// NotTriedText is why a member did not try an address.
+const NotTriedText = "not an address this member can check for you"
 
 var (
 	dialBackRequestFields  = []string{"v", "addrs"}
-	dialBackResponseFields = []string{"v", "reached", "saw"}
+	dialBackResponseFields = []string{"v", "reached", "not_tried", "saw"}
 	dialBackRequestShape   = shape{"v": nil, "addrs": nil}
-	dialBackResponseShape  = shape{"v": nil, "reached": nil, "saw": nil}
+	dialBackResponseShape  = shape{"v": nil, "reached": nil, "not_tried": nil, "saw": nil}
 )
 
 // DecodeDialBackRequest checks a body already within MaxDialBackBody:
@@ -75,26 +82,43 @@ func DecodeDialBackRequest(body []byte) (*DialBackRequest, *PullError) {
 	if len(q.Addrs) == 0 || len(q.Addrs) > MaxAddrs {
 		return nil, badRequest("addrs")
 	}
-	for i, a := range q.Addrs {
-		if _, ok := literalAddr(a); !ok || slices.Contains(q.Addrs[:i], a) {
+	seen := map[netip.AddrPort]bool{}
+	for _, a := range q.Addrs {
+		ap, ok := literalAddr(a)
+		if !ok || seen[ap] { // repeats are found after normalising (::ffff:1.2.3.4 is 1.2.3.4)
 			return nil, badRequest("addrs")
 		}
+		seen[ap] = true
 	}
 	return &q, nil
 }
 
 // DecodeDialBackResponse decodes a 200 body and checks it against the
-// request it answers: every reached address is one that was asked.
+// request it answers: every reached and not-tried address is one that was
+// asked, none is both, and saw is empty or an IP address literal without
+// a zone, so nothing else is ever stored or printed.
 func DecodeDialBackResponse(body []byte, asked []string) (*DialBackResponse, error) {
 	var r DialBackResponse
 	if !strictPull(body, dialBackResponseFields, dialBackResponseShape) || json.Unmarshal(body, &r) != nil ||
-		r.V != PullVersion || len(r.Reached) > len(asked) || len(r.Saw) > MaxAddrBytes {
+		r.V != PullVersion || len(r.Reached)+len(r.NotTried) > len(asked) {
 		return nil, errNotStrictResponse
 	}
-	for _, a := range r.Reached {
+	for _, a := range append(slices.Clone(r.Reached), r.NotTried...) {
 		if !slices.Contains(asked, a) {
 			return nil, errNotStrictResponse
 		}
+	}
+	for _, a := range r.NotTried {
+		if slices.Contains(r.Reached, a) {
+			return nil, errNotStrictResponse
+		}
+	}
+	if r.Saw != "" {
+		ip, err := netip.ParseAddr(r.Saw)
+		if err != nil || ip.Zone() != "" || len(r.Saw) > MaxAddrBytes {
+			return nil, errNotStrictResponse
+		}
+		r.Saw = ip.Unmap().String()
 	}
 	return &r, nil
 }
@@ -144,11 +168,17 @@ type Handshaker interface {
 	Handshake(ctx context.Context, addr, key string) bool
 }
 
+// AddrLookup is the address book as the responder reads it.
+type AddrLookup interface {
+	Addrs(node string) []string
+}
+
 // DialBackServer answers dial-back requests for one machine.
 type DialBackServer struct {
-	r   *Rooms
-	hs  Handshaker
-	now func() time.Time
+	r    *Rooms
+	hs   Handshaker
+	book AddrLookup
+	now  func() time.Time
 
 	mu   sync.Mutex
 	per  map[string]*tokens
@@ -179,9 +209,22 @@ func (t *tokens) take(now time.Time, burst float64, every time.Duration) (bool, 
 const maxDialBackPeers = 1024
 
 // NewDialBackServer answers for the machine whose rooms are r, dialling
-// through hs.
-func NewDialBackServer(r *Rooms, hs Handshaker) *DialBackServer {
-	return &DialBackServer{r: r, hs: hs, now: r.m.now, per: map[string]*tokens{}}
+// through hs only addresses that book already holds for the asker, or the
+// asker's own source address.
+func NewDialBackServer(r *Rooms, hs Handshaker, book AddrLookup) *DialBackServer {
+	return &DialBackServer{r: r, hs: hs, book: book, now: r.m.now, per: map[string]*tokens{}}
+}
+
+// mayDial says whether the responder dials ap for the asker from that
+// connected from srcIP: its IP is the source IP (any port), or the
+// endpoint is one the book already holds for from, which this machine
+// would dial while pulling anyway. Nothing else: a member can cause a TCP
+// connection and a TLS ClientHello only to itself.
+func (s *DialBackServer) mayDial(ap netip.AddrPort, srcIP netip.Addr, known map[netip.AddrPort]bool) bool {
+	if !dialable(ap.Addr(), srcIP) {
+		return false
+	}
+	return ap.Addr() == srcIP || known[ap]
 }
 
 // SharesRoom reports whether node is, now, a member of a room this
@@ -232,15 +275,25 @@ func (s *DialBackServer) DialBack(ctx context.Context, from, source string, q *D
 	defer s.leave()
 	src, _ := netip.ParseAddrPort(source)
 	srcIP := src.Addr().Unmap()
+	known := map[netip.AddrPort]bool{}
+	if s.book != nil {
+		for _, a := range s.book.Addrs(from) {
+			if ap, ok := literalAddr(a); ok {
+				known[ap] = true
+			}
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, DialBackTimeout)
 	defer cancel()
 	ok := make([]bool, len(q.Addrs))
+	tried := make([]bool, len(q.Addrs))
 	var wg sync.WaitGroup
 	for i, a := range q.Addrs {
 		ap, valid := literalAddr(a)
-		if !valid || !dialable(ap.Addr(), srcIP) {
+		if !valid || !s.mayDial(ap, srcIP, known) {
 			continue
 		}
+		tried[i] = true
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -249,14 +302,21 @@ func (s *DialBackServer) DialBack(ctx context.Context, from, source string, q *D
 	}
 	wg.Wait()
 	resp := &DialBackResponse{V: PullVersion}
+	n := 0
 	for i, a := range q.Addrs {
-		if ok[i] {
+		switch {
+		case ok[i]:
 			resp.Reached = append(resp.Reached, a)
+		case !tried[i]:
+			resp.NotTried = append(resp.NotTried, a)
+		}
+		if tried[i] {
+			n++
 		}
 	}
-	// Unless every address asked was reached, answer at the deadline: how
-	// long a refused or a silent third party took is not told either.
-	if len(resp.Reached) < len(q.Addrs) {
+	// Unless every address tried was reached, answer at the deadline: how
+	// long a refused or a silent address took is not told either.
+	if len(resp.Reached) < n {
 		<-ctx.Done()
 	}
 	if src.IsValid() {

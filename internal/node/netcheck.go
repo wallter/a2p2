@@ -8,7 +8,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -18,10 +20,10 @@ const (
 	ProbeReached     = "reached"     // TCP connected and the expected key completed the handshake
 	ProbeRefused     = "refused"     // nothing listens there (connection refused)
 	ProbeTimeout     = "timed_out"   // no answer within the dial or handshake timeout
-	ProbeWrongKey    = "wrong_key"   // an a2p2 machine answered with another key
+	ProbeWrongKey    = "wrong_key"   // the certificate offered names another key than expected (not proof that key is held)
 	ProbeNotA2P2     = "not_a2p2"    // something answered TCP, but not an a2p2 machine's TLS
 	ProbeUnreachable = "unreachable" // no route, network down, or another dial error
-	ProbeNotTried    = "not_tried"   // over the limit of one check
+	ProbeNotTried    = "not_tried"   // over the limit of one check, or not routable from here (Detail says)
 )
 
 // maxProbes bounds the addresses one check tries; probeParallel how many
@@ -65,9 +67,17 @@ type NetCheck struct {
 	Advertised []string      `json:"advertised"`
 	Members    []MemberCheck `json:"members"`
 	Reach      Reach         `json:"reach"`
-	// Mapping is the router's port mapping, when a person asked for one.
+	// IPv4Only: the decision was recorded before a2p2 listened on IPv6
+	// (Network.IPv4Only).
+	IPv4Only bool `json:"ipv4_only,omitempty"`
+	// Mapping is the router's port mapping, when a person asked for one
+	// or one is left to remove.
 	Mapping *PortMapping `json:"mapping,omitempty"`
-	Advice  string       `json:"advice"`
+	// Forward, when members see this machine at a public address it does
+	// not advertise and no mapping was asked for, is the config line that
+	// advertises it, for a person who forwarded the port by hand.
+	Forward string `json:"forward,omitempty"`
+	Advice  string `json:"advice"`
 }
 
 // PortMapping is the router's forwarding of the listening port (a2p2 net
@@ -79,15 +89,23 @@ type PortMapping struct {
 	// Reached: a member reached External, so it is advertised.
 	Reached bool   `json:"reached"`
 	Error   string `json:"error,omitempty"` // why the last attempt failed
+	// NotRemoved is the mappings (of this run or an earlier one) that may
+	// still be on the router and could not be removed yet, each with why.
+	NotRemoved []string `json:"not_removed,omitempty"`
 }
 
-// MappingNow is the mapping as shown, nil when none was asked for.
+// MappingNow is the mapping as shown: nil when none was asked for and
+// none is left to remove.
 func (s *Surface) MappingNow() *PortMapping {
-	if s.mapping == nil || s.net.State != NetworkOn || !s.net.MapPort {
+	if s.mapping == nil {
 		return nil
 	}
 	m := s.mapping()
+	asked := s.net.State == NetworkOn && s.net.MapPort
 	if m == nil {
+		if !asked {
+			return nil
+		}
 		return &PortMapping{Error: "not mapped yet"}
 	}
 	c := *m
@@ -118,7 +136,7 @@ func (s *Surface) ReachNow() Reach {
 // reached to dial back. With networking off it dials nothing.
 func (s *Surface) NetCheck(ctx context.Context) (NetCheck, error) {
 	nc := NetCheck{State: s.net.State, Listen: s.net.Listen, Fault: s.fault(), Advertised: s.Addrs(),
-		Members: []MemberCheck{}}
+		Members: []MemberCheck{}, IPv4Only: s.net.State == NetworkOn && s.net.IPv4Only}
 	nc.Listening = nc.State == NetworkOn && nc.Fault == ""
 	if nc.Advertised == nil {
 		nc.Advertised = []string{}
@@ -156,7 +174,7 @@ func (s *Surface) NetCheck(ctx context.Context) (NetCheck, error) {
 			if _, ok := results[k]; ok {
 				continue
 			}
-			results[k] = AddrCheck{Addr: a, Result: ProbeNotTried}
+			results[k] = AddrCheck{Addr: a, Result: ProbeNotTried, Detail: "over the limit of one check"}
 			if len(todo) < maxProbes && s.probe != nil {
 				todo = append(todo, k)
 			}
@@ -200,9 +218,47 @@ func (s *Surface) NetCheck(ctx context.Context) (NetCheck, error) {
 		nc.Reach = s.ReachNow()
 	}
 	nc.Mapping = s.MappingNow()
+	nc.Forward = forwardLine(nc)
 	nc.Advice = Advice(nc)
 	return nc, nil
 }
+
+// forwardLine is the config line for a port forwarded by hand: when no
+// mapping was asked for, members could not connect, and they see this
+// machine at a public address it does not advertise. What members say
+// they see is never advertised by itself (DESIGN 11); a person who knows
+// the router forwards the port says so in config.json.
+func forwardLine(nc NetCheck) string {
+	_, port, err := net.SplitHostPort(nc.Listen)
+	if err != nil || nc.Mapping != nil || nc.Reach.State == ReachYes || !nc.Listening {
+		return ""
+	}
+	for _, x := range nc.Reach.Saw {
+		ip, err := netip.ParseAddr(x)
+		if err != nil || !ip.IsGlobalUnicast() || ip.IsPrivate() || ula.Contains(ip) || cgnat.Contains(ip) {
+			continue
+		}
+		a := net.JoinHostPort(ip.String(), port)
+		if slices.Contains(nc.Advertised, a) {
+			continue
+		}
+		list := append([]string{a}, nc.Advertised...)
+		if len(list) > MaxAddrs {
+			list = list[:MaxAddrs]
+		}
+		q := make([]string, len(list))
+		for i, l := range list {
+			q[i] = strconv.Quote(l)
+		}
+		return `"advertise": [` + strings.Join(q, ", ") + `]`
+	}
+	return ""
+}
+
+var (
+	ula   = netip.MustParsePrefix("fc00::/7")
+	cgnat = netip.MustParsePrefix("100.64.0.0/10") // shared address space (RFC 6598)
+)
 
 // behindAnotherNAT: the router's external IP address is not one members
 // saw this machine come from.
@@ -268,6 +324,10 @@ func Advice(nc NetCheck) string {
 		return "Members cannot connect to this machine and the router did not forward the port (" +
 			nc.Mapping.Error + "): run it as outbound-only (a2p2 net on --outbound-only) and make sure at least one " +
 			"member of each room is reachable."
+	case nc.Reach.State == ReachNo && nc.Forward != "":
+		return "Members cannot connect to this machine; if you forwarded port " + port + " on the router to it by " +
+			"hand, add " + nc.Forward + " to config.json and restart, otherwise run it as outbound-only " +
+			"(a2p2 net on --outbound-only)."
 	case nc.Reach.State == ReachNo:
 		s := "Members cannot connect to this machine: run it as outbound-only (a2p2 net on --outbound-only) and make " +
 			"sure at least one member of each room is reachable"

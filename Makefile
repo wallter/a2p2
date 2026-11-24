@@ -9,8 +9,10 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 build:            ## build bin/a2p2
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/a2p2
 
+# -timeout: internal/node takes about four minutes under the race detector
+# here and more than Go's default ten on a two-core hosted runner.
 test:             ## unit, property and integration tests with the race detector
-	$(GO) test -race -count=1 ./...
+	$(GO) test -race -count=1 -timeout 30m ./...
 
 fmt:              ## fail if any file is not gofmt-clean
 	@out=$$(gofmt -l cmd internal); [ -z "$$out" ] || { echo "gofmt needed:"; echo "$$out"; exit 1; }
@@ -18,9 +20,11 @@ fmt:              ## fail if any file is not gofmt-clean
 vet:
 	$(GO) vet ./...
 
-windows:          ## a2p2 does not run on Windows yet, but it must build and vet there
+windows:          ## build and vet (test files included) for Windows on amd64 and arm64; running there is the dispatch-only CI job
 	GOOS=windows GOARCH=amd64 $(GO) build ./...
 	GOOS=windows GOARCH=amd64 $(GO) vet ./...
+	GOOS=windows GOARCH=arm64 $(GO) build ./...
+	GOOS=windows GOARCH=arm64 $(GO) vet ./...
 
 licences:         ## requirement I4: only allow-listed direct dependencies; prints their licence files
 	scripts/licences.sh
@@ -69,11 +73,11 @@ e2e-local: build  ## OpenCode, Hermes, Pi on local Ollama models: make e2e-local
 review:           ## independent review of uncommitted changes: make review WHO=sol
 	scripts/review.sh $${WHO:-sol}
 
-release:          ## static binaries a2p2_<os>_<arch> and SHA256SUMS in dist/ (VERSION=v1.2.3 to name it)
-	@rm -rf dist && mkdir dist && for t in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64; do \
-	  os=$${t%/*}; arch=$${t#*/}; \
+release:          ## static binaries a2p2_<os>_<arch> (.exe on Windows) and SHA256SUMS in dist/ (VERSION=v1.2.3 to name it)
+	@rm -rf dist && mkdir dist && for t in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/arm64 windows/amd64; do \
+	  os=$${t%/*}; arch=$${t#*/}; ext=""; [ "$$os" = windows ] && ext=.exe; \
 	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags '$(LDFLAGS)' \
-	    -o dist/a2p2_$${os}_$$arch ./cmd/a2p2 || exit 1; done; \
+	    -o dist/a2p2_$${os}_$$arch$$ext ./cmd/a2p2 || exit 1; done; \
 	cd dist && if command -v sha256sum >/dev/null; then sha256sum a2p2_*; else shasum -a 256 a2p2_*; fi > SHA256SUMS
 
 # The same tests on Linux, in a container, without leaving this machine:
@@ -83,7 +87,7 @@ release:          ## static binaries a2p2_<os>_<arch> and SHA256SUMS in dist/ (V
 GO_IMAGE ?= golang:$(shell awk '/^go /{print $$2}' go.mod)
 check-linux:      ## go vet and the race tests on Linux in a container (needs Docker)
 	docker run --rm -v "$(CURDIR)":/src:ro -v a2p2-gomod:/go/pkg/mod -v a2p2-gocache:/root/.cache/go-build \
-	  -w /work $(GO_IMAGE) sh -c 'cp -a /src/. /work/ && rm -rf /work/bin /work/dist /work/.chaos /work/.a2p2-dev /work/.claude && go vet ./... && go test -race -count=1 ./...'
+	  -w /work $(GO_IMAGE) sh -c 'cp -a /src/. /work/ && rm -rf /work/bin /work/dist /work/.chaos /work/.a2p2-dev /work/.claude && go vet ./... && go test -race -count=1 -timeout 30m ./...'
 
 prerelease:       ## the local gate before a tag: check, lint, vuln, Linux in a container, one chaos run (its default length: shorter runs are inconclusive)
 	$(MAKE) check

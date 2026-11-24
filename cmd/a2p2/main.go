@@ -14,9 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -304,11 +302,7 @@ func run(ctx context.Context, name string, args []string) (err error) {
 			return err
 		}
 		fmt.Println(st.UI)
-		if runtime.GOOS == "darwin" {
-			_ = exec.Command("open", st.UI).Start()
-		} else {
-			_ = exec.Command("xdg-open", st.UI).Start()
-		}
+		openURL(st.UI) // tty_unix.go, tty_windows.go
 		return nil
 	case "trace":
 		if len(rest) != 1 {
@@ -509,6 +503,9 @@ func status(c *cmd) error {
 			fmt.Printf("network  %s, %s\n", st.Network.State, st.Network.Reason)
 		case st.Network.State == "on":
 			fmt.Printf("network  on, listening on %s\n", addressText(st.Network.Listen))
+			if st.Network.IPv4Only {
+				fmt.Println("         IPv4 only: decided before a2p2 listened on IPv6; run a2p2 net on again to add it")
+			}
 			if len(st.Listen) > 0 {
 				addresses := make([]string, 0, len(st.Listen))
 				for _, addr := range st.Listen {
@@ -970,6 +967,9 @@ func netCmd(c *cmd, args []string) error {
 		"on":       "This machine will listen on " + addressText(req.Listen) + ". Anyone who can reach this address can connect. Only room members can fetch room messages. This machine will also connect out.",
 	}[req.State]
 	fmt.Fprintln(os.Stderr, what)
+	if req.State == "on" {
+		fmt.Fprintln(os.Stderr, daemon.FamiliesText(req.Listen))
+	}
 	if *mapPort {
 		req.MapPort = true
 		fmt.Fprintln(os.Stderr, node.MapPortText)

@@ -24,7 +24,7 @@ make fuzz                       # fuzz the record and entry decoders (FUZZTIME=1
 make lint vuln                  # staticcheck, govulncheck (need network)
 make check-linux                # go vet and the race tests on Linux in a Docker container
 make chaos                      # real daemons in Docker containers through kills and network splits
-make prerelease                 # before a tag: check, lint, vuln, check-linux and a short chaos run
+make prerelease                 # before a tag: check, lint, vuln, check-linux and one chaos run
 make e2e HARNESS=claude         # real harness end to end; spends model tokens
 make review WHO=sol             # review of uncommitted changes by another model family
 ```

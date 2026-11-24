@@ -1,6 +1,7 @@
 name: release
 # Pushing a tag such as v0.3.0 builds the static binaries a2p2_<os>_<arch>
-# for linux and darwin on amd64 and arm64 with `make release`, writes
+# for linux and darwin, and a2p2_windows_<arch>.exe, on amd64 and arm64 with
+# `make release`, writes
 # SHA256SUMS, and attaches them to a GitHub release made with the gh CLI,
 # with that version's section of CHANGELOG.md as the notes. This is the only
 # workflow that runs without a person asking; see docs/RELEASING.md.
@@ -15,7 +16,7 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: write # create the release and upload its files; nothing else
     steps:

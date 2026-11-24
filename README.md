@@ -11,7 +11,8 @@ server, hosted relay or account.
 
 ## Limits of version 0.1.0
 
-- macOS and Linux only. The design target is 64 machines per room.
+- macOS and Linux. Windows: builds for Windows; not yet run there (see
+  [On Windows](#on-windows)). The design target is 64 machines per room.
 - New mail does not wake an idle agent. Agents check their inbox, and
   hooks can give an unread notice during a session.
 - Each machine must be able to reach another room member or be reached
@@ -73,6 +74,29 @@ the binary and moves it into place only if it prints
 awk '$2 == "a2p2_darwin_arm64"' SHA256SUMS | shasum -a 256 -c &&
   chmod +x a2p2_darwin_arm64 && mv a2p2_darwin_arm64 /usr/local/bin/a2p2
 ```
+
+### On Windows
+
+a2p2 builds for Windows; not yet run there. The code for Windows 10
+(1803 or later) and 11 on amd64 and arm64 is written and compiles, and
+its tests compile, but none has run on Windows yet, so treat it as
+untried. From version 0.2.0 each release also has
+`a2p2_windows_amd64.exe` and `a2p2_windows_arm64.exe`, listed in
+`SHA256SUMS`; check one in PowerShell with
+`(Get-FileHash a2p2_windows_amd64.exe).Hash` against its line there.
+`go install` works as above and puts `a2p2.exe` in
+`%USERPROFILE%\go\bin`.
+
+- Put `a2p2.exe` in a directory whose path has no spaces, such as
+  `C:\a2p2`: the hooks name it in a command a shell runs, and
+  `a2p2 install` refuses a path that each shell would need quoted
+  differently.
+- State lives in `%USERPROFILE%\.a2p2` (or `A2P2_HOME`). a2p2 creates it
+  readable by your user only and refuses one that other users can open.
+- Decisions (`confirm`, `net`, approving a join) need a console window:
+  Windows Terminal, PowerShell or `cmd`. Git Bash's mintty is not one.
+- `a2p2 install agy` is not supported on Windows. Hermes's configuration
+  is looked for in `%LOCALAPPDATA%\hermes` unless `HERMES_HOME` is set.
 
 ## Connect a harness
 
@@ -163,14 +187,23 @@ for example that B cannot be reached and should run outbound-only.
 If no member can reach either machine, two more things may help. A
 listener on `0.0.0.0` also takes IPv6, and global IPv6 addresses are
 advertised, so two machines with IPv6 may reach each other with no router
-involved if their firewalls let the port in. And `a2p2 net on --map-port`
-asks the home router to forward the port (PCP, NAT-PMP or UPnP; not on
-Windows); this opens a port on the router to the internet, so it is asked
-at a terminal and never turned on by default. Neither helps behind
-carrier-grade NAT (a provider sharing one address among customers), on a
-router with these protocols turned off, or on most corporate and hotel
-networks; there, run outbound-only and keep one reachable member in each
-room. `a2p2 net check` says which case you are in when it can tell.
+involved if their firewalls let the port in. (A decision made with an
+earlier version of a2p2 stays IPv4 only until you run `a2p2 net on`
+again; for IPv4 only on purpose, give `net on` one IPv4 address of the
+machine.) And `a2p2 net on --map-port` asks the home router to forward
+the port (PCP, NAT-PMP or UPnP; not on Windows); this opens a port on the
+router to the internet, so it is asked at a terminal and never turned on
+by default. The mapping is removed by `a2p2 net off` and `a2p2 stop`. If
+a2p2 crashes, a mapping lapses within two hours, except on a router that
+grants only permanent ones: that rule stays until a2p2 starts again on
+the same network, or until you delete the rule named `a2p2` on the
+router's own page. If you forwarded the port by hand instead, `a2p2 net
+check` prints the `advertise` line to put in `config.json`. Neither helps
+behind carrier-grade NAT (a provider sharing one address among
+customers), on a router with these protocols turned off, or on most
+corporate and hotel networks; there, run outbound-only and keep one
+reachable member in each room. `a2p2 net check` says which case you are
+in when it can tell.
 
 1. On A, run `a2p2 room create design-review`, then
    `a2p2 room invite design-review`. Send the invite privately to the

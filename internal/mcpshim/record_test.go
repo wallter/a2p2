@@ -27,7 +27,7 @@ type recorder struct {
 
 func record(t *testing.T, real string) (*localapi.Client, *recorder) {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "a2p2")
+	dir, err := os.MkdirTemp(sockTemp(), "a2p2")
 	if err != nil {
 		t.Fatal(err)
 	}

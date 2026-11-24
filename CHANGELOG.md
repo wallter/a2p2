@@ -19,14 +19,25 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   or unknown", checked by asking members to connect back (a new peer
   request, `/p/v2/dialback`; older machines answer that they do not know
   it, and nothing else changes).
-- **IPv6:** a listener on `0.0.0.0` or `::` takes IPv4 and IPv6, and global
-  IPv6 addresses are advertised (stable before temporary, never
-  link-local). The address members see is tried and advertised only once
-  a member reaches it.
+- **IPv6:** after a new `a2p2 net on`, a listener on `0.0.0.0` or `::`
+  takes IPv4 and IPv6, and global IPv6 addresses are advertised (stable
+  before temporary, never link-local). A networking decision made with an
+  earlier version stays IPv4 only until you run `a2p2 net on` again.
 - **`a2p2 net on --map-port`** asks the router to forward the port (PCP,
   NAT-PMP, then UPnP), only when a person decides it at a terminal. It is
-  renewed while on and removed on `net off` and on a clean stop; `status`
-  and `net check` show it. Not available on Windows.
+  renewed while on, removed on `net off`, when the listener stops and on a
+  clean stop, and what a crash left is removed at the next start; `status`
+  and `net check` show it and any removal that failed. The router's
+  address is advertised only while a member reaches it; what members say
+  they see is shown, never advertised. Not available on Windows.
+- **Windows support, built but not yet run there.** The daemon and the CLI
+  no longer refuse to start on Windows 10 (1803 or later) and 11. The
+  home is created for your user only and refused if others can open it,
+  and every local API call carries a key the daemon writes into the home
+  at each start (D-windows). Releases include `a2p2_windows_amd64.exe`
+  and `a2p2_windows_arm64.exe`. On Windows, `a2p2 install` refuses a
+  binary path with spaces for the harnesses whose hooks run it in a
+  shell, and refuses `agy`. Nothing changes on macOS or Linux.
 
 ## [0.1.0] - 2026-11-24
 

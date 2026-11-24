@@ -7,9 +7,14 @@ package daemon
 // be (addrFlags, build-tagged).
 
 import (
+	"errors"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
+	"strings"
+	"sync"
+	"time"
 )
 
 // ifAddr is one address of an interface, as the system reports it.
@@ -98,6 +103,65 @@ func sameSite48(a, b netip.Addr) bool {
 	return err == nil && p.Contains(b)
 }
 
+// FamiliesText says, for the person deciding a2p2 net on listen, which
+// address families the listener takes and the IPv6 addresses it would
+// advertise now (DESIGN 11).
+func FamiliesText(listen string) string {
+	host, port, err := net.SplitHostPort(listen)
+	ip, perr := netip.ParseAddr(host)
+	if err != nil || (perr != nil && host != "") {
+		return ""
+	}
+	if host != "" && !ip.IsUnspecified() {
+		if ip.Is4() {
+			return "It listens on IPv4 only, at that one address."
+		}
+		return "It listens on IPv6 only, at that one address."
+	}
+	p, _ := strconv.Atoi(port)
+	var v6 []string
+	for _, a := range advertisable(localAddrs(), p, false) {
+		if strings.HasPrefix(a, "[") {
+			v6 = append(v6, a)
+		}
+	}
+	s := "It listens on IPv4 and IPv6. "
+	if len(v6) == 0 {
+		s += "This machine has no global IPv6 address now, so it advertises none."
+	} else {
+		s += "It advertises these IPv6 addresses beside its IPv4 ones: " + strings.Join(v6, ", ") + "."
+	}
+	return s + " For IPv4 only, set listen to one IPv4 address of this machine, for example 192.168.1.5:" + port + "."
+}
+
+// advertisable is chooseAdvertised, IPv4 only for a decision recorded
+// before IPv6 (Network.IPv4Only).
+func advertisable(addrs []ifAddr, port int, ipv4Only bool) []string {
+	out := chooseAdvertised(addrs, port)
+	if ipv4Only {
+		out = slices.DeleteFunc(out, func(a string) bool { return strings.HasPrefix(a, "[") })
+	}
+	return out
+}
+
+// liveUsable is usableFrom over the interfaces as they are now, read
+// again at most every 30 seconds: for every dial path (pulls, dial-backs
+// asked, net check probes and joins).
+func liveUsable() func(addr string) bool {
+	var mu sync.Mutex
+	var at time.Time
+	var f func(string) bool
+	return func(addr string) bool {
+		mu.Lock()
+		if f == nil || time.Since(at) > 30*time.Second {
+			f, at = usableFrom(localAddrs()), time.Now()
+		}
+		g := f
+		mu.Unlock()
+		return g(addr)
+	}
+}
+
 // usableFrom says whether a peer's address is worth dialling from here:
 // a unique-local IPv6 address only if this machine holds one in the same
 // /48 itself (otherwise it cannot be routed from here).
@@ -122,19 +186,25 @@ func usableFrom(local []ifAddr) func(addr string) bool {
 	}
 }
 
-// gatewayLocal is the default gateway and this machine's address on its
-// network, or invalid addresses when either is unknown.
+// gatewayLocal is the default route's gateway and this machine's IPv4
+// address on that route's interface (the source address its packets to
+// the gateway carry): the one in the gateway's subnet. With several
+// uplinks only the default route is used: the one with the lowest metric
+// on Linux, the unscoped one on macOS.
 func gatewayLocal() (gw, local netip.Addr, err error) {
-	gw, err = defaultGateway()
+	gw, iface, err := defaultGateway()
 	if err != nil {
 		return netip.Addr{}, netip.Addr{}, err
 	}
 	ifaces, _ := net.Interfaces()
 	for _, ifc := range ifaces {
+		if iface != "" && ifc.Name != iface {
+			continue
+		}
 		as, _ := ifc.Addrs()
 		for _, a := range as {
 			ipn, ok := a.(*net.IPNet)
-			if !ok {
+			if !ok || ipn.IP.To4() == nil {
 				continue
 			}
 			if ipn.Contains(gw.AsSlice()) {
@@ -143,5 +213,5 @@ func gatewayLocal() (gw, local netip.Addr, err error) {
 			}
 		}
 	}
-	return gw, netip.Addr{}, nil
+	return netip.Addr{}, netip.Addr{}, errors.New("no address of this machine is on the default gateway's network")
 }

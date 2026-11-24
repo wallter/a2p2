@@ -126,6 +126,9 @@ type machine struct {
 	// router, if set, is the fake router port mapping talks to; without
 	// one a test machine finds no gateway, so no test reaches a real one.
 	router portmap.Mapper
+	// local, if valid, is this machine's address on the fake router's
+	// network; otherwise 127.0.0.1, where the test listener is.
+	local netip.Addr
 }
 
 func (m *machine) gateway() (gw, local netip.Addr, err error) {
@@ -134,7 +137,11 @@ func (m *machine) gateway() (gw, local netip.Addr, err error) {
 	if m.router == nil {
 		return netip.Addr{}, netip.Addr{}, errors.New("no router in tests")
 	}
-	return netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("127.0.0.1"), nil
+	local = netip.MustParseAddr("127.0.0.1")
+	if m.local.IsValid() {
+		local = m.local
+	}
+	return netip.MustParseAddr("127.0.0.1"), local, nil
 }
 
 func (m *machine) mapper(netip.Addr, netip.Addr) portmap.Mapper {
@@ -160,7 +167,7 @@ func newMachineWith(t *testing.T, name string, prepare func(home string)) *machi
 
 func newMachineOpts(t *testing.T, name string, prepare func(home string), realBind bool) *machine {
 	t.Helper()
-	home, err := os.MkdirTemp("/tmp", "a2p2")
+	home, err := os.MkdirTemp(sockTemp(), "a2p2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +207,7 @@ func (m *machine) start() {
 	case <-time.After(10 * time.Second):
 		m.t.Fatal("daemon did not start")
 	}
-	m.c = localapi.NewClient(SockPath(m.home))
+	m.c = Client(m.home)
 	m.node = call[localapi.Status](m, "status", localapi.Empty{}).Node
 }
 

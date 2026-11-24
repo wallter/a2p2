@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // Identity is a node's long-lived Ed25519 key. The node id is the public key.
@@ -54,7 +55,9 @@ func LoadIdentity(home string) (*Identity, error) {
 	if err != nil {
 		return nil, err
 	}
-	if st.Mode().Perm()&0o077 != 0 {
+	// Windows has no file modes (Go reports 0666); the key is guarded by
+	// the home's access control list, which the daemon checks.
+	if runtime.GOOS != "windows" && st.Mode().Perm()&0o077 != 0 {
 		return nil, fmt.Errorf("%s is readable by other users (mode %o); run: chmod 600 %s", path, st.Mode().Perm(), path)
 	}
 	seed, err := hex.DecodeString(string(trimSpace(b)))

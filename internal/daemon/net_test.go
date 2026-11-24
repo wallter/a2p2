@@ -2,10 +2,14 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -89,47 +93,68 @@ func TestThePeerListenerOnAnUnspecifiedHostTakesIPv4AndIPv6(t *testing.T) {
 	}
 }
 
-// fakeRouter is a portmap.Mapper that counts mappings held.
+// fakeRouter is a portmap.Mapper that keeps the mappings it holds; while
+// failUnmap is set it fails every removal.
 type fakeRouter struct {
-	mu     sync.Mutex
-	held   int
-	maps   int
-	unmaps int
+	mu        sync.Mutex
+	held      map[string]bool
+	unmaps    int
+	failUnmap bool
 }
 
-func (f *fakeRouter) Map(_ context.Context, internal uint16, _ time.Duration, prev *portmap.Mapping) (portmap.Mapping, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.maps++
-	if prev == nil {
-		f.held++
+func newFakeRouter() *fakeRouter { return &fakeRouter{held: map[string]bool{}} }
+
+func (f *fakeRouter) mapping(internal uint16) portmap.Mapping {
+	return portmap.Mapping{Protocol: portmap.PCP, Gateway: netip.MustParseAddr("127.0.0.1"), Internal: internal,
+		Nonce: [12]byte{7}, Lifetime: time.Hour, Expires: time.Now().Add(time.Hour),
+		External: netip.MustParseAddrPort("198.51.100.7:40001")}
+}
+
+func (f *fakeRouter) Map(_ context.Context, internal uint16, _ time.Duration, _ *portmap.Mapping, note portmap.Note) (portmap.Mapping, error) {
+	m := f.mapping(internal)
+	if err := note(m, true); err != nil {
+		return portmap.Mapping{}, err
 	}
-	return portmap.Mapping{Protocol: portmap.PCP, Internal: internal, Lifetime: time.Hour, Expires: time.Now().Add(time.Hour),
-		External: netip.MustParseAddrPort("198.51.100.7:40001")}, nil
-}
-
-func (f *fakeRouter) Unmap(context.Context, portmap.Mapping) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.held[m.Key()] = true
+	return m, nil
+}
+
+func (f *fakeRouter) Unmap(_ context.Context, m portmap.Mapping) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failUnmap {
+		return errors.New("no answer")
+	}
 	f.unmaps++
-	f.held--
+	delete(f.held, m.Key())
 	return nil
 }
 
 func (f *fakeRouter) count() (held, unmaps int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.held, f.unmaps
+	return len(f.held), f.unmaps
+}
+
+func (f *fakeRouter) setFail(b bool) { f.mu.Lock(); f.failUnmap = b; f.mu.Unlock() }
+
+func (m *machine) useRouter(r portmap.Mapper, local string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.router = r
+	if local != "" {
+		m.local = netip.MustParseAddr(local)
+	}
 }
 
 // Port mapping happens only when decided, is shown in status, and is
 // removed on net off, on a decision without it, and on a stop.
 func TestPortMappingIsShownAndRemovedOnNetOffAnotherDecisionAndStop(t *testing.T) {
 	m := newMachineWith(t, "a", nil)
-	r := &fakeRouter{}
-	m.mu.Lock()
-	m.router = r
-	m.mu.Unlock()
+	r := newFakeRouter()
+	m.useRouter(r, "")
 	listen := m.ln.ln.Addr().String()
 	m.setNet(node.NetworkOn)
 	if held, _ := r.count(); held != 0 {
@@ -157,6 +182,9 @@ func TestPortMappingIsShownAndRemovedOnNetOffAnotherDecisionAndStop(t *testing.T
 	if held, unmaps := r.count(); held != 0 || unmaps != 3 {
 		t.Fatalf("after stop: held %d, removed %d times", held, unmaps)
 	}
+	if _, err := os.Stat(filepath.Join(m.home, "portmap.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("record left after a clean stop: %v", err)
+	}
 }
 
 // Without a router (here: none found), mapping says why and the machine
@@ -166,5 +194,88 @@ func TestPortMappingWithoutARouterSaysWhyAndStillListens(t *testing.T) {
 	st := m.decide(localapi.NetReq{State: node.NetworkOn, Listen: m.ln.ln.Addr().String(), MapPort: true})
 	if st.Network.Applied != "" || st.Mapping == nil || st.Mapping.Error != "no router in tests" {
 		t.Fatalf("status %+v %+v", st.Network, st.Mapping)
+	}
+}
+
+// A listener bound to one address that is not this machine's address on
+// the router's network is never mapped: the router would forward to
+// whatever else listens there.
+func TestNoMappingForAListenerThatDoesNotCoverTheAddressTheRouterForwardsTo(t *testing.T) {
+	m := newMachineWith(t, "a", nil)
+	r := newFakeRouter()
+	m.useRouter(r, "192.0.2.5") // the router's side of this machine; the listener is on 127.0.0.1
+	st := m.decide(localapi.NetReq{State: node.NetworkOn, Listen: m.ln.ln.Addr().String(), MapPort: true})
+	if st.Mapping == nil || !strings.Contains(st.Mapping.Error, "the router would forward to 192.0.2.5") {
+		t.Fatalf("mapping %+v", st.Mapping)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if held, _ := r.count(); held != 0 {
+		t.Fatal("mapped for a listener that does not cover the forwarded address")
+	}
+}
+
+// The mapping ends with the listener it forwards to, however the
+// listener ends: here it stops accepting while the daemon runs.
+func TestTheMappingIsRemovedWhenTheListenerStops(t *testing.T) {
+	m := newMachineWith(t, "a", nil)
+	r := newFakeRouter()
+	m.useRouter(r, "")
+	m.decide(localapi.NetReq{State: node.NetworkOn, Listen: m.ln.ln.Addr().String(), MapPort: true})
+	eventually(t, "mapped", func() bool { held, _ := r.count(); return held == 1 })
+	m.ln.mu.Lock()
+	v := m.ln.cur
+	m.ln.mu.Unlock()
+	v.Close() // Accept now fails: the listener has stopped
+	eventually(t, "removed with the listener", func() bool { held, _ := r.count(); return held == 0 })
+}
+
+// A mapping is recorded in the home before the router is asked. A crash
+// leaves it on the router and in the record; the next start removes it,
+// whatever the decision (here networking off). A removal that fails is
+// shown in status and kept for the next attempt.
+func TestAMappingLeftByACrashIsRemovedAtTheNextStartAndAFailureIsShown(t *testing.T) {
+	m := newMachineWith(t, "a", nil)
+	r := newFakeRouter()
+	m.useRouter(r, "")
+	left := r.mapping(7423)
+	r.held[left.Key()] = true // on the router since the crash
+	rec := &mapRecord{path: filepath.Join(m.home, "portmap.json")}
+	if err := rec.Save([]portmap.Mapping{left}); err != nil {
+		t.Fatal(err)
+	}
+	r.setFail(true)
+	m.stop()
+	m.start() // networking off: the removal is still tried, and fails
+	eventually(t, "the failed removal in status", func() bool {
+		st := call[localapi.Status](m, "status", localapi.Empty{})
+		return st.Mapping != nil && len(st.Mapping.NotRemoved) == 1 &&
+			strings.Contains(st.Mapping.NotRemoved[0], "could not remove it: no answer")
+	})
+	if got, _ := rec.Load(); len(got) != 1 {
+		t.Fatalf("record %v", got)
+	}
+	r.setFail(false)
+	m.stop() // retried at stop
+	if held, _ := r.count(); held != 0 {
+		t.Fatal("not removed at stop")
+	}
+	if got, _ := rec.Load(); len(got) != 0 {
+		t.Fatalf("record after removal %v", got)
+	}
+}
+
+func TestAnIPv4OnlyDecisionAdvertisesNoIPv6(t *testing.T) {
+	addrs := []ifAddr{{IP: netip.MustParseAddr("192.168.1.5"), Iface: "en0"}, {IP: netip.MustParseAddr("2001:db8:1::5"), Iface: "en0"}}
+	if got := advertisable(addrs, 7423, true); !slices.Equal(got, []string{"192.168.1.5:7423"}) {
+		t.Fatalf("IPv4 only: %v", got)
+	}
+	if got := advertisable(addrs, 7423, false); len(got) != 2 {
+		t.Fatalf("both: %v", got)
+	}
+	if got := FamiliesText("192.168.1.5:7423"); !strings.Contains(got, "IPv4 only") {
+		t.Fatalf("%q", got)
+	}
+	if got := FamiliesText("0.0.0.0:7423"); !strings.Contains(got, "IPv4 and IPv6") || !strings.Contains(got, "For IPv4 only") {
+		t.Fatalf("%q", got)
 	}
 }

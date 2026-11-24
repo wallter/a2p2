@@ -39,21 +39,32 @@ func v4mapped(ip netip.Addr) [16]byte {
 	return ip.As16() // As16 maps an IPv4 address into ::ffff:0:0/96
 }
 
-func (c *Client) mapPCP(ctx context.Context, internal uint16, lifetime time.Duration, prev *Mapping) (Mapping, error) {
+func (c *Client) mapPCP(ctx context.Context, internal uint16, lifetime time.Duration, prev *Mapping, note Note) (Mapping, error) {
 	var m Mapping
 	if prev != nil && prev.Protocol == PCP {
 		m = *prev // the same nonce renews the same mapping
-	} else if _, err := rand.Read(m.nonce[:]); err != nil {
+	} else if _, err := rand.Read(m.Nonce[:]); err != nil {
 		return Mapping{}, err
 	}
-	m.Protocol, m.Internal = PCP, internal
+	m.Protocol, m.Internal, m.Gateway = PCP, internal, c.Gateway
 	suggest := internal
 	if prev != nil && prev.External.IsValid() {
 		suggest = prev.External.Port()
 	}
 	m.External = netip.AddrPortFrom(netip.Addr{}, suggest)
-	return c.pcp(ctx, internal, lifetime, &m)
+	if err := note(m, true); err != nil {
+		return Mapping{}, err
+	}
+	got, err := c.pcp(ctx, internal, lifetime, &m)
+	if err != nil && ctx.Err() == nil && !errors.Is(err, errUnsure) {
+		_ = note(m, false) // a definite answer, or none at all: nothing was made
+	}
+	return got, err
 }
+
+// errUnsure: the router answered that a mapping was made, but not in a
+// form that can be used; it is kept to be removed.
+var errUnsure = errors.New("the router's answer cannot be used")
 
 // pcp sends one MAP request for m (lifetime 0 deletes it) and returns the
 // mapping granted.
@@ -63,7 +74,7 @@ func (c *Client) pcp(ctx context.Context, internal uint16, lifetime time.Duratio
 	binary.BigEndian.PutUint32(q[4:], uint32(lifetime/time.Second))
 	local := v4mapped(c.Local)
 	copy(q[8:24], local[:])
-	copy(q[24:36], m.nonce[:])
+	copy(q[24:36], m.Nonce[:])
 	q[36] = pcpProtoTCP
 	binary.BigEndian.PutUint16(q[40:], internal)
 	if lifetime > 0 {
@@ -73,24 +84,32 @@ func (c *Client) pcp(ctx context.Context, internal uint16, lifetime time.Duratio
 	copy(q[44:60], ext[:])
 	var out Mapping
 	err := c.exchange(ctx, q, func(b []byte) (bool, error) {
-		if len(b) >= 4 && b[0] == 0 {
-			return true, &oldVersion{} // a NAT-PMP answer to a PCP request
+		if len(b) >= 8 && b[0] == 0 {
+			// A NAT-PMP server's answer to a request of another version
+			// (RFC 6886 section 3.5, RFC 6887 section 9): opcode 128 + 1,
+			// result 1, unsupported version. Any other version-0 datagram
+			// is not an answer.
+			if len(b) <= 16 && b[1] == 0x80|pcpOpMap && binary.BigEndian.Uint16(b[2:]) == 1 {
+				return true, &oldVersion{}
+			}
+			return false, nil
 		}
-		if len(b) < pcpReqLen || b[0] != pcpVersion || b[1] != 0x80|pcpOpMap || string(b[24:36]) != string(m.nonce[:]) ||
-			b[36] != pcpProtoTCP || binary.BigEndian.Uint16(b[40:]) != internal {
+		if len(b) < pcpReqLen || len(b) > 1100 || len(b)%4 != 0 || b[0] != pcpVersion || b[1] != 0x80|pcpOpMap ||
+			string(b[24:36]) != string(m.Nonce[:]) || b[36] != pcpProtoTCP || binary.BigEndian.Uint16(b[40:]) != internal {
 			return false, nil // not the answer to this request
 		}
 		if r := b[3]; r != 0 {
-			if r == 1 && b[0] == 0 {
-				return true, &oldVersion{}
-			}
 			return true, fmt.Errorf("refused: %s", pcpText(r))
 		}
 		granted := time.Duration(binary.BigEndian.Uint32(b[4:])) * time.Second
 		ip := netip.AddrFrom16([16]byte(b[44:60])).Unmap()
+		port := binary.BigEndian.Uint16(b[42:])
 		out = *m
-		out.External = netip.AddrPortFrom(ip, binary.BigEndian.Uint16(b[42:]))
+		out.External = netip.AddrPortFrom(ip, port)
 		out.Lifetime, out.Expires = granted, c.now().Add(granted)
+		if lifetime > 0 && (granted == 0 || port == 0 || !ip.IsValid() || ip.IsUnspecified()) {
+			return true, fmt.Errorf("%w: success with lifetime %d s, external %s", errUnsure, granted/time.Second, out.External)
+		}
 		return true, nil
 	})
 	return out, err

@@ -9,11 +9,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"net/netip"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,11 +35,15 @@ type Reach struct {
 	// members that answered the last check.
 	Reached []string `json:"reached,omitempty"`
 	By      []string `json:"by,omitempty"`
-	// Saw is the addresses members saw this machine's requests come from,
-	// as they said: hints only (PROTOCOL 4.7).
+	// NotTried is the addresses no answering member would dial for this
+	// machine (DialBackResponse.NotTried).
+	NotTried []string `json:"not_tried,omitempty"`
+	// Saw is the IP addresses members said this machine's requests came
+	// from: shown, compared with a router's external address, and never
+	// advertised (DESIGN 11).
 	Saw []string `json:"saw,omitempty"`
-	// Verified is the external addresses (seen by members, or mapped by
-	// the router) that a member reached: advertised while they are.
+	// Verified is the router's mapped external addresses that a member
+	// reached within VerifiedFor: advertised while they are.
 	Verified []string `json:"verified,omitempty"`
 	Why      string   `json:"why,omitempty"`
 }
@@ -55,8 +56,12 @@ type DialBackTransport interface {
 // Timing of the automatic check. Variables so tests can shorten them.
 var (
 	// ReachEvery is how often the daemon asks again; never a peer more
-	// often than this, except when a person runs a2p2 net check.
+	// often than this, except when a person runs a2p2 net check or the
+	// router's mapping changes.
 	ReachEvery = time.Hour
+	// VerifiedFor is how long a member's dial-back to a mapped address
+	// lets it be advertised: three hourly checks may miss before it stops.
+	VerifiedFor = 3 * time.Hour
 	// reachFirst is the wait after a run starts (so the first pulls have
 	// filled the address book), reachRetry the wait after a check no
 	// member answered.
@@ -74,26 +79,26 @@ type ReachOpts struct {
 	// Book orders them: members with an address that completed a pinned
 	// handshake first.
 	Book *AddrBook
-	// Addrs is what this machine advertises: what members are asked to
-	// dial.
+	// Addrs is what this machine advertises from its interfaces: what
+	// members are asked to dial.
 	Addrs func() []string
-	// Port is the listening port, joined to an address members saw to
-	// make a candidate; 0: seen addresses are not tried.
-	Port int
-	// Candidates, if set, lists more addresses to verify (a mapped
-	// external address).
+	// Candidates, if set, is the external address of the router mapping
+	// this machine asked for, if it has one now: verified by a dial-back
+	// before it is advertised. Nothing else is ever a candidate.
 	Candidates func() []string
 	Now        func() time.Time
 }
 
 // Reacher keeps the answer up to date for a run with a listener.
 type Reacher struct {
-	t DialBackTransport
-	o ReachOpts
+	t     DialBackTransport
+	o     ReachOpts
+	nudge chan struct{}
 
-	mu    sync.Mutex
-	asked map[string]time.Time
-	cur   Reach
+	mu       sync.Mutex
+	asked    map[string]time.Time
+	cur      Reach
+	verified map[string]time.Time // candidate: when a member last reached it
 }
 
 // NewReacher asks through t.
@@ -101,16 +106,19 @@ func NewReacher(t DialBackTransport, o ReachOpts) *Reacher {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	return &Reacher{t: t, o: o, asked: map[string]time.Time{}, cur: Reach{State: ReachUnknown, Why: "not checked yet"}}
+	return &Reacher{t: t, o: o, nudge: make(chan struct{}, 1), asked: map[string]time.Time{},
+		verified: map[string]time.Time{}, cur: Reach{State: ReachUnknown, Why: "not checked yet"}}
 }
 
 // Get is the latest answer.
 func (r *Reacher) Get() Reach {
+	v := r.Verified()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	c := r.cur
 	c.Reached, c.By, c.Saw = slices.Clone(c.Reached), slices.Clone(c.By), slices.Clone(c.Saw)
-	c.Verified = slices.Clone(c.Verified)
+	c.NotTried = slices.Clone(c.NotTried)
+	c.Verified = v
 	return c
 }
 
@@ -130,15 +138,22 @@ func (r *Reacher) order(peers []string) []string {
 	return out
 }
 
+func (r *Reacher) candidates() []string {
+	if r.o.Candidates == nil {
+		return nil
+	}
+	return r.o.Candidates()
+}
+
 // Check asks up to three of peers to dial back to this machine's
-// advertised addresses and its candidates (DESIGN 11). Unless force (a
-// person asked), a peer asked in the last ReachEvery is not asked again.
-// A candidate seen for the first time in the answers is tried at once, in
-// one more round to the members that answered. A check that no member
-// answers changes nothing already known.
+// advertised addresses and its candidate (DESIGN 11). Unless force (a
+// person asked, or the mapping changed), a peer asked in the last
+// ReachEvery is not asked again. A check that no member answers changes
+// nothing already known.
 func (r *Reacher) Check(ctx context.Context, peers []string, force bool) Reach {
 	base := r.o.Addrs()
-	if len(base) == 0 && len(r.candidates(nil)) == 0 {
+	cands := r.candidates()
+	if len(base) == 0 && len(cands) == 0 {
 		r.set(Reach{State: ReachNo, Why: "this machine advertises no address"}, true)
 		return r.Get()
 	}
@@ -159,29 +174,31 @@ func (r *Reacher) Check(ctx context.Context, peers []string, force bool) Reach {
 	if len(ask) == 0 {
 		return r.Get()
 	}
-	cands := r.candidates(nil)
 	addrs := askList(cands, base)
 	rd := r.round(ctx, ask, addrs)
-	// The members saw this machine at addresses not yet asked: try them now.
-	if more := r.candidates(rd.saw); len(rd.by) > 0 && len(more) > len(cands) {
-		cands = more
-		extra := askList(more, base)
-		rd.merge(r.round(ctx, rd.by, extra))
-		addrs = extra
-	}
-	var verified []string
-	for _, c := range cands {
-		if slices.Contains(rd.reached, c) {
-			verified = append(verified, c)
+	at := r.o.Now()
+	if len(rd.by) > 0 {
+		r.mu.Lock()
+		for _, c := range cands {
+			switch {
+			case slices.Contains(rd.reached, c):
+				r.verified[c] = at
+			case slices.Contains(rd.tried, c):
+				delete(r.verified, c) // members tried it and could not connect
+			}
 		}
+		r.mu.Unlock()
 	}
-	at := r.o.Now().UTC().Format(timeFormat)
+	stamp := at.UTC().Format(timeFormat)
 	switch {
 	case len(rd.reached) > 0:
-		r.set(Reach{State: ReachYes, Checked: at, Reached: rd.reached, By: rd.by, Saw: rd.saw, Verified: verified}, true)
+		r.set(Reach{State: ReachYes, Checked: stamp, Reached: rd.reached, By: rd.by, NotTried: rd.notTried, Saw: rd.saw}, true)
+	case len(rd.tried) > 0:
+		r.set(Reach{State: ReachNo, Checked: stamp, By: rd.by, NotTried: rd.notTried, Saw: rd.saw,
+			Why: fmt.Sprintf("%d member(s) tried %s and could not connect", len(rd.by), strings.Join(rd.tried, ", "))}, true)
 	case len(rd.by) > 0:
-		r.set(Reach{State: ReachNo, Checked: at, By: rd.by, Saw: rd.saw,
-			Why: fmt.Sprintf("%d member(s) tried %s and could not connect", len(rd.by), strings.Join(addrs, ", "))}, true)
+		r.set(Reach{State: ReachUnknown, Checked: stamp, By: rd.by, NotTried: rd.notTried, Saw: rd.saw,
+			Why: "the members that answered tried none of " + strings.Join(addrs, ", ") + ": " + NotTriedText}, false)
 	default:
 		r.set(Reach{State: ReachUnknown, Why: "no member answered the dial-back: " + strings.Join(rd.failed, "; ")}, false)
 	}
@@ -200,58 +217,37 @@ func askList(cands, base []string) []string {
 	return out
 }
 
-// candidates are the addresses to verify before advertising: what the
-// daemon offers (a mapped external address) and, for each global IP
-// address members saw (now, or in the last answer) that is not already
-// advertised, that IP with the listening port.
-func (r *Reacher) candidates(saw []string) []string {
-	var out []string
-	if r.o.Candidates != nil {
-		out = append(out, r.o.Candidates()...)
-	}
-	if r.o.Port == 0 {
-		return out
-	}
-	base := r.o.Addrs()
+// Verified is the candidates a member reached within VerifiedFor that
+// are still candidates: the mapped external addresses that may be
+// advertised now. A mapping that is gone, or not confirmed in time, is
+// not.
+func (r *Reacher) Verified() []string {
+	cands := r.candidates()
+	now := r.o.Now()
 	r.mu.Lock()
-	all := append(slices.Clone(r.cur.Saw), saw...)
-	r.mu.Unlock()
-	for _, s := range all {
-		ip, err := netip.ParseAddr(s)
-		if err != nil || !ip.IsGlobalUnicast() || ip.IsPrivate() {
-			continue
-		}
-		c := net.JoinHostPort(ip.String(), strconv.Itoa(r.o.Port))
-		if !slices.Contains(base, c) && !slices.Contains(out, c) {
+	defer r.mu.Unlock()
+	var out []string
+	for _, c := range cands {
+		if at, ok := r.verified[c]; ok && now.Sub(at) < VerifiedFor {
 			out = append(out, c)
 		}
 	}
 	return out
 }
 
-// Verified is the candidates the last conclusive check reached: external
-// addresses that may now be advertised.
-func (r *Reacher) Verified() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return slices.Clone(r.cur.Verified)
-}
-
-// roundResult is what one round of dial-backs gave.
-type roundResult struct{ by, reached, saw, failed []string }
-
-func (a *roundResult) merge(b roundResult) {
-	add := func(to *[]string, from []string) {
-		for _, x := range from {
-			if !slices.Contains(*to, x) {
-				*to = append(*to, x)
-			}
-		}
+// Nudge asks Run to check again at once with the current candidates (the
+// router's mapping changed). It never blocks.
+func (r *Reacher) Nudge() {
+	select {
+	case r.nudge <- struct{}{}:
+	default:
 	}
-	add(&a.by, b.by)
-	add(&a.reached, b.reached)
-	add(&a.saw, b.saw)
 }
+
+// roundResult is what one round of dial-backs gave: who answered, the
+// addresses reached, tried (by at least one answering member) and not
+// tried (by any), the addresses seen and why others did not answer.
+type roundResult struct{ by, reached, tried, notTried, saw, failed []string }
 
 // round asks each of peers at once to dial back to addrs.
 func (r *Reacher) round(ctx context.Context, peers, addrs []string) roundResult {
@@ -272,6 +268,11 @@ func (r *Reacher) round(ctx context.Context, peers, addrs []string) roundResult 
 	}
 	wg.Wait()
 	var rd roundResult
+	add := func(to *[]string, x string) {
+		if !slices.Contains(*to, x) {
+			*to = append(*to, x)
+		}
+	}
 	for _, a := range answers {
 		if a.err != nil {
 			rd.failed = append(rd.failed, core.ShortNode(a.peer)+": "+dialBackErrText(a.err))
@@ -279,12 +280,20 @@ func (r *Reacher) round(ctx context.Context, peers, addrs []string) roundResult 
 		}
 		rd.by = append(rd.by, a.peer)
 		for _, x := range a.resp.Reached {
-			if !slices.Contains(rd.reached, x) {
-				rd.reached = append(rd.reached, x)
+			add(&rd.reached, x)
+		}
+		for _, x := range addrs {
+			if !slices.Contains(a.resp.NotTried, x) {
+				add(&rd.tried, x)
 			}
 		}
-		if a.resp.Saw != "" && !slices.Contains(rd.saw, a.resp.Saw) {
-			rd.saw = append(rd.saw, a.resp.Saw)
+		if a.resp.Saw != "" {
+			add(&rd.saw, a.resp.Saw)
+		}
+	}
+	for _, x := range addrs {
+		if len(rd.by) > 0 && !slices.Contains(rd.tried, x) {
+			rd.notTried = append(rd.notTried, x)
 		}
 	}
 	return rd
@@ -318,16 +327,19 @@ func dialBackErrText(err error) string {
 }
 
 // Run checks after the run starts, then every ReachEvery (sooner when no
-// member answered), until ctx ends.
+// member answered, at once when nudged), until ctx ends.
 func (r *Reacher) Run(ctx context.Context) {
 	wait := reachFirst
 	for {
+		force := false
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(wait):
+		case <-r.nudge:
+			force = true
 		}
-		got := r.Check(ctx, r.o.Members(), false)
+		got := r.Check(ctx, r.o.Members(), force)
 		wait = ReachEvery
 		if got.State == ReachUnknown {
 			wait = reachRetry

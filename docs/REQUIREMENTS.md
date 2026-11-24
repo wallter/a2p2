@@ -326,7 +326,9 @@ there is no server.
   a router port mapping (`a2p2 net on --map-port`) widen who can be
   reached, but not behind carrier-grade NAT, a router with mapping turned
   off, or a corporate network that drops inbound connections. Such a room
-  needs one member that others can reach.
+  needs one member that others can reach. After a crash, a mapping lasts
+  until its lease ends, or, on a router that grants only permanent ones,
+  until a2p2 starts again on that network or a person removes it there.
 
 ## 7. Scale
 

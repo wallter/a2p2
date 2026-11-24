@@ -2,6 +2,8 @@ package peer
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"net"
 	"net/http/httptest"
@@ -31,7 +33,7 @@ func dialBackPair(t *testing.T) (a, b *pm) {
 	t.Helper()
 	a, b = newPM(t, "a", true), newPM(t, "b", true)
 	group(t, a, b)
-	addr := serve(t, a.id, dbH{a.h, node.NewDialBackServer(a.r, NewProber(a.id))}, nil)
+	addr := serve(t, a.id, dbH{a.h, node.NewDialBackServer(a.r, NewProber(a.id), a.book)}, nil)
 	b.book.Keep(func(n string) bool { return n != a.node() }) // only the dial-back listener
 	b.book.Replace(a.node(), []string{addr}, time.Now())
 	return a, b
@@ -207,9 +209,11 @@ func TestReachOverTLSIsYesThenNoWhenTheListenerGoes(t *testing.T) {
 	}
 }
 
-// A candidate address (a mapped port, or the address members see) is
-// verified over TLS like any other: it counts only where the asker's own
-// key answers. Over IPv6 loopback too, where there is one.
+// A mapped address is verified over TLS like any other: it counts only
+// where the asker's own key answers. An address that is neither the
+// asker's source address nor in the responder's book for it is not even
+// dialled; once the book holds it (the asker advertised it), it is. Over
+// IPv6 loopback, where there is one.
 //
 // Requirements: N2
 func TestOverTLSACandidateIsVerifiedOnlyWhereTheAskersKeyAnswersAndIPv6Works(t *testing.T) {
@@ -219,18 +223,99 @@ func TestOverTLSACandidateIsVerifiedOnlyWhereTheAskersKeyAnswersAndIPv6Works(t *
 	second := serve(t, b.id, b.h, nil) // b's key on another port, as a router forwarding to it
 	other := newPM(t, "x", true)
 	cands := []string{second, other.addr}
+	v6 := ""
 	if l6, err := net.Listen("tcp6", "[::1]:0"); err == nil {
 		ctx, cancel := context.WithCancel(bg)
 		done := make(chan error, 1)
 		go func() { done <- Serve(ctx, l6, b.id, b.h) }()
 		t.Cleanup(func() { cancel(); <-done })
-		cands = append(cands, l6.Addr().String())
+		v6 = l6.Addr().String()
+		cands = append(cands, v6)
 	}
 	r := node.NewReacher(b.cl, node.ReachOpts{Members: func() []string { return []string{a.node()} }, Book: b.book,
 		Addrs: func() []string { return []string{b.addr} }, Candidates: func() []string { return cands }})
+	got := r.Check(bg, []string{a.node()}, true)
+	if v := r.Verified(); !slices.Equal(v, []string{second}) {
+		t.Fatalf("verified %v, want only %s", v, second)
+	}
+	if v6 == "" {
+		return
+	}
+	// b connected over IPv4: [::1] is not its source address, and a's book
+	// does not hold it yet.
+	if !slices.Equal(got.NotTried, []string{v6}) {
+		t.Fatalf("not tried %v, want %s", got.NotTried, v6)
+	}
+	a.book.Replace(b.node(), append(a.book.Addrs(b.node()), v6), time.Now())
 	r.Check(bg, []string{a.node()}, true)
-	want := slices.DeleteFunc(slices.Clone(cands), func(c string) bool { return c == other.addr })
-	if got := r.Verified(); !slices.Equal(got, want) {
-		t.Fatalf("verified %v, want %v", got, want)
+	if v := r.Verified(); !slices.Equal(v, []string{second, v6}) {
+		t.Fatalf("verified %v once a's book holds %s", v, v6)
+	}
+}
+
+// What the other side of a probe receives, measured: the HOST:PORT and
+// --invite forms present a throwaway certificate, never this machine's;
+// a server whose certificate names another key than the invite's never
+// receives one at all; and no HTTP request follows any handshake.
+//
+// Requirements: N2
+func TestAProbeShowsOnlyAThrowawayCertificateAndNoneToAWrongKey(t *testing.T) {
+	srvID := newID(t)
+	cert, err := selfSigned(srvID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var shown []string
+	requests := 0
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert},
+		NextProtos: []string{"h2"}, ClientAuth: tls.RequireAnyClientCert,
+		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
+			n, err := certNode(raw)
+			mu.Lock()
+			shown = append(shown, n)
+			mu.Unlock()
+			return err
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_ = c.(*tls.Conn).Handshake()
+				buf := make([]byte, 1)
+				if n, _ := c.Read(buf); n > 0 {
+					mu.Lock()
+					requests++
+					mu.Unlock()
+				}
+			}()
+		}
+	}()
+	machine := newID(t)
+	tp, err := NewThrowawayProber()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tp.ProbeWith(bg, ln.Addr().String(), nil); got.Result != node.ProbeReached {
+		t.Fatalf("throwaway: %+v", got)
+	}
+	wrong := func(string) error { return errors.New("not the invite's key") }
+	if got := tp.ProbeWith(bg, ln.Addr().String(), wrong); got.Result != node.ProbeWrongKey ||
+		!strings.Contains(got.Detail, "certificate key mismatch") {
+		t.Fatalf("wrong key: %+v", got)
+	}
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(shown) != 1 || shown[0] == machine.NodeID() || shown[0] == srvID.NodeID() || requests != 0 {
+		t.Fatalf("certificates shown %v (machine %s), requests %d", shown, core.ShortNode(machine.NodeID()), requests)
 	}
 }

@@ -17,4 +17,4 @@ func addrFlags() func(iface string, ip netip.Addr) v6Flags {
 // build cannot read.
 var errMapUnavailable = errors.New("port mapping is not available on this system")
 
-func defaultGateway() (netip.Addr, error) { return netip.Addr{}, errMapUnavailable }
+func defaultGateway() (netip.Addr, string, error) { return netip.Addr{}, "", errMapUnavailable }

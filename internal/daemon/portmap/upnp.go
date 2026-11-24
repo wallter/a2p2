@@ -81,8 +81,10 @@ func (c *Client) discover(ctx context.Context) (upnpService, error) {
 				continue
 			}
 			loc := resp.Header.Get("Location")
+			st := strings.TrimSpace(resp.Header.Get("ST"))
 			resp.Body.Close()
-			if !c.gatewayURL(loc) {
+			// Only a 200 answer to this search, for the device searched.
+			if resp.StatusCode != http.StatusOK || st != igdDevice || !c.gatewayURL(loc) {
 				continue
 			}
 			return c.describe(ctx, loc)
@@ -190,32 +192,51 @@ func (c *Client) soap(ctx context.Context, s upnpService, action string, args []
 		return nil, err
 	}
 	defer resp.Body.Close()
-	fields := map[string]string{}
-	dec := xml.NewDecoder(io.LimitReader(resp.Body, maxDescBody))
-	var name string
-	for {
-		tok, err := dec.Token()
-		if err != nil {
-			break
-		}
-		switch t := tok.(type) {
-		case xml.StartElement:
-			name = t.Name.Local
-		case xml.CharData:
-			if name != "" {
-				fields[name] += strings.TrimSpace(string(t))
-			}
-		case xml.EndElement:
-			name = ""
-		}
-	}
+	fields, complete := soapFields(io.LimitReader(resp.Body, maxDescBody), action+"Response")
 	if resp.StatusCode != http.StatusOK {
 		if code := fields["errorCode"]; code != "" {
 			return fields, &upnpError{code: code, text: fields["errorDescription"]}
 		}
 		return fields, fmt.Errorf("%s: %s", action, resp.Status)
 	}
+	if !complete {
+		return fields, fmt.Errorf("%s: the gateway's answer is not a complete %sResponse", action, action)
+	}
 	return fields, nil
+}
+
+// soapFields reads a SOAP envelope: the text of every element by local
+// name, and whether the document is well formed to its end and holds a
+// want element in an Envelope's Body.
+func soapFields(r io.Reader, want string) (map[string]string, bool) {
+	fields := map[string]string{}
+	dec := xml.NewDecoder(r)
+	var stack []string
+	found := false
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return fields, found && len(stack) == 0
+		}
+		if err != nil {
+			return fields, false
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == want && len(stack) == 2 && stack[0] == "Envelope" && stack[1] == "Body" {
+				found = true
+			}
+			stack = append(stack, t.Name.Local)
+		case xml.CharData:
+			if len(stack) > 0 {
+				fields[stack[len(stack)-1]] += strings.TrimSpace(string(t))
+			}
+		case xml.EndElement:
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+		}
+	}
 }
 
 type upnpError struct{ code, text string }
@@ -227,13 +248,13 @@ func (e *upnpError) Error() string {
 	return "error " + e.code
 }
 
-func (c *Client) mapUPnP(ctx context.Context, internal uint16, lifetime time.Duration, prev *Mapping) (Mapping, error) {
+func (c *Client) mapUPnP(ctx context.Context, internal uint16, lifetime time.Duration, prev *Mapping, note Note) (Mapping, error) {
 	if !c.Local.IsValid() {
 		return Mapping{}, errors.New("no local address on the gateway's network")
 	}
 	var s upnpService
-	if prev != nil && prev.Protocol == UPnP && prev.control != "" {
-		s = upnpService{control: prev.control, service: prev.service}
+	if prev != nil && prev.Protocol == UPnP && prev.Control != "" && c.gatewayURL(prev.Control) {
+		s = upnpService{control: prev.Control, service: prev.Service}
 	} else {
 		var err error
 		if s, err = c.discover(ctx); err != nil {
@@ -245,17 +266,31 @@ func (c *Client) mapUPnP(ctx context.Context, internal uint16, lifetime time.Dur
 		ext = prev.External.Port()
 	}
 	lease := lifetime
+	handle := func(port uint16) Mapping {
+		return Mapping{Protocol: UPnP, Gateway: c.Gateway, Internal: internal,
+			External: netip.AddrPortFrom(netip.Addr{}, port), Control: s.control, Service: s.service}
+	}
 	add := func(port uint16, lease time.Duration) error {
+		h := handle(port)
+		if err := note(h, true); err != nil {
+			return err
+		}
 		_, err := c.soap(ctx, s, "AddPortMapping", [][2]string{{"NewRemoteHost", ""},
 			{"NewExternalPort", strconv.Itoa(int(port))}, {"NewProtocol", "TCP"},
 			{"NewInternalPort", strconv.Itoa(int(internal))}, {"NewInternalClient", c.Local.String()},
 			{"NewEnabled", "1"}, {"NewPortMappingDescription", description},
 			{"NewLeaseDuration", strconv.Itoa(int(lease / time.Second))}})
+		var ue *upnpError
+		if errors.As(err, &ue) {
+			_ = note(h, false) // a UPnP error: nothing was added
+		}
 		return err
 	}
+	// A finite lease first; a permanent one only if the router refuses
+	// finite ones (725), and then it is removed by Unmap or by hand only.
 	err := add(ext, lease)
 	var ue *upnpError
-	if errors.As(err, &ue) && ue.code == "725" { // only permanent leases: removed by Unmap only
+	if errors.As(err, &ue) && ue.code == "725" {
 		lease = 0
 		err = add(ext, lease)
 	}
@@ -271,11 +306,11 @@ func (c *Client) mapUPnP(ctx context.Context, internal uint16, lifetime time.Dur
 		return Mapping{}, err
 	}
 	ip, err := netip.ParseAddr(f["NewExternalIPAddress"])
-	if err != nil {
+	if err != nil || ip.Zone() != "" || ip.IsUnspecified() {
 		return Mapping{}, errors.New("the gateway gave no external address")
 	}
-	m := Mapping{Protocol: UPnP, Internal: internal, External: netip.AddrPortFrom(ip.Unmap(), ext), Lifetime: lease,
-		control: s.control, service: s.service}
+	m := handle(ext)
+	m.External, m.Lifetime = netip.AddrPortFrom(ip.Unmap(), ext), lease
 	if lease > 0 {
 		m.Expires = c.now().Add(lease)
 	}
@@ -283,8 +318,15 @@ func (c *Client) mapUPnP(ctx context.Context, internal uint16, lifetime time.Dur
 }
 
 func (c *Client) upnpDelete(ctx context.Context, m Mapping) error {
-	_, err := c.soap(ctx, upnpService{control: m.control, service: m.service}, "DeletePortMapping",
+	if !c.gatewayURL(m.Control) {
+		return errors.New("its control URL is not on this network's router")
+	}
+	_, err := c.soap(ctx, upnpService{control: m.Control, service: m.Service}, "DeletePortMapping",
 		[][2]string{{"NewRemoteHost", ""}, {"NewExternalPort", strconv.Itoa(int(m.External.Port()))},
 			{"NewProtocol", "TCP"}})
+	var ue *upnpError
+	if errors.As(err, &ue) && ue.code == "714" { // NoSuchEntryInArray: already gone
+		return nil
+	}
 	return err
 }

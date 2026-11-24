@@ -141,6 +141,9 @@ func readDialBack(resp *http.Response, asked []string) (*node.DialBackResponse, 
 type Prober struct {
 	cert tls.Certificate
 	err  error
+	// Usable, if set, says whether an address is worth dialling from here
+	// (PullClient.Usable); set before use.
+	Usable func(addr string) bool
 }
 
 var (
@@ -181,11 +184,17 @@ func (p *Prober) Handshake(ctx context.Context, addr, key string) bool {
 	return p.Probe(ctx, key, addr).Result == node.ProbeReached
 }
 
-var errWrongKey = errors.New("peer: another key answered")
+var errWrongKey = errors.New("peer: certificate key mismatch")
 
-// ProbeWith connects to addr and completes the TLS handshake, accepting
-// the node that check accepts (nil: any a2p2 node), then closes the
-// connection: no request is sent. The result says which node answered.
+// ProbeWith connects to addr and starts a TLS 1.3 handshake, presenting
+// p's certificate, and accepts the server whose certificate names the
+// node check accepts (nil: any a2p2 node). It then closes the connection:
+// no HTTP request is sent, so nothing of an invite or a room reaches the
+// other side. What the other side does learn: this machine's source
+// address, a TLS ClientHello and, once its own certificate has been
+// accepted, p's certificate (a throwaway one for net check HOST:PORT and
+// --invite). A certificate naming another key is reported before the
+// server proved it holds that key: a mismatch, not an identification.
 func (p *Prober) ProbeWith(ctx context.Context, addr string, check func(node string) error) node.AddrCheck {
 	out := node.AddrCheck{Addr: addr}
 	start := time.Now()
@@ -198,6 +207,9 @@ func (p *Prober) ProbeWith(ctx context.Context, addr string, check func(node str
 	}
 	if !validAddr(addr) {
 		return done(node.ProbeUnreachable, "not host:port")
+	}
+	if p.Usable != nil && !p.Usable(addr) {
+		return done(node.ProbeNotTried, "a unique-local address of another site, which cannot be routed from here")
 	}
 	dctx, cancel := context.WithTimeout(ctx, probeDialTimeout)
 	raw, err := (&net.Dialer{}).DialContext(dctx, "tcp", addr)
@@ -239,7 +251,8 @@ func (p *Prober) ProbeWith(ctx context.Context, addr string, check func(node str
 	out.Node = got
 	switch {
 	case checkErr != nil:
-		return done(node.ProbeWrongKey, "an a2p2 machine with key "+core.ShortNode(got)+" answered")
+		return done(node.ProbeWrongKey, "certificate key mismatch: the certificate offered there names key "+
+			core.ShortNode(got)+" (not proven to be held)")
 	case err != nil && got != "":
 		return done(node.ProbeNotA2P2, "handshake failed: "+err.Error())
 	case err != nil && isTimeout(err):
