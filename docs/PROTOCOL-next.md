@@ -532,8 +532,8 @@ The joiner polls every `retry_ms`, doubling to 60 s, until signed (and
 
 ## 6. MCP tools (golden file)
 
-`internal/mcpshim/testdata/tools.json` after the change. Compact: 3,999
-bytes; A2 proxy ⌈3,999 / 4⌉ = 1,000 ≤ 1,000.
+`internal/mcpshim/testdata/tools.json` after the change. Compact: 4,000
+bytes; A2 proxy ⌈4,000 / 4⌉ = 1,000 ≤ 1,000.
 
 ```json
 [
@@ -624,7 +624,7 @@ bytes; A2 proxy ⌈3,999 / 4⌉ = 1,000 ≤ 1,000.
     "name": "peers"
   },
   {
-    "description": "Reply to a message by id, in its room and thread. By default only its author is addressed; to names others. Reports the original handled when you may; the result says whom it addressed and if it did.",
+    "description": "Reply to a message by id, in its room and thread, addressed to its author and those who posted in the thread unless to is given. Reports the original handled when you may; the result says whom it reached and if it did.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -637,7 +637,7 @@ bytes; A2 proxy ⌈3,999 / 4⌉ = 1,000 ≤ 1,000.
           "type": "string"
         },
         "to": {
-          "description": "as in send; default the author answered",
+          "description": "agent ids, as in send",
           "items": {
             "type": "string"
           },
@@ -714,7 +714,7 @@ Tool behaviour:
 | Tool | Local call |
 |---|---|
 | `send` | `send`; `to: ["everyone"]` means everyone and is sent with `to` omitted on the wire; `human` in `to` is the person at this machine (`human@<own short node>`); with `reply_to` and no `to`, `to` is the parent's `{author, agent}` |
-| `reply(message_id, text, to?)` | `send` with `reply_to` (and `to` if given), then `ack`; `handled_report` is `sent…` or `not sent: <ack's refusal>` |
+| `reply(message_id, text, to?)` | `send` with `reply_to`, `thread: true` (and `to` if given), then `ack`; without `to` it reaches the parent's author and every agent that has posted in the thread here; `to_omitted` in the `send` response becomes a `note`; `handled_report` is `sent…` or `not sent: <ack's refusal>` |
 | `ack` | `ack`; a refusal says which: no such message here; not addressed to you and no `ask_handled`; your own message; inbox has not shown you its text (a thread view does not count); already reported |
 | `inbox` | `inbox`, then `seen` with every returned `key` and `version`; with `thread`, `thread` and no `seen`; with `recent: N` (1 to 50) and no `thread`, `history` of `room` (default local) with `limit: N`, and no `seen` |
 | `peers` | `status`: per room its `machines` and `agents_seen_writing` (`agent`, `last_seen`); a machine with no name here is named by its short id |
@@ -740,7 +740,7 @@ Socket calls are `POST /v1/<name>`, JSON in and out; errors `{"error"}` with
 
 | Call | Request | Response |
 |---|---|---|
-| `send` (changed) | `{"agent","room","text","to"?,"reply_to"?,"ask_handled"?,"replaces"?,"choices"?}`; `"human"` in `to` is the person at this machine | `{"id","room","room_label","created","to"?}`; `to` is the addressees as written, omitted for everyone and for `replaces` |
+| `send` (changed) | `{"agent","room","text","to"?,"reply_to"?,"ask_handled"?,"replaces"?,"choices"?,"thread"?}`; `"human"` in `to` is the person at this machine; `thread: true` with `reply_to` and no `to` addresses the parent's author and every agent of a current member that has posted in the parent's thread as held here, without the sender, at most 32 (the parent's author always kept, then newest post first); the surface writes that list as `to`, so on the wire it is an ordinary addressed reply. Without `thread`, a reply with no `to` goes to the parent's author | `{"id","room","room_label","created","to"?,"to_omitted"?}`; `to` is the addressees as written, omitted for everyone and for `replaces`; `to_omitted` counts thread participants the limit left out |
 | `inbox` (changed) | `{"agent","room"?,"limit"?,"wait_ms"?}` | `{"entries":[Entry],"waiting":[Wait]}` |
 | `thread` (new) | `{"agent","id"}` | `{"entries":[Entry]}`; marks nothing |
 | `seen` (changed) | `{"agent","entries":[{"key","version"}]}` | `{"results":[{"key","ok","reason"?}]}`: each entry is confirmed only if the inbox would show exactly it to this agent now; the rest are applied. A replaced entry's key names the replace record |

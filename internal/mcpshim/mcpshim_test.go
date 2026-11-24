@@ -7,6 +7,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -493,7 +494,7 @@ func TestReplySaysWhatItDidAndCanNameRecipients(t *testing.T) {
 		t.Fatalf("carol's inbox = %+v", es)
 	}
 	r = parse(t, ok(t, k, "reply", map[string]any{"message_id": es[1].ID, "text": "ok"}))
-	if r.To[0] != bob || !strings.HasPrefix(r.HandledReport, "sent") {
+	if len(r.To) != 2 || !slices.Contains(r.To, bob) || !slices.Contains(r.To, alice) || !strings.HasPrefix(r.HandledReport, "sent") {
 		t.Fatalf("carol's reply = %+v", r)
 	}
 }

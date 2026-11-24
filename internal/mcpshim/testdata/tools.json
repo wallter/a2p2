@@ -86,7 +86,7 @@
     "name": "peers"
   },
   {
-    "description": "Reply to a message by id, in its room and thread. By default only its author is addressed; to names others. Reports the original handled when you may; the result says whom it addressed and if it did.",
+    "description": "Reply to a message by id, in its room and thread, addressed to its author and those who posted in the thread unless to is given. Reports the original handled when you may; the result says whom it reached and if it did.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -99,7 +99,7 @@
           "type": "string"
         },
         "to": {
-          "description": "as in send; default the author answered",
+          "description": "agent ids, as in send",
           "items": {
             "type": "string"
           },

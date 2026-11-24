@@ -256,6 +256,9 @@ type Sent struct {
 	Already bool
 	// Label is the room's label (filled in by Surface).
 	Label string
+	// ToOmitted is how many thread participants a reply to the thread
+	// left out at the addressee limit (Surface, SendInput.Thread).
+	ToOmitted int
 }
 
 // Send writes a message. Once it returns, the message is committed (D1).

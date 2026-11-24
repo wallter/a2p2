@@ -523,6 +523,10 @@ type SendInput struct {
 	AskHandled bool
 	Replaces   string // with empty text: withdraw
 	Choices    []string
+	// Thread, with ReplyTo and no To: address the parent's author and
+	// every agent that has posted in the thread as this machine holds it
+	// (the reply tool). Without it a reply goes to the parent's author.
+	Thread bool
 }
 
 // Send posts, replies, replaces or withdraws. With reply_to or replaces and
@@ -566,14 +570,20 @@ func (s *Surface) Send(ctx context.Context, in SendInput) (Sent, error) {
 		return Sent{}, userErr("text must not be empty")
 	}
 	d := Draft{Room: room, Agent: label, Text: in.Text, Choices: in.Choices, ReplyTo: in.ReplyTo, AskHandled: in.AskHandled}
+	omitted := 0
 	if len(in.To) == 1 && in.To[0] == Everyone {
 		d.Everyone = true
 	} else if len(in.To) > 0 {
 		if d.To, err = s.addressees(room, in.To); err != nil {
 			return Sent{}, err
 		}
+	} else if in.Thread && in.ReplyTo != "" {
+		if d.To, omitted, err = s.participants(ctx, room, label, in.ReplyTo); err != nil {
+			return Sent{}, err
+		}
 	}
 	sent, err := s.m.Send(ctx, d)
+	sent.ToOmitted = omitted
 	return s.labelled(ctx, sent, err)
 }
 
@@ -610,6 +620,62 @@ func (s *Surface) withLabels(ctx context.Context, es []Entry, err error) ([]Entr
 		es[i].RoomLabel = labels[es[i].Room]
 	}
 	return es, err
+}
+
+// participants is whom a reply to parent addresses by default from the
+// reply tool: the parent's author first, then every agent of a current
+// member that has posted in the parent's thread as held here, newest post
+// first, without the sender and without repeats, at most core.MaxTo; it
+// also returns how many the limit left out. An empty list (the sender
+// alone posted) leaves the record's own default, the parent's author.
+func (s *Surface) participants(ctx context.Context, room, sender, parent string) ([]core.Addressee, int, error) {
+	st, err := s.r.State(room)
+	if err != nil {
+		return nil, 0, err
+	}
+	member := map[string]bool{}
+	for _, m := range st.Members {
+		member[m] = true
+	}
+	var hs []store.Held
+	var p store.Held
+	err = s.m.st.View(ctx, func(rd *store.Reader) error {
+		var ok bool
+		if p, ok, err = rd.Record(room, parent); err != nil || !ok {
+			return err
+		}
+		root := p.Record.Fields().Thread
+		if root == "" {
+			root = parent
+		}
+		hs, err = rd.ByThread(room, root)
+		return err
+	})
+	if err != nil || p.Record == nil {
+		return nil, 0, err // an unknown parent is refused by Send
+	}
+	sort.SliceStable(hs, func(i, j int) bool { return hs[i].Record.Fields().Created.After(hs[j].Record.Fields().Created) })
+	self := core.Addressee{Node: s.m.ID, Agent: sender}
+	seen := map[core.Addressee]bool{self: true}
+	var out []core.Addressee
+	omitted := 0
+	add := func(r *core.Record, always bool) {
+		a := core.Addressee{Node: r.Author(), Agent: r.Fields().Agent}
+		if seen[a] || !always && !member[a.Node] {
+			return
+		}
+		seen[a] = true
+		if len(out) == core.MaxTo {
+			omitted++
+			return
+		}
+		out = append(out, a)
+	}
+	add(p.Record, true) // as a plain reply would address it
+	for _, h := range hs {
+		add(h.Record, false)
+	}
+	return out, omitted, nil
 }
 
 // addressees resolves agent ids (label@short node) against the room's

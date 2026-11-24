@@ -3,8 +3,12 @@ package node
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/wallter/a2p2/internal/core"
 )
 
 // The product round (what five agents tripped over): ack says why it
@@ -110,5 +114,32 @@ func TestSurfaceStatusListsTheAgentsSeenWritingInEachRoom(t *testing.T) {
 		if w.Agent != alice && w.Agent != bob {
 			t.Fatalf("writer %+v", w)
 		}
+	}
+}
+
+// The reply tool's default addressees stop at the addressee limit; the
+// parent's author is always among them and the result counts the rest.
+func TestSurfaceThreadReplyAddresseesAreCappedWithTheParentsAuthorKept(t *testing.T) {
+	e := newSurf(t)
+	lead := e.agent("lead")
+	kick := e.send(SendInput{Agent: lead, Text: "kickoff"})
+	var first Sent
+	for i := 0; i < core.MaxTo+3; i++ {
+		w := e.agent(fmt.Sprintf("w%02d", i))
+		s := e.send(SendInput{Agent: w, Text: "finding", ReplyTo: kick.ID})
+		if i == 0 {
+			first = s
+		}
+	}
+	me := e.agent("me")
+	r := e.send(SendInput{Agent: me, Text: "to all of you", ReplyTo: first.ID, Thread: true})
+	if len(r.To) != core.MaxTo || r.ToOmitted != 4 { // 35 writers and the lead, less 32
+		t.Fatalf("%d addressed, %d left out", len(r.To), r.ToOmitted)
+	}
+	if !slices.ContainsFunc(r.To, func(a core.Addressee) bool { return AgentID(a) == e.s.agentID("w00", e.s.Node()) }) {
+		t.Fatalf("the parent's author is not addressed: %+v", r.To)
+	}
+	if slices.ContainsFunc(r.To, func(a core.Addressee) bool { return AgentID(a) == me }) {
+		t.Fatal("the sender addressed itself")
 	}
 }

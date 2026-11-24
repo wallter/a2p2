@@ -48,6 +48,9 @@ type (
 		AskHandled bool     `json:"ask_handled,omitempty"`
 		Replaces   string   `json:"replaces,omitempty"`
 		Choices    []string `json:"choices,omitempty"`
+		// Thread, with reply_to and no to: also address every agent that
+		// has posted in the thread (the reply tool).
+		Thread bool `json:"thread,omitempty"`
 	}
 	// SendResp: to is the message's addressees as written, empty for
 	// everyone (and for a replace or withdraw, which keep the original's).
@@ -57,6 +60,8 @@ type (
 		RoomLabel string   `json:"room_label"`
 		Created   string   `json:"created"`
 		To        []string `json:"to,omitempty"`
+		// ToOmitted: thread participants left out at the addressee limit.
+		ToOmitted int `json:"to_omitted,omitempty"`
 	}
 	InboxReq struct {
 		Agent  string `json:"agent"`
@@ -557,8 +562,8 @@ func Handler(s *node.Surface, info Info) http.Handler {
 	})
 	handle(mux, "send", func(ctx context.Context, r SendReq) (SendResp, error) {
 		m, err := s.Send(ctx, node.SendInput{Agent: r.Agent, Room: r.Room, Text: r.Text, To: r.To, ReplyTo: r.ReplyTo,
-			AskHandled: r.AskHandled, Replaces: r.Replaces, Choices: r.Choices})
-		out := SendResp{ID: m.ID, Room: m.Room, RoomLabel: m.Label, Created: Time(m.Created)}
+			AskHandled: r.AskHandled, Replaces: r.Replaces, Choices: r.Choices, Thread: r.Thread})
+		out := SendResp{ID: m.ID, Room: m.Room, RoomLabel: m.Label, Created: Time(m.Created), ToOmitted: m.ToOmitted}
 		for _, a := range m.To {
 			out.To = append(out.To, node.AgentID(a))
 		}
