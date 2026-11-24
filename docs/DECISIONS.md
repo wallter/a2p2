@@ -883,8 +883,31 @@ seen to reach the model.
 The tool definitions change in one place: the description of `inbox`'s
 `recent` argument now ends "not new mail" (3,991 of 4,000 bytes), because
 an 8B model read its mail with `recent` and could then not report it
-handled; with the new wording it stopped doing so in seven runs. A weaker
+handled; with the new wording it did so in 0 of 7 runs (2 of 7 before). A weaker
 model would also be helped by a description for `reply`'s and `ack`'s
 `id` ("message id from inbox") and by optional string arguments that
 accept null, but the first needs bytes the budget does not have and the
 second changes the schema, so both are left.
+
+**Install records (review fix, same day).** A review found that installing
+over an entry named `a2p2` the person already had, then uninstalling,
+erased that entry, and that uninstall deleted the backup even when the
+file had changed since. Each `install` into any of the six harnesses now
+first writes a record to `$A2P2_HOME/installs/<harness>.json` (a directory
+of a2p2's own state, not a database table): which file, and the entry
+named `a2p2` it replaced, if any. A second install keeps the first record.
+`uninstall` removes a2p2's entry, puts the recorded one back, keeps every
+other edit, and deletes the record; with no record it removes nothing and
+says so, since it cannot tell a2p2's entry from the person's. A
+`<file>.a2p2.bak` is deleted only when the file equals it again. A config
+path that is a symlink is followed for all six; a dangling one is refused
+before anything is written, since writing would replace the link. The
+Hermes edit now keeps CRLF line endings, a missing final newline and a
+comment after `mcp_servers:`, refuses documents that are not a block
+mapping or mix line endings, and, like the OpenCode edit, parses its
+result back and checks that every original line outside a2p2's entry is
+still there before writing. Tests: `TestUninstallPutsBackTheEntryNamedA2P2ThatInstallReplaced`,
+`TestUninstallWithoutARecordRemovesNothing`,
+`TestHermesEditNeverTurnsAValidFileIntoAnInvalidOne`,
+`TestOpenCodeAndPiRefuseWhatTheyCannotEditExactly`,
+`TestConfigSymlinksAreFollowedAndDanglingOnesRefused`.

@@ -257,7 +257,7 @@ func TestPiInstallWritesOnlyItsSkill(t *testing.T) {
 	if _, err := Install("pi", o2); err == nil {
 		t.Fatal("foreign skill overwritten")
 	}
-	if rep, err := Uninstall("pi", o2); err != nil || !strings.Contains(rep, "no skill found") {
+	if rep, err := Uninstall("pi", o2); err != nil || !strings.Contains(rep, "no install record") {
 		t.Fatalf("%q %v", rep, err)
 	}
 	if b, _ := os.ReadFile(p); string(b) != "my own a2p2 skill" {

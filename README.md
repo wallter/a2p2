@@ -130,8 +130,9 @@ unread-mail hook to the harness's user hook file: `~/.claude/settings.json`,
 approves the tools of this one server in `~/.codex/config.toml`; if it
 cannot, it says so, and the person approves them in Codex.
 `a2p2 doctor` checks the setup. `a2p2 uninstall <harness>` removes what
-install added and restores a hook file it backed up; it does not bring
-back a registration that install replaced.
+install added and puts back an entry named `a2p2` that install replaced,
+which install records under `$A2P2_HOME/installs/`; with no record it
+removes nothing and says so.
 
 **A person must act** if Codex is connected: Codex only runs a new hook
 after the person approves it with `/hooks` in the Codex terminal UI. The

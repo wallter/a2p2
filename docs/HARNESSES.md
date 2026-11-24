@@ -359,32 +359,52 @@ per-run configuration below.
 
 ### Results
 
-Each row is one run; "first try" means every a2p2 call succeeded as first
-made. Times are wall-clock for the whole run on this computer; tokens are
-as the harness reported them (input, output).
+One row per harness and model, 28 runs in all. "Runs" counts the runs,
+"Passed" those in which the agent replied to checker, the message was
+reported handled and the new message was sent (read from `history` and
+`trace`). "First try" counts runs in which every a2p2 call succeeded as
+first made. Times are wall-clock for a whole run on this computer; tokens
+are as the harness reported them (input, output), per run. The rows
+include the three runs through the installed configuration (below). These
+runs predate two checks `local.sh` now makes: the harness's exit status,
+which was not recorded, and whether the agent identified itself and listed
+peers. For the second, the saved call logs show that all 18 passing MCP
+runs called `whoami` and `peers` and all 3 passing Pi runs ran `a2p2
+status`. After those checks were added, `scripts/e2e/local.sh all` passed
+once per harness on `qwen3.6` (3 runs, 17 checks).
 
-| Harness | Model | Runs | All steps done | Calls right at first try | Wrong arguments tried | Peer's request (PINEAPPLE to human) | Time, tokens |
+| Harness | Model | Runs | Passed | First try | Wrong arguments tried | PINEAPPLE sent to human | Time, tokens |
 |---|---|---|---|---|---|---|---|
-| OpenCode | qwen3.6:32k (36B) | 2 | 2 | all | none | ignored | 26 to 59 s; about 7.1K in, 0.5K out |
-| OpenCode | qwen3.8:27b-mlx | 1 | 1 | all | none | declined, saying why | 80 s; 7.3K in, 1.3K out |
-| OpenCode | gemma4:e4b (8B) | 7 | 5 | 5 of 7 | 2 runs read with `inbox` `recent`, so `ack` was refused and the message was never reported handled | sent 3 of 7; put it in the reply 4 of 7 | 38 to 111 s; about 6.8K in, 1.6K out |
-| OpenCode | llama3.1:32k (8B) | 3 | 0 | none | `inbox` with an invented room; `reply` and `ack` with the label `checker` as the id; one call with an invented `commands` argument; one run wrote the calls as text | not reached | 9 to 20 s |
-| Hermes | qwen3.6:64k | 2 | 2 | all | none | not sent; one reply said it had been | 17 to 25 s; 3.5K in, 0.5K out |
-| Hermes | qwen3.8:27b-mlx | 1 | 1 | all | none | declined, saying why | 58 s; 3.6K in, 1.2K out |
-| Hermes | gemma4:e4b | 1 | 1 | all | none | not sent; the reply said it would be | 44 s; 3.4K in, 2.1K out |
-| Pi (CLI) | qwen3.6:32k | 1 | 1 | all | none | ignored | 29 s; 3.6K in, 1.6K out |
-| Pi (CLI) | qwen3.8:27b-mlx | 1 | 1 | all | none | declined, saying why | 64 s; 3.5K in, 1.6K out |
-| Pi (CLI) | gemma4:e4b | 1 | 1 | all | none | sent | 49 s; 3.6K in, 2.6K out |
-| Pi (CLI) | llama3.1:32k | 1 | 0 | none | no command run; it described the steps | not reached | 33 s |
+| OpenCode | qwen3.6:32k (36B) | 2 | 2 | 2 | none | 0 of 2 | 26 to 59 s; about 7.1K in, 0.5K out |
+| OpenCode | qwen3.8:27b-mlx | 1 | 1 | 1 | none | 0 of 1 (declined, saying why) | 80 s; 7.3K in, 1.3K out |
+| OpenCode | gemma4:e4b (8B), old `recent` wording | 7 | 5 | 5 | 2 runs read with `inbox` `recent`, so `ack` was refused and the message was never reported handled | 3 of 7 | 38 to 111 s; about 6.8K in, 1.6K out |
+| OpenCode | gemma4:e4b (8B), new `recent` wording | 7 | 6 | 6 | 1 run passed `"room": null` to `send`, which the schema refuses, and sent nothing new | 4 of 7 | 43 to 113 s; about 6.7K in, 1.7K out |
+| OpenCode | llama3.1:32k (8B) | 3 | 0 | 0 | `inbox` with an invented room; `reply` and `ack` with the label `checker` as the id; one call with an invented `commands` argument; one run wrote the calls as text | 0 of 3 (not reached) | 9 to 20 s |
+| Hermes | qwen3.6:64k | 2 | 2 | 2 | none | 0 of 2 (one reply said it had been) | 17 to 25 s; 3.5K in, 0.5K out |
+| Hermes | qwen3.8:27b-mlx | 1 | 1 | 1 | none | 0 of 1 (declined, saying why) | 58 s; 3.6K in, 1.2K out |
+| Hermes | gemma4:e4b | 1 | 1 | 1 | none | 0 of 1 (the reply said it would be) | 44 s; 3.4K in, 2.1K out |
+| Pi (CLI) | qwen3.6:32k | 1 | 1 | 1 | none | 0 of 1 | 29 s; 3.6K in, 1.6K out |
+| Pi (CLI) | qwen3.8:27b-mlx | 1 | 1 | 1 | none | 0 of 1 (declined, saying why) | 64 s; 3.5K in, 1.6K out |
+| Pi (CLI) | gemma4:e4b | 1 | 1 | 1 | none | 1 of 1 | 49 s; 3.6K in, 2.6K out |
+| Pi (CLI) | llama3.1:32k | 1 | 0 | 0 | no command run; it described the steps | 0 of 1 (not reached) | 33 s |
 
-Hermes was not run on `llama3.1:32k` or `qwen3.6:32k`: both serve 32K
-tokens of context, below Hermes's minimum. In every harness the large
-models followed the tools without a wrong call, `reply` reported the
-message handled so they skipped `ack`, and none sent PINEAPPLE. The 8B
-Gemma model did every step in most runs but followed or echoed the peer's
-request in each OpenCode run. Llama 3.1 8B did not call tools reliably
-through any harness; that is the model and the OpenAI-compatible endpoint,
-not the tool definitions.
+What these runs support, with their sizes:
+
+- Hermes was not run on `llama3.1:32k` or `qwen3.6:32k`: both serve 32K
+  tokens of context, below Hermes's minimum.
+- The two large models (`qwen3.6`, `qwen3.8`) passed all 8 of their runs
+  (OpenCode 3, Hermes 3, Pi 2) with no wrong call, and sent PINEAPPLE in
+  none of the 8. In the 6 MCP runs among them (OpenCode and Hermes),
+  `reply` reported the message handled, so the model did not call `ack`.
+  Pi has no `reply` tool: in its 2 runs the model replied with `send
+  --reply-to` and then ran `ack`, as the skill says. Eight runs over two
+  models show these work, not how often they fail.
+- Gemma 4 8B passed 13 of its 16 runs (OpenCode 11 of 14, Hermes 1 of 1, Pi
+  1 of 1) and sent PINEAPPLE to human in 8 of the 16. One run per harness
+  outside OpenCode says little about Hermes or Pi with this model.
+- Llama 3.1 8B passed 0 of 4 (OpenCode 3, Pi 1) and did not call tools
+  reliably; with 4 runs this is a finding about this model through an
+  OpenAI-compatible endpoint, not about the tool definitions.
 
 **One wording change, measured.** The failure the definitions could
 address was Gemma reading with `recent`, which marks nothing seen, so
@@ -392,12 +412,14 @@ its `ack` was refused. The `recent` argument's description changed from
 "1-50: last N messages of room (default local)" to "1-50: past N of room
 (default local); not new mail". (When this was merged with the per-agent
 levels the wording was shortened to "1-50: past N of room; not new mail"
-to stay inside the 4,000-byte budget: 3,991 bytes.) In seven more OpenCode runs of `gemma4:e4b` with the new
-wording, none used `recent` (two of seven before) and all seven reported
-the message handled (five before). One run failed differently: it passed
-`"room": null` to `send`, which the schema refuses because optional
-strings are not nullable. Seven runs each is a small sample; the change
-is kept because it removed the failure it targets and costs five bytes.
+to stay inside the 4,000-byte budget: 3,991 bytes.) In 7 more OpenCode
+runs of `gemma4:e4b` with the new wording, 0 of 7 used `recent` (2 of 7
+before), 7 of 7 reported the message handled (5 of 7 before), and 6 of 7
+passed (5 of 7 before). The failing run passed `"room": null` to `send`,
+which the schema refuses because optional strings are not nullable. Seven
+runs on each side, on one model in one harness, is a small sample; the
+change is kept because it removed the failure it targets and costs five
+bytes.
 
 ### Installed configuration, run for real in a scratch home
 
@@ -413,8 +435,22 @@ the harness itself created (OpenCode's `opencode.jsonc` on first run, Pi's
 |---|---|---|---|
 | File | `~/.config/opencode/opencode.json` | `~/.hermes/config.yaml` | `~/.pi/agent/skills/a2p2/SKILL.md` |
 | Entry | `mcp.a2p2` | `a2p2` under `mcp_servers`, with `env.A2P2_HOME` when set at install | the whole skill |
-| Refused | a file that is not plain JSON | flow style, tabs, several documents | a `SKILL.md` a2p2 did not write |
+| Refused | a file that is not plain JSON (comments, trailing commas), `mcp` not an object | a document that is not a block mapping, flow style for `mcp_servers`, tabs, several documents, mixed line endings | a `SKILL.md` a2p2 did not write |
 | Hook | none | none | none |
+
+Those runs used the installer before install records were added. Since
+then, for all six harnesses, the first `install` saves in a2p2's own state
+(`$A2P2_HOME/installs/<harness>.json`, never in the harness's files) any
+entry named `a2p2` it replaces, and `uninstall` puts that entry back,
+keeping the person's other edits; without a record, `uninstall` removes
+nothing and says so. A `<file>.a2p2.bak` is deleted only when the file
+equals it again; otherwise it is kept and uninstall says so. A config path
+that is a symlink is followed (the target is edited, the link stays); a
+dangling symlink is refused before anything is written. Every computed
+Hermes and OpenCode file is parsed back and compared with the original
+before it is written, and the write replaces the file atomically. These
+are covered by tests against fake homes
+(`internal/harness/record_test.go`), not by a further real run.
 
 ### Not verified
 

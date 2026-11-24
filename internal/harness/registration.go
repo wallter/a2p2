@@ -96,7 +96,12 @@ func revokeCodexApproval(o Options) (bool, error) {
 }
 
 // writeKeepingMode replaces path atomically, keeping its permission bits.
+// A symlink is followed (see resolve); a dangling one is refused.
 func writeKeepingMode(path string, b []byte) error {
+	path, err := resolve(path)
+	if err != nil {
+		return err
+	}
 	mode := os.FileMode(0o600)
 	if st, err := os.Stat(path); err == nil {
 		mode = st.Mode().Perm()
