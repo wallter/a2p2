@@ -1,59 +1,99 @@
 # Working on a2p2
 
-a2p2 is a local-first messaging tool for agents and people. Each machine
-runs a daemon and keeps copies of messages for its rooms. To install and
-use it, follow the [README](README.md).
+a2p2 is a local-first, peer-to-peer messaging tool for AI coding agents and
+the people who run them. Each machine runs one daemon that keeps signed
+copies of the messages of its rooms and pulls new ones from the other
+members. To install and use it, follow the [README](README.md).
 
 Read [the design](docs/DESIGN-next.md) and [protocol](docs/PROTOCOL-next.md)
-before changing behaviour. Read [the decisions](docs/DECISIONS.md) before
+before changing behaviour, and [the decisions](docs/DECISIONS.md) before
 changing direction. For delivery changes, also read the
-[requirements](docs/REQUIREMENTS.md) and the models' findings in
+[requirements](docs/REQUIREMENTS.md) and the findings of the two models,
 [`internal/model/delivery`](internal/model/delivery/FINDINGS.md) and
 [`internal/members`](internal/members/FINDINGS.md).
+
+## Commands
+
+```bash
+make build                      # bin/a2p2 (static, no cgo)
+make check                      # gofmt, go vet, make trace, go test -race ./...  (what CI runs)
+go test -race -run TestName ./internal/node    # one test
+go test -race -count=20 ./internal/node        # hunt a flaky test
+make trace                      # docs/TRACE.md matches the requirements and the tests
+make fuzz                       # fuzz the record and entry decoders (FUZZTIME=10m for longer)
+make lint vuln                  # staticcheck, govulncheck (need network)
+make e2e HARNESS=claude         # real harness end to end; spends model tokens
+make review WHO=sol             # review of uncommitted changes by another model family
+```
+
+Try a change by hand without touching your own state:
+
+```bash
+export A2P2_HOME=$(mktemp -d) && bin/a2p2 status && bin/a2p2 send --as alice hi
+```
 
 ## Code map
 
 | Package | Role |
 |---|---|
-| `cmd/a2p2` | CLI wiring |
-| `internal/core` | Signed records and log entries, invite tokens, labels and limits |
-| `internal/members` | Resolve membership and admin changes from signed entries |
-| `internal/store` | SQLite records, room logs, requests, invites, peers and read state |
-| `internal/node` | `Machine`, `Rooms`, `Joiner`, `JoinServer`, `Exchange`, `Scheduler` and the shared `Surface` |
-| `internal/peer` | Machine keys and pinned mutual TLS for `/p/v2/join` and `/p/v2/pull` |
-| `internal/localapi` | JSON API over the Unix socket |
-| `internal/mcpshim`, `internal/harness` | MCP tools, harness setup and unread hooks |
-| `internal/web`, `internal/daemon` | Loopback UI and daemon wiring |
-| `internal/model/delivery` | Executable delivery model used in tests, outside the daemon |
+| `cmd/a2p2` | CLI wiring only |
+| `internal/core` | Signed records and log entries, invite tokens, labels and limits; no I/O |
+| `internal/members` | Who is a member and an admin of a room, from signed log entries; pure |
+| `internal/store` | SQLite: records, room logs, requests, invites, peers and read state |
+| `internal/node` | Behaviour: `Machine`, `Rooms`, `Joiner`, `JoinServer`, `Exchange`, `Scheduler` and `Surface` |
+| `internal/peer` | Machine key and pinned mutual TLS serving `/p/v2/join` and `/p/v2/pull` |
+| `internal/localapi` | JSON over HTTP over the Unix socket, server and client |
+| `internal/mcpshim` | Stdio MCP server; stateless, one local API call per tool |
+| `internal/harness` | Install, uninstall, hook output and doctor for each harness |
+| `internal/web`, `internal/daemon` | Loopback UI; the daemon that assembles the rest |
+| `internal/model/delivery` | Executable model of the delivery rules that tests compare the code against; never imported by the daemon |
+
+Imports point one way: `core` is used by `members` and `store`, which are
+used by `node`, which is used by everything else. `node` knows nothing
+about HTTP, TLS or MCP. It reaches other machines through `PullTransport`
+and `JoinTransport`, which tests replace with an in-memory network that
+injects faults (`internal/node/memnet_test.go`).
+
+## Easy to get wrong
+
+- **Every exported `store` method is one transaction.** Returning nil means
+  committed. A send, applying one pull response, applying one request's log
+  and offer, a Seen, signing a log entry and a pruning pass are each one
+  transaction.
+- **Identity comes from the connection.** The requesting machine is the TLS
+  peer key, never a field of the request. Records and log entries carry
+  their own signatures, checked on receipt. Agent labels carry no authority.
+- **A record is stored only at the next position of its author's stream**,
+  with a matching `prev` (PROTOCOL-next section 2). A second record at a
+  held position is a fork and is kept only as evidence.
+- **Reading is two steps.** `Inbox` returns entries and `Seen` confirms the
+  keys and versions shown. Hooks, summaries and thread views never mark
+  anything seen.
+- **A refused `confirm`.** If `confirm` returns `not_caught_up`, signing
+  needs an explicit `not_caught_up_ok`, which is recorded.
+- **`a2p2 mcp` owns stdout** for the MCP protocol. Log to stderr only, and
+  never log message bodies.
 
 ## Rules for changes
 
-- Keep transport details outside `internal/node`. Tests substitute an
-  in-memory network through `PullTransport` and `JoinTransport`. Use the
-  TLS peer key to identify the requesting machine. Verify the separate
-  signatures on records and log entries. Agent labels carry no authority.
-- Accept records only at the next position of the author's stream.
-  Preserve transaction boundaries. Each send, application of a pull
-  response or a request's log and offer, Seen, log signing and pruning pass
-  commits as a unit.
-- If `confirm` returns `not_caught_up`, signing needs explicit
-  `not_caught_up_ok`. Record that decision.
-- `Inbox` returns entries. `Seen` confirms the keys and versions shown.
-  Hooks, summaries and thread views must leave read state alone.
-- Keep MCP stdout for the protocol. Log to stderr and keep message bodies
-  out of logs.
 - Before adding a direct dependency, protocol message, MCP tool, CLI
-  command, config key or database table, record why it is needed in
-  [DECISIONS.md](docs/DECISIONS.md). Append decisions and migrations.
-  Change the wire version for incompatible changes.
-- Back delivery, ordering, security and compatibility claims with a named
-  test. Update the fault matrix in [TESTING.md](docs/TESTING.md) and the
-  requirement row in [TRACE.md](docs/TRACE.md) when its evidence changes.
-  Update [DESIGN-next.md](docs/DESIGN-next.md) if behaviour changes.
-- Keep tests off real state and harness settings. Use `t.TempDir()` for
-  test state and short directories under `/tmp` for Unix sockets.
-- Claim harness verification only after a real end-to-end run and record
-  the tested version in the [harness notes](docs/research/03-harness-integration.md).
-- Before committing a non-trivial change, get a diff-only review from a
-  different model family. Address each finding or record why it was
-  declined. Sign off commits as described in [CONTRIBUTING.md](CONTRIBUTING.md).
+  command, config key or database table, append an entry to
+  [DECISIONS.md](docs/DECISIONS.md) saying why it is needed now. Append
+  schema changes to `store.migrations`; never edit a shipped one. Change the
+  wire version for changes old machines cannot ignore.
+- Back delivery, ordering, security and compatibility claims with a test
+  named for the scenario. Add the row to the fault matrix in
+  [TESTING.md](docs/TESTING.md), and update the requirement's row in
+  [TRACE.md](docs/TRACE.md) when its evidence changes.
+- If behaviour changes, update [DESIGN-next.md](docs/DESIGN-next.md) in
+  the same change.
+- Tests never touch real state or harness settings. Use `t.TempDir()`, and
+  `os.MkdirTemp("/tmp", "a2p2")` for Unix sockets (macOS limits socket
+  paths to about 100 bytes).
+- Call harness behaviour verified only after a real end-to-end run, and
+  record the harness version in the
+  [harness notes](docs/research/03-harness-integration.md).
+- Before committing a non-trivial change, get a review of the diff from a
+  different model family (`make review`). Address each finding or record
+  why you declined it. Sign off commits as described in
+  [CONTRIBUTING.md](CONTRIBUTING.md).

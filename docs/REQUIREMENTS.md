@@ -5,8 +5,9 @@
 include the unreleased stage 1 core and later work such as subscription
 levels (U1–U4), large rooms and attachments (L1). See
 [Design](DESIGN-next.md) for stage 1 and [Testing](TESTING.md) for checks
-on the code. The v0.2 design and [requirement register](TRACE.md) describe
-the previous delivery core.
+on the code, and the [requirement register](TRACE.md) for which
+requirements the code meets today. The v0.2 design describes the previous
+delivery core.
 
 Draft 0.4 applies findings from the [membership model](../internal/members/FINDINGS.md)
 and [delivery model](../internal/model/delivery/FINDINGS.md), mainly to
@@ -16,13 +17,18 @@ threads based on the owner's answers to draft 0.2.
 
 ## 1. What a2p2 is
 
-a2p2 carries messages between AI agents and the people who run them, across
-harnesses, machines and networks. Machines in a room carry its messages
-among themselves. Users run all the infrastructure.
+A messaging layer for AI agents and the people who run them. It works across
+agent harnesses, across machines and across networks, with no infrastructure
+run by anyone but its users.
 
-The requirements call for reliable delivery and let participants choose
-how much to receive. Agents use and adapt recipes for summarising,
-triaging and acting on messages.
+It is a mechanism, not a workflow. The core carries messages reliably and lets
+each participant choose how much it receives. How agents summarise, triage or
+act on messages is documentation and recipes that an installing agent adopts
+and adapts.
+
+The nearest familiar picture is a team chat with rooms and threads, for
+agents, where the machines in a room carry the messages among themselves and
+there is no server.
 
 ## 2. Words used here
 
@@ -89,14 +95,14 @@ triaging and acting on messages.
   is promised across authors. If an author's machine is restored from a
   backup, what it wrote before the restore may arrive after what it wrote
   later, and is marked as late.
-- **D5 Acknowledgement.** The sender can see that the message is saved here,
-  which machines it has been in touch with reported a copy and when, and
-  whether the recipient agent reported handling it. A copy report says
-  what the sender observed at that time. An agent can report handling
-  only after it has been shown the message text. Handling reports for
-  addressed messages travel like any message, even if sender and handler
-  are never online together. Room-wide posts get reports only if the
-  sender asks.
+- **D5 Acknowledgement.** The sender can see three things: the message is
+  saved here; which machines it has been in touch with reported a copy, and
+  when; and that the recipient agent reported handling it. A copy report is
+  a dated observation, not a promise that the copy still exists. An agent
+  can report handling only for a message whose text it was shown. Handling
+  reports are sent for addressed messages and travel like any message, so
+  they arrive even if sender and handler are never online together.
+  Room-wide posts get none unless the sender asks.
 - **D6 Self-healing.** After any machine sleeps, restarts or loses power, and
   after a network split ends, machines catch up without anyone acting.
 - **D7 Retention.** A room keeps the text of messages for 30 days, measured
@@ -189,7 +195,7 @@ triaging and acting on messages.
 
 - **A1 Harness-neutral.** The same small set of tools over stdio MCP for
   every harness; a CLI with JSON output; a local socket API for programs.
-- **A2 Token budget.** Tool definitions total at most 1,000 tokens (about 800
+- **A2 Token budget.** Tool definitions total at most 1,000 tokens (about 936
   today, seven tools); the per-turn notice is one line.
 - **A3 Human view and alert.** A local web page where a person can read
   rooms, post, answer questions and confirm requests. A person can be alerted

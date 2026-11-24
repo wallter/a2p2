@@ -41,15 +41,14 @@ Headers, entries, bodies and all peer requests and responses use
   array or `false` is an error.
 - Store and pass on the exact signed bytes.
 
-A peer's key is its node id. Learn it from the room log or an invite
-token and pin every outbound TLS connection to it.
-
-Learn addresses from the token, a peer's `addrs` and `peers` in responses.
-Keep at most 8 per node (`peer_addrs`, section 8) and try them by most
-recent success. Give addresses a node reports for itself priority for
-those slots. Drop an address after 24 hours of failure and at least 5
-failed attempts. Dials to addresses that have yet to complete a pinned
-handshake share one daemon budget (2 a second, burst 8).
+A peer's key is its node id, learned from the room log or an invite token;
+every outbound TLS connection is pinned to it. Addresses are hints, learned
+from the token, a peer's `addrs`, and `peers` in responses, stored per
+node (`peer_addrs`, section 8) and tried most recent success first. At most
+8 per node; an address a node reports for itself takes a slot before one
+heard from a third party; one that has failed for 24 hours and at least 5
+attempts is dropped. Dials to addresses that have never completed a pinned
+handshake share one budget for the daemon (2 a second, burst 8).
 
 ## 1. Record header
 
@@ -751,9 +750,9 @@ Networking states:
 - `outbound` has everything except a listener (requirement N1).
 - `on` includes a listener.
 
-Any program running as the same user can call the socket. The agent tools
-and hooks omit `confirm`, `net` and `room/join/accept`. The daemon records
-each use of those calls. See [Requirements section 6](REQUIREMENTS.md#6-limits-in-plain-words).
+The socket is open to any program running as the same user: `confirm`, `net`
+and `room/join/accept` are kept out of the agent tools and hooks and every
+use is recorded, which is a guard rail and not a lock (REQUIREMENTS 6).
 
 `Entry`: `{"key","version","kind":"message"|"withdrawn"|"replaced"|"expired"|"voided","id","room","from","from_node","author_removed","to","parent","thread","parent_state":"here"|"missing"|"expired"|"withdrawn","late","created","text","choices"}`.
 `Wait`: `{"room","author","have","known","since","reason":"text"|"link"|"gap"}`.

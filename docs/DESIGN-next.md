@@ -46,9 +46,8 @@ are `message`, `handled`, `withdraw` and `replace` (delivery FINDINGS,
   hold every link by room, author, epoch, sequence and id [R4]. The receiver
   refuses a second record at a held position as a fork. It repairs text
   for a held header only when the machine still wants and may read it.
-- Each start opens a new stream. Its first record links every held head of
-  the author's history [R2]. The model has no cap on links. The wire
-  limits and refusal are in [Protocol section 1](PROTOCOL-next.md#1-record-header).
+- Every start writes a new stream whose first record links every head of
+  the author's history held [R2]; there is no cap on links.
 - The writer sets a replacement's version to one above the winning version
   it knows (the model's `World.amend`). Only an agent shown the text can
   report handling [R7]. Receivers do not check these writer rules. They
@@ -71,10 +70,10 @@ an author not a member now is shown marked "author removed", whoever
 relayed it. A voided author's records are no longer shown or served; agents
 shown one get a "voided" notice
 (`TestVoidedAdmissionHidesAndDropsItsRecordsAndTellsReadersWhoSawThem`).
-A member that has yet to hear of a removal can pass on later writes by the
-removed machine
-(`TestRecordWrittenAfterRemovalReachesNoHonestMemberButARelayedCopyIsKeptMarked`).
-After removal, T1 holds in this limited form.
+With no cut-off on records, a removed machine's later writes can reach
+informed machines through a member not yet told
+(`TestRecordWrittenAfterRemovalReachesNoHonestMemberButARelayedCopyIsKeptMarked`),
+so after a removal T1 holds only in this weaker, marked form.
 
 **"Was a member"** means the machine has ever had an effective admission
 in `members.State.Admitted` [M13], regardless of membership period.
@@ -322,11 +321,10 @@ applies. Rejoining needs a new invite; an admin removes it from the list.
 | Relay alters or strips | Refused, or text repaired | `TestRelayThatAltersARecordIsRefused`, `TestRelayThatStripsTextAndClaimsWithdrawalCannotLoseIt` |
 | Peer withholds | Other streams progress; rotation reaches other holders | `TestARefusedStreamDoesNotStarveOthersUnderAPageLimit` covers paging; rotation not covered (G4) |
 
-The build plan called for tests of the golden vectors (PROTOCOL 9),
-rejoining after disk loss, future-dated records, fork alerts, anchor
-rotation, the token proxy, join states, leave and rejoin, and the summary
-exchange against full summaries, including a round that cannot progress.
-See [Testing](TESTING.md) for coverage.
+Tests the build must add: the golden vectors (PROTOCOL 9); rejoining after
+a lost disk; future-dated records; fork alerts; anchor rotation; the token
+proxy; join states; leave and rejoin; the summary exchange against full
+summaries, including a round that cannot progress.
 
 ## 9. Package plan
 
@@ -394,7 +392,7 @@ user-facing limits.
 Members gap 1 is closed by [M12]; gaps 2, 3 and 5 are passing tests of
 stated limits.
 
-Other findings from the design review:
+What remains partly resolved, as REQUIREMENTS section 6 limits:
 
 | Finding | Limit |
 |---|---|
