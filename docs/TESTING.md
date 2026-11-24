@@ -104,67 +104,100 @@ Rows marked "model" include tests of the rules in `internal/members` or
 | Real machine taken off the network and put back | It catches up without anyone acting | `make chaos` |
 | Room split into two halves by the network, a daemon killed during the split, then healed | Both halves converge to the same records; handled reports arrive | `make chaos` |
 | One machine cut off for good (sabotage) | The chaos checker reports the missing records and exits non-zero | `make chaos` with `--sabotage isolate` |
+| A scheduled fault that did not take effect, or a run with nothing delivered | The chaos run is inconclusive (exit 3), not a pass | `chaos.py check DIR --unverify partition`, `--empty` |
 
 ### Chaos runs of real daemons
 
 `make chaos` (`scripts/chaos/chaos.py run`) needs Docker and a few
 minutes, and is not part of `make check`. It builds the static Linux
-binary into a busybox image of about 17 MB and starts one daemon per
-container, each the container's main process with its own home volume,
-on one user-defined network. The last node runs `net on --outbound-only`,
-so it has no inbound route (N1). The room is formed by real invites,
-`join` and `confirm`, answered at a pseudo-terminal inside the containers;
-the driver checks each fingerprint against the joiner's node id. The
-first three nodes become admins, so the third needs both admins'
-confirmations.
+binary into a busybox image of about 17 MB, tagged for the run, and
+starts one daemon per container, each the container's main process with
+its own home volume, on one user-defined network. The last node runs
+`net on --outbound-only`, so it has no inbound route (N1). The room is
+formed by real invites, `join` and `confirm`, answered at a
+pseudo-terminal inside the containers; the driver checks each
+fingerprint against the joiner's node id. The first three nodes become
+admins, so the third needs both admins' confirmations.
+
+Every Docker object a run makes has a name with a random run id and the
+label `a2p2chaos.run=<run id>`. A name already in use fails the run
+instead of being reused. Cleanup removes only the objects Docker
+returned to the run and those with its label, also after SIGINT or
+SIGTERM, and a cleanup failure makes the exit status non-zero. `--keep`
+leaves them and prints them.
 
 While a fault schedule made from the seed runs, every node's agent sends
 numbered room-wide posts, posts that ask for handled reports, replies in
 threads, one replace and one withdraw, and reads its inbox and reports
-handled what it may. The faults are `docker kill -s KILL` and start,
-`docker pause` and unpause, `docker network disconnect` and connect, and
-a partition into two halves (blackhole routes inside the containers)
-with a kill inside it and a heal; extra kills overlap the others. The
-schedule is written to `schedule.json` before anything runs. After the
-heal every node sends once more, and the checker requires, on every
-member: the same records (key, version, sender, text, thread and
-addressees), each message once, every message a sender accepted, each
-author's messages in the author's order in history and in the order its
-inbox showed them, no message shown twice and every message for the
-agent shown, nothing marked late, nothing still waited for, every
-handled report in `trace`, the withdrawn message and its text gone, the
-replacement text shown, every daemon running, no exit other than the
-kills, and no panic in any log. Variables: `NODES`, `SEED`, `DURATION`.
-Logs, the schedule, a snapshot and `summary.txt` go to `.chaos/`.
+handled what it may. Before replacing or withdrawing, the author waits
+up to 20 seconds for another member's agent to be shown the original, so
+that the notice path is exercised. The faults are `docker kill -s KILL`
+and start, `docker pause` and unpause, `docker network disconnect` and
+connect, and a partition into two halves (blackhole routes inside the
+containers) with a kill inside it and a heal; extra kills overlap the
+others. A kill waits for a driver inbox read in progress on that node
+to finish, so the window between showing and confirming (D3's
+exception) is not exercised. The schedule is written to `schedule.json`
+before anything runs.
 
-The checker fails when delivery is broken. `chaos.py check DIR --drop
-n3:n1` deletes n1's records from n3's copy in a saved snapshot and
-reports four violations; `run --sabotage isolate` leaves one node cut
-off after the heal and fails the run.
+A fault counts only once its effect is seen: the process gone with exit
+137, the container running again, paused or not, detached from the
+network or back on it at its address, or the blackhole routes read back
+from each running node (each pair across the split cut on at least one
+side). The summary lists faults applied and not applied.
 
-Recorded runs (2026-11-24, 3 nodes, default schedule unless stated):
-seeds 1, 2 and 3 (92 to 107 seconds of faults, 5 to 8 kills each, 169
-to 184 accepted messages, 82 to 85 handled reports) had no violations and
-settled within 6 seconds of the heal. Eight nodes, seed 4, 120 seconds
-(10 kills, 641 accepted messages, 866 handled reports): no violations,
-settled within 5 seconds. Seed 5 with `--sabotage isolate`: 11
-violations, exit 1, as it should.
+After the heal every node sends once more. The checker then requires:
 
-What the runs showed beyond the checks: the text of a withdrawn message
-is gone from every surface, but its bytes can stay on disk. The summary
-greps each daemon's database files for the withdrawn text; in four of
-six runs the write-ahead log still held it at the end, and once the main
-database file did (free pages; the store does not set
-`secure_delete`). D9 says machines drop the withdrawn text. That was
-fixed afterwards (decision D43): the store now overwrites freed content
-and truncates its write-ahead log every minute, proven by
-`TestWithdrawnTextIsInNoFileOfTheStoreAfterAScrub`. The chaos runs above
-predate the fix.
+- on every member, the same records with every field equal; each message
+  once; every message a sender accepted; for each, the text, author,
+  creation time, parent, thread and addressees the driver sent, and no
+  record whose text no workload agent tried to send;
+- each author's messages in the author's order in history and in the
+  order the inbox showed them; nothing marked late; nothing still waited
+  for; no message shown twice; every message for the agent shown;
+- every handled report in `trace` on every member;
+- the withdrawn message absent from history, absent from every file of
+  the store once its one-minute scrub has run (DECISIONS D43), and an
+  agent shown it told it was withdrawn and shown no withdrawn text
+  after; the replacement in history, last in what each agent was shown,
+  and an agent shown the original told it was replaced;
+- every daemon running, no exit other than the kills, no panic in any
+  log.
+
+A run is inconclusive (exit 3) when any kind of fault was never seen
+applied, no applied partition had an accepted send on both sides during
+it, a member had no accepted send after the last fault, the run made no
+accepted reply, handled report, replace or withdraw, no reader was shown
+an original before its replace or withdraw, or an inbox read failed
+partway (that member's inbox cannot be checked for completeness). A
+violation exits 1, a run that could not be carried out or cleaned up
+exits 2. Variables: `NODES`, `SEED`, `DURATION`. Logs, the schedule, a
+snapshot and `summary.txt` go to `.chaos/`.
+
+The checker fails when it should, shown on a saved snapshot with
+`chaos.py check DIR`: `--drop n3:n1` (n1's records deleted from n3's
+copy) gives violations; `--corrupt` (one message's text changed the same
+way on every member) gives violations; `--unverify partition` and
+`--empty` (nothing got through) are inconclusive. `run --sabotage
+isolate` leaves one node cut off after the heal and fails the run.
+
+Recorded runs on 2026-11-24, after the store gained `secure_delete` and
+its one-minute scrub (DECISIONS D43); every fault of every run was seen
+applied, and no withdrawn text was found in any member's files:
+
+| Seed | Nodes | Faults for | Kills | Accepted sends | Handled reports | Notices checked (replace, withdraw) | Settled after heal | Result |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 3 | 107 s | 8 | 175 | 85 | 2, 2 | 6 s | pass |
+| 2 | 3 | 92 s | 5 | 106 | 51 | 3, 1 | 6 s | pass (a first run was inconclusive: the driver's own flag missed the notices; the checker now reads them from the inbox) |
+| 3 | 3 | 96 s | 6 | 175 | 78 | 2, 2 | 0 s | pass |
+| 4 | 8 | 120 s | 10 | 570 | 732 | 7, 7 | 4 s | pass |
+| 5, `--sabotage isolate` | 3 | 55 s | 3 | 45 | 19 | 0, 1 | not settled in 60 s | 34 violations, exit 1 |
 
 Not covered: a real WAN, latency or loss (`tc netem` is not used),
 clock skew, a full disk, power loss (a kill -9 leaves the kernel's page
-cache intact, so it does not test `synchronous(FULL)`), restores from
-backup, removals during faults, and machines on different versions.
+cache intact, so it does not test `synchronous(FULL)`), a crash between
+showing and confirming, restores from backup, removals during faults,
+and machines on different versions.
 
 ## Acceptance
 
