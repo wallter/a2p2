@@ -9,35 +9,36 @@ import (
 )
 
 // One waiting pull per room per peer: a second from the same peer for the
-// same room releases the first at once (same, no error).
+// same room releases the first at once (same, no error). In an explicit
+// order: the first is held, then the second is, and only then is the
+// first released.
 //
 // Requirements: P5
 func TestASecondWaitingPullFromOnePeerReleasesTheFirst(t *testing.T) {
 	a, b, _, room := pairWithHistory(t)
-	first := make(chan error, 1)
-	go func() {
-		_, err := b.x.Pull(context.Background(), room, a.id, PullOpts{WaitMS: 60000})
-		first <- err
-	}()
-	time.Sleep(30 * time.Millisecond)
+	b.mustPull(room, a, PullOpts{})
+	a.x.after = func(time.Duration) <-chan time.Time { return nil } // no wait ends on its own
+	first := heldPull(t, a, b, room)
 	select {
 	case err := <-first:
-		t.Fatalf("returned before the second: %v", err)
+		t.Fatalf("the first returned on its own: %v", err)
 	default:
 	}
+	second := a.x.NextHold(room, b.id)
 	ctx, cancel := context.WithCancel(context.Background())
-	second := make(chan struct{})
-	defer func() { cancel(); <-second }()
+	stopped := make(chan struct{})
+	defer func() { cancel(); <-stopped }()
 	go func() {
-		defer close(second)
+		defer close(stopped)
 		_, _ = b.x.Pull(ctx, room, a.id, PullOpts{WaitMS: 60000})
 	}()
+	<-second
 	select {
 	case err := <-first:
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("the first, released: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("the first waiting pull was not released")
 	}
 }

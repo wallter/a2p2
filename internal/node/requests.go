@@ -117,7 +117,6 @@ const (
 	ReasonSelf        = "a machine cannot add or make itself an admin; to stop carrying a room, leave it"
 	ReasonNotWaiting  = "the change it would second is no longer waiting for a second admin"
 	ReasonRoomGone    = "the room is no longer held here"
-	ReasonNotPulled   = "this machine has not fetched the room's log from another member since it started"
 	ReasonActionMoved = "the room changed: signing now would "
 	ReasonTooMany     = "too many requests are waiting in this room"
 	errNotPendingText = "request is not pending"
@@ -264,6 +263,32 @@ func (r *Rooms) withDeadlines(ctx context.Context, qs []store.Request) ([]store.
 // approval in one transaction. Decisions are serialised: two approvals,
 // or an approval and a decline, sign at most once.
 func (r *Rooms) Confirm(ctx context.Context, id string, approve bool) (Confirmation, error) {
+	return r.ConfirmWith(ctx, id, approve, ConfirmOpts{})
+}
+
+// ReasonNotCaughtUp is why an approval that would sign was refused: this
+// machine has not caught up with the room's log since it started.
+const ReasonNotCaughtUp = "not_caught_up"
+
+// ErrNotCaughtUp: the approval would sign an entry for a room whose log
+// this machine has not caught up with since it started (DESIGN-next 3);
+// nothing was signed and the request stays pending. Signing now risks
+// reusing a position this machine signed before a restore, or building on
+// a log other members have moved past.
+var ErrNotCaughtUp = &UserError{ReasonNotCaughtUp + ": this machine has not caught up with the room's log from " +
+	"another member since it started; signing now risks a fork if it was restored from an older copy"}
+
+// ConfirmOpts are a person's choices on one approval.
+type ConfirmOpts struct {
+	// NotCaughtUpOK signs although the room's log has not been caught up
+	// with since start (every other member may be gone for good). The
+	// surface asks for it only after showing the risk; it is recorded
+	// with the request.
+	NotCaughtUpOK bool
+}
+
+// ConfirmWith is Confirm with the person's options.
+func (r *Rooms) ConfirmWith(ctx context.Context, id string, approve bool, o ConfirmOpts) (Confirmation, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	q, err := r.m.st.GetRequest(ctx, id)
@@ -304,11 +329,17 @@ func (r *Rooms) Confirm(ctx context.Context, id string, approve bool) (Confirmat
 	if rl == nil {
 		return fail(ReasonRoomGone)
 	}
-	if !r.maySign(rl) {
-		return Confirmation{}, &UserError{ReasonNotPulled} // stays pending
-	}
 	if reason := r.check(rl, q); reason != "" {
 		return fail(reason)
+	}
+	// Approving a rejoin signs nothing; anything else waits for the
+	// catch-up unless the person accepted the risk (stays pending).
+	override := false
+	if q.Action != ActionRejoin && !r.maySign(rl) {
+		if !o.NotCaughtUpOK {
+			return Confirmation{}, ErrNotCaughtUp
+		}
+		override = true
 	}
 	if q.Action == ActionRejoin {
 		// Nothing to sign: the approval alone is stored.
@@ -366,7 +397,7 @@ func (r *Rooms) Confirm(ctx context.Context, id string, approve bool) (Confirmat
 		// The joiner was shown that it would be admitted (DESIGN-next 7).
 		return fail(ReasonNotAdmitted)
 	}
-	res, err := r.ingest(ctx, rl, 0, wires, &completion{request: id, entry: strings.Join(ids, ",")})
+	res, err := r.ingest(ctx, rl, 0, wires, &completion{request: id, entry: strings.Join(ids, ","), notCaughtUp: override})
 	if errors.Is(err, store.ErrInviteExpired) {
 		// The invite ran out while this was being signed: nothing was stored.
 		if _, err := r.m.st.ExpireInvites(ctx, r.m.now()); err != nil {
@@ -391,12 +422,13 @@ func (r *Rooms) Confirm(ctx context.Context, id string, approve bool) (Confirmat
 }
 
 // maySign enforces "since starting, a daemon signs no entry for a room
-// until it has pulled that room's log from another member" (DESIGN-next
-// section 3). rl.pulled is set by the first pull of the room since start
-// that ended without an error (Exchange.Pull), by a join's delivery of the
-// log (Receive), and for a room created or pinned in this run. Rooms where
-// this machine is the only member are exempt: there is no one to pull
-// from. The rule narrows the restore problem; it cannot detect a restore.
+// until it has caught up with that room's log from another member"
+// (DESIGN-next section 3). rl.pulled is set by an exchange with a current
+// member in which every log head that member advertised is accepted here
+// (Exchange.Pull), by a join that completes with every head of its last
+// page accepted (Joiner.verify), and for a room created in this run.
+// Rooms where this machine is the only member are exempt. The rule
+// narrows the restore problem; it cannot detect a restore.
 func (r *Rooms) maySign(rl *roomLog) bool {
 	if len(rl.st.Members) <= 1 {
 		return true

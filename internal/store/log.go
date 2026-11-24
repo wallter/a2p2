@@ -127,6 +127,9 @@ type Request struct {
 	// Admins is the number of admins the room had when a request that
 	// makes an admin was raised here (0: not recorded).
 	Admins int
+	// NotCaughtUp: approved before this machine had caught up with the
+	// room's log since it started, on the person's explicit override.
+	NotCaughtUp bool
 	// Deadline, for a request an invite raised, is the invite's expiry
 	// (filled by the node; not stored with the request).
 	Deadline time.Time
@@ -190,6 +193,9 @@ type LogBatch struct {
 	Requests []Request
 	Complete string
 	Entries  string
+	// NotCaughtUp records, with Complete, that the person approved it
+	// before the room's log was caught up with (ConfirmOpts).
+	NotCaughtUp bool
 	// Access, if set, is called after the rows are written, with a Reader
 	// over the same transaction.
 	Access func(*Reader) (Access, error)
@@ -353,8 +359,8 @@ func applyLog(tx *sql.Tx, b LogBatch) (int64, error) {
 			if err := inviteDeadline(tx, b.Complete, b.Now); err != nil {
 				return err
 			}
-			res, err := tx.Exec(`UPDATE requests SET state = ?, decided_at = ?, entries = ?, reason = ''
-				WHERE id = ? AND room = ? AND state = ?`, RequestApproved, ms(b.Now), b.Entries, b.Complete, b.Room, RequestPending)
+			res, err := tx.Exec(`UPDATE requests SET state = ?, decided_at = ?, entries = ?, reason = '', not_caught_up = ?
+				WHERE id = ? AND room = ? AND state = ?`, RequestApproved, ms(b.Now), b.Entries, b.NotCaughtUp, b.Complete, b.Room, RequestPending)
 			if err != nil {
 				return err
 			}
@@ -662,13 +668,13 @@ func insertRequest(tx *sql.Tx, q Request) error {
 	return err
 }
 
-const requestCols = `id, kind, action, room, node, name, role, history, seconds, created_at, state, decided_at, entries, reason, admins`
+const requestCols = `id, kind, action, room, node, name, role, history, seconds, created_at, state, decided_at, entries, reason, admins, not_caught_up`
 
 func scanRequest(sc interface{ Scan(...any) error }) (Request, error) {
 	var q Request
 	var created, decided int64
 	if err := sc.Scan(&q.ID, &q.Kind, &q.Action, &q.Room, &q.Node, &q.Name, &q.Role, &q.History, &q.Seconds,
-		&created, &q.State, &decided, &q.Entries, &q.Reason, &q.Admins); err != nil {
+		&created, &q.State, &decided, &q.Entries, &q.Reason, &q.Admins, &q.NotCaughtUp); err != nil {
 		return Request{}, err
 	}
 	q.Created = fromMS(created)

@@ -246,8 +246,12 @@ func TestOverTLSAMessageReachesThreeMachinesAndItsHandledReportReturns(t *testin
 	runSched(t, a, b, c)
 	warm := a.send(room, "warm up", false)
 	within(t, "the first message everywhere", func() bool { return b.holds(room, warm) && c.holds(room, warm) })
-	// Measured from the write: by now every scheduler waits on the others.
-	time.Sleep(20 * time.Millisecond)
+	// Measured from the write, once b and c each hold a waiting pull at a
+	// again (after the warm-up released theirs).
+	bHeld, cHeld := a.x.NextHold(room, b.node()), a.x.NextHold(room, c.node())
+	_ = a.send(room, "warm up again", false)
+	<-bHeld
+	<-cHeld
 	start := time.Now()
 	id := a.send(room, "please look", true)
 	within(t, "the message everywhere", func() bool { return b.holds(room, id) && c.holds(room, id) })
@@ -286,12 +290,13 @@ func TestOverTLSAWaitingPullIsReleasedByAnArrival(t *testing.T) {
 	room := group(t, a, b)
 	got := make(chan error, 1)
 	var returned atomic.Int64
+	held := a.x.NextHold(room, b.node())
 	go func() {
 		_, err := b.pull(room, a, node.PullOpts{WaitMS: 60000})
 		returned.Store(time.Now().UnixNano())
 		got <- err
 	}()
-	time.Sleep(50 * time.Millisecond)
+	<-held
 	if returned.Load() != 0 {
 		t.Fatal("the waiting pull returned before anything changed")
 	}
@@ -314,11 +319,12 @@ func TestOverTLSAPeerRemovedWhileItsPullWaitsGetsNotMember(t *testing.T) {
 	a, b, c := newPM(t, "alice", true), newPM(t, "bob", false), newPM(t, "carol", false)
 	room := group(t, a, b, c)
 	got := make(chan error, 1)
+	held := a.x.NextHold(room, b.node())
 	go func() {
 		_, err := b.pull(room, a, node.PullOpts{WaitMS: 60000})
 		got <- err
 	}()
-	time.Sleep(50 * time.Millisecond)
+	<-held
 	q, err := a.r.Propose(bg, room, node.Change{Kind: core.EntryRemove, Target: b.node()})
 	if err != nil {
 		t.Fatal(err)
@@ -345,6 +351,7 @@ func TestOverTLSAPeerRemovedWhileItsPullWaitsGetsNotMember(t *testing.T) {
 func TestOverTLSAStrangersHandshakeFailsAndItsRequestIsRefused(t *testing.T) {
 	a, b, s := newPM(t, "alice", true), newPM(t, "bob", false), newPM(t, "stranger", true)
 	room := group(t, a, b)
+	forget(b.book, a.node())
 	b.book.Replace(a.node(), []string{s.addr}, time.Now()) // a's address now answers with another key
 	_, err := b.pull(room, a, node.PullOpts{})
 	var pe *node.PullError
@@ -367,6 +374,9 @@ func TestOverTLSAStrangersHandshakeFailsAndItsRequestIsRefused(t *testing.T) {
 		t.Fatalf("stranger: %d %s", status, body)
 	}
 }
+
+// forget drops what book holds of n.
+func forget(book *node.AddrBook, n string) { book.Keep(func(o string) bool { return o != n }) }
 
 func mustBody(t *testing.T, q *node.PullRequest) []byte {
 	t.Helper()
@@ -513,10 +523,8 @@ func TestOverTLSAMachineWithNoListenerConvergesThroughItsOwnRequests(t *testing.
 	// c's first pull told a where c is (its addrs); n's first pull, after
 	// it, was answered with c among the peers.
 	room := group(t, a, c, n)
-	// The join gave n the whole log, so its pull in group was answered
-	// "same", which carries no peers; a difference gets a digests answer.
-	a.send(room, "hello", false)
-	n.mustPull(room, a, node.PullOpts{})
+	// n had no address for c, so its pull in group asked for peers, and
+	// the same answer listed c.
 	if got := n.book.Addrs(c.node()); len(got) != 1 || got[0] != c.addr {
 		t.Fatalf("n learned c at %v, want %s", got, c.addr)
 	}
@@ -553,6 +561,7 @@ func TestOverTLSAPeerWithADeadFirstAddressIsReachedOnItsSecond(t *testing.T) {
 	}
 	dead := ln.Addr().String()
 	ln.Close()
+	forget(b.book, a.node())
 	b.book.Replace(a.node(), []string{dead}, time.Now())
 	b.book.Learn(a.node(), []string{a.addr}, time.Now())
 	if got := b.book.Addrs(a.node()); got[0] != dead {
@@ -595,13 +604,15 @@ func TestOverTLSWaitingPullsToOnePeerShareOneConnection(t *testing.T) {
 	b := newPM(t, "bob", false)
 	r1, r2 := group(t, a, b), group(t, a, b)
 	errs := make(chan error, 2)
+	h1, h2 := a.x.NextHold(r1, b.node()), a.x.NextHold(r2, b.node())
 	for _, room := range []string{r1, r2} {
 		go func() {
 			_, err := b.pull(room, a, node.PullOpts{WaitMS: 60000})
 			errs <- err
 		}()
 	}
-	time.Sleep(50 * time.Millisecond)
+	<-h1
+	<-h2
 	id1, id2 := a.send(r1, "one", false), a.send(r2, "two", false)
 	for range 2 {
 		if err := <-errs; err != nil {

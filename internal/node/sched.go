@@ -15,12 +15,18 @@ package node
 //   - Failure: back off 1 s doubling to 5 min, with ±20 % jitter, and move
 //     on to the next member. 403 twice running (the exchange resends its
 //     whole log after the first) stops pulling the room from that peer
-//     until this machine's log of the room changes; 413 halves the offer;
-//     429 and 503 wait their Retry-After.
+//     until this machine's log of the room changes or a request from the
+//     peer, a current member, shows changed log heads (the Exchange keeps
+//     that state; refusalOf); 413 halves the offer; 429 and 503 wait their
+//     Retry-After. A waiting pull answered same well before its wait, with
+//     nothing stored here, counts as a failure for back-off: against a
+//     peer that answers at once, after 1 s doubling to 5 min, one request
+//     per room per 4 to 6 min.
 //
 // Clock, timers, jitter and transport are injected, so tests are
-// deterministic. Peers' addresses are the Exchange's AddrBook, in memory.
-// Nothing in the daemon starts a Scheduler yet: that happens at the switch.
+// deterministic. Peers' addresses are the Exchange's AddrBook; Run keeps
+// it to the members of the rooms held. Nothing in the daemon starts a
+// Scheduler yet: that happens at the switch.
 
 import (
 	"context"
@@ -57,17 +63,22 @@ type Scheduler struct {
 	mu    sync.Mutex
 	peers map[[2]string]*peerState // per room and peer
 	rooms map[string]*roomSched
+
+	// Test hooks: beforeLook runs before Run looks at the rooms held;
+	// beforePull after an anchor has picked its peer, before it pulls;
+	// loopDone when a room's loop has ended.
+	beforeLook func()
+	beforePull func(room string, slot int)
+	loopDone   func(room string)
 }
 
 // peerState is what the scheduler knows of one peer for one room.
 type peerState struct {
-	fails   int       // failures since the last success
-	ok      int       // successes
-	until   time.Time // not before
-	refused int       // 403s running
-	muted   []string  // set: this machine's log heads when the peer refused twice
-	offer   int       // offer limit after a 413; 0: the exchange's
-	spins   int       // waiting pulls running that neither waited nor stored anything
+	fails int       // failures since the last success
+	ok    int       // successes
+	until time.Time // not before
+	offer int       // offer limit after a 413; 0: the exchange's
+	spins int       // waiting pulls running that neither waited nor stored anything
 }
 
 // roomSched is one room's anchors: the peer each is pulling from, and the
@@ -102,37 +113,57 @@ func NewScheduler(x *Exchange, o SchedOpts) *Scheduler {
 	return &Scheduler{x: x, o: o, peers: map[[2]string]*peerState{}, rooms: map[string]*roomSched{}}
 }
 
-// Run pulls every room held until ctx ends: one loop per room, started
-// when the room is held and stopped when it is left.
+// Run pulls every room held until ctx ends: one loop per room and
+// generation, started when the room is held and stopped when it is left
+// or joined again; a loop of an earlier generation has ended before the
+// loop of the next starts. Its context reaches every request of every
+// exchange the loop runs.
 func (s *Scheduler) Run(ctx context.Context) {
-	loops := map[string]context.CancelFunc{}
-	var wg sync.WaitGroup
+	type loop struct {
+		gen  int64
+		stop context.CancelFunc
+		done chan struct{}
+	}
+	loops := map[string]*loop{}
 	defer func() {
-		for _, stop := range loops {
-			stop()
+		for _, l := range loops {
+			l.stop()
 		}
-		wg.Wait()
+		for _, l := range loops {
+			<-l.done
+		}
 	}()
 	for {
 		wake := s.x.r.m.wakes.wait(roomSet)
-		held := s.held()
-		for _, room := range held {
-			if loops[room] == nil {
-				rctx, stop := context.WithCancel(ctx)
-				loops[room] = stop
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					s.room(rctx, room)
-				}()
-			}
+		if s.beforeLook != nil {
+			s.beforeLook()
 		}
-		for room, stop := range loops {
-			if !slices.Contains(held, room) {
-				stop()
+		held := s.held()
+		for room, l := range loops {
+			if g, ok := held[room]; !ok || g != l.gen {
+				l.stop()
+				<-l.done
 				delete(loops, room)
 			}
 		}
+		for room, gen := range held {
+			if l := loops[room]; l != nil {
+				select {
+				case <-l.done: // ended by itself (the room moved on): replaced
+					delete(loops, room)
+				default:
+					continue
+				}
+			}
+			rctx, stop := context.WithCancel(ctx)
+			l := &loop{gen: gen, stop: stop, done: make(chan struct{})}
+			loops[room] = l
+			go func() {
+				defer close(l.done)
+				s.room(rctx, room, gen)
+			}()
+		}
+		s.x.keepBook()
 		select {
 		case <-wake:
 		case <-ctx.Done():
@@ -141,27 +172,27 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
-func (s *Scheduler) held() []string {
+// held is the rooms held and their generations.
+func (s *Scheduler) held() map[string]int64 {
 	r := s.x.r
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]string, 0, len(r.rooms))
-	for id := range r.rooms {
-		out = append(out, id)
+	out := make(map[string]int64, len(r.rooms))
+	for id, rl := range r.rooms {
+		out[id] = rl.gen
 	}
-	slices.Sort(out)
 	return out
 }
 
 // room is one room's loop: the start pulls, then the two anchors.
-func (s *Scheduler) room(ctx context.Context, room string) {
-	s.start(ctx, room)
+func (s *Scheduler) room(ctx context.Context, room string, gen int64) {
+	s.start(ctx, room, gen)
 	var wg sync.WaitGroup
 	for _, slot := range []int{slotStable, slotRotating} {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.anchor(ctx, room, slot)
+			s.anchor(ctx, room, gen, slot)
 		}()
 	}
 	wg.Wait()
@@ -173,14 +204,20 @@ func (s *Scheduler) room(ctx context.Context, room string) {
 		}
 	}
 	s.mu.Unlock()
+	if s.loopDone != nil {
+		s.loopDone(room)
+	}
 }
 
 // start is the short pulls of a room from two members, the most reliable
 // first; a failure moves on to the next.
-func (s *Scheduler) start(ctx context.Context, room string) {
+func (s *Scheduler) start(ctx context.Context, room string, gen int64) {
 	done := 0
 	tried := map[string]bool{}
 	for done < 2 && ctx.Err() == nil {
+		if g, err := s.x.r.Gen(room); err != nil || g != gen {
+			return
+		}
 		var peer string
 		for _, p := range s.eligible(room) {
 			if !tried[p] {
@@ -201,18 +238,29 @@ func (s *Scheduler) start(ctx context.Context, room string) {
 	}
 }
 
-// anchor is one anchor's loop of waiting pulls.
-func (s *Scheduler) anchor(ctx context.Context, room string, slot int) {
-	offer, probed := true, false
+// anchor is one anchor's loop of waiting pulls, for generation gen of
+// the room.
+func (s *Scheduler) anchor(ctx context.Context, room string, gen int64, slot int) {
+	// offered is the count of the room's touches (writes) covered by the
+	// last exchange that could carry an offer and ran; until one has run
+	// for every touch, the next request offers.
+	var offered uint64
+	first, probed := true, false
 	cur := ""
 	for ctx.Err() == nil {
-		if _, err := s.x.r.Gen(room); err != nil {
-			return // left: no more pulls of it
+		// Taken before anything is looked at: a write after this point
+		// both wakes the wait below and shows in seq.
+		wake, seq := s.x.r.m.wakes.sub(room)
+		if g, err := s.x.r.Gen(room); err != nil || g != gen {
+			return // left, or joined again (a new loop): no more pulls of this generation
 		}
 		peer, idle := s.pick(room, slot)
 		if peer == "" {
-			s.sleep(ctx, room, idle)
+			s.sleep(ctx, wake, idle)
 			continue
+		}
+		if s.beforePull != nil {
+			s.beforePull(room, slot)
 		}
 		if peer != cur {
 			cur, probed = peer, slot == slotStable
@@ -221,24 +269,25 @@ func (s *Scheduler) anchor(ctx context.Context, room string, slot int) {
 		if !probed {
 			wait = s.o.Probe
 		}
-		stop := s.x.r.m.wakes.wait(room)
+		offer := first || seq != offered
+		began := s.o.Now()
 		st, err := s.x.Pull(ctx, room, peer, PullOpts{Offer: offer, OfferLimit: s.offerOf(room, peer),
-			WaitMS: wait.Milliseconds(), Stop: stop})
-		select {
-		case <-stop:
-			offer = true // changed while it ran: the next request offers
-		default:
-			offer = false
-		}
+			WaitMS: wait.Milliseconds(), Stop: wake})
 		switch {
 		case ctx.Err() != nil:
 			return
 		case err == nil:
+			if offer {
+				first, offered = false, seq
+			}
 			s.succeeded(room, peer)
-			// An exchange that ended without a same did not wait; if it
-			// also stored nothing (a lasting difference whose round was not
-			// clean, so no seen), it is not repeated at once.
-			s.spun(room, peer, st.Same == 0 && st.Stored+st.Repaired+st.Entries+st.Offered == 0)
+			// Progress is what was stored here; what was sent proves
+			// nothing. An exchange that stored nothing and did not wait
+			// (a same well before its wait, or a lasting difference whose
+			// round was not clean) is backed off as a failure.
+			stored := st.Stored+st.Repaired+st.Entries > 0
+			early := s.o.Now().Sub(began) < wait/2
+			s.spun(room, peer, !stored && (st.Same == 0 || early))
 			if slot == slotRotating {
 				if probed {
 					s.rotate(room) // the end of a wait
@@ -246,15 +295,13 @@ func (s *Scheduler) anchor(ctx context.Context, room string, slot int) {
 				probed = true
 			}
 		case errors.Is(err, ErrWaitStopped):
-			offer = true
 			if slot == slotRotating {
 				s.rotate(room) // a cancellation
 			}
 		case errors.Is(err, ErrStaleGeneration), errors.Is(err, ErrNoRoom), errors.Is(err, ErrPeerNotMember):
-			// The room or its membership moved: pick again.
+			// The room or its membership moved: look again.
 		default:
 			s.failed(room, peer, err)
-			offer = true
 			if slot == slotRotating {
 				s.rotate(room)
 			}
@@ -262,9 +309,8 @@ func (s *Scheduler) anchor(ctx context.Context, room string, slot int) {
 	}
 }
 
-// sleep waits d, or for a change to the room.
-func (s *Scheduler) sleep(ctx context.Context, room string, d time.Duration) {
-	wake := s.x.r.m.wakes.wait(room)
+// sleep waits d, or for wake (the subscription taken before the look).
+func (s *Scheduler) sleep(ctx context.Context, wake <-chan struct{}, d time.Duration) {
 	select {
 	case <-s.o.After(d):
 	case <-wake:
@@ -302,17 +348,11 @@ func (s *Scheduler) eligibleLocked(room string, members, heads []string) []strin
 		if p == r.m.ID {
 			continue
 		}
-		ps := s.peers[[2]string{room, p}]
-		if ps != nil {
-			if ps.muted != nil {
-				if sameSet(ps.muted, heads) {
-					continue
-				}
-				ps.muted, ps.refused = nil, 0 // the log changed: try it again
-			}
-			if now.Before(ps.until) {
-				continue
-			}
+		if s.x.muted(room, p, heads) {
+			continue // refused twice; until either side's log heads change
+		}
+		if ps := s.peers[[2]string{room, p}]; ps != nil && now.Before(ps.until) {
+			continue
 		}
 		out = append(out, p)
 	}
@@ -435,18 +475,12 @@ func (s *Scheduler) succeeded(room, peer string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ps := s.state(room, peer)
-	ps.fails, ps.until, ps.refused, ps.muted = 0, time.Time{}, 0, nil
+	ps.fails, ps.until = 0, time.Time{}
 	ps.ok++
 }
 
 // failed applies PROTOCOL-next 4.5 to a failed exchange with peer.
 func (s *Scheduler) failed(room, peer string, err error) {
-	var heads []string
-	s.x.r.mu.Lock()
-	if rl := s.x.r.rooms[room]; rl != nil {
-		heads, _ = rl.logHeads()
-	}
-	s.x.r.mu.Unlock()
 	now := s.o.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -456,13 +490,7 @@ func (s *Scheduler) failed(room, peer string, err error) {
 	switch {
 	case pe != nil && pe.Status == 403:
 		// The first: the exchange sends its whole log next time, at once.
-		// The second running: none until this machine's log changes.
-		if ps.refused++; ps.refused >= 2 {
-			ps.muted = heads
-			if ps.muted == nil {
-				ps.muted = []string{}
-			}
-		}
+		// The second running mutes the peer (Exchange.answered; eligible).
 		ps.fails++
 		return
 	case pe != nil && pe.Status == 413 && ps.offer != 1:

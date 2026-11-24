@@ -44,6 +44,10 @@ var (
 	pullConcurrent        = 4 // per peer, requests other than waiting pulls
 	pullTLSTimeout        = 5 * time.Second
 	pullIdleTimeout       = 120 * time.Second
+	// Dials to addresses that never completed a pinned handshake, for the
+	// whole daemon (one PullClient).
+	pullDialRate  = 2.0
+	pullDialBurst = 8.0
 )
 
 // PullHandler serves the pull exchange (node.Exchange). A Handler passed
@@ -56,19 +60,37 @@ type PullHandler interface {
 type pullServer struct {
 	h   PullHandler
 	lim *pullLimiter
-	mu  sync.Mutex
-	// busy counts, per peer, requests in progress that are not waiting
-	// pulls; a waiting pull is one per room per peer (the node releases
-	// the older one).
+	// closing ends when the listener begins to shut down: every request
+	// in progress, a held one above all, is cancelled then and refused
+	// 503, rather than lasting into the grace period.
+	closing context.Context
+	mu      sync.Mutex
+	// busy counts, per peer, requests in progress that are not held; a
+	// waiting pull gives up its slot when it enters a hold (one per room
+	// per peer: the node releases the older one).
 	busy map[string]int
 }
 
-func newPullServer(h PullHandler) *pullServer {
-	return &pullServer{h: h, lim: newPullLimiter(pullRatePerSec, pullRateBurst), busy: map[string]int{}}
+func newPullServer(closing context.Context, h PullHandler) *pullServer {
+	return &pullServer{h: h, lim: newPullLimiter(pullRatePerSec, pullRateBurst), closing: closing, busy: map[string]int{}}
 }
 
 func (s *pullServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	from := requestNode(r) // step 1: from the certificate, never the body
+	// The rate limit for this peer, before anything of the body is read.
+	if ok, wait := s.lim.take(from); !ok {
+		pullRefuse(w, &node.PullError{Status: http.StatusTooManyRequests, Code: node.CodeRateLimited, RetryAfter: wait})
+		return
+	}
+	// And its concurrency: a slot until the request is answered or held.
+	if !s.enter(from) {
+		pullRefuse(w, &node.PullError{Status: http.StatusTooManyRequests, Code: node.CodeRateLimited,
+			Detail: "concurrent", RetryAfter: time.Second})
+		return
+	}
+	var once sync.Once
+	leave := func() { once.Do(func() { s.leave(from) }) }
+	defer leave()
 	// Step 2: size before reading, strict JSON, version and field limits.
 	if r.ContentLength > maxPullBody {
 		pullRefuse(w, &node.PullError{Status: http.StatusRequestEntityTooLarge, Code: node.CodeTooLarge})
@@ -89,31 +111,24 @@ func (s *pullServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		pullRefuse(w, perr)
 		return
 	}
-	// Step 3: the rate limit for this peer, and its concurrency.
-	if ok, wait := s.lim.take(from); !ok {
-		pullRefuse(w, &node.PullError{Status: http.StatusTooManyRequests, Code: node.CodeRateLimited, RetryAfter: wait})
-		return
-	}
-	if q.WaitMS == 0 {
-		if !s.enter(from) {
-			pullRefuse(w, &node.PullError{Status: http.StatusTooManyRequests, Code: node.CodeRateLimited,
-				Detail: "concurrent", RetryAfter: time.Second})
-			return
-		}
-		defer s.leave(from)
-	}
 	// The write deadline: wait_ms + 30 s (the server's own is 30 s).
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Duration(q.WaitMS)*time.Millisecond + pullSlack)); err != nil {
 		pullRefuse(w, &node.PullError{Status: http.StatusServiceUnavailable, Code: node.CodeUnavailable})
 		return
 	}
-	resp, err := s.h.Serve(r.Context(), from, q)
+	ctx, cancel := context.WithCancel(node.WithHoldNotice(r.Context(), leave))
+	defer cancel()
+	defer context.AfterFunc(s.closing, cancel)()
+	resp, err := s.h.Serve(ctx, from, q)
 	if err != nil {
 		var pe *node.PullError
-		if !errors.As(err, &pe) {
-			if r.Context().Err() != nil {
-				return // the requester went away (or the server is closing)
-			}
+		switch {
+		case errors.As(err, &pe):
+		case s.closing.Err() != nil:
+			pe = &node.PullError{Status: http.StatusServiceUnavailable, Code: node.CodeUnavailable, Detail: "closing"}
+		case r.Context().Err() != nil:
+			return // the requester went away
+		default:
 			pe = &node.PullError{Status: http.StatusServiceUnavailable, Code: node.CodeUnavailable}
 		}
 		pullRefuse(w, pe)
@@ -214,9 +229,10 @@ func (l *pullLimiter) take(key string) (bool, time.Duration) {
 // HTTP/2: one transport per peer, so that its requests (waiting pulls of
 // several rooms among them) share one connection.
 type PullClient struct {
-	cert tls.Certificate
-	err  error
-	book *node.AddrBook
+	cert  tls.Certificate
+	err   error
+	book  *node.AddrBook
+	dials *pullLimiter // to addresses never verified, for every peer
 
 	mu      sync.Mutex
 	clients map[string]*http.Client
@@ -227,7 +243,8 @@ var _ node.PullTransport = (*PullClient)(nil)
 // NewPullClient pulls as id, reaching peers at the addresses in book.
 func NewPullClient(id *Identity, book *node.AddrBook) *PullClient {
 	cert, err := selfSigned(id)
-	return &PullClient{cert: cert, err: err, book: book, clients: map[string]*http.Client{}}
+	return &PullClient{cert: cert, err: err, book: book, dials: newPullLimiter(pullDialRate, pullDialBurst),
+		clients: map[string]*http.Client{}}
 }
 
 // Close closes idle connections.
@@ -272,9 +289,18 @@ func (c *PullClient) client(peer string) *http.Client {
 	}
 	protos := new(http.Protocols)
 	protos.SetHTTP2(true)
+	dialer := &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if !c.verified(peer, addr) {
+			if ok, _ := c.dials.take(""); !ok {
+				return nil, errDialBudget
+			}
+		}
+		return dialer.DialContext(ctx, network, addr)
+	}
 	hc := &http.Client{
 		Transport: &http.Transport{
-			DialContext:         (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext,
+			DialContext:         dial,
 			TLSClientConfig:     cfg,
 			TLSHandshakeTimeout: pullTLSTimeout,
 			IdleConnTimeout:     pullIdleTimeout,
@@ -290,9 +316,27 @@ func (c *PullClient) client(peer string) *http.Client {
 	return hc
 }
 
-// Pull sends req to peer at each of its addresses in turn, the one that
-// worked last first, until one answers. A refusal is a *node.PullError.
+// errDialBudget: the daemon's budget of dials to unverified addresses is
+// spent for now; the address is not tried and not counted as failing.
+var errDialBudget = errors.New("peer: dial budget for unverified addresses spent")
+
+// verified says whether addr of peer ever completed a pinned handshake.
+func (c *PullClient) verified(peer, addr string) bool {
+	for _, d := range c.book.Dial(peer) {
+		if d.Addr == addr {
+			return d.Good
+		}
+	}
+	return false
+}
+
+// Pull sends req to peer at each of its addresses in turn, in the book's
+// order (good ones first, failing ones last), until one answers. An
+// address that fails (unreachable, another key, a timeout) is noted, so
+// the next attempt starts at the next one; one that answers is marked
+// good. A refusal is a *node.PullError.
 func (c *PullClient) Pull(ctx context.Context, peer string, req *node.PullRequest) (*node.PullResponse, error) {
+	caller := ctx
 	if c.err != nil {
 		return nil, c.err
 	}
@@ -323,8 +367,14 @@ func (c *PullClient) Pull(ctx context.Context, peer string, req *node.PullReques
 		resp, err := hc.Do(hr)
 		if err != nil {
 			lastErr = err
+			if caller.Err() != nil {
+				break // the caller gave up (a waiting pull abandoned): no fault of the address
+			}
+			if !errors.Is(err, errDialBudget) {
+				c.book.Failed(peer, addr, time.Now())
+			}
 			if ctx.Err() != nil {
-				break
+				break // timed out at this address: the next attempt starts at the next one
 			}
 			continue // unreachable, or another key at this address: the next one
 		}
