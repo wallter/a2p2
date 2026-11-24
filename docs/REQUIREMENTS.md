@@ -297,6 +297,24 @@ there is no server.
   being talked into a trust change through its tools. An agent running as
   the same user that sets out to get around it can, because it can do
   anything that user can do at a terminal.
+- **A machine restored from a very old backup may have to be invited
+  again.** If the copy it was restored to knows none of the room's current
+  members, it cannot catch up by itself; a current admin sends it a new
+  invite, which hands it the room's record.
+- **An admin whose machine cannot reach any other member is warned before
+  it changes membership.** The machine cannot tell a normal restart from a
+  restore, so it asks the person to say so explicitly; the override is
+  recorded.
+- **A removed machine is not told by the room.** Its requests are refused
+  with an answer that says nothing; its person learns from the invite's
+  status, or from the people.
+- **A faulty or dishonest machine can sign two different messages in one
+  place of its own sequence.** Other machines may then hold different ones
+  without noticing, and a copy report for that machine's messages can be
+  wrong. Nothing lets it alter anyone else's messages.
+- **A question for the person is an ordinary message addressed to them.**
+  The local page lists unread messages to the person as questions; there
+  is no separate kind.
 - **Every member can read everything in the room** that it is allowed to
   fetch, including who handled which message.
 - **An agent may see a message again** after a crash or a restore from
@@ -393,3 +411,10 @@ basis: the licence is Apache-2.0 with a signed-off-by line on commits
 (`DECISIONS.md` D23); the tree is committed locally, not pushed; step 0 of
 section 9 has started. Rows 1 to 4 above stand as written unless the owner
 objects. Pushing to a remote and making a release still wait for the owner.
+
+Built on that basis by 2026-11-24 (`DECISIONS.md` D25 to D34): steps 0 and
+1, and stage 1 of step 2, with the old delivery core replaced. Five limits
+found while building were added to section 6 on that date (a machine
+restored from a very old backup; the warning before an out-of-touch admin
+changes membership; a removed machine is not told; two messages in one
+place; questions for the person). They stand unless the owner objects.
