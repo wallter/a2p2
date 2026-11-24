@@ -51,13 +51,13 @@ delivery rework.
 | U2 | not yet | 3 | |
 | U3 | partly | 3 | `TestLateJoinerGetsNoBackfill`. No way to read what was skipped. New path: `TestAgentRegisteredLaterSeesOnlyWhatComesAfter` |
 | U4 | partly | 3 | `TestHookOutputs` covers the unread count. No first-lines reading |
-| N1 | not yet | 2 | Today both machines must accept connections. Model: `TestMachineThatOnlyOpensRequestsStillConverges`. New path: `TestAMachineThatOnlyOpensRequestsConverges` (in-memory transport; not yet over a real network) |
+| N1 | not yet | 2 | Today both machines must accept connections. Model: `TestMachineThatOnlyOpensRequestsStillConverges`. New path: `TestAMachineThatOnlyOpensRequestsConverges` (in-memory transport; not yet over a real network), `TestNetworkStatesAfterARestart` |
 | N2 | untested | 2 | Several addresses are tried in turn; no test |
 | N3 | untested | 2 | True by construction; no test |
 | A1 | met | 2 | `TestToolsGolden`, `TestLocalRoundTrip`, and `make e2e` for the three harnesses |
 | A2 | partly | 2 | `TestToolsGolden` fixes the definitions (about 800 tokens); nothing asserts the limit |
-| A3 | partly | 2 | `TestAskHumanArrivesForTheHumanAndTheAnswerIsAReply`, `TestQuestionAnswerFlow`, `TestSendAsHuman`, `TestInboxWaitWakesOnArrival`. No confirming of requests; the browser flow is not exercised |
-| A4 | partly | 2 | `TestStatusMapping`. Reasons for non-delivery are shown; copies on other machines are not. Model: `TestResolveGivesEveryEntryAReasonOnArbitraryInput` |
+| A3 | partly | 2 | `TestAskHumanArrivesForTheHumanAndTheAnswerIsAReply`, `TestQuestionAnswerFlow`, `TestSendAsHuman`, `TestInboxWaitWakesOnArrival`, `TestQuestionsForThePersonAreListedUntilAnsweredWhateverTheBacklog`. No confirming of requests; the browser flow is not exercised |
+| A4 | partly | 2 | `TestStatusMapping`, `TestTraceSavedMeansTheHeaderIsHeldAndAnUnknownIDIsAnError`. Reasons for non-delivery are shown; copies on other machines are not. Model: `TestResolveGivesEveryEntryAReasonOnArbitraryInput` |
 | I1 | partly | 1 | `TestInstallFresh`, `TestDoctor`. Not yet shown that an agent can install from the repository's instructions alone |
 | I2 | met | 1 | `TestExistingSurvivesIdempotentOnStopUninstall`, `TestUninstallFreshLeavesEmptyObject`, `TestOwnershipIsExact` |
 | I3 | partly | 1 | `AGENTS.md` exists; no portable skill, no recipes |

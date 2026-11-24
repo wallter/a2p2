@@ -66,3 +66,7 @@ dialog td, dialog th { text-align: left; padding: .2rem .4rem; overflow-wrap: an
   main { height: 80vh; }
   #compose .row { flex-wrap: wrap; } #to { max-width: none; width: 100%; }
 }
+.qcard .field { display: flex; gap: .5rem; flex-wrap: wrap; margin: .1rem 0; }
+.qcard .field .k { min-width: 9rem; opacity: .7; }
+.qcard .field .v { overflow-wrap: anywhere; }
+.mono { font-family: ui-monospace, Menlo, Consolas, monospace; letter-spacing: .02em; }

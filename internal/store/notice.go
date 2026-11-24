@@ -6,33 +6,33 @@ import (
 )
 
 // NoticeV02Key is the meta key that records that the v0.2 notice was
-// shown (PROTOCOL-next section 8).
+// shown to a person (PROTOCOL-next section 8).
 const NoticeV02Key = "v02_dropped_notice"
 
-// V02Notice reports, once per database, that it holds v0.2 messages, which
-// the next version ignores: true the first time it is called over such a
-// database, and never again (the key is set in the same transaction). The
-// v0.2 tables are not touched.
-func (s *Store) V02Notice(ctx context.Context) (show bool, err error) {
+// V02Pending reports whether the v0.2 notice is still to be shown: the
+// database holds v0.2 state (messages, or rooms without a create entry,
+// which only v0.2 made) and the notice has not been shown yet. It changes
+// nothing; V02Shown records the showing. The v0.2 tables are never touched.
+func (s *Store) V02Pending(ctx context.Context) (bool, error) {
+	var pending bool
+	err := s.db.QueryRowContext(ctx, `SELECT NOT EXISTS (SELECT 1 FROM meta WHERE key = ?)
+		AND (EXISTS (SELECT 1 FROM messages) OR EXISTS (SELECT 1 FROM rooms WHERE create_id = ''))`,
+		NoticeV02Key).Scan(&pending)
+	return pending, err
+}
+
+// V02Shown records that the v0.2 notice was shown; it is not shown again.
+// It reports whether this call was the one that recorded it, so that two
+// readers racing do not both show it.
+func (s *Store) V02Shown(ctx context.Context) (first bool, err error) {
 	err = s.tx(ctx, func(tx *sql.Tx) error {
-		var done, held int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM meta WHERE key = ?`, NoticeV02Key).Scan(&done); err != nil {
+		res, err := tx.Exec(`INSERT OR IGNORE INTO meta (key, value) VALUES (?, 1)`, NoticeV02Key)
+		if err != nil {
 			return err
 		}
-		if done > 0 {
-			return nil
-		}
-		if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM messages)`).Scan(&held); err != nil {
-			return err
-		}
-		if held == 0 {
-			return nil
-		}
-		if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES (?, 1)`, NoticeV02Key); err != nil {
-			return err
-		}
-		show = true
-		return nil
+		n, err := res.RowsAffected()
+		first = n == 1
+		return err
 	})
-	return show, err
+	return first, err
 }

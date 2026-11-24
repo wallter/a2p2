@@ -2,33 +2,130 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
+	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/wallter/a2p2/internal/localapi"
 	"github.com/wallter/a2p2/internal/node"
 	"github.com/wallter/a2p2/internal/store"
+	_ "modernc.org/sqlite"
 )
 
-// machine is a real daemon in a temporary home with networking on,
-// listening on loopback.
+// stableListener is one real loopback listener held for the whole test,
+// handed to each run of a daemon as a view (RunOpts.PeerListener), so that
+// a restart is found again at the address its peers know without releasing
+// and rebinding a port. It counts the connections other machines made.
+type stableListener struct {
+	ln       net.Listener
+	accepted atomic.Int64
+	mu       sync.Mutex
+	cur      *listenView
+}
+
+type listenView struct {
+	s    *stableListener
+	ch   chan net.Conn
+	done chan struct{}
+	once sync.Once
+}
+
+func newStableListener(t *testing.T) *stableListener {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &stableListener{ln: ln}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			s.accepted.Add(1)
+			s.mu.Lock()
+			v := s.cur
+			s.mu.Unlock()
+			if v == nil {
+				c.Close() // no daemon listens now
+				continue
+			}
+			select {
+			case v.ch <- c:
+			case <-v.done:
+				c.Close()
+			}
+		}
+	}()
+	return s
+}
+
+func (s *stableListener) view() *listenView {
+	v := &listenView{s: s, ch: make(chan net.Conn), done: make(chan struct{})}
+	s.mu.Lock()
+	s.cur = v
+	s.mu.Unlock()
+	return v
+}
+
+func (v *listenView) Accept() (net.Conn, error) {
+	select {
+	case c := <-v.ch:
+		return c, nil
+	case <-v.done:
+		return nil, net.ErrClosed
+	}
+}
+
+func (v *listenView) Close() error {
+	v.once.Do(func() {
+		close(v.done)
+		v.s.mu.Lock()
+		if v.s.cur == v {
+			v.s.cur = nil
+		}
+		v.s.mu.Unlock()
+	})
+	return nil
+}
+
+func (v *listenView) Addr() net.Addr { return v.s.ln.Addr() }
+
+// machine is a real daemon in a temporary home, listening on loopback
+// through a stable listener.
 type machine struct {
 	t    *testing.T
 	home string
+	ln   *stableListener
 	c    *localapi.Client
 	done chan error
 	node string
 }
 
-func newMachine(t *testing.T, name string) *machine { return newMachineWith(t, name, nil) }
+// newMachine starts a machine with networking on, decided through the
+// local API's net call as a2p2 net on does.
+func newMachine(t *testing.T, name string) *machine {
+	m := newMachineWith(t, name, nil)
+	m.setNet(node.NetworkOn)
+	return m
+}
 
-// newMachineWith runs prepare on the home before the first start.
+// newMachineWith runs prepare on the home before the first start; the
+// machine starts with networking off, as a new one does.
 func newMachineWith(t *testing.T, name string, prepare func(home string)) *machine {
 	t.Helper()
 	home, err := os.MkdirTemp("/tmp", "a2p2")
@@ -36,43 +133,87 @@ func newMachineWith(t *testing.T, name string, prepare func(home string)) *machi
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(home) })
-	// A fixed port, as a real machine has, so that a restart is found again
-	// at the address its peers know.
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	listen := ln.Addr().String()
-	ln.Close()
-	if err := SaveConfig(home, Config{Name: name, Listen: listen, UI: "127.0.0.1:0"}); err != nil {
+	if err := SaveConfig(home, Config{Name: name, UI: "127.0.0.1:0"}); err != nil {
 		t.Fatal(err)
 	}
 	if prepare != nil {
 		prepare(home)
 	}
-	m := &machine{t: t, home: home}
+	m := &machine{t: t, home: home, ln: newStableListener(t)}
 	m.start()
 	t.Cleanup(m.stop)
 	return m
 }
 
+// start runs the daemon and waits for its readiness barrier.
 func (m *machine) start() {
 	m.t.Helper()
 	m.done = make(chan error, 1)
-	done := m.done
-	go func() { done <- Run(context.Background(), m.home, "test") }()
-	m.c = localapi.NewClient(SockPath(m.home))
-	for deadline := time.Now().Add(10 * time.Second); ; {
-		var st localapi.Status
-		if m.c.Call(context.Background(), "status", nil, &st) == nil {
-			m.node = st.Node
-			return
-		}
-		if time.Now().After(deadline) {
-			m.t.Fatal("daemon did not start")
-		}
-		time.Sleep(20 * time.Millisecond)
+	done, ready := m.done, make(chan struct{})
+	go func() {
+		done <- RunWith(context.Background(), m.home, "test", RunOpts{PeerListener: m.ln.view(), Ready: func() { close(ready) }})
+	}()
+	select {
+	case <-ready:
+	case err := <-done:
+		m.done = nil
+		m.t.Fatalf("daemon did not start: %v", err)
+	case <-time.After(10 * time.Second):
+		m.t.Fatal("daemon did not start")
 	}
+	m.c = localapi.NewClient(SockPath(m.home))
+	m.node = call[localapi.Status](m, "status", localapi.Empty{}).Node
+}
+
+// setNet records a networking decision through the local API's net call
+// and restarts the daemon to apply it.
+func (m *machine) setNet(state string) localapi.Status {
+	m.t.Helper()
+	req := localapi.NetReq{State: state}
+	if state == node.NetworkOn {
+		req.Listen = m.ln.ln.Addr().String()
+	}
+	res := call[localapi.NetResp](m, "net", req)
+	if res.State != state || res.Request == "" {
+		m.t.Fatalf("net %s = %+v", state, res)
+	}
+	m.stop()
+	m.start()
+	st := call[localapi.Status](m, "status", localapi.Empty{})
+	if st.Network.State != state || st.Network.Request != res.Request {
+		m.t.Fatalf("after net %s and a restart: %+v", state, st.Network)
+	}
+	return st
+}
+
+// ui calls the page's API of m with its token.
+func (m *machine) ui(method, path string, body any, out any) int {
+	m.t.Helper()
+	st := call[localapi.Status](m, "status", localapi.Empty{})
+	u, err := url.Parse(st.UI)
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	var rd io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rd = strings.NewReader(string(b))
+	}
+	req, _ := http.NewRequest(method, "http://"+u.Host+path, rd)
+	req.Header.Set("Authorization", "Bearer "+u.Fragment)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "http://"+u.Host)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if out != nil {
+		_ = json.NewDecoder(res.Body).Decode(out)
+	}
+	return res.StatusCode
 }
 
 // stop stops the daemon with its own stop call and waits for it to end.
@@ -280,46 +421,250 @@ func TestMachineAddedWithoutHistorySeesNoEarlierTextThroughAnySurface(t *testing
 			t.Fatalf("first lines showed earlier text: %+v", f)
 		}
 	}
+	// The page's API, as the browser fetches it (no browser runs the script).
+	for _, path := range []string{"/api/state", "/api/history?room=" + room, "/api/thread?id=" + before.ID, "/api/trace?id=" + before.ID} {
+		var raw json.RawMessage
+		c.ui("GET", path, nil, &raw)
+		if strings.Contains(string(raw), "SECRET") {
+			t.Fatalf("page API %s showed earlier text: %s", path, raw)
+		}
+	}
 }
 
-func TestV02NoticeShownOnceThroughStatus(t *testing.T) {
-	if st := call[localapi.Status](newMachine(t, "fresh"), "status", localapi.Empty{}); st.Notice != "" {
+// loadV02 writes the schema-version-1 fixture (a database as v0.2 left
+// it) into home.
+func loadV02(t *testing.T, home string) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "store", "testdata", "v02-schema1.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(home, "a2p2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(string(b)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestV02NoticeFromASchemaOneFileIsShownOnceEverThroughStatus(t *testing.T) {
+	if st := call[localapi.Status](newMachineWith(t, "fresh", nil), "status", localapi.StatusReq{ShowNotice: true}); st.Notice != "" {
 		t.Fatalf("notice on a new home: %q", st.Notice)
 	}
-	// A home whose database holds v0.2 messages.
-	m := newMachineWith(t, "old", func(home string) {
-		ctx := context.Background()
-		st, err := store.Open(filepath.Join(home, "a2p2.db"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer st.Close()
-		n, err := node.New(ctx, st, strings.Repeat("ab", 32), "old", time.Now)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := n.Send(ctx, node.SendReq{From: n.HumanID(), Text: "v0.2 text"}); err != nil {
-			t.Fatal(err)
-		}
-	})
-	st := call[localapi.Status](m, "status", localapi.Empty{})
-	if st.Notice != node.NoticeV02 || len(st.Rooms) != 1 || st.Rooms[0].ID == "local" {
-		t.Fatalf("first start: notice %q rooms %+v", st.Notice, st.Rooms)
+	m := newMachineWith(t, "old", func(home string) { loadV02(t, home) })
+	// An agent's status (whoami, peers) does not use it up, nor does a
+	// run in which no person saw it.
+	if st := call[localapi.Status](m, "status", localapi.Empty{}); st.Notice != node.NoticeV02 {
+		t.Fatalf("agent status: %q", st.Notice)
+	}
+	m.stop()
+	m.start()
+	st := call[localapi.Status](m, "status", localapi.StatusReq{ShowNotice: true})
+	if st.Notice != node.NoticeV02 || len(st.Rooms) != 1 || st.Rooms[0].Label != node.LocalLabel {
+		t.Fatalf("shown: notice %q rooms %+v", st.Notice, st.Rooms)
+	}
+	if st := call[localapi.Status](m, "status", localapi.StatusReq{ShowNotice: true}); st.Notice != "" {
+		t.Fatalf("shown twice: %q", st.Notice)
 	}
 	if h := call[localapi.Entries](m, "history", localapi.HistoryReq{}); len(h.Entries) != 0 {
 		t.Fatalf("v0.2 messages shown: %+v", h)
 	}
 	m.stop()
 	m.start()
-	if st := call[localapi.Status](m, "status", localapi.Empty{}); st.Notice != "" {
-		t.Fatalf("second start: notice %q", st.Notice)
+	if st := call[localapi.Status](m, "status", localapi.StatusReq{ShowNotice: true}); st.Notice != "" {
+		t.Fatalf("after a restart: notice %q", st.Notice)
 	}
 }
 
 func TestDaemonServesOnlyTheNewPath(t *testing.T) {
-	m := newMachine(t, "solo")
+	m := newMachineWith(t, "solo", nil)
 	st := call[localapi.Status](m, "status", localapi.Empty{})
 	if len(st.Rooms) != 1 || st.Rooms[0].Label != "local" || st.Rooms[0].ID == "local" || len(st.Rooms[0].Admins) != 1 || st.Rooms[0].Admins[0] != st.Node {
 		t.Fatalf("rooms on an empty home = %+v", st.Rooms)
 	}
+	if st.Rooms[0].Members[0].Name != "solo" {
+		t.Fatalf("room list without this machine's own name: %+v", st.Rooms[0].Members)
+	}
+}
+
+func TestNetworkingIsOffOnANewHomeAndAConfigListenDoesNotTurnItOn(t *testing.T) {
+	m := newMachineWith(t, "solo", func(home string) {
+		if err := SaveConfig(home, Config{Name: "solo", UI: "127.0.0.1:0", Listen: "127.0.0.1:0"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	st := call[localapi.Status](m, "status", localapi.Empty{})
+	if st.Network.State != node.NetworkOff || len(st.Listen) != 0 || st.Network.Request != "" {
+		t.Fatalf("new home: %+v listen %v", st.Network, st.Listen)
+	}
+	if m.ln.accepted.Load() != 0 {
+		t.Fatal("something reached a machine with networking off")
+	}
+}
+
+// TestNetworkStatesAfterARestart turns a joined machine's networking off,
+// outbound only and on, restarting each time. Off: no listener, and it
+// reaches nobody (its admin's listener counts no connection from it) and
+// refuses calls that would dial. Outbound: still no listener, but it pulls
+// from its admin. On: a listener again.
+func TestNetworkStatesAfterARestart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts daemons")
+	}
+	a, b := newMachine(t, "alpha"), newMachine(t, "beta")
+	room := call[localapi.Room](a, "room/create", localapi.RoomReq{Room: "team"}).ID
+	ann := a.agent("ann")
+	join(t, a, b, room, localapi.InviteReq{}, false)
+	bea := b.agent("bea")
+	tok := call[localapi.InviteResp](a, "room/invite", localapi.InviteReq{Room: room}).Token
+
+	st := b.setNet(node.NetworkOff)
+	if len(st.Listen) != 0 {
+		t.Fatalf("off listens: %+v", st.Listen)
+	}
+	heard := a.ln.accepted.Load()
+	msg := call[localapi.SendResp](a, "send", localapi.SendReq{Agent: ann, Room: room, Text: "while off", To: []string{bea}})
+	var ue *localapi.Error
+	for _, c := range []struct {
+		name string
+		req  any
+	}{
+		{"room/join", localapi.JoinReq{Token: tok}},
+		{"room/join/accept", localapi.AcceptReq{Token: tok, Preview: "pv"}},
+	} {
+		if err := b.c.Call(context.Background(), c.name, c.req, nil); !errors.As(err, &ue) || !ue.User || !strings.Contains(err.Error(), "networking is off") {
+			t.Fatalf("%s with networking off: %v", c.name, err)
+		}
+	}
+	// Long enough for the scheduler's first pull and a join poll, had they run.
+	time.Sleep(3 * time.Second)
+	if n := a.ln.accepted.Load(); n != heard {
+		t.Fatalf("networking off, yet %d connection(s) reached the admin machine", n-heard)
+	}
+	if in := call[localapi.InboxResp](b, "inbox", localapi.InboxReq{Agent: bea}); len(in.Entries) != 0 {
+		t.Fatalf("networking off, yet mail arrived: %+v", in.Entries)
+	}
+
+	st = b.setNet(node.NetworkOutbound)
+	if len(st.Listen) != 0 {
+		t.Fatalf("outbound listens: %+v", st.Listen)
+	}
+	if es := inboxWait(b, bea); len(es) != 1 || es[0].ID != msg.ID {
+		t.Fatalf("outbound pulled: %+v", es)
+	}
+	if a.ln.accepted.Load() == heard {
+		t.Fatal("outbound reached nobody")
+	}
+	var inv localapi.InviteResp
+	if err := b.c.Call(context.Background(), "room/invite", localapi.InviteReq{Room: room}, &inv); !errors.As(err, &ue) || !ue.User {
+		t.Fatalf("invite without a listener: %v", err)
+	}
+
+	st = b.setNet(node.NetworkOn)
+	if len(st.Listen) != 1 || st.Listen[0] != b.ln.ln.Addr().String() {
+		t.Fatalf("on: listen %v", st.Listen)
+	}
+	// Every decision is a decided request of kind network.
+	var nets int
+	err := b.c.Call(context.Background(), "status", nil, &st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(b.home, "a2p2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	qs, err := db.Requests(context.Background(), "", store.RequestApproved)
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range qs {
+		if q.Kind == store.RequestNetwork {
+			nets++
+		}
+	}
+	if nets != 4 { // on (newMachine), off, outbound, on
+		t.Fatalf("%d network decisions recorded: %+v", nets, qs)
+	}
+}
+
+// TestStopDuringAWaitingCallEndsItBeforeTheStoreCloses stops a daemon while
+// a waiting inbox read is held: the read ends (the request's context is
+// cancelled), the daemon returns, and no handler outlives it.
+func TestStopDuringAWaitingCallEndsItBeforeTheStoreCloses(t *testing.T) {
+	m := newMachineWith(t, "solo", nil)
+	ann := m.agent("ann")
+	res := make(chan error, 1)
+	go func() {
+		res <- m.c.Call(context.Background(), "inbox", localapi.InboxReq{Agent: ann, WaitMS: 100000}, &localapi.InboxResp{})
+	}()
+	time.Sleep(300 * time.Millisecond) // the read is waiting
+	start := time.Now()
+	m.stop()
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("stop took %v with a waiting read", d)
+	}
+	select {
+	case <-res:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiting read outlived the daemon")
+	}
+}
+
+func TestPageDecisionNeedsTheExactOriginAndShowsTheFullFingerprint(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts daemons")
+	}
+	a, b := newMachine(t, "alpha"), newMachine(t, "beta")
+	room := call[localapi.Room](a, "room/create", localapi.RoomReq{Room: "team"}).ID
+	tok := call[localapi.InviteResp](a, "room/invite", localapi.InviteReq{Room: room, Role: node.RoleAdmin, History: true})
+	pv := call[localapi.PreviewResp](b, "room/join", localapi.JoinReq{Token: tok.Token})
+	call[localapi.AcceptResp](b, "room/join/accept", localapi.AcceptReq{Token: tok.Token, Preview: pv.Preview})
+	var state struct {
+		Requests []localapi.Request `json:"requests"`
+	}
+	if code := a.ui("GET", "/api/state", nil, &state); code != 200 || len(state.Requests) != 1 {
+		t.Fatalf("state %d %+v", code, state)
+	}
+	q := state.Requests[0]
+	fp := node.Fingerprint(b.node)
+	if q.Node != b.node || q.Fingerprint != fp || q.Action != node.ActionAdmitAdmin || !q.History || q.RoomLabel != "team" ||
+		q.Text != "add machine "+fp+" (beta) to room team ("+room+") as an admin, with earlier history" {
+		t.Fatalf("request as the page shows it: %+v", q)
+	}
+	// Without the page's Origin, or with another, nothing is decided.
+	st := call[localapi.Status](a, "status", localapi.Empty{})
+	u, _ := url.Parse(st.UI)
+	for _, origin := range []string{"", "http://evil.example"} {
+		body := strings.NewReader(`{"id":"` + q.ID + `","approve":true,"text":` + jsonString(q.Text) + `}`)
+		req, _ := http.NewRequest("POST", "http://"+u.Host+"/api/confirm", body)
+		req.Header.Set("Authorization", "Bearer "+u.Fragment)
+		req.Header.Set("Content-Type", "application/json")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode == 200 {
+			t.Fatalf("decided with Origin %q", origin)
+		}
+	}
+	if qs := call[localapi.RequestsResp](a, "requests", localapi.Empty{}); len(qs.Requests) != 1 {
+		t.Fatalf("decided without the page: %+v", qs)
+	}
+	var cf localapi.ConfirmResp
+	if code := a.ui("POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": q.Text}, &cf); code != 200 || cf.State != store.RequestApproved {
+		t.Fatalf("page decision: %d %+v", code, cf)
+	}
+}
+
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }

@@ -17,6 +17,11 @@ type surfEnv struct {
 	key  ed25519.PrivateKey
 	st   *store.Store
 	s    *Surface
+	// net, tr and addrs configure the next open: the networking state, a
+	// join transport (nil: no joiner) and this machine's addresses.
+	net   Network
+	tr    JoinTransport
+	addrs []string
 }
 
 func newSurf(t *testing.T) *surfEnv {
@@ -41,7 +46,11 @@ func (e *surfEnv) open() {
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	e.s, err = OpenSurface(context.Background(), m, r, SurfaceOpts{Name: "solo", Book: NewAddrBook()})
+	o := SurfaceOpts{Name: "solo", Book: NewAddrBook(), Network: e.net, Addrs: func() []string { return e.addrs }}
+	if e.tr != nil {
+		o.Joiner = NewJoiner(r, e.tr, JoinerOpts{Name: "solo"})
+	}
+	e.s, err = OpenSurface(context.Background(), m, r, o)
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -280,16 +289,31 @@ func TestSurfaceUnreadCountsAndFirstLinesNeverMarkSeen(t *testing.T) {
 func TestSurfaceInboxWaitReturnsWhenAMessageArrives(t *testing.T) {
 	e := newSurf(t)
 	alice, bob := e.agent("alice"), e.agent("bob")
+	// A readiness barrier: send only once the read waits. The wake, not the
+	// one-second fallback poll, must end the wait.
+	waiting := make(chan struct{}, 1)
+	e.s.waiting = func() {
+		select {
+		case waiting <- struct{}{}:
+		default:
+		}
+	}
+	sent := make(chan time.Time, 1)
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		<-waiting
+		sent <- time.Now()
 		e.s.Send(context.Background(), SendInput{Agent: alice, Text: "wake"})
 	}()
-	start := time.Now()
 	v, err := e.s.Inbox(context.Background(), bob, "", 0, 20*time.Second)
-	if err != nil || len(v.Entries) != 1 || time.Since(start) > 5*time.Second {
-		t.Fatalf("after %v: %+v %v", time.Since(start), v, err)
+	at := <-sent
+	if err != nil || len(v.Entries) != 1 {
+		t.Fatalf("%+v %v", v, err)
 	}
-	start = time.Now()
+	if d := time.Since(at); d > 700*time.Millisecond {
+		t.Fatalf("woke %v after the send: the fallback poll, not the wake", d)
+	}
+	e.s.waiting = nil
+	start := time.Now()
 	v, err = e.s.Inbox(context.Background(), alice, "", 0, 300*time.Millisecond)
 	if err != nil || len(v.Entries) != 0 || time.Since(start) < 300*time.Millisecond {
 		t.Fatalf("empty wait: %+v %v after %v", v, err, time.Since(start))
@@ -306,39 +330,5 @@ func TestSurfaceSeenConfirmsOnlyWhatTheInboxShowsNow(t *testing.T) {
 	res, err := e.s.Seen(ctx, bob, []store.Read{{Key: es[0].Key, Version: es[0].Version}, {Key: strings.Repeat("a", 32)}})
 	if err != nil || len(res) != 2 || res[0].Confirmed || res[0].Reason != SeenVersionChanged || res[1].Confirmed || res[1].Reason != SeenNotShown {
 		t.Fatalf("seen = %+v, %v", res, err)
-	}
-}
-
-func TestV02NoticeIsShownOnceForADatabaseWithV02Messages(t *testing.T) {
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "a2p2.db")
-	st, err := store.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n, err := New(ctx, st, strings.Repeat("ab", 32), "old", time.Now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := n.Send(ctx, SendReq{From: n.HumanID(), Text: "from v0.2"}); err != nil {
-		t.Fatal(err)
-	}
-	st.Close()
-	seed := make([]byte, ed25519.SeedSize)
-	e := &surfEnv{t: t, path: path, key: ed25519.NewKeyFromSeed(seed)}
-	e.open()
-	if e.s.Notice() != NoticeV02 {
-		t.Fatalf("first start: notice %q", e.s.Notice())
-	}
-	if hist, err := e.s.History(ctx, "", "", 0); err != nil || len(hist) != 0 {
-		t.Fatalf("v0.2 message shown: %+v %v", hist, err)
-	}
-	e.restart()
-	if e.s.Notice() != "" {
-		t.Fatalf("second start: notice %q", e.s.Notice())
-	}
-	fresh := newSurf(t)
-	if fresh.s.Notice() != "" {
-		t.Fatal("notice on an empty database")
 	}
 }

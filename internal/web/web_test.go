@@ -65,7 +65,7 @@ func open(t *testing.T, seed byte, peer *env) *env {
 		j = node.NewJoiner(rooms, joinNet{from: m.ID, admin: &peer.js, id: &peer.id}, node.JoinerOpts{Name: "joiner"})
 	}
 	e.s, err = node.OpenSurface(ctx, m, rooms, node.SurfaceOpts{Name: "box", Joiner: j,
-		Addrs: func() []string { return []string{"127.0.0.1:7443"} }})
+		Addrs: func() []string { return []string{"127.0.0.1:7443"} }, Network: node.Network{State: node.NetworkOn, Listen: "127.0.0.1:7443"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,6 +301,9 @@ func joinRequest(t *testing.T, admin, joiner *env, room, role string) {
 	}
 }
 
+// origin sets the page's own Origin, as a fetch from the page does.
+func origin(r *http.Request) { r.Header.Set("Origin", "http://"+r.Host) }
+
 func TestPageApprovesAndDeclinesRequestsNamingExactlyWhatIsApproved(t *testing.T) {
 	admin := setup(t)
 	room, err := admin.s.CreateRoom(admin.ctx, "team")
@@ -311,24 +314,33 @@ func TestPageApprovesAndDeclinesRequestsNamingExactlyWhatIsApproved(t *testing.T
 	other := open(t, 3, admin)
 	joinRequest(t, admin, joiner, room.ID, node.RoleMember)
 	st := admin.state(t)
-	if len(st.Requests) != 1 || !strings.Contains(st.Requests[0].Text, joiner.id[:8]) || len(st.Alerts) != 1 {
+	if len(st.Requests) != 1 || !strings.Contains(st.Requests[0].Text, node.Fingerprint(joiner.id)) ||
+		st.Requests[0].Node != joiner.id || st.Requests[0].Fingerprint != node.Fingerprint(joiner.id) || len(st.Alerts) != 1 {
 		t.Fatalf("requests = %+v alerts = %+v", st.Requests, st.Alerts)
 	}
 	q := st.Requests[0]
-	if c, b := admin.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": "add machine ffffffff"}, nil); c != 400 {
+	// A decision needs the page's exact Origin: none, or another, decides nothing.
+	if c, b := admin.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": q.Text}, nil); c != 400 {
+		t.Fatalf("confirm without an Origin: %d %s", c, b)
+	}
+	if c, b := admin.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": q.Text},
+		func(r *http.Request) { r.Header.Set("Origin", "http://127.0.0.1:1") }); c == 200 {
+		t.Fatalf("confirm from another origin: %d %s", c, b)
+	}
+	if c, b := admin.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": "add machine ffffffff"}, origin); c != 400 {
 		t.Fatalf("confirm naming something else: %d %s", c, b)
 	}
-	if c, b := admin.do(t, "POST", "/api/confirm", map[string]any{"id": "nope", "approve": true, "text": q.Text}, nil); c != 400 {
+	if c, b := admin.do(t, "POST", "/api/confirm", map[string]any{"id": "nope", "approve": true, "text": q.Text}, origin); c != 400 {
 		t.Fatalf("confirm of nothing: %d %s", c, b)
 	}
-	c, b := admin.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": q.Text}, nil)
+	c, b := admin.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": q.Text}, origin)
 	var cf localapi.ConfirmResp
 	if c != 200 || json.Unmarshal(b, &cf) != nil || cf.State != store.RequestApproved {
 		t.Fatalf("approve: %d %s", c, b)
 	}
 	joinRequest(t, admin, other, room.ID, node.RoleMember)
 	q = admin.state(t).Requests[0]
-	c, b = admin.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": false, "text": q.Text}, nil)
+	c, b = admin.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": false, "text": q.Text}, origin)
 	if c != 200 || json.Unmarshal(b, &cf) != nil || cf.State != store.RequestDeclined {
 		t.Fatalf("decline: %d %s", c, b)
 	}

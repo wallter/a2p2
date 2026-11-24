@@ -19,6 +19,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/wallter/a2p2/internal/core"
 	"github.com/wallter/a2p2/internal/daemon"
@@ -46,8 +47,9 @@ Talking (as the human, or --as <label> for a script)
   a2p2 trace ID                   where a message got to: copies and handling reports
 
 Rooms across machines
-  a2p2 net on [ADDR]              accept peer connections (default 0.0.0.0:7423)
-  a2p2 net off                    this machine only
+  a2p2 net on [ADDR]              listen for other machines (default 0.0.0.0:7423) and connect out
+  a2p2 net on --outbound-only     connect out only: pull rooms and follow joins, listen on nothing
+  a2p2 net off                    this machine only: no listener, no connections
   a2p2 room create LABEL          make a room with this machine as its admin
   a2p2 room invite ROOM [--history] [--member|--admin]
                                   print a one-time invite (valid 30 minutes)
@@ -57,7 +59,9 @@ Rooms across machines
   a2p2 room remove ROOM MACHINE   ask to remove a member (confirm to sign)
   a2p2 room leave ROOM            stop carrying a room on this machine
 
-A person's decisions (at a terminal only)
+A person's decisions (asked at a terminal and recorded; no agent tool reaches them,
+but any program running as you can call the daemon's socket)
+  a2p2 net ...                    (above)
   a2p2 confirm                    list requests waiting for you
   a2p2 confirm ID [--decline]     approve (or decline) one request
   a2p2 alerts [--wait SECONDS]    what waits for a person; --wait returns when something does
@@ -158,11 +162,16 @@ func (c *cmd) call(name string, req, resp any, human func()) error {
 	return nil
 }
 
-// terminal reports whether stdin is a terminal: a person's decisions are
-// taken only there (P3), never through a pipe an agent could feed.
+// terminal reports whether stdin is a terminal. A person's decisions are
+// asked for there and not through a pipe, which keeps them out of what an
+// agent's tools do; it does not prove a person answered, since a program
+// running as this user can drive a terminal or call the socket directly.
+// It asks the terminal driver (a character device such as /dev/null is
+// not a terminal).
 func terminal() bool {
-	fi, err := os.Stdin.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	var t syscall.Termios
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, os.Stdin.Fd(), uintptr(ioctlGetTermios), uintptr(unsafe.Pointer(&t)))
+	return errno == 0
 }
 
 var stdin = bufio.NewReader(os.Stdin)
@@ -374,15 +383,21 @@ func short(s string) string {
 
 func status(c *cmd) error {
 	var st localapi.Status
-	return c.call("status", nil, &st, func() {
+	return c.call("status", localapi.StatusReq{ShowNotice: true}, &st, func() {
 		if st.Notice != "" {
 			fmt.Println("NOTICE   " + st.Notice)
 		}
 		fmt.Printf("machine  %s (%s)  a2p2 %s  pid %d\n", st.Name, short(st.Node), st.Version, st.PID)
-		if len(st.Listen) == 0 {
-			fmt.Println("network  off (this machine only; enable with: a2p2 net on)")
-		} else {
-			fmt.Printf("network  listening, reachable at %s\n", strings.Join(st.Listen, ", "))
+		switch st.Network.State {
+		case "on":
+			fmt.Printf("network  on: listening on %s, reachable at %s; connects out\n", st.Network.Listen, strings.Join(st.Listen, ", "))
+		case "outbound":
+			fmt.Println("network  outbound only: connects out to the machines in its rooms; listens on nothing")
+		default:
+			fmt.Println("network  off: this machine only, no connections (a person turns it on with: a2p2 net on)")
+		}
+		if st.Waiting > 0 {
+			fmt.Printf("waiting  %d request(s) for you: a2p2 confirm\n", st.Waiting)
 		}
 		fmt.Printf("ui       %s\n", st.UI)
 		fmt.Println("rooms")
@@ -409,35 +424,39 @@ func status(c *cmd) error {
 func trace(c *cmd, id string) error {
 	var t localapi.TraceResp
 	return c.call("trace", localapi.IDReq{ID: id}, &t, func() {
-		fmt.Printf("message %s in room %s: saved here, text %s\n", t.ID, t.Room, t.Reason)
+		fmt.Printf("message %s in room %s: its signed header is saved here; its text here: %s\n", t.ID, t.Room, t.Reason)
 		if len(t.Copies) == 0 {
 			fmt.Println("copies: none reported yet by a machine this one has been in touch with")
+		} else {
+			fmt.Println("copies (dates are when this machine observed them; a machine showed it holds the author's")
+			fmt.Println("        messages up to this one's position, which does not tell apart a different message")
+			fmt.Println("        signed at the same position; member means a member now):")
 		}
 		for _, cp := range t.Copies {
 			member := "member"
 			if !cp.Member {
-				member = "no longer a member"
+				member = "not a member now"
 			}
-			fmt.Printf("  copy on %s (%s), reported %s\n", short(cp.Node), member, clock(cp.At))
+			fmt.Printf("  %s (%s), observed %s\n", short(cp.Node), member, clock(cp.At))
 		}
 		if len(t.Handled) == 0 {
 			fmt.Println("handled: no report yet")
+		} else {
+			fmt.Println("handled (dates are when each report was written, as its author signed it):")
 		}
 		for _, h := range t.Handled {
-			fmt.Printf("  handled by %s at %s\n", h.Agent, clock(h.At))
+			fmt.Printf("  by %s at %s\n", h.Agent, clock(h.At))
 		}
 	})
 }
 
 // join previews an invite, asks the person at this terminal, accepts, and
-// waits for the admin machine's person unless --no-wait.
+// waits for the admin machine's person unless --no-wait. Without a
+// terminal it shows the preview only.
 func join(c *cmd, args []string) error {
 	noWait := c.fs.Bool("no-wait", false, "do not wait for the admin machine's person")
 	if err := c.fs.Parse(permute(args)); err != nil || c.fs.NArg() > 1 {
 		return usagef("a2p2 join [TOKEN] [--no-wait]")
-	}
-	if !terminal() {
-		return errors.New("join asks for your approval at a terminal; run it in one (stdin is not a terminal)")
 	}
 	token := c.fs.Arg(0)
 	if token == "" || token == "-" {
@@ -459,6 +478,9 @@ func join(c *cmd, args []string) error {
 		pv.Room.Label, pv.Room.ID, pv.Role, hist, short(pv.Admin), clock(pv.Expires))
 	if pv.Member {
 		fmt.Fprintln(os.Stderr, "This machine is a member already: approving fetches the room's log and changes nothing.")
+	}
+	if !terminal() {
+		return errors.New("accepting an invite is asked at a terminal; run a2p2 join there to accept (stdin is not a terminal)")
 	}
 	if ask("Join on these terms? Type yes: ") != "yes" {
 		return errors.New("not joined")
@@ -559,7 +581,9 @@ func room(c *cmd, args []string) error {
 	case (rest[0] == "admin" || rest[0] == "remove") && len(rest) == 3:
 		var r localapi.ChangeResp
 		return c.call("room/"+rest[0], localapi.MemberReq{Room: rest[1], Node: rest[2]}, &r, func() {
-			fmt.Printf("request %s: %s\nApprove it with: a2p2 confirm %s\n", r.Request, r.Text, r.Request)
+			fmt.Printf("request %s, waiting for a person here:\n", r.Request)
+			printTerms(os.Stdout, r.Terms)
+			fmt.Printf("Decide it with: a2p2 confirm %s\n", r.Request)
 		})
 	case rest[0] == "leave" && len(rest) == 2:
 		return c.call("room/leave", localapi.RoomReq{Room: rest[1]}, &localapi.Empty{}, func() {
@@ -569,14 +593,45 @@ func room(c *cmd, args []string) error {
 	return usagef("a2p2 room create LABEL | invite ROOM [--history] [--member|--admin] | admin ROOM MACHINE | remove ROOM MACHINE | leave ROOM | list [ROOM]")
 }
 
-// confirm lists requests, or decides one; deciding needs a terminal (P3).
+// printTerms shows a request's terms as separate labelled fields, the
+// machine by its full fingerprint, then the sentence naming what
+// approving does.
+func printTerms(w io.Writer, q localapi.Request) {
+	fmt.Fprintf(w, "  request      %s\n", q.ID)
+	if q.Kind == store.RequestNetwork {
+		fmt.Fprintf(w, "  networking   %s\n", q.Action)
+		if q.Name != "" {
+			fmt.Fprintf(w, "  listen on    %s\n", q.Name)
+		}
+	} else {
+		fmt.Fprintf(w, "  action       %s\n", q.Action)
+		fmt.Fprintf(w, "  room         %s (%s)\n", q.RoomLabel, q.Room)
+		fmt.Fprintf(w, "  machine      %s\n", q.Fingerprint)
+		if q.Name != "" {
+			fmt.Fprintf(w, "  name         %s (chosen by that machine)\n", q.Name)
+		}
+		if q.Role != "" {
+			fmt.Fprintf(w, "  role         %s\n", q.Role)
+		}
+		if q.Action != "remove" && q.Action != "promote" {
+			fmt.Fprintf(w, "  history      %s\n", map[bool]string{true: "may read earlier history", false: "no earlier history"}[q.History])
+		}
+		if q.Seconding {
+			fmt.Fprintln(w, "  seconding    another admin's entry")
+		}
+		if q.Deadline != "" {
+			fmt.Fprintf(w, "  invite ends  %s\n", clock(q.Deadline))
+		}
+	}
+	fmt.Fprintf(w, "  approving    %s\n", q.Text)
+}
+
+// confirm lists requests, or decides one. Deciding is asked at a terminal
+// and recorded; no agent tool reaches it.
 func confirm(c *cmd, args []string) error {
 	decline := c.fs.Bool("decline", false, "decline instead of approving")
 	if err := c.fs.Parse(permute(args)); err != nil || c.fs.NArg() > 1 {
 		return usagef("a2p2 confirm [ID] [--decline]")
-	}
-	if !terminal() {
-		return errors.New("confirm takes a person's decision at a terminal only (stdin is not a terminal)")
 	}
 	var qs localapi.RequestsResp
 	if c.fs.NArg() == 0 {
@@ -585,9 +640,13 @@ func confirm(c *cmd, args []string) error {
 				fmt.Println("nothing waits for you")
 			}
 			for _, q := range qs.Requests {
-				fmt.Printf("%s  room %s: %s\n", q.ID, q.Room, q.Text)
+				printTerms(os.Stdout, q)
+				fmt.Println()
 			}
 		})
+	}
+	if !terminal() {
+		return errors.New("a decision is asked at a terminal; run a2p2 confirm there (stdin is not a terminal)")
 	}
 	id := c.fs.Arg(0)
 	cl, err := c.client()
@@ -610,7 +669,7 @@ func confirm(c *cmd, args []string) error {
 	if *decline {
 		verb = "Decline"
 	}
-	fmt.Fprintf(os.Stderr, "Room %s: %s\n", q.Room, q.Text)
+	printTerms(os.Stderr, *q)
 	if ask(verb+" this? Type yes: ") != "yes" {
 		return errors.New("nothing decided")
 	}
@@ -643,36 +702,64 @@ func alerts(c *cmd, args []string) error {
 	})
 }
 
+// netCmd is a person's networking decision: shown exactly, asked at a
+// terminal, recorded by the daemon (a decided request of kind network),
+// and applied by restarting it.
 func netCmd(c *cmd, args []string) error {
-	if len(args) == 0 || (args[0] != "on" && args[0] != "off") || len(args) > 2 {
-		return usagef("a2p2 net on [ADDR] | off")
+	outbound := c.fs.Bool("outbound-only", false, "connect out only; listen on nothing")
+	if err := c.fs.Parse(permute(args)); err != nil {
+		return errUsage
 	}
-	if err := daemon.PrepareHome(c.home); err != nil {
-		return err
+	rest := c.fs.Args()
+	if len(rest) == 0 || (rest[0] != "on" && rest[0] != "off") || len(rest) > 2 ||
+		rest[0] == "off" && (len(rest) > 1 || *outbound) || *outbound && len(rest) > 1 {
+		return usagef("a2p2 net on [ADDR] | net on --outbound-only | net off")
 	}
-	cfg, err := daemon.LoadConfig(c.home)
+	req := localapi.NetReq{State: "off"}
+	switch {
+	case rest[0] == "on" && *outbound:
+		req.State = "outbound"
+	case rest[0] == "on":
+		req.State = "on"
+		cfg, err := daemon.LoadConfig(c.home)
+		if err != nil {
+			return err
+		}
+		req.Listen = daemon.DefaultListen
+		if cfg.Listen != "" {
+			req.Listen = cfg.Listen
+		}
+		if len(rest) == 2 {
+			req.Listen = rest[1]
+		}
+	}
+	what := map[string]string{
+		"off":      "Networking off: this machine listens on no address and connects to no other machine.",
+		"outbound": "Networking outbound only: this machine listens on no address; it connects out to the machines in its rooms and to the admin machine of a join.",
+		"on":       "Networking on: this machine listens for other machines on " + req.Listen + " (any machine that can reach that address can connect; only room members get anything) and connects out to the machines in its rooms.",
+	}[req.State]
+	fmt.Fprintln(os.Stderr, what)
+	fmt.Fprintln(os.Stderr, "The daemon restarts to apply it.")
+	if !terminal() {
+		return errors.New("a networking decision is asked at a terminal; run a2p2 net there (stdin is not a terminal)")
+	}
+	if ask("Apply this? Type yes: ") != "yes" {
+		return errors.New("nothing changed")
+	}
+	cl, err := c.client()
 	if err != nil {
 		return err
 	}
-	cfg.Listen = ""
-	if args[0] == "on" {
-		cfg.Listen = daemon.DefaultListen
-		if len(args) == 2 {
-			cfg.Listen = args[1]
-		}
-	}
-	if err := daemon.SaveConfig(c.home, cfg); err != nil {
+	var res localapi.NetResp
+	if err := cl.Call(c.ctx, "net", req, &res); err != nil {
 		return err
 	}
-	if cl, ok := daemon.Running(c.ctx, c.home); ok { // restart to apply
-		_ = cl.Call(c.ctx, "stop", nil, nil)
-		for i := 0; i < 100; i++ {
-			if _, up := daemon.Running(c.ctx, c.home); !up {
-				break
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
+	fmt.Fprintf(os.Stderr, "recorded as decision %s\n", res.Request)
+	_ = cl.Call(c.ctx, "stop", nil, nil) // restart to apply
+	if !daemon.WaitStopped(c.home, 20*time.Second) {
+		return errors.New("the daemon did not stop; the decision applies when it next starts")
 	}
+	c.cl = nil
 	return status(c)
 }
 

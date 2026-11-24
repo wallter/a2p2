@@ -11,6 +11,7 @@ import (
 	"errors"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/wallter/a2p2/internal/core"
@@ -68,11 +69,18 @@ const (
 		"lost key cannot be retired and no new admin can be named."
 )
 
-// Alert kinds (PROTOCOL-next section 7; "missing" comes with pull).
+// Alert kinds (PROTOCOL-next section 7).
 const (
 	AlertRequest = "request"
 	AlertFork    = "fork"
+	AlertMissing = "missing" // a record's text not here a day after it was written
 )
+
+// MissingAlertAfter is how long a record's text may be missing before a
+// person is told.
+const MissingAlertAfter = 24 * time.Hour
+
+const maxMissingAlerts = 100
 
 // Alert is something a person should act on.
 type Alert struct {
@@ -190,10 +198,12 @@ func (r *Rooms) Alerts(ctx context.Context) ([]Alert, error) {
 		return nil, err
 	}
 	var out []Alert
+	labels := map[string]string{}
 	for _, info := range rooms {
+		labels[info.ID] = info.Label
 		for _, q := range info.Requests {
 			out = append(out, Alert{Kind: AlertRequest, ID: q.ID, Room: info.ID, Since: q.Created,
-				Text: requestText(q)})
+				Text: requestText(q, info.Label)})
 		}
 		for _, f := range info.Forks {
 			if f.Open {
@@ -203,29 +213,73 @@ func (r *Rooms) Alerts(ctx context.Context) ([]Alert, error) {
 			}
 		}
 	}
+	ms, err := r.m.st.MissingBefore(ctx, r.m.now().Add(-MissingAlertAfter), maxMissingAlerts)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range ms {
+		if _, ok := labels[m.Room]; !ok {
+			continue
+		}
+		out = append(out, Alert{Kind: AlertMissing, ID: m.ID, Room: m.Room, Since: m.Created,
+			Text: "the text of record " + m.ID + " has not arrived here in the day since it was written; " +
+				"no machine this one reached could hand it over"})
+	}
 	return out, nil
 }
 
-func requestText(q store.Request) string {
-	verb := map[string]string{"add": "add", "remove": "remove", "admin": "make an admin of"}[q.Kind]
-	s := verb + " machine " + short(q.Node)
+// requestText says exactly what approving q does, naming the machine by
+// its full fingerprint and room by its label and id.
+func requestText(q store.Request, label string) string {
+	if q.Kind == store.RequestNetwork {
+		return "networking " + q.Action + ": " + NetworkText(Network{State: q.Action, Listen: q.Name})
+	}
+	m := "machine " + Fingerprint(q.Node)
 	if q.Name != "" {
-		s += " (" + q.Name + ")"
+		m += " (" + q.Name + ")"
 	}
-	switch {
-	case q.Action == ActionRejoin:
-		s = "let machine " + short(q.Node) + " (" + q.Name + ") fetch the room's log again: already a member, " +
-			"approval returns the log and changes nothing"
-	case q.Kind == string(core.EntryAdd) && q.Action == ActionAdmitAdmin:
-		s += " and make it an admin"
-	}
-	if q.Kind != string(core.EntryRemove) && q.Action != ActionPromote && q.Action != ActionRejoin {
-		s += map[bool]string{true: ", with earlier history", false: ", without earlier history"}[q.History]
+	room := "room " + label + " (" + q.Room + ")"
+	hist := map[bool]string{true: "with earlier history", false: "without earlier history"}[q.History]
+	var s string
+	switch q.Action {
+	case ActionAdmit:
+		s = "add " + m + " to " + room + " as a member, " + hist
+	case ActionAdmitAdmin:
+		s = "add " + m + " to " + room + " as an admin, " + hist
+	case ActionPromote:
+		s = "make " + m + ", a member of " + room + ", an admin"
+	case ActionRemove:
+		s = "remove " + m + " from " + room
+	case ActionRejoin:
+		s = "let " + m + ", already a member of " + room + " as " + an(q.Role) + ", " + hist +
+			", fetch the room's log again; approving changes nothing"
+	default:
+		s = q.Action + " " + m + " in " + room
 	}
 	if q.Seconds != "" {
 		s += ", seconding another admin's entry"
 	}
-	return s + ": waits for your confirmation"
+	return s
+}
+
+func an(role string) string {
+	if role == "admin" {
+		return "an admin"
+	}
+	return "a " + role
+}
+
+// Fingerprint is a node id grouped for reading aloud and comparing: groups
+// of four hex digits.
+func Fingerprint(node string) string {
+	var b strings.Builder
+	for i := 0; i < len(node); i += 4 {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(node[i:min(i+4, len(node))])
+	}
+	return b.String()
 }
 
 func short(node string) string {

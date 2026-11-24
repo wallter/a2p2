@@ -150,10 +150,12 @@ func entries(es []node.Entry, err error) (any, error) {
 }
 
 // state is everything the page shows at once. The human's unread entries
-// are read without marking anything seen; the page confirms what it showed.
+// and the questions waiting for the person are read without marking
+// anything seen; the page confirms what it showed. A one-time notice comes
+// back once and is recorded as shown, so the page keeps it on screen.
 func (sv *server) state(r *http.Request) (any, error) {
 	ctx := r.Context()
-	st, err := sv.s.Status(ctx)
+	st, err := sv.s.Status(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +167,11 @@ func (sv *server) state(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	qs, err := sv.s.Requests(ctx)
+	qs, err := sv.s.Waiting(ctx)
+	if err != nil {
+		return nil, err
+	}
+	questions, err := sv.s.Questions(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -183,6 +189,11 @@ func (sv *server) state(r *http.Request) (any, error) {
 		requests = append(requests, localapi.RequestOf(q))
 	}
 	out["unread"], out["waiting"], out["alerts"], out["requests"] = unread, len(in.Waiting), alerts, requests
+	asked := make([]localapi.Entry, 0, len(questions))
+	for _, e := range questions {
+		asked = append(asked, localapi.EntryOf(e))
+	}
+	out["questions"] = asked
 	return out, nil
 }
 
@@ -248,10 +259,18 @@ func (sv *server) ack(r *http.Request) (any, error) {
 	return localapi.AckResp{Handled: h.ID}, err
 }
 
-// confirm is the person's decision on a request (P3). The page sends back
-// the text it showed; a request whose text no longer matches is not
-// decided, so what is approved is exactly what was named.
+// confirm decides a request from the page. The page sends back the text
+// it showed, which names every term and the full fingerprint; a request
+// whose text no longer matches is not decided, so what is approved is
+// exactly what was named. The request must carry this page's exact
+// Origin, so that another site the browser opens cannot decide. This
+// keeps decisions out of the agents' tools and recorded; it does not prove
+// that a person clicked, since a program running as this user can read the
+// page's token from status.
 func (sv *server) confirm(r *http.Request) (any, error) {
+	if r.Header.Get("Origin") != "http://"+r.Host {
+		return nil, &node.UserError{Msg: "a decision must come from the page itself (its exact Origin)"}
+	}
 	var in struct {
 		ID      string `json:"id"`
 		Approve bool   `json:"approve"`
@@ -260,14 +279,14 @@ func (sv *server) confirm(r *http.Request) (any, error) {
 	if err := decode(r, &in); err != nil {
 		return nil, err
 	}
-	qs, err := sv.s.Requests(r.Context())
+	qs, err := sv.s.Waiting(r.Context())
 	if err != nil {
 		return nil, err
 	}
 	shown := false
 	for _, q := range qs {
 		if q.ID == in.ID {
-			if node.RequestText(q) != in.Text {
+			if q.Text != in.Text {
 				return nil, &node.UserError{Msg: "the request changed since the page showed it; reload and decide again"}
 			}
 			shown = true

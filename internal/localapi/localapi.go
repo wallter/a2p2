@@ -128,15 +128,24 @@ type (
 	IDReq struct {
 		ID string `json:"id"`
 	}
+	// Copy: machine node showed this one, at the time at (this machine's
+	// observation), that it holds the author's stream up to the message's
+	// position. Evidence is "position": it does not tell forks apart.
+	// Member is membership now.
 	Copy struct {
-		Node   string `json:"node"`
-		At     string `json:"at"`
-		Member bool   `json:"member"`
+		Node     string `json:"node"`
+		At       string `json:"at"`
+		Member   bool   `json:"member"`
+		Evidence string `json:"evidence"`
 	}
+	// Handled: at is when the report was written, as its author signed it.
 	Handled struct {
 		Agent string `json:"agent"`
 		At    string `json:"at"`
 	}
+	// TraceResp: saved is true when this machine holds the message's
+	// signed header; reason is the state of its text here. An id not held
+	// here is an error.
 	TraceResp struct {
 		ID      string    `json:"id"`
 		Room    string    `json:"room"`
@@ -158,16 +167,24 @@ type (
 	AlertsResp struct {
 		Alerts []Alert `json:"alerts"`
 	}
+	// Request is a decision waiting for (or taken by) this machine's
+	// person, every term its own field. Node is the full node id and
+	// Fingerprint the same grouped for reading.
 	Request struct {
-		ID      string `json:"id"`
-		Kind    string `json:"kind"`
-		Room    string `json:"room"`
-		Node    string `json:"node"`
-		Name    string `json:"name,omitempty"`
-		Role    string `json:"role,omitempty"`
-		History bool   `json:"history"`
-		Created string `json:"created"`
-		// Text names exactly what approving it does (P3).
+		ID          string `json:"id"`
+		Kind        string `json:"kind"`
+		Action      string `json:"action"`
+		Room        string `json:"room"`
+		RoomLabel   string `json:"room_label"`
+		Node        string `json:"node"`
+		Fingerprint string `json:"fingerprint"`
+		Name        string `json:"name,omitempty"`
+		Role        string `json:"role,omitempty"`
+		History     bool   `json:"history"`
+		Seconding   bool   `json:"seconding,omitempty"`
+		Created     string `json:"created"`
+		Deadline    string `json:"deadline,omitempty"`
+		// Text says exactly what approving it does.
 		Text string `json:"text"`
 	}
 	RequestsResp struct {
@@ -237,9 +254,34 @@ type (
 	// ChangeResp: room/admin and room/remove raise a request for a person
 	// (P3); confirm signs it.
 	ChangeResp struct {
-		Request string `json:"request"`
+		Request string  `json:"request"`
+		State   string  `json:"state"`
+		Text    string  `json:"text"`
+		Terms   Request `json:"terms"`
+	}
+	// NetReq is a person's networking decision: state off, outbound or
+	// on, and with on the address to listen on. It has the authority of
+	// confirm; no agent tool or hook sends it.
+	NetReq struct {
+		State  string `json:"state"`
+		Listen string `json:"listen,omitempty"`
+	}
+	// Network is a machine's networking state. NetResp is the decision
+	// recorded; it applies when the daemon next starts.
+	Network struct {
 		State   string `json:"state"`
+		Listen  string `json:"listen,omitempty"`
+		Request string `json:"request,omitempty"`
+	}
+	NetResp struct {
+		Network
 		Text    string `json:"text"`
+		Applies string `json:"applies"`
+	}
+	StatusReq struct {
+		// ShowNotice: a person is shown this status, so a one-time notice
+		// is returned and recorded as shown.
+		ShowNotice bool `json:"show_notice,omitempty"`
 	}
 	RoomListReq struct {
 		Room string `json:"room,omitempty"`
@@ -276,6 +318,9 @@ type (
 		NoEffect []NoEffect `json:"no_effect"`
 		Forks    []Fork     `json:"forks"`
 		Limits   []string   `json:"limits"`
+		// Waiting is the number of requests in this room waiting for this
+		// machine's person.
+		Waiting int `json:"waiting"`
 	}
 	RoomsResp struct {
 		Rooms []Room `json:"rooms"`
@@ -322,8 +367,10 @@ type (
 		Rooms   []Room        `json:"rooms"`
 		Agents  []store.Agent `json:"agents"`
 		Peers   []Peer        `json:"peers"`
-		Listen  []string      `json:"listen"` // addresses other machines can dial; empty: networking off
-		UI      string        `json:"ui"`     // URL of the web page including its access token
+		Network Network       `json:"network"`
+		Waiting int           `json:"waiting"` // requests waiting for this machine's person
+		Listen  []string      `json:"listen"`  // addresses other machines can dial; empty: no listener
+		UI      string        `json:"ui"`      // URL of the web page including its access token
 		Version string        `json:"version"`
 		PID     int           `json:"pid"`
 		Notice  string        `json:"notice,omitempty"`
@@ -403,7 +450,7 @@ func entriesOf(es []node.Entry) []Entry {
 // RoomOf renders a room as room/list shows it.
 func RoomOf(r node.RoomInfo) Room {
 	out := Room{ID: r.ID, Label: r.Label, Members: []Member{}, Admins: append([]string{}, r.Admins...), Pending: []Change{},
-		NoEffect: []NoEffect{}, Forks: []Fork{}, Limits: append([]string{}, r.Limits...)}
+		NoEffect: []NoEffect{}, Forks: []Fork{}, Limits: append([]string{}, r.Limits...), Waiting: len(r.Requests)}
 	for _, m := range r.Members {
 		out.Members = append(out.Members, Member{Node: m.Node, Name: m.Name, Admin: m.Admin})
 	}
@@ -427,10 +474,16 @@ func roomsOf(rs []node.RoomInfo) []Room {
 	return out
 }
 
-// RequestOf renders a request waiting for a person.
-func RequestOf(q store.Request) Request {
-	return Request{ID: q.ID, Kind: q.Kind, Room: q.Room, Node: q.Node, Name: q.Name, Role: q.Role, History: q.History,
-		Created: Time(q.Created), Text: node.RequestText(q)}
+// RequestOf renders a request for a person.
+func RequestOf(q node.RequestView) Request {
+	return Request{ID: q.ID, Kind: q.Kind, Action: q.Action, Room: q.Room, RoomLabel: q.RoomLabel, Node: q.Machine,
+		Fingerprint: q.Fingerprint, Name: q.Name, Role: q.Role, History: q.History, Seconding: q.Seconding,
+		Created: Time(q.Created), Deadline: Time(q.Deadline), Text: q.Text}
+}
+
+// NetworkOf renders a networking state.
+func NetworkOf(n node.Network) Network {
+	return Network{State: n.State, Listen: n.Listen, Request: n.Request}
 }
 
 // AlertOf renders an alert.
@@ -442,7 +495,7 @@ func AlertOf(a node.Alert) Alert {
 func TraceOf(t node.TraceView) TraceResp {
 	out := TraceResp{ID: t.ID, Room: t.Room, Saved: t.Saved, Reason: t.Reason, Copies: []Copy{}, Handled: []Handled{}}
 	for _, c := range t.Copies {
-		out.Copies = append(out.Copies, Copy{Node: c.Node, At: Time(c.At), Member: c.Member})
+		out.Copies = append(out.Copies, Copy{Node: c.Node, At: Time(c.At), Member: c.Member, Evidence: "position"})
 	}
 	for _, h := range t.Handled {
 		out.Handled = append(out.Handled, Handled{Agent: h.Agent, At: Time(h.At)})
@@ -459,7 +512,8 @@ func PreviewOf(p node.Preview) PreviewResp {
 // StatusOf renders the machine at a glance.
 func StatusOf(st node.StatusView, listen []string, info Info) Status {
 	out := Status{Node: st.Node, Name: st.Name, Human: st.Human, Local: st.Local, Rooms: roomsOf(st.Rooms),
-		Agents: st.Agents, Peers: []Peer{}, Listen: listen, Version: info.Version, PID: info.PID, Notice: st.Notice}
+		Agents: st.Agents, Peers: []Peer{}, Listen: listen, Version: info.Version, PID: info.PID, Notice: st.Notice,
+		Network: NetworkOf(st.Network), Waiting: st.Waiting}
 	if out.Listen == nil {
 		out.Listen = []string{}
 	}
@@ -540,7 +594,7 @@ func Handler(s *node.Surface, info Info) http.Handler {
 		return out, err
 	})
 	handle(mux, "requests", func(ctx context.Context, _ Empty) (RequestsResp, error) {
-		qs, err := s.Requests(ctx)
+		qs, err := s.Waiting(ctx)
 		out := RequestsResp{Requests: []Request{}}
 		for _, q := range qs {
 			out.Requests = append(out.Requests, RequestOf(q))
@@ -585,7 +639,8 @@ func Handler(s *node.Surface, info Info) http.Handler {
 			if err != nil {
 				return ChangeResp{}, err
 			}
-			return ChangeResp{Request: q.ID, State: "waiting", Text: node.RequestText(q)}, nil
+			v, err := s.Describe(ctx, q)
+			return ChangeResp{Request: q.ID, State: "waiting", Text: v.Text, Terms: RequestOf(v)}, err
 		}
 	}
 	handle(mux, "room/admin", change(s.Admin))
@@ -612,9 +667,18 @@ func Handler(s *node.Surface, info Info) http.Handler {
 		}
 		return out, err
 	})
-	handle(mux, "status", func(ctx context.Context, _ Empty) (Status, error) {
-		st, err := s.Status(ctx)
+	handle(mux, "status", func(ctx context.Context, r StatusReq) (Status, error) {
+		st, err := s.Status(ctx, r.ShowNotice)
 		return StatusOf(st, s.Addrs(), info), err
+	})
+	// net records a person's networking decision, with the authority of
+	// confirm: the CLI asks for it at a terminal and no agent tool or hook
+	// calls it. That keeps it out of the agents' tools and recorded; it
+	// does not prove that a person made it, since any program running as
+	// this user can call this socket.
+	handle(mux, "net", func(ctx context.Context, r NetReq) (NetResp, error) {
+		n, err := s.SetNetwork(ctx, node.Network{State: r.State, Listen: r.Listen})
+		return NetResp{Network: NetworkOf(n), Text: node.NetworkText(n), Applies: "when the daemon next starts"}, err
 	})
 	handle(mux, "stop", func(ctx context.Context, _ Empty) (Empty, error) {
 		if info.Stop != nil {

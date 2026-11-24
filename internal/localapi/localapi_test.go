@@ -42,6 +42,7 @@ type machine struct {
 	c      *Client
 	human  string
 	server *node.JoinServer
+	st     *store.Store
 }
 
 // newPair starts two machines with local APIs; b joins through a.
@@ -57,6 +58,7 @@ func newPair(t *testing.T) (*machine, *machine) {
 		t.Cleanup(func() { st.Close() })
 		key := ed25519.NewKeyFromSeed(append([]byte{seed}, make([]byte, 31)...))
 		mach := node.NewMachine(st, key, node.MachineOpts{})
+		m.st = st
 		m.id = mach.ID
 		rooms, err := node.OpenRooms(ctx, mach)
 		if err != nil {
@@ -65,7 +67,7 @@ func newPair(t *testing.T) (*machine, *machine) {
 		m.js = node.NewJoinServer(rooms)
 		j := node.NewJoiner(rooms, joinNet{from: mach.ID, server: &peer.js, admin: &peer.id}, node.JoinerOpts{Name: "m" + string('0'+seed)})
 		m.s, err = node.OpenSurface(ctx, mach, rooms, node.SurfaceOpts{Name: "m", Joiner: j, Book: node.NewAddrBook(),
-			Addrs: func() []string { return []string{"127.0.0.1:7443"} }})
+			Addrs: func() []string { return []string{"127.0.0.1:7443"} }, Network: node.Network{State: node.NetworkOn, Listen: "127.0.0.1:7443"}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -183,6 +185,10 @@ func TestEveryLocalCallRoundTripsAndRefusesAUserError(t *testing.T) {
 	if len(qs.Requests) != 1 || qs.Requests[0].Node != b.id || qs.Requests[0].Room != room.ID || !strings.Contains(qs.Requests[0].Text, "admin") {
 		t.Fatalf("requests = %+v", qs)
 	}
+	if q := qs.Requests[0]; q.Fingerprint != node.Fingerprint(b.id) || q.Action != node.ActionAdmitAdmin || q.RoomLabel != "team" ||
+		q.Deadline == "" || !strings.HasPrefix(q.Text, "add machine "+q.Fingerprint) {
+		t.Fatalf("request terms = %+v", q)
+	}
 	al := call[AlertsResp](t, a.c, "alerts", WaitReq{})
 	if len(al.Alerts) != 1 || al.Alerts[0].Kind != node.AlertRequest || al.Alerts[0].ID != qs.Requests[0].ID {
 		t.Fatalf("alerts = %+v", al)
@@ -224,6 +230,19 @@ func TestEveryLocalCallRoundTripsAndRefusesAUserError(t *testing.T) {
 	st := call[Status](t, a.c, "status", Empty{})
 	if st.Node != a.id || st.Human != a.human || len(st.Rooms) != 2 || st.Rooms[0].ID != a.s.LocalRoom() || len(st.Peers) != 1 || st.Peers[0].Node != b.id {
 		t.Fatalf("status = %+v", st)
+	}
+	if st.Network.State != node.NetworkOn || st.Waiting != 1 {
+		t.Fatalf("status network %+v waiting %d", st.Network, st.Waiting)
+	}
+	// net records a person's decision; it applies at the next start.
+	userError(t, a.c, "net", NetReq{State: "sideways"})
+	userError(t, a.c, "net", NetReq{State: "on", Listen: "nowhere"})
+	nr := call[NetResp](t, a.c, "net", NetReq{State: "outbound"})
+	if nr.State != node.NetworkOutbound || nr.Request == "" || nr.Applies == "" || !strings.Contains(nr.Text, "listen on no address") {
+		t.Fatalf("net = %+v", nr)
+	}
+	if n, err := node.LoadNetwork(context.Background(), a.st); err != nil || n.Request != nr.Request {
+		t.Fatalf("recorded %+v %v", n, err)
 	}
 	call[Empty](t, a.c, "stop", Empty{})
 	if err := a.c.Call(context.Background(), "nosuch", nil, nil); err == nil {

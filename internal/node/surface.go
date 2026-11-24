@@ -16,7 +16,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -45,39 +44,45 @@ const (
 	maxFirstLines     = 10
 )
 
-// NoticeV02 is shown once, by the first daemon run over a database that
-// holds v0.2 messages.
-const NoticeV02 = "This machine's database holds messages from a2p2 v0.2. That version's messages, rooms and " +
-	"invites are not carried over and are no longer shown; pair your machines again with a2p2 room invite."
+// NoticeV02 is shown to a person once ever, over a database that holds
+// v0.2 state (PROTOCOL-next section 8).
+const NoticeV02 = "This machine's database holds messages or rooms from a2p2 v0.2. This version ignores them: " +
+	"they stay in the database file but are not read, shown or sent. Pair your machines again with a2p2 room invite."
 
 // SurfaceOpts configures a Surface.
 type SurfaceOpts struct {
 	Name   string          // this machine's label
 	Joiner *Joiner         // nil: joining is unavailable
 	Book   *AddrBook       // where peers' addresses are learned; nil: none
-	Addrs  func() []string // where joiners and peers reach this machine; empty: networking is off
+	Addrs  func() []string // where joiners and peers reach this machine; empty: no listener
+	// Network is the networking state this run applies (zero: off).
+	Network Network
 }
 
 // Surface serves the surfaces of one machine.
 type Surface struct {
-	m      *Machine
-	r      *Rooms
-	j      *Joiner
-	book   *AddrBook
-	name   string
-	addrs  func() []string
-	local  string
-	notice string
-	// jmu serialises the joiner's accept and resume, so that one join is
-	// followed by one caller at a time.
-	jmu sync.Mutex
+	m     *Machine
+	r     *Rooms
+	j     *Joiner
+	book  *AddrBook
+	name  string
+	addrs func() []string
+	local string
+	net   Network
+	// waiting, if set (tests), is called each time Inbox starts to wait:
+	// a readiness barrier.
+	waiting func()
 }
 
 // OpenSurface prepares the surfaces over m and r: it creates the local
-// room on first start (this machine its only member and admin), registers
-// the human, and records whether the v0.2 notice is due (shown once).
+// room on first start (this machine its only member and admin) and
+// registers the human.
 func OpenSurface(ctx context.Context, m *Machine, r *Rooms, o SurfaceOpts) (*Surface, error) {
-	s := &Surface{m: m, r: r, j: o.Joiner, book: o.Book, name: o.Name, addrs: o.Addrs, local: localRoomID(m.ID)}
+	s := &Surface{m: m, r: r, j: o.Joiner, book: o.Book, name: o.Name, addrs: o.Addrs, local: localRoomID(m.ID),
+		net: o.Network}
+	if s.net.State == "" {
+		s.net.State = NetworkOff
+	}
 	if s.addrs == nil {
 		s.addrs = func() []string { return nil }
 	}
@@ -90,13 +95,6 @@ func OpenSurface(ctx context.Context, m *Machine, r *Rooms, o SurfaceOpts) (*Sur
 	}
 	if _, err := s.Register(ctx, HumanLabel, HumanLabel, ""); err != nil {
 		return nil, err
-	}
-	show, err := m.st.V02Notice(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if show {
-		s.notice = NoticeV02
 	}
 	if err := s.SeedBook(ctx); err != nil {
 		return nil, err
@@ -135,8 +133,22 @@ func (s *Surface) LocalRoom() string { return s.local }
 // HumanID is the agent id of this machine's person.
 func (s *Surface) HumanID() string { return s.agentID(HumanLabel, s.m.ID) }
 
-// Notice is the one-time notice of this run, if any.
-func (s *Surface) Notice() string { return s.notice }
+// Notice returns the v0.2 notice if it is still to be shown, and with
+// show records it as shown, so that a person sees it once ever. Callers
+// pass show only when a person is shown the result (status at the CLI,
+// the page), never for an agent tool.
+func (s *Surface) Notice(ctx context.Context, show bool) (string, error) {
+	pending, err := s.m.st.V02Pending(ctx)
+	if err != nil || !pending {
+		return "", err
+	}
+	if show {
+		if first, err := s.m.st.V02Shown(ctx); err != nil || !first {
+			return "", err
+		}
+	}
+	return NoticeV02, nil
+}
 
 // Addrs are where other machines reach this one; empty when networking is off.
 func (s *Surface) Addrs() []string { return s.addrs() }
@@ -220,13 +232,17 @@ func (s *Surface) CreateRoom(ctx context.Context, label string) (RoomInfo, error
 	if err != nil {
 		return RoomInfo{}, err
 	}
-	return s.r.Info(ctx, id)
+	info, err := s.r.Info(ctx, id)
+	s.named([]RoomInfo{info})
+	return info, err
 }
 
 // RoomList is room/list: every room, or one.
 func (s *Surface) RoomList(ctx context.Context, room string) ([]RoomInfo, error) {
 	if room == "" {
-		return s.r.List(ctx)
+		rs, err := s.r.List(ctx)
+		s.named(rs)
+		return rs, err
 	}
 	id, err := s.ResolveRoom(ctx, room)
 	if err != nil {
@@ -236,11 +252,13 @@ func (s *Surface) RoomList(ctx context.Context, room string) ([]RoomInfo, error)
 	if err != nil {
 		return nil, err
 	}
+	s.named([]RoomInfo{info})
 	return []RoomInfo{info}, nil
 }
 
-// Invite issues an invite to room; networking must be on, since the joiner
-// reaches this machine at its addresses.
+// Invite issues an invite to room; this machine must listen, since the
+// joiner reaches it at its addresses. An invite decides nothing: the
+// admin machine's person approves the accept it leads to.
 func (s *Surface) Invite(ctx context.Context, room, role string, history bool) (Invitation, error) {
 	id, err := s.ResolveRoom(ctx, room)
 	if err != nil {
@@ -251,7 +269,8 @@ func (s *Surface) Invite(ctx context.Context, room, role string, history bool) (
 	}
 	addrs := s.addrs()
 	if len(addrs) == 0 {
-		return Invitation{}, userErr("networking is off, so nobody could reach this machine to join; run: a2p2 net on")
+		return Invitation{}, userErr("networking is %s here, so no machine could reach this one to join; "+
+			"a person can turn the listener on at a terminal: a2p2 net on", s.net.State)
 	}
 	if len(addrs) > MaxAddrs {
 		addrs = addrs[:MaxAddrs]
@@ -284,12 +303,14 @@ func (s *Surface) member(room, node string) (string, error) {
 	return "", userErr("%q names several members; give more of the node id", node)
 }
 
-// Admin proposes making a member an admin; a person confirms it (P3).
+// Admin proposes making a member an admin; confirm decides it, and no
+// agent tool reaches confirm (P3).
 func (s *Surface) Admin(ctx context.Context, room, node string) (store.Request, error) {
 	return s.change(ctx, room, node, core.EntryAdmin)
 }
 
-// Remove proposes removing a member; a person confirms it (P3).
+// Remove proposes removing a member; confirm decides it, and no agent
+// tool reaches confirm (P3).
 func (s *Surface) Remove(ctx context.Context, room, node string) (store.Request, error) {
 	return s.change(ctx, room, node, core.EntryRemove)
 }
@@ -321,7 +342,8 @@ func (s *Surface) Leave(ctx context.Context, room string) error {
 // Requests lists requests waiting for a person.
 func (s *Surface) Requests(ctx context.Context) ([]store.Request, error) { return s.r.Requests(ctx) }
 
-// Confirm is a person's decision on a request. No agent tool reaches it (P3).
+// Confirm decides a request. No agent tool or hook reaches it (P3); any
+// program running as this user can still call the socket that does.
 func (s *Surface) Confirm(ctx context.Context, id string, approve bool) (Confirmation, error) {
 	return s.r.Confirm(ctx, id, approve)
 }
@@ -335,6 +357,9 @@ func (s *Surface) JoinPreview(ctx context.Context, token string) (Preview, error
 	if s.j == nil {
 		return Preview{}, userErr("joining is not available")
 	}
+	if err := s.dials(); err != nil {
+		return Preview{}, err
+	}
 	tok, err := core.DecodeToken(token)
 	if err != nil {
 		return Preview{}, userErr("not an invite: %v", err)
@@ -347,7 +372,8 @@ func (s *Surface) JoinPreview(ctx context.Context, token string) (Preview, error
 }
 
 // JoinAccept accepts the preview with id preview of the invite in token,
-// which a person here approved, and waits up to wait for the outcome.
+// approved at this machine (the CLI asks at a terminal; nothing proves who
+// answered), and waits up to wait for the outcome.
 func (s *Surface) JoinAccept(ctx context.Context, token, preview string, wait time.Duration) (JoinOutcome, error) {
 	if s.j == nil {
 		return JoinOutcome{}, userErr("joining is not available")
@@ -355,8 +381,9 @@ func (s *Surface) JoinAccept(ctx context.Context, token, preview string, wait ti
 	if preview == "" {
 		return JoinOutcome{}, userErr("name the preview approved (its id, from room/join)")
 	}
-	s.jmu.Lock()
-	defer s.jmu.Unlock()
+	if err := s.dials(); err != nil {
+		return JoinOutcome{}, err
+	}
 	o, err := s.j.JoinAccept(ctx, token, preview, min(wait, MaxWait))
 	if err == nil {
 		err = s.SeedBook(ctx)
@@ -365,13 +392,12 @@ func (s *Surface) JoinAccept(ctx context.Context, token, preview string, wait ti
 }
 
 // ResumeJoins follows every join still waiting for the admin machine's
-// person (the daemon calls it at start and then every few seconds).
+// person (the daemon calls it at start and then every few seconds). With
+// networking off it does nothing.
 func (s *Surface) ResumeJoins(ctx context.Context, wait time.Duration) ([]JoinOutcome, error) {
-	if s.j == nil {
+	if s.j == nil || s.dials() != nil {
 		return nil, nil
 	}
-	s.jmu.Lock()
-	defer s.jmu.Unlock()
 	o, err := s.j.Resume(ctx, wait)
 	if err == nil {
 		err = s.SeedBook(ctx)
@@ -608,6 +634,9 @@ func (s *Surface) Inbox(ctx context.Context, agent, room string, limit int, wait
 			}
 			return v, err
 		}
+		if s.waiting != nil {
+			s.waiting()
+		}
 		if !waitAny(ctx, wakes, deadline) {
 			return v, ctx.Err()
 		}
@@ -762,8 +791,10 @@ func (s *Surface) Thread(ctx context.Context, agent, id string) ([]Entry, error)
 }
 
 // History is the room's messages held here with their text, oldest first:
-// at most limit, before message before if given. It marks nothing; text
-// this machine may not read is not held, so it is never shown.
+// at most limit, before message before if given. Pages run by (created,
+// id) through an index; before may name a message withdrawn or expired
+// since, since its header stays. It marks nothing; text this machine may
+// not read is not held, so it is never shown.
 func (s *Surface) History(ctx context.Context, room, before string, limit int) ([]Entry, error) {
 	id, err := s.ResolveRoom(ctx, room)
 	if err != nil {
@@ -779,23 +810,39 @@ func (s *Surface) History(ctx context.Context, room, before string, limit int) (
 	}
 	var out []Entry
 	err = s.m.view(ctx, id, func(v *roomView) error {
-		for _, st := range v.streams {
-			hs, err := v.rd.RecordsFrom(id, st.Author, st.Epoch, 1)
+		var at time.Time
+		after := ""
+		if before != "" {
+			h, ok, err := v.rd.Record(id, strings.TrimPrefix(before, "x:"))
+			if err != nil {
+				return err
+			}
+			if !ok || h.Record.Fields().Kind != core.KindMessage {
+				return userErr("message %q is not in the room's history here", before)
+			}
+			at, after = h.Record.Fields().Created, h.Record.ID()
+		}
+		for len(out) < limit {
+			hs, err := v.rd.MessagesBefore(id, at, after, limit)
 			if err != nil {
 				return err
 			}
 			for _, h := range hs {
+				at, after = h.Record.Fields().Created, h.Record.ID()
 				x := v.keep(h)
-				if x.f.Kind != core.KindMessage || v.hidden(x.author) {
+				if v.hidden(x.author) {
 					continue
 				}
 				e, err := v.threadEntry(x)
 				if err != nil {
 					return err
 				}
-				if e != nil && e.Kind == EntryMessage {
+				if e != nil && e.Kind == EntryMessage && len(out) < limit {
 					out = append(out, *e)
 				}
+			}
+			if len(hs) < limit {
+				break
 			}
 		}
 		return nil
@@ -803,48 +850,45 @@ func (s *Surface) History(ctx context.Context, room, before string, limit int) (
 	if err != nil {
 		return nil, err
 	}
-	sortEntries(out)
-	if before != "" {
-		i := slices.IndexFunc(out, func(e Entry) bool { return e.ID == before })
-		if i < 0 {
-			return nil, userErr("message %q is not in the room's history here", before)
-		}
-		out = out[:i]
-	}
-	if len(out) > limit {
-		out = out[len(out)-limit:]
-	}
+	slices.Reverse(out)
 	return out, nil
 }
 
 // TraceView is what is known here of one message (A4).
 type TraceView struct {
-	ID      string
-	Room    string
-	Saved   bool   // the message is saved on this machine
-	Reason  string // its text: live, expired, withdrawn, not_admitted or missing
+	ID   string
+	Room string
+	// Saved: this machine holds the message's signed header. Whether it
+	// holds the text is Reason.
+	Saved   bool
+	Reason  string // its text here: live, expired, withdrawn, not_admitted or missing
 	Copies  []CopyView
 	Handled []HandledView
 }
 
-// CopyView is a machine that reported holding the message, when.
+// CopyView is a machine that showed this one it holds the author's stream
+// up to the message's position. That is position evidence only: it does
+// not tell apart another record the author signed at the same position.
 type CopyView struct {
 	Node   string
-	At     time.Time
-	Member bool // a member of the room now, in this machine's view
+	At     time.Time // when this machine observed it, not when the copy was made
+	Member bool      // a member of the room now, in this machine's view (not then)
 }
 
 // HandledView is a handling report held here.
 type HandledView struct {
 	Agent string
-	At    time.Time
+	At    time.Time // when the report was written, as its author signed it
 }
 
 // Trace shows where message id got to: saved here, the reason its text is
 // or is not here, the copies other machines reported (dated observations)
-// and the handling reports held.
+// and the handling reports held. An id not held here is an error.
 func (s *Surface) Trace(ctx context.Context, id string) (TraceView, error) {
 	room, err := s.roomOf(ctx, id)
+	if errors.Is(err, ErrNotHeld) {
+		return TraceView{}, userErr("no message %q is held on this machine", id)
+	}
 	if err != nil {
 		return TraceView{}, err
 	}
@@ -985,15 +1029,20 @@ type StatusView struct {
 	Rooms  []RoomInfo
 	Agents []store.Agent
 	Peers  []PeerView
-	Notice string
+	// Waiting is the number of requests waiting for this machine's person.
+	Waiting int
+	Network Network
+	Notice  string
 }
 
-// Status gathers rooms, agents and peers.
-func (s *Surface) Status(ctx context.Context) (StatusView, error) {
+// Status gathers rooms, agents and peers. show is Notice's: true only when
+// a person is shown the result.
+func (s *Surface) Status(ctx context.Context, show bool) (StatusView, error) {
 	rooms, err := s.r.List(ctx)
 	if err != nil {
 		return StatusView{}, err
 	}
+	s.named(rooms)
 	sort.SliceStable(rooms, func(i, j int) bool { return rooms[i].ID == s.local && rooms[j].ID != s.local })
 	agents, err := s.Agents(ctx)
 	if err != nil {
@@ -1003,8 +1052,28 @@ func (s *Surface) Status(ctx context.Context) (StatusView, error) {
 	if err != nil {
 		return StatusView{}, err
 	}
+	notice, err := s.Notice(ctx, show)
+	if err != nil {
+		return StatusView{}, err
+	}
+	waiting := 0
+	for _, r := range rooms {
+		waiting += len(r.Requests)
+	}
 	return StatusView{Node: s.m.ID, Name: s.name, Human: s.HumanID(), Local: s.local, Rooms: rooms, Agents: agents,
-		Peers: peers, Notice: s.notice}, nil
+		Peers: peers, Waiting: waiting, Network: s.net, Notice: notice}, nil
+}
+
+// named fills in this machine's own name where a room lists it without
+// one (its create entry names nobody).
+func (s *Surface) named(rooms []RoomInfo) {
+	for i := range rooms {
+		for k := range rooms[i].Members {
+			if m := &rooms[i].Members[k]; m.Node == s.m.ID && m.Name == "" {
+				m.Name = s.name
+			}
+		}
+	}
 }
 
 func (s *Surface) peers(ctx context.Context, rooms []RoomInfo) ([]PeerView, error) {
@@ -1064,6 +1133,3 @@ func (s *Surface) Alerts(ctx context.Context, wait time.Duration) ([]Alert, erro
 		}
 	}
 }
-
-// RequestText names exactly what approving request q does (P3).
-func RequestText(q store.Request) string { return requestText(q) }

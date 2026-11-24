@@ -144,8 +144,28 @@ func advertised(cfg Config, ln net.Listener) []string {
 	return out
 }
 
+// RunOpts are for tests: what Run takes from its caller instead of making.
+type RunOpts struct {
+	// PeerListener, if set, is used as the peer listener when networking
+	// is on, instead of listening on the decided address. Run closes it.
+	PeerListener net.Listener
+	// Ready, if set, is called once every listener serves.
+	Ready func()
+}
+
 // Run is the daemon. It returns when ctx ends or a stop is requested.
 func Run(ctx context.Context, home, version string) error {
+	return RunWith(ctx, home, version, RunOpts{})
+}
+
+// RunWith is Run with test options.
+func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
+	peerLn := o.PeerListener
+	defer func() {
+		if peerLn != nil && err != nil {
+			peerLn.Close()
+		}
+	}()
 	if err := PrepareHome(home); err != nil {
 		return err
 	}
@@ -176,6 +196,7 @@ func Run(ctx context.Context, home, version string) error {
 	if err != nil {
 		return err
 	}
+	// Closed last of all, after every handler and loop has returned.
 	defer st.Close()
 
 	// The next version's path (DESIGN-next section 9): records, the room
@@ -189,10 +210,21 @@ func Run(ctx context.Context, home, version string) error {
 	if err := m.Prune(ctx); err != nil {
 		return err
 	}
-	var peerLn net.Listener
-	if cfg.Listen != "" { // networking is a person's choice: a2p2 net on
-		if peerLn, err = net.Listen("tcp4", cfg.Listen); err != nil {
-			return fmt.Errorf("peer listener: %w", err)
+	// Networking is what a person last decided (a2p2 net, recorded in
+	// requests); with no decision it is off. The config file's listen
+	// address is only the default a2p2 net on offers.
+	netw, err := node.LoadNetwork(ctx, st)
+	if err != nil {
+		return err
+	}
+	if netw.State != node.NetworkOn {
+		if peerLn != nil {
+			peerLn.Close()
+		}
+		peerLn = nil
+	} else if peerLn == nil {
+		if peerLn, err = net.Listen("tcp4", netw.Listen); err != nil {
+			return fmt.Errorf("peer listener on %s: %w", netw.Listen, err)
 		}
 	}
 	addrs := advertised(cfg, peerLn)
@@ -205,23 +237,20 @@ func Run(ctx context.Context, home, version string) error {
 	x := node.NewExchange(rooms, pulls, node.ExchangeOpts{Book: book, Addrs: addrs})
 	joiner := node.NewJoiner(rooms, peer.NewJoinClient(id), node.JoinerOpts{Name: cfg.Name, Addrs: addrs})
 	surf, err := node.OpenSurface(ctx, m, rooms, node.SurfaceOpts{Name: cfg.Name, Joiner: joiner, Book: book,
-		Addrs: func() []string { return addrs }})
+		Addrs: func() []string { return addrs }, Network: netw})
 	if err != nil {
-		if peerLn != nil {
-			peerLn.Close()
-		}
 		return err
 	}
-	if n := surf.Notice(); n != "" {
-		slog.Warn(n)
+	if n, err := surf.Notice(ctx, false); err == nil && n != "" {
+		slog.Warn(n) // not recorded as shown: a person sees it through status or the page
 	}
 
 	ctx, stop := context.WithCancel(ctx)
-	var wg sync.WaitGroup
-	// Deferred calls run last first: stop, then wait for every loop, and
-	// only then close the store.
-	defer wg.Wait()
 	defer stop()
+	// gate lets every request handler finish before the store closes, and
+	// refuses the ones that start after.
+	g := &gate{}
+	var wg sync.WaitGroup
 	run := func(fn func()) {
 		wg.Add(1)
 		go func() {
@@ -229,17 +258,42 @@ func Run(ctx context.Context, home, version string) error {
 			fn()
 		}()
 	}
-	run(func() { node.NewScheduler(x, node.SchedOpts{}).Run(ctx) })
-	run(func() { resumeJoins(ctx, surf) })
-	run(func() { prune(ctx, m) })
 	if peerLn != nil {
-		h := peerHandler{JoinServer: node.NewJoinServer(rooms), x: x}
+		h := peerHandler{JoinServer: node.NewJoinServer(rooms), x: x, g: g}
+		ln := peerLn
+		peerLn = nil // Serve owns it now
 		run(func() {
-			if err := peer.Serve(ctx, peerLn, id, h, nil); err != nil && ctx.Err() == nil {
+			if err := peer.Serve(ctx, ln, id, h, nil); err != nil && ctx.Err() == nil {
 				slog.Error("peer listener stopped", "err", err)
 			}
 		})
 	}
+	if netw.State != node.NetworkOff { // off: no scheduler, no join polling, nothing dialled
+		run(func() { node.NewScheduler(x, node.SchedOpts{}).Run(ctx) })
+		run(func() { resumeJoins(ctx, surf) })
+	}
+	run(func() { prune(ctx, m) })
+	// shutdown, deferred before the listeners below: cancel every request
+	// and loop, drain the handlers, wait for the loops; the store closes
+	// after (deferred first).
+	var servers []*http.Server
+	defer func() {
+		stop()
+		// CANCEL-HOLDS: the pull endpoint's own call that releases held
+		// (waiting) pulls arrives with the scheduler work in another
+		// worktree; call it here, before draining. Until then the request
+		// contexts, which end with ctx, release them.
+		shut, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		for _, srv := range servers {
+			_ = srv.Shutdown(shut)
+			srv.Close() // waiting reads that outlived the grace period
+		}
+		g.close()
+		wg.Wait()
+		slog.Info("a2p2 daemon stopped")
+	}()
+	base := func(net.Listener) context.Context { return ctx } // requests end when the daemon stops
 
 	// Web UI: loopback only, token required. If the port is taken, pick any.
 	token, err := newToken()
@@ -261,7 +315,8 @@ func Run(ctx context.Context, home, version string) error {
 		return fmt.Errorf("the UI must listen on a loopback address, not %s", uiLn.Addr())
 	}
 	uiURL := fmt.Sprintf("http://%s/#%s", uiLn.Addr(), token)
-	uiSrv := &http.Server{Handler: web.Handler(surf, token), ReadHeaderTimeout: 5 * time.Second}
+	uiSrv := &http.Server{Handler: g.wrap(web.Handler(surf, token)), ReadHeaderTimeout: 5 * time.Second, BaseContext: base}
+	servers = append(servers, uiSrv)
 	go uiSrv.Serve(uiLn)
 
 	// Local API on the Unix socket. We hold the lock, so a leftover socket
@@ -272,27 +327,61 @@ func Run(ctx context.Context, home, version string) error {
 	apiLn, err := net.Listen("unix", sock)
 	syscall.Umask(old)
 	if err != nil {
-		uiSrv.Close()
 		return fmt.Errorf("local socket: %w", err)
 	}
 	defer os.Remove(sock)
-	apiSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: localapi.Handler(surf, localapi.Info{
+	apiSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, BaseContext: base, Handler: g.wrap(localapi.Handler(surf, localapi.Info{
 		Version: version, UIURL: func() string { return uiURL }, PID: os.Getpid(), Stop: stop,
-	})}
+	}))}
+	servers = append(servers, apiSrv)
 	go apiSrv.Serve(apiLn)
 
 	slog.Info("a2p2 daemon started", "node", core.ShortNode(m.ID), "name", cfg.Name, "home", home,
-		"ui", uiLn.Addr().String(), "listen", addrs, "version", version)
+		"ui", uiLn.Addr().String(), "network", netw.State, "listen", addrs, "version", version)
+	if o.Ready != nil {
+		o.Ready()
+	}
 	<-ctx.Done()
-	shut, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_ = apiSrv.Shutdown(shut)
-	_ = uiSrv.Shutdown(shut)
-	apiSrv.Close() // waiting reads that outlived the grace period
-	uiSrv.Close()
-	slog.Info("a2p2 daemon stopped")
 	return nil
 }
+
+// gate counts request handlers in flight. close waits for them and makes
+// every later one fail, so that none touches the store after it closes.
+type gate struct {
+	mu     sync.RWMutex
+	closed bool
+}
+
+func (g *gate) enter() bool {
+	g.mu.RLock()
+	if g.closed {
+		g.mu.RUnlock()
+		return false
+	}
+	return true
+}
+
+func (g *gate) leave() { g.mu.RUnlock() }
+
+func (g *gate) close() {
+	g.mu.Lock()
+	g.closed = true
+	g.mu.Unlock()
+}
+
+func (g *gate) wrap(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !g.enter() {
+			http.Error(w, "the a2p2 daemon is stopping", http.StatusServiceUnavailable)
+			return
+		}
+		defer g.leave()
+		h.ServeHTTP(w, r)
+	})
+}
+
+// errStopping answers a peer while the daemon stops.
+var errStopping = errors.New("the a2p2 daemon is stopping")
 
 // resumeJoins follows joins waiting for the admin machine's person: at
 // start, then every node.JoinRetry, one poll each.
@@ -331,15 +420,29 @@ func prune(ctx context.Context, m *node.Machine) {
 }
 
 // peerHandler serves the next version's peer routes, /p/v2/join and
-// /p/v2/pull. The v0.2 routes, which peer.Serve still mounts until they are
-// deleted, refuse everything: no v0.2 node exists to answer them.
+// /p/v2/pull, each call inside the gate. The v0.2 routes, which peer.Serve
+// still mounts until they are deleted, refuse everything: no v0.2 node
+// exists to answer them.
 type peerHandler struct {
 	*node.JoinServer
 	x *node.Exchange
+	g *gate
 }
 
 func (h peerHandler) Serve(ctx context.Context, from string, q *node.PullRequest) (*node.PullResponse, error) {
+	if !h.g.enter() {
+		return nil, errStopping
+	}
+	defer h.g.leave()
 	return h.x.Serve(ctx, from, q)
+}
+
+func (h peerHandler) Handle(ctx context.Context, from, source string, body []byte) node.JoinReply {
+	if !h.g.enter() {
+		return node.JoinReply{Status: http.StatusServiceUnavailable, RetryAfter: node.JoinRetry}
+	}
+	defer h.g.leave()
+	return h.JoinServer.Handle(ctx, from, source, body)
 }
 
 func (peerHandler) Receive(_ context.Context, _ string, req node.DeliverReq, _ func(string)) []node.Result {
@@ -393,6 +496,25 @@ func Connect(ctx context.Context, home string) (*localapi.Client, error) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return nil, fmt.Errorf("the a2p2 daemon did not start; see %s", filepath.Join(home, "daemon.log"))
+}
+
+// WaitStopped waits up to d for the daemon of home to have exited: its
+// lock is free. It reports whether it did.
+func WaitStopped(home string, d time.Duration) bool {
+	f, err := os.OpenFile(filepath.Join(home, "lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	for deadline := time.Now().Add(d); ; time.Sleep(50 * time.Millisecond) {
+		if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+			syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+	}
 }
 
 // SockPath is the local API socket of home.

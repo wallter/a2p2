@@ -196,7 +196,7 @@ func (sh *shim) peers(ctx context.Context, _ none) (string, error) {
 	}
 	rooms := []room{}
 	for _, r := range st.Rooms {
-		x := room{ID: r.ID, Label: clip(r.Label, 64), Members: []member{}, Pending: len(r.Pending)}
+		x := room{ID: r.ID, Label: clip(r.Label, 64), Members: []member{}, Pending: r.Waiting + len(r.Pending)}
 		for i, m := range r.Members {
 			if i >= maxListed {
 				x.Omitted = len(r.Members) - i
@@ -232,7 +232,9 @@ func (sh *shim) peers(ctx context.Context, _ none) (string, error) {
 			break
 		}
 		state := "not heard from in this run"
-		if p.LastHeard != "" {
+		if st.Network.State == "off" {
+			state = "not contacted: networking is off on this machine"
+		} else if p.LastHeard != "" {
 			state = "last heard " + p.LastHeard
 		}
 		others = append(others, peer{short(p.Node), clip(p.Name, 64), state})
