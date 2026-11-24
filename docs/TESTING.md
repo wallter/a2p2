@@ -24,6 +24,7 @@ that need to replay the same steps.
 | [`internal/peer`](../internal/peer) | Mutual TLS on loopback, joins, access checks, request limits, waiting pulls and address fallback. |
 | [`internal/localapi`](../internal/localapi), [`internal/mcpshim`](../internal/mcpshim), [`internal/web`](../internal/web), [`internal/daemon`](../internal/daemon) | Unix-socket API, MCP calls, web server checks and integration with two daemons. |
 | [`internal/harness`](../internal/harness) | Install and uninstall preserve the settings exercised by the tests. Hook tests check the output sent to the harness. |
+| [`scripts/recipes.sh`](../scripts/recipes.sh) (`make recipes`, in `make check`) | Every tool, tool argument and CLI command named in [`recipes/`](../recipes) and [`skills/`](../skills) exists in the golden tools file and `a2p2 help`, and each recipe and the skill stay short. |
 
 ## Fault matrix
 

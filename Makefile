@@ -34,7 +34,11 @@ vuln:             ## govulncheck (needs network)
 trace:            ## every requirement has a row in docs/TRACE.md, and every test it names exists
 	scripts/trace.sh
 
-check: fmt vet windows licences trace test ## everything CI runs except lint/vuln (which need network)
+.PHONY: recipes
+recipes:          ## requirement I3: the recipes and the skill name only tools, arguments and commands that exist
+	scripts/recipes.sh
+
+check: fmt vet windows licences trace test recipes ## everything CI runs except lint/vuln (which need network)
 
 fuzz:             ## short fuzz smoke run of the record and entry decoders; FUZZTIME=10m for a long one
 	$(GO) test ./internal/core -run '^$$' -fuzz '^FuzzParseRecord$$' -fuzztime $${FUZZTIME:-20s}

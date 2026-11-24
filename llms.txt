@@ -12,6 +12,7 @@ Turning networking on and approving a join are decisions a person makes at a ter
 - [Harness notes](docs/HARNESSES.md): which harness versions were checked, the per-run and installed configurations, and what is not yet verified.
 - [Limits](docs/REQUIREMENTS.md#6-limits-in-plain-words): what a2p2 does not guarantee, in plain words.
 - [Security](SECURITY.md): what a machine, a room member and an agent can reach, and how to report a vulnerability.
+- [Agent skill](skills/a2p2/SKILL.md) and [recipes](recipes/README.md): how to install and use a2p2 as an agent, and optional conventions for teams (briefs, handoffs, status lines, claims, review, late joining).
 
 ## Optional
 
