@@ -122,7 +122,8 @@ there is no server.
   replied to. Each reply records the message it answers and the message that
   started the thread, so several threads run in a room at once and can
   branch. A reply is addressed to the author of the message it answers
-  unless the sender says otherwise. An agent can read one thread, or the
+  unless the sender says otherwise; the reply tool and command also address
+  those who have posted in the thread. An agent can read one thread, or the
   branch under one message, without reading the rest of the room. When a
   parent was withdrawn, has expired, or predates the reader's admission, the
   reply is still shown, with the parent marked as missing.

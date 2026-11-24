@@ -552,6 +552,10 @@ type SendInput struct {
 	AskHandled bool
 	Replaces   string // with empty text: withdraw
 	Choices    []string
+	// Thread, with ReplyTo and no To: address the parent's author and
+	// every agent that has posted in the thread as this machine holds it
+	// (the reply tool). Without it a reply goes to the parent's author.
+	Thread bool
 }
 
 // Send posts, replies, replaces or withdraws. With reply_to or replaces and
@@ -561,16 +565,21 @@ func (s *Surface) Send(ctx context.Context, in SendInput) (Sent, error) {
 	if err != nil {
 		return Sent{}, err
 	}
-	var room string
+	var room, ref string
 	switch {
 	case in.Room != "":
 		room, err = s.ResolveRoom(ctx, in.Room)
 	case in.Replaces != "":
-		room, err = s.roomOf(ctx, in.Replaces)
+		ref = in.Replaces
+		room, err = s.roomOf(ctx, ref)
 	case in.ReplyTo != "":
-		room, err = s.roomOf(ctx, in.ReplyTo)
+		ref = in.ReplyTo
+		room, err = s.roomOf(ctx, ref)
 	default:
 		room = s.local
+	}
+	if errors.Is(err, ErrNotHeld) {
+		return Sent{}, userErr("no message %s is held here: check the id (inbox and its thread view show ids)", ref)
 	}
 	if err != nil {
 		return Sent{}, err
@@ -580,22 +589,122 @@ func (s *Surface) Send(ctx context.Context, in SendInput) (Sent, error) {
 			return Sent{}, userErr("replaces takes only new text: the addressees, parent and choices stay as they were")
 		}
 		if strings.TrimSpace(in.Text) == "" {
-			return s.m.Withdraw(ctx, room, label, in.Replaces)
+			sent, err := s.m.Withdraw(ctx, room, label, in.Replaces)
+			return s.labelled(ctx, sent, err)
 		}
-		return s.m.Replace(ctx, room, label, in.Replaces, in.Text)
+		sent, err := s.m.Replace(ctx, room, label, in.Replaces, in.Text)
+		return s.labelled(ctx, sent, err)
 	}
 	if strings.TrimSpace(in.Text) == "" {
 		return Sent{}, userErr("text must not be empty")
 	}
 	d := Draft{Room: room, Agent: label, Text: in.Text, Choices: in.Choices, ReplyTo: in.ReplyTo, AskHandled: in.AskHandled}
+	omitted := 0
 	if len(in.To) == 1 && in.To[0] == Everyone {
 		d.Everyone = true
 	} else if len(in.To) > 0 {
 		if d.To, err = s.addressees(room, in.To); err != nil {
 			return Sent{}, err
 		}
+	} else if in.Thread && in.ReplyTo != "" {
+		if d.To, omitted, err = s.participants(ctx, room, label, in.ReplyTo); err != nil {
+			return Sent{}, err
+		}
 	}
-	return s.m.Send(ctx, d)
+	sent, err := s.m.Send(ctx, d)
+	sent.ToOmitted = omitted
+	return s.labelled(ctx, sent, err)
+}
+
+// labelled fills in the room label of a write's result.
+func (s *Surface) labelled(ctx context.Context, sent Sent, err error) (Sent, error) {
+	if err == nil {
+		sent.Label, err = s.roomLabel(ctx, sent.Room)
+	}
+	return sent, err
+}
+
+// roomLabel is the label of room id ("" if not held).
+func (s *Surface) roomLabel(ctx context.Context, id string) (string, error) {
+	labels, err := s.roomLabels(ctx)
+	return labels[id], err
+}
+
+func (s *Surface) roomLabels(ctx context.Context) (map[string]string, error) {
+	rs, err := s.m.st.LogRooms(ctx)
+	out := make(map[string]string, len(rs))
+	for _, r := range rs {
+		out[r.ID] = r.Label
+	}
+	return out, err
+}
+
+// withLabels fills in the room label of each entry.
+func (s *Surface) withLabels(ctx context.Context, es []Entry, err error) ([]Entry, error) {
+	if err != nil || len(es) == 0 {
+		return es, err
+	}
+	labels, err := s.roomLabels(ctx)
+	for i := range es {
+		es[i].RoomLabel = labels[es[i].Room]
+	}
+	return es, err
+}
+
+// participants is whom a reply to parent addresses by default from the
+// reply tool: the parent's author first, then every agent of a current
+// member that has posted in the parent's thread as held here, newest post
+// first, without the sender and without repeats, at most core.MaxTo; it
+// also returns how many the limit left out. An empty list (the sender
+// alone posted) leaves the record's own default, the parent's author.
+func (s *Surface) participants(ctx context.Context, room, sender, parent string) ([]core.Addressee, int, error) {
+	st, err := s.r.State(room)
+	if err != nil {
+		return nil, 0, err
+	}
+	member := map[string]bool{}
+	for _, m := range st.Members {
+		member[m] = true
+	}
+	var hs []store.Held
+	var p store.Held
+	err = s.m.st.View(ctx, func(rd *store.Reader) error {
+		var ok bool
+		if p, ok, err = rd.Record(room, parent); err != nil || !ok {
+			return err
+		}
+		root := p.Record.Fields().Thread
+		if root == "" {
+			root = parent
+		}
+		hs, err = rd.ByThread(room, root)
+		return err
+	})
+	if err != nil || p.Record == nil {
+		return nil, 0, err // an unknown parent is refused by Send
+	}
+	sort.SliceStable(hs, func(i, j int) bool { return hs[i].Record.Fields().Created.After(hs[j].Record.Fields().Created) })
+	self := core.Addressee{Node: s.m.ID, Agent: sender}
+	seen := map[core.Addressee]bool{self: true}
+	var out []core.Addressee
+	omitted := 0
+	add := func(r *core.Record, always bool) {
+		a := core.Addressee{Node: r.Author(), Agent: r.Fields().Agent}
+		if seen[a] || !always && !member[a.Node] {
+			return
+		}
+		seen[a] = true
+		if len(out) == core.MaxTo {
+			omitted++
+			return
+		}
+		out = append(out, a)
+	}
+	add(p.Record, true) // as a plain reply would address it
+	for _, h := range hs {
+		add(h.Record, false)
+	}
+	return out, omitted, nil
 }
 
 // addressees resolves agent ids (label@short node) against the room's
@@ -610,9 +719,12 @@ func (s *Surface) addressees(room string, to []string) ([]core.Addressee, error)
 		if a == Everyone {
 			return nil, userErr("everyone is the only addressee when given")
 		}
+		if a == HumanLabel { // the person at this machine
+			a = s.HumanID()
+		}
 		l, node, ok := strings.Cut(a, "@")
 		if !ok || !core.ValidLabel(l) || len(node) < 8 {
-			return nil, userErr("%q is not an agent id (label@node, as in peers)", a)
+			return nil, userErr("%q is not an agent id (label@machine, as peers lists them; or human, or everyone)", a)
 		}
 		var got []string
 		for _, m := range st.Members {
@@ -628,17 +740,31 @@ func (s *Surface) addressees(room string, to []string) ([]core.Addressee, error)
 	return out, nil
 }
 
-// Ack reports that agent handled message id.
+// Ack reports that agent handled message id. Each refusal says why: the
+// id is unknown here, the agent may not report it (not addressed, own
+// message, not shown its text yet), or it reported it already.
 func (s *Surface) Ack(ctx context.Context, agent, id string) (Sent, error) {
 	label, err := s.label(agent)
 	if err != nil {
 		return Sent{}, err
 	}
 	room, err := s.roomOf(ctx, id)
-	if err != nil {
-		return Sent{}, err
+	if err == nil {
+		var h Sent
+		if h, err = s.m.Handled(ctx, room, label, id); err == nil && h.Already {
+			err = userErr("you already reported this message handled (report %s)", h.ID)
+		} else if err == nil {
+			return h, nil
+		}
 	}
-	return s.m.Handled(ctx, room, label, id)
+	var ue *UserError
+	switch {
+	case errors.Is(err, ErrNotHeld):
+		err = userErr("no message %s is held here: check the id (inbox and its thread view show ids)", id)
+	case errors.As(err, &ue):
+		err = ue // a refusal, as a plain user error
+	}
+	return Sent{}, err
 }
 
 // ---- reading ----
@@ -719,7 +845,9 @@ func (s *Surface) inbox(ctx context.Context, label, room string) (InboxView, err
 		out.Waiting = append(out.Waiting, v.Waiting...)
 	}
 	sortEntries(out.Entries)
-	return out, nil
+	var err error
+	out.Entries, err = s.withLabels(ctx, out.Entries, nil)
+	return out, err
 }
 
 // wakes are channels closed at the next change of room (or of any room,
@@ -834,10 +962,13 @@ func (s *Surface) Thread(ctx context.Context, agent, id string) ([]Entry, error)
 	if err != nil {
 		return nil, err
 	}
+	var es []Entry
 	if thread == "" {
-		return s.m.Thread(ctx, room, id)
+		es, err = s.m.Thread(ctx, room, id)
+	} else {
+		es, err = s.m.Branch(ctx, room, id)
 	}
-	return s.m.Branch(ctx, room, id)
+	return s.withLabels(ctx, es, err)
 }
 
 // History is the room's messages held here with their text, oldest first:
@@ -901,7 +1032,7 @@ func (s *Surface) History(ctx context.Context, room, before string, limit int) (
 		return nil, err
 	}
 	slices.Reverse(out)
-	return out, nil
+	return s.withLabels(ctx, out, nil)
 }
 
 // TraceView is what is known here of one message (A4).
@@ -1088,6 +1219,42 @@ type StatusView struct {
 	Decided Network
 	Fault   string
 	Notice  string
+	// Writers is, per room id, the agents of current members seen writing
+	// messages there, newest first: whom an agent can address.
+	Writers map[string][]WriterView
+}
+
+// WriterView is an agent seen writing in a room.
+type WriterView struct {
+	Agent string // agent id, label@short node
+	Node  string
+	Last  time.Time
+}
+
+// maxWriters bounds the writers listed per room.
+const maxWriters = 64
+
+func (s *Surface) writers(ctx context.Context, rooms []RoomInfo) (map[string][]WriterView, error) {
+	out := map[string][]WriterView{}
+	err := s.m.st.View(ctx, func(rd *store.Reader) error {
+		for _, r := range rooms {
+			member := map[string]bool{}
+			for _, m := range r.Members {
+				member[m.Node] = true
+			}
+			ws, err := rd.Writers(r.ID, maxWriters)
+			if err != nil {
+				return err
+			}
+			for _, w := range ws {
+				if member[w.Node] {
+					out[r.ID] = append(out[r.ID], WriterView{Agent: s.agentID(w.Agent, w.Node), Node: w.Node, Last: w.Last})
+				}
+			}
+		}
+		return nil
+	})
+	return out, err
 }
 
 // Status gathers rooms, agents and peers. show is Notice's: true only when
@@ -1107,6 +1274,10 @@ func (s *Surface) Status(ctx context.Context, show bool) (StatusView, error) {
 	if err != nil {
 		return StatusView{}, err
 	}
+	writers, err := s.writers(ctx, rooms)
+	if err != nil {
+		return StatusView{}, err
+	}
 	notice, err := s.Notice(ctx, show)
 	if err != nil {
 		return StatusView{}, err
@@ -1120,7 +1291,7 @@ func (s *Surface) Status(ctx context.Context, show bool) (StatusView, error) {
 		return StatusView{}, err
 	}
 	return StatusView{Node: s.m.ID, Name: s.name, Human: s.HumanID(), Local: s.local, Rooms: rooms, Agents: agents,
-		Peers: peers, Waiting: waiting, Network: s.net, Decided: decided, Fault: s.fault(), Notice: notice}, nil
+		Peers: peers, Waiting: waiting, Network: s.net, Decided: decided, Fault: s.fault(), Notice: notice, Writers: writers}, nil
 }
 
 // mayBeRemoved: every other member of r has refused this machine as not a

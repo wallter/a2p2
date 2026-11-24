@@ -102,13 +102,16 @@ func fieldName(k string) string {
 }
 
 // Limits from PROTOCOL-next sections 1 and 3.
+// MaxTo is the most addressees a message names.
+const MaxTo = 32
+
 const (
 	maxHeader      = 4096
 	maxFirstHeader = 8192 // a record with seq 1
 	maxBody        = 16384
 	maxEntry       = 16384
 	sigSize        = ed25519.SignatureSize
-	maxTo          = 32
+	maxTo          = MaxTo
 	maxLinks       = 100
 	maxParents     = 64
 	maxFromAuthors = 64

@@ -2,7 +2,6 @@ package mcpshim
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -73,14 +72,7 @@ func TestEveryToolMakesOnlyAgentCalls(t *testing.T) {
 	b := connect(t, c, "bob")
 	bob := agentID(t, b)
 	out := ok(t, a, "send", map[string]any{"text": "hi", "to": []string{bob}})
-	id := between(out, "id ", " ")
-	if id == "" {
-		var sent struct {
-			ID string `json:"id"`
-		}
-		_ = json.Unmarshal([]byte(out), &sent)
-		id = sent.ID
-	}
+	id := idOf(t, out)
 	for _, step := range []struct {
 		cs   string
 		tool string
@@ -88,6 +80,7 @@ func TestEveryToolMakesOnlyAgentCalls(t *testing.T) {
 	}{
 		{"b", "inbox", map[string]any{}},
 		{"b", "inbox", map[string]any{"thread": id}},
+		{"b", "inbox", map[string]any{"recent": 5}},
 		{"b", "reply", map[string]any{"message_id": id, "text": "ok"}},
 		{"b", "ack", map[string]any{"message_id": id}},
 		{"a", "ask_human", map[string]any{"question": "Ship?", "choices": []string{"yes", "no"}}},
@@ -108,7 +101,7 @@ func TestEveryToolMakesOnlyAgentCalls(t *testing.T) {
 		}
 		call(t, cs, step.tool, step.args)
 	}
-	allowed := []string{"register", "send", "inbox", "seen", "thread", "ack", "status"}
+	allowed := []string{"register", "send", "inbox", "seen", "thread", "history", "ack", "status"}
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	if len(rec.calls) < 15 {
