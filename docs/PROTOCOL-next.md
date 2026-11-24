@@ -458,16 +458,21 @@ server key's fingerprint against the token and stops on a mismatch
 
 ```json
 {"v":2,"op":"open","secret":"<26 base32>","name":"laptop","addrs":["…"]}
-{"v":2,"op":"poll","invite":"<64 hex>","after":256}
+{"v":2,"op":"accept","secret":"<26 base32>","terms":"<64 hex>","name":"laptop","addrs":["…"]}
+{"v":2,"op":"poll","invite":"<64 hex>","after":4711}
 ```
 
 | `op` | Server |
 |---|---|
 | `open` | secret valid and unexpired; bind to this key if unbound; refuse if bound to another |
-| `accept` | as `open`, then move to accepted and raise a request for a person (DESIGN 7); repeat is a no-op |
+| `accept` | only after `open` by the same key, and only if `terms` matches what that key was last shown (else `revoked`); then move to accepted and raise a request for a person (DESIGN 7); repeat is a no-op |
 | `poll` | report the state |
 
-`after` (poll only, never 0): number of log entries already received.
+`terms` (accept only): SHA-256 over a fixed encoding of everything the
+preview showed (room id, label, create entry id, role, history, member,
+admin key, expiry), so a person's approval on the joiner covers exactly one
+preview. `after` (poll only, never 0): the `next` value of the last page
+received.
 `invite` (poll only, instead of `secret`): SHA-256 of the secret, accepted
 only from the key the invite is bound to, so a joiner that restarts resumes
 without having stored the secret. `name` and `addrs` only on `open` and
@@ -479,7 +484,7 @@ without having stored the secret. `name` and `addrs` only on `open` and
 |---|---|---|---|
 | previewed | first `open` | 200 `{"state":"previewed","room":{"id","label","create"},"role":"member"\|"admin","history":bool,"member":bool,"admin":"<node id>","expires":"<time>"}` | 202, moves to accepted |
 | accepted | `accept` | 202 `{"state":"accepted","retry_ms":5000}` | 202 same |
-| signed | a person approves; approval and grant entries stored in one transaction | 200 `{"state":"signed","room":{…},"entries":[…],"more":bool}`, the log in the order the server stored it (which only appends) from index `after`, ≤ 256 and ≤ 3 MiB | 200 same |
+| signed | a person approves; approval and grant entries stored in one transaction | 200 `{"state":"signed","room":{…},"entries":[…],"more":bool}`, the log in the order the server stored it, after position `after`, ≤ 256 and ≤ 3 MiB, with `next` (a position allocated once per stored entry and never reused) and, on the last page, `heads` (the server's accepted log heads) | 200 same |
 | refused | a person declines, or revalidation fails | 403 `declined` or `revoked` | 403 same |
 | expired | 30 minutes pass before signing | 403 `expired` | 403 `expired` |
 
@@ -491,8 +496,12 @@ shown in a preview are recorded on both sides; if they no longer hold at
 accept or at approval, the invite is refused with `revoked` and a new one
 is needed. The joiner records the approved preview before it sends
 `accept`, uses an invite once, and a join in progress ends when its room
-is left. It reports `signed` only when the last page is applied, every
-entry was accepted, and its own state shows it a member. After signed, the
+is left; pinning a room for a join checks the join and the room's
+generation in the same write. The joiner reports success only when the
+last page is applied, no entry was refused, it has accepted every entry in
+`heads`, and its own state shows it a member; it then reports the role and
+history its own state shows, and says so if they differ from the preview
+(the log is the truth; a promotion may have landed meanwhile). After signed, the
 answer stays signed, expired or not, while the key is a member; once it is
 removed the answer is 403 `removed`. A pending promotion of the joiner
 (third admin) is visible in the returned log as an entry waiting for a
@@ -504,7 +513,7 @@ new grant is signed if it is still a member; approval returns the log).
 |---|---|---|
 | 403 | `bad_secret` | unknown secret, or bound to another key |
 | 403 | `declined`, `revoked`, `expired`, `removed` | as above |
-| 429 | `rate_limited`, `Retry-After` | 10 requests carrying a secret per minute per source; polls naming an unknown invite share 60 per minute |
+| 429 | `rate_limited`, `Retry-After` | 10 requests per minute per source address, counted before the body is read; polls naming an unknown invite share 60 per minute |
 | 503 | `unavailable`, `Retry-After` | the room already has 32 requests waiting for a person |
 
 The joiner polls every `retry_ms`, doubling to 60 s, until signed (and
