@@ -152,8 +152,12 @@ func TestExistingSurvivesIdempotentOnStopUninstall(t *testing.T) {
 		if got := readJSON(t, p); !reflect.DeepEqual(got, orig) {
 			t.Errorf("%s: uninstall did not restore: %v", name, got)
 		}
-		if _, err := os.Stat(p + ".a2p2.bak"); err != nil {
-			t.Errorf("%s: backup removed", name)
+		// I2: the file is back byte for byte, and the backup is gone.
+		if b, _ := os.ReadFile(p); string(b) != body {
+			t.Errorf("%s: not restored exactly: %s", name, b)
+		}
+		if _, err := os.Stat(p + ".a2p2.bak"); err == nil {
+			t.Errorf("%s: backup left behind", name)
 		}
 		if len(r.calls) != 1 || r.calls[0] != name+" mcp remove a2p2" {
 			t.Errorf("%s: uninstall calls %q", name, r.calls)
@@ -161,12 +165,16 @@ func TestExistingSurvivesIdempotentOnStopUninstall(t *testing.T) {
 	}
 }
 
+// A settings file that held only an empty object holds only that again.
 func TestUninstallFreshLeavesEmptyObject(t *testing.T) {
 	o, _ := setup(t)
+	p := hookPath("claude", o)
+	os.MkdirAll(filepath.Dir(p), 0o755)
+	os.WriteFile(p, []byte("{}\n"), 0o644)
 	Install("claude", o)
 	Uninstall("claude", o)
-	if got := readJSON(t, hookPath("claude", o)); !reflect.DeepEqual(got, map[string]any{}) {
-		t.Errorf("got %v", got)
+	if b, err := os.ReadFile(p); err != nil || string(b) != "{}\n" {
+		t.Errorf("got %q %v", b, err)
 	}
 }
 
@@ -215,9 +223,10 @@ func TestDoctor(t *testing.T) {
 		}
 		return f, nil
 	}
+	o.Run = fakeCLI(o.HomeDir)
 	cs := Doctor(o)
 	// An unconnected harness is reported, not failed: not connecting is a choice.
-	if len(cs) != 2 || !cs[0].OK || !strings.Contains(cs[0].Info, "a2p2 install claude") {
+	if len(cs) != 4 || !cs[0].OK || !cs[1].OK || !strings.Contains(cs[0].Info, "a2p2 install claude") {
 		t.Fatalf("before install: %+v", cs)
 	}
 	Install("claude", o)

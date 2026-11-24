@@ -221,7 +221,7 @@ func (s *Surface) ResolveRoom(ctx context.Context, name string) (string, error) 
 	}
 	switch len(ids) {
 	case 0:
-		return "", userErr("no room %q here", name)
+		return "", codedErr(ErrorNotFound, "no room %q here", name)
 	case 1:
 		return ids[0], nil
 	}
@@ -296,11 +296,11 @@ func (s *Surface) Invite(ctx context.Context, room, role string, history bool) (
 		return Invitation{}, err
 	}
 	if id == s.local {
-		return Invitation{}, userErr("the local room is this machine only; create a room to share: a2p2 room create LABEL")
+		return Invitation{}, codedErr(ErrorNotAllowed, "the local room is this machine only; create a room to share: a2p2 room create LABEL")
 	}
 	addrs := s.addrs()
 	if len(addrs) == 0 {
-		return Invitation{}, userErr("networking is %s here, so no machine could reach this one to join; "+
+		return Invitation{}, codedErr(ErrorNetworkingOff, "networking is %s here, so no machine could reach this one to join; "+
 			"a person can turn the listener on at a terminal: a2p2 net on", s.net.State)
 	}
 	if len(addrs) > MaxAddrs {
@@ -327,7 +327,7 @@ func (s *Surface) member(room, node string) (string, error) {
 	}
 	switch len(got) {
 	case 0:
-		return "", userErr("no member %q in the room", node)
+		return "", codedErr(ErrorNotFound, "no member %q in the room", node)
 	case 1:
 		return got[0], nil
 	}
@@ -365,7 +365,7 @@ func (s *Surface) Leave(ctx context.Context, room string) error {
 		return err
 	}
 	if id == s.local {
-		return userErr("the local room cannot be left")
+		return codedErr(ErrorNotAllowed, "the local room cannot be left")
 	}
 	return s.r.Leave(ctx, id)
 }
@@ -495,6 +495,19 @@ func (s *Surface) Register(ctx context.Context, harness, label, cwd string) (sto
 	}
 	now := s.m.now()
 	a := store.Agent{ID: s.agentID(label, s.m.ID), Label: label, Harness: harness, Cwd: cwd, LastSeen: now}
+	if harness == CLIHarness {
+		// A CLI call made --as a harness's agent only marks it seen: it
+		// keeps the harness and directory its hook is found by (AgentFor).
+		agents, err := s.m.st.Agents(ctx)
+		if err != nil {
+			return store.Agent{}, err
+		}
+		for _, prev := range agents {
+			if prev.ID == a.ID && prev.Harness != "" && prev.Cwd != "" {
+				a.Harness, a.Cwd = prev.Harness, prev.Cwd
+			}
+		}
+	}
 	if err := s.m.st.TouchAgent(ctx, a, now); err != nil {
 		return store.Agent{}, err
 	}
@@ -503,6 +516,9 @@ func (s *Surface) Register(ctx context.Context, harness, label, cwd string) (sto
 	}
 	return a, nil
 }
+
+// CLIHarness is the harness the CLI registers as for `--as LABEL`.
+const CLIHarness = "cli"
 
 func cleanDir(dir string) string {
 	if dir == "" {
@@ -579,7 +595,7 @@ func (s *Surface) Send(ctx context.Context, in SendInput) (Sent, error) {
 		room = s.local
 	}
 	if errors.Is(err, ErrNotHeld) {
-		return Sent{}, userErr("no message %s is held here: check the id (inbox and its thread view show ids)", ref)
+		return Sent{}, codedErr(ErrorNotFound, "no message %s is held here: check the id (inbox and its thread view show ids)", ref)
 	}
 	if err != nil {
 		return Sent{}, err
@@ -742,7 +758,8 @@ func (s *Surface) addressees(room string, to []string) ([]core.Addressee, error)
 
 // Ack reports that agent handled message id. Each refusal says why: the
 // id is unknown here, the agent may not report it (not addressed, own
-// message, not shown its text yet), or it reported it already.
+// message, not shown its text yet). A report made before by the same
+// agent is returned with Already set.
 func (s *Surface) Ack(ctx context.Context, agent, id string) (Sent, error) {
 	label, err := s.label(agent)
 	if err != nil {
@@ -751,16 +768,16 @@ func (s *Surface) Ack(ctx context.Context, agent, id string) (Sent, error) {
 	room, err := s.roomOf(ctx, id)
 	if err == nil {
 		var h Sent
-		if h, err = s.m.Handled(ctx, room, label, id); err == nil && h.Already {
-			err = userErr("you already reported this message handled (report %s)", h.ID)
-		} else if err == nil {
+		// A second report by the same agent is a success that names the
+		// first (reply reports handling, and agents then call ack too).
+		if h, err = s.m.Handled(ctx, room, label, id); err == nil {
 			return h, nil
 		}
 	}
 	var ue *UserError
 	switch {
 	case errors.Is(err, ErrNotHeld):
-		err = userErr("no message %s is held here: check the id (inbox and its thread view show ids)", id)
+		err = codedErr(ErrorNotFound, "no message %s is held here: check the id (inbox and its thread view show ids)", id)
 	case errors.As(err, &ue):
 		err = ue // a refusal, as a plain user error
 	}
@@ -836,7 +853,7 @@ func (s *Surface) inbox(ctx context.Context, label, room string) (InboxView, err
 	for _, id := range ids {
 		v, err := s.m.Inbox(ctx, id, label)
 		if errors.Is(err, ErrUnknownAgent) {
-			return InboxView{}, userErr("agent %s is not registered; call register first", s.agentID(label, s.m.ID))
+			return InboxView{}, codedErr(ErrorNotRegistered, "agent %s is not registered; call register first", s.agentID(label, s.m.ID))
 		}
 		if err != nil {
 			return InboxView{}, err
@@ -971,6 +988,23 @@ func (s *Surface) Thread(ctx context.Context, agent, id string) ([]Entry, error)
 	return s.withLabels(ctx, es, err)
 }
 
+// ThreadAfter is Thread without what was read before: only the entries
+// that follow message after in the thread's order, so re-reading a thread
+// does not repeat it. An empty after is Thread. It marks nothing.
+func (s *Surface) ThreadAfter(ctx context.Context, agent, id, after string) ([]Entry, error) {
+	es, err := s.Thread(ctx, agent, id)
+	if err != nil || after == "" {
+		return es, err
+	}
+	after = strings.TrimPrefix(after, "x:")
+	for i, e := range es {
+		if e.ID == after {
+			return es[i+1:], nil
+		}
+	}
+	return nil, codedErr(ErrorNotFound, "message %s is not in this thread here: give the id of a message the thread view showed", after)
+}
+
 // History is the room's messages held here with their text, oldest first:
 // at most limit, before message before if given. Pages run by (created,
 // id) through an index; before may name a message withdrawn or expired
@@ -999,7 +1033,7 @@ func (s *Surface) History(ctx context.Context, room, before string, limit int) (
 				return err
 			}
 			if !ok || h.Record.Fields().Kind != core.KindMessage {
-				return userErr("message %q is not in the room's history here", before)
+				return codedErr(ErrorNotFound, "message %q is not in the room's history here", before)
 			}
 			at, after = h.Record.Fields().Created, h.Record.ID()
 		}
@@ -1068,7 +1102,7 @@ type HandledView struct {
 func (s *Surface) Trace(ctx context.Context, id string) (TraceView, error) {
 	room, err := s.roomOf(ctx, id)
 	if errors.Is(err, ErrNotHeld) {
-		return TraceView{}, userErr("no message %q is held on this machine", id)
+		return TraceView{}, codedErr(ErrorNotFound, "no message %q is held on this machine", id)
 	}
 	if err != nil {
 		return TraceView{}, err

@@ -29,8 +29,12 @@ import (
 )
 
 // UserError is a mistake by the caller (unknown room, bad argument). Layers
-// above map it to a 4xx / tool error instead of an internal failure.
-type UserError struct{ Msg string }
+// above map it to a 4xx / tool error instead of an internal failure. Code is
+// one of ErrorCodes; empty means invalid_request.
+type UserError struct {
+	Msg  string
+	Code string
+}
 
 func (e *UserError) Error() string { return e.Msg }
 
@@ -48,9 +52,14 @@ func (r *ackRefusal) As(target any) bool {
 	return false
 }
 
-func refuse(msg string) error { return &ackRefusal{UserError{msg}} }
+func refuse(code, msg string) error { return &ackRefusal{UserError{msg, code}} }
 
-func userErr(format string, a ...any) error { return &UserError{fmt.Sprintf(format, a...)} }
+func userErr(format string, a ...any) error { return &UserError{Msg: fmt.Sprintf(format, a...)} }
+
+// codedErr is userErr with a code from ErrorCodes.
+func codedErr(code, format string, a ...any) error {
+	return &UserError{Msg: fmt.Sprintf(format, a...), Code: code}
+}
 
 // writeErr says in plain words why a message could not be written and
 // what to do, without the protocol's rule codes.
@@ -61,34 +70,34 @@ func writeErr(err error) error {
 	}
 	switch {
 	case r.Code == core.CodeTooLarge && r.Field == "body":
-		return userErr("the message is too long: its text and choices may take about 16 KB (%d bytes). "+
+		return codedErr(ErrorTooLarge, "the message is too long: its text and choices may take about 16 KB (%d bytes). "+
 			"Shorten it, or split it into several messages", core.MaxBodyBytes)
 	case r.Code == core.CodeTooLarge || r.Code == core.CodeTooManyHeads:
-		return userErr("the message has too many addressees or choices to fit; send it to fewer, or to everyone")
+		return codedErr(ErrorTooLarge, "the message has too many addressees or choices to fit; send it to fewer, or to everyone")
 	case r.Field == "text" || r.Field == "choices":
 		return userErr("the %s is not valid UTF-8 text; send plain text", r.Field)
 	case r.Field == "to":
-		return userErr("the message names too many addressees; send it to everyone instead")
+		return codedErr(ErrorTooLarge, "the message names too many addressees; send it to everyone instead")
 	}
 	return userErr("the message could not be written (%s)", r.Code)
 }
 
 // Errors of the record operations. All are user errors.
 var (
-	ErrNotHeld      = &UserError{"record not held here"}
-	ErrNotAllowed   = &UserError{"not allowed"}
-	ErrUnknownAgent = &UserError{"agent not registered"}
+	ErrNotHeld      = &UserError{"record not held here", ErrorNotFound}
+	ErrNotAllowed   = &UserError{"not allowed", ErrorNotAllowed}
+	ErrUnknownAgent = &UserError{"agent not registered", ErrorNotRegistered}
 )
 
 // Why Handled refused: each is ErrNotAllowed, and says what the agent can
 // do about it (D5's rule does not change; only the reason is told).
 var (
-	ErrAckNotMessage   = refuse("that id is a report, withdrawal or replacement, not a message")
-	ErrAckOwn          = refuse("you wrote this message; only its readers report handling it")
-	ErrAckNotAddressed = refuse("this message is not addressed to you and did not ask for handled reports " +
+	ErrAckNotMessage   = refuse(ErrorInvalid, "that id is a report, withdrawal or replacement, not a message")
+	ErrAckOwn          = refuse(ErrorNotAllowed, "you wrote this message; only its readers report handling it")
+	ErrAckNotAddressed = refuse(ErrorNotAllowed, "this message is not addressed to you and did not ask for handled reports "+
 		"(ask_handled); reply to it instead")
-	ErrAckNotShown = refuse("you have not been shown this message's text yet: read it with inbox first " +
-		"(a thread or recent view does not count); inbox never shows a message sent before you registered, so " +
+	ErrAckNotShown = refuse(ErrorNotShown, "you have not been shown this message's text yet: read it with inbox first "+
+		"(a thread or recent view does not count); inbox never shows a message sent before you registered, so "+
 		"reply to that instead")
 )
 

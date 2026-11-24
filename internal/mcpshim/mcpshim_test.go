@@ -235,7 +235,7 @@ func TestSendInboxReplyAckThroughTheDaemon(t *testing.T) {
 		t.Fatalf("second read: %s", s)
 	}
 	// reply: room, thread and recipient filled in, and the original handled
-	out = ok(t, b, "reply", map[string]any{"message_id": id, "text": "pong"})
+	out = ok(t, b, "reply", map[string]any{"id": id, "text": "pong"})
 	if r := parse(t, out); !strings.HasPrefix(r.HandledReport, "sent") || len(r.To) != 1 || r.To[0] != alice ||
 		r.RoomLabel != "local" {
 		t.Fatalf("reply = %q", out)
@@ -250,11 +250,11 @@ func TestSendInboxReplyAckThroughTheDaemon(t *testing.T) {
 		t.Fatalf("trace = %+v %v", tr, err)
 	}
 	// ack: only an addressee who was shown the text
-	ok(t, a, "ack", map[string]any{"message_id": rid})
-	if _, isErr := call(t, b, "ack", map[string]any{"message_id": rid}); !isErr {
+	ok(t, a, "ack", map[string]any{"id": rid})
+	if _, isErr := call(t, b, "ack", map[string]any{"id": rid}); !isErr {
 		t.Fatal("the author of a reply acknowledged it")
 	}
-	if _, isErr := call(t, a, "ack", map[string]any{"message_id": strings.Repeat("0", 32)}); !isErr {
+	if _, isErr := call(t, a, "ack", map[string]any{"id": strings.Repeat("0", 32)}); !isErr {
 		t.Fatal("ack of unknown id should fail")
 	}
 	// thread view marks nothing
@@ -419,7 +419,7 @@ func TestEveryToolResultIsAJSONObject(t *testing.T) {
 		args map[string]any
 	}{
 		{a, "whoami", nil}, {a, "peers", nil}, {a, "inbox", nil}, {b, "inbox", map[string]any{"thread": id}},
-		{b, "inbox", nil}, {b, "reply", map[string]any{"message_id": id, "text": "a"}},
+		{b, "inbox", nil}, {b, "reply", map[string]any{"id": id, "text": "a"}},
 		{a, "send", map[string]any{"text": "v2", "replaces": id}}, {a, "ask_human", map[string]any{"question": "?"}},
 	} {
 		out := ok(t, x.cs, x.tool, x.args)
@@ -430,7 +430,7 @@ func TestEveryToolResultIsAJSONObject(t *testing.T) {
 	}
 	id2 := idOf(t, ok(t, a, "send", map[string]any{"text": "q2", "to": []string{bob}}))
 	ok(t, b, "inbox", nil)
-	if r := parse(t, ok(t, b, "ack", map[string]any{"message_id": id2})); r.Handled != id2 || r.Report == "" {
+	if r := parse(t, ok(t, b, "ack", map[string]any{"id": id2})); r.Handled != id2 || r.Report == "" {
 		t.Fatalf("ack = %+v", r)
 	}
 }
@@ -453,22 +453,56 @@ func TestAckRefusalsSayWhy(t *testing.T) {
 		{a, direct, "you wrote this message"},
 		{b, direct, "read it with inbox first"},
 	} {
-		s, isErr := call(t, x.cs, "ack", map[string]any{"message_id": x.id})
+		s, isErr := call(t, x.cs, "ack", map[string]any{"id": x.id})
 		if !isErr || !strings.Contains(s, x.reason) {
 			t.Errorf("ack %s: %v %q, want %q", x.id, isErr, s, x.reason)
 		}
 	}
 	// Reading the thread does not count; reading the inbox does.
 	parseEntries(t, ok(t, b, "inbox", map[string]any{"thread": direct}))
-	if s, _ := call(t, b, "ack", map[string]any{"message_id": direct}); !strings.Contains(s, "thread or recent view does not count") {
+	if s, _ := call(t, b, "ack", map[string]any{"id": direct}); !strings.Contains(s, "thread or recent view does not count") {
 		t.Fatalf("after thread: %q", s)
 	}
 	ok(t, b, "inbox", nil)
-	ok(t, b, "ack", map[string]any{"message_id": direct})
-	if s, isErr := call(t, b, "ack", map[string]any{"message_id": direct}); !isErr || !strings.Contains(s, "already reported") {
-		t.Fatalf("second ack: %v %q", isErr, s)
+	first := parse(t, ok(t, b, "ack", map[string]any{"id": direct}))
+	var again struct {
+		Handled, Report string
+		Already         bool
+	}
+	if err := json.Unmarshal([]byte(ok(t, b, "ack", map[string]any{"id": direct})), &again); err != nil ||
+		!again.Already || again.Report != first.Report || again.Handled != direct {
+		t.Fatalf("second ack: %+v %v", again, err)
 	}
 	_ = alice
+}
+
+// Addition (a): ack after reply is not an error. reply already reported the
+// original handled; the agent's ack then succeeds and names that report.
+func TestAckAfterReplySucceedsAndSaysItWasAlreadyReported(t *testing.T) {
+	c := startDaemon(t)
+	a, b := connect(t, c, "alice"), connect(t, c, "bob")
+	bob := agentID(t, b)
+	id := idOf(t, ok(t, a, "send", map[string]any{"text": "please review", "to": []string{bob}}))
+	ok(t, b, "inbox", nil)
+	if r := parse(t, ok(t, b, "reply", map[string]any{"id": id, "text": "done"})); !strings.HasPrefix(r.HandledReport, "sent:") {
+		t.Fatalf("reply = %+v", r)
+	}
+	out := ok(t, b, "ack", map[string]any{"id": id})
+	var r ackOut
+	if err := json.Unmarshal([]byte(out), &r); err != nil || !r.Already || r.Handled != id || r.Report == "" {
+		t.Fatalf("ack after reply = %s", out)
+	}
+	var tr localapi.TraceResp
+	if err := c.Call(context.Background(), "trace", localapi.IDReq{ID: id}, &tr); err != nil || len(tr.Handled) != 1 {
+		t.Fatalf("one report expected: %+v %v", tr, err)
+	}
+	if r2 := parse(t, ok(t, b, "reply", map[string]any{"id": id, "text": "and more"})); !strings.HasPrefix(r2.HandledReport, "sent before") {
+		t.Fatalf("second reply = %+v", r2)
+	}
+	// The other refusals stay refusals.
+	if _, isErr := call(t, a, "ack", map[string]any{"id": id}); !isErr {
+		t.Fatal("the author's ack was accepted")
+	}
 }
 
 // Item 2: reply says whom it addressed, the room by label and whether a
@@ -480,12 +514,12 @@ func TestReplySaysWhatItDidAndCanNameRecipients(t *testing.T) {
 	alice, bob, carol := agentID(t, a), agentID(t, b), agentID(t, k)
 	kick := idOf(t, ok(t, a, "send", map[string]any{"text": "kickoff"}))
 	ok(t, b, "inbox", nil)
-	r := parse(t, ok(t, b, "reply", map[string]any{"message_id": kick, "text": "finding"}))
+	r := parse(t, ok(t, b, "reply", map[string]any{"id": kick, "text": "finding"}))
 	if len(r.To) != 1 || r.To[0] != alice || r.RoomLabel != "local" || !strings.HasPrefix(r.HandledReport, "not sent: ") ||
 		!strings.Contains(r.HandledReport, "did not ask") {
 		t.Fatalf("default reply = %+v", r)
 	}
-	r = parse(t, ok(t, b, "reply", map[string]any{"message_id": kick, "text": "for both", "to": []string{alice, carol}}))
+	r = parse(t, ok(t, b, "reply", map[string]any{"id": kick, "text": "for both", "to": []string{alice, carol}}))
 	if len(r.To) != 2 {
 		t.Fatalf("reply with to = %+v", r)
 	}
@@ -493,7 +527,7 @@ func TestReplySaysWhatItDidAndCanNameRecipients(t *testing.T) {
 	if len(es) != 2 || es[1].Text != "for both" || es[1].Parent != kick {
 		t.Fatalf("carol's inbox = %+v", es)
 	}
-	r = parse(t, ok(t, k, "reply", map[string]any{"message_id": es[1].ID, "text": "ok"}))
+	r = parse(t, ok(t, k, "reply", map[string]any{"id": es[1].ID, "text": "ok"}))
 	if len(r.To) != 2 || !slices.Contains(r.To, bob) || !slices.Contains(r.To, alice) || !strings.HasPrefix(r.HandledReport, "sent") {
 		t.Fatalf("carol's reply = %+v", r)
 	}

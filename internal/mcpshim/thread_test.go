@@ -167,20 +167,20 @@ func TestReplyReachesEveryoneWhoPostedInTheThreadAcrossMachines(t *testing.T) {
 	waitFor(t, bob, "kickoff")
 	waitFor(t, carol, "kickoff")
 
-	r := parse(t, ok(t, bob, "reply", map[string]any{"message_id": kick, "text": "bob finds"}))
+	r := parse(t, ok(t, bob, "reply", map[string]any{"id": kick, "text": "bob finds"}))
 	if !slices.Equal(r.To, []string{leadID}) {
 		t.Fatalf("first reply = %+v", r) // only the lead has posted so far
 	}
 	waitFor(t, lead, "bob finds")
 
-	r = parse(t, ok(t, carol, "reply", map[string]any{"message_id": kick, "text": "carol answers"}))
+	r = parse(t, ok(t, carol, "reply", map[string]any{"id": kick, "text": "carol answers"}))
 	if len(r.To) != 2 || !slices.Contains(r.To, leadID) || !slices.Contains(r.To, bobID) {
 		t.Fatalf("carol's reply = %+v", r)
 	}
 	waitFor(t, lead, "carol answers")
 	waitFor(t, bob, "carol answers")
 
-	r = parse(t, ok(t, lead, "reply", map[string]any{"message_id": r.ID, "text": "lead wraps up"}))
+	r = parse(t, ok(t, lead, "reply", map[string]any{"id": r.ID, "text": "lead wraps up"}))
 	if len(r.To) != 2 || !slices.Contains(r.To, carolID) || !slices.Contains(r.To, bobID) {
 		t.Fatalf("lead's reply = %+v", r)
 	}
@@ -188,7 +188,7 @@ func TestReplyReachesEveryoneWhoPostedInTheThreadAcrossMachines(t *testing.T) {
 	waitFor(t, carol, "lead wraps up")
 
 	// An explicit to narrows it.
-	r = parse(t, ok(t, bob, "reply", map[string]any{"message_id": kick, "text": "just lead", "to": []string{leadID}}))
+	r = parse(t, ok(t, bob, "reply", map[string]any{"id": kick, "text": "just lead", "to": []string{leadID}}))
 	if !slices.Equal(r.To, []string{leadID}) {
 		t.Fatalf("narrowed = %+v", r)
 	}
@@ -205,12 +205,12 @@ func TestSendWithReplyToAndNoToStillAddressesOnlyTheParentsAuthor(t *testing.T) 
 	a, b, k := connect(t, c, "alice"), connect(t, c, "bob"), connect(t, c, "carol")
 	alice, _, carol := agentID(t, a), agentID(t, b), agentID(t, k)
 	kick := idOf(t, ok(t, a, "send", map[string]any{"text": "kickoff"}))
-	ok(t, k, "reply", map[string]any{"message_id": kick, "text": "carol was here"})
+	ok(t, k, "reply", map[string]any{"id": kick, "text": "carol was here"})
 	r := parse(t, ok(t, b, "send", map[string]any{"text": "plain reply", "reply_to": kick}))
 	if !slices.Equal(r.To, []string{alice}) {
 		t.Fatalf("send reply_to = %+v", r)
 	}
-	r = parse(t, ok(t, b, "reply", map[string]any{"message_id": kick, "text": "tool reply"}))
+	r = parse(t, ok(t, b, "reply", map[string]any{"id": kick, "text": "tool reply"}))
 	if len(r.To) != 2 || !slices.Contains(r.To, alice) || !slices.Contains(r.To, carol) {
 		t.Fatalf("reply tool = %+v", r)
 	}

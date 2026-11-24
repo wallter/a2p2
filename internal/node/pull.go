@@ -34,7 +34,7 @@ type PullTransport interface {
 
 // ErrPeerNotMember: the peer is not a member of the room in this machine's
 // view, so nothing is pulled from it, or what it sent is not taken [RM1].
-var ErrPeerNotMember = &UserError{"the peer is not a member of the room here"}
+var ErrPeerNotMember = &UserError{"the peer is not a member of the room here", ErrorNotAllowed}
 
 // ExchangeOpts bounds what one request or response carries.
 type ExchangeOpts struct {

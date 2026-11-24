@@ -156,7 +156,7 @@ func (r *Rooms) propose(ctx context.Context, room string, c Change, admit bool) 
 		return store.Request{}, err
 	}
 	if !admit && c.Kind != core.EntryRemove && !slices.Contains(rl.st.Members, c.Target) {
-		return store.Request{}, &UserError{ReasonNeedsInvite}
+		return store.Request{}, &UserError{ReasonNeedsInvite, ErrorNotAllowed}
 	}
 	q, err := r.prepare(ctx, rl, c)
 	if err != nil {
@@ -215,14 +215,14 @@ func (r *Rooms) prepared(ctx context.Context, rl *roomLog, q store.Request, hist
 		q.Admins = len(rl.st.Admins) // one admin's entry, or two [M4]
 	}
 	if reason := r.check(rl, q); reason != "" {
-		return store.Request{}, &UserError{reason}
+		return store.Request{}, &UserError{Msg: reason}
 	}
 	pending, err := r.m.st.Requests(ctx, rl.id, store.RequestPending)
 	if err != nil {
 		return store.Request{}, err
 	}
 	if len(pending) >= MaxPendingRequests {
-		return store.Request{}, &UserError{ReasonTooMany}
+		return store.Request{}, &UserError{ReasonTooMany, ErrorNotAllowed}
 	}
 	q.ID = r.newID()
 	return q, nil
@@ -275,7 +275,7 @@ const ReasonNotCaughtUp = "not_caught_up"
 // nothing was signed and the request stays pending. Signing now risks
 // reusing a position this machine signed before a restore, or building on
 // a log other members have moved past.
-var ErrNotCaughtUp = &UserError{ReasonNotCaughtUp + ": this machine has not caught up with the room's log from " +
+var ErrNotCaughtUp = &UserError{Code: ErrorNotCaughtUp, Msg: ReasonNotCaughtUp + ": this machine has not caught up with the room's log from " +
 	"another member since it started; signing now risks a fork if it was restored from an older copy"}
 
 // ConfirmOpts are a person's choices on one approval.
@@ -293,7 +293,7 @@ func (r *Rooms) ConfirmWith(ctx context.Context, id string, approve bool, o Conf
 	defer r.mu.Unlock()
 	q, err := r.m.st.GetRequest(ctx, id)
 	if errors.Is(err, store.ErrNotFound) {
-		return Confirmation{}, userErr("no such request")
+		return Confirmation{}, codedErr(ErrorNotFound, "no such request")
 	}
 	if err != nil {
 		return Confirmation{}, err
@@ -303,7 +303,7 @@ func (r *Rooms) ConfirmWith(ctx context.Context, id string, approve bool, o Conf
 		return Confirmation{ID: id, State: q.State, Reason: q.Reason}, nil
 	}
 	if q.State != store.RequestPending {
-		return Confirmation{}, &UserError{errNotPendingText}
+		return Confirmation{}, &UserError{errNotPendingText, ErrorAlreadyDone}
 	}
 	now := r.m.now()
 	if !approve {

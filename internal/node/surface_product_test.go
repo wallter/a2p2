@@ -48,9 +48,9 @@ func TestSurfaceAckRefusalsSayWhyAndTheRuleIsUnchanged(t *testing.T) {
 	if _, err := e.s.Ack(ctx, bob, asked.ID); err != nil {
 		t.Fatalf("a post that asked, once shown: %v", err)
 	}
-	_, err = e.s.Ack(ctx, bob, direct.ID)
-	if !isUser(err) || !strings.Contains(err.Error(), "already reported") || !strings.Contains(err.Error(), h.ID) {
-		t.Fatalf("second ack: %v", err)
+	// A second report by the same agent succeeds and names the first.
+	if again, err := e.s.Ack(ctx, bob, direct.ID); err != nil || !again.Already || again.ID != h.ID {
+		t.Fatalf("second ack: %+v %v", again, err)
 	}
 	// The machine-level refusals still count as ErrNotAllowed.
 	if _, err := e.s.m.Handled(ctx, e.s.LocalRoom(), "alice", asked.ID); !errors.Is(err, ErrNotAllowed) {

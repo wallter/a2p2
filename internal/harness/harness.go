@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 )
 
@@ -300,16 +301,59 @@ func (h *hookFile) encode() ([]byte, error) {
 	return buf.Bytes(), err
 }
 
-// write saves atomically, backing up the original once. A symlinked hook
-// file is resolved so the link survives; existing permission bits are kept.
-func (h *hookFile) write() error {
+// Before a2p2 first changes a hook file it records what was there, beside
+// the file, so that Uninstall can put the home back as it was (I2):
+//
+//   - <file>.a2p2.bak is the file as it was before a2p2 first touched it.
+//     Uninstall removes a2p2's entries, writes these exact bytes back when
+//     nothing else changed since, and deletes the backup.
+//   - <file>.a2p2.new says a2p2 created the file, and lists the directories
+//     it created for it. Uninstall deletes the file if nothing but a2p2's
+//     entries were in it, then those directories if they are empty, then
+//     the marker.
+const (
+	bakSuffix = ".a2p2.bak"
+	newSuffix = ".a2p2.new"
+)
+
+// realPath resolves a symlinked hook file so the link survives.
+func (h *hookFile) realPath() string {
+	if r, err := filepath.EvalSymlinks(h.path); err == nil {
+		return r
+	}
+	return h.path
+}
+
+// write saves atomically, recording the original first (see bakSuffix).
+// Existing permission bits are kept.
+func (h *hookFile) write(record bool) error {
 	b, err := h.encode()
 	if err != nil {
 		return err
 	}
-	path := h.path
-	if r, err := filepath.EvalSymlinks(path); err == nil {
-		path = r
+	path := h.realPath()
+	_, bakErr := os.Stat(path + bakSuffix)
+	_, newErr := os.Stat(path + newSuffix)
+	first := record && errors.Is(bakErr, os.ErrNotExist) && errors.Is(newErr, os.ErrNotExist)
+	if first && !h.existed {
+		var made []string // directories this write creates, deepest first
+		for d := filepath.Dir(path); ; d = filepath.Dir(d) {
+			if _, err := os.Stat(d); err == nil || d == filepath.Dir(d) {
+				break
+			}
+			made = append(made, d)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path+newSuffix, []byte(strings.Join(made, "\n")), 0o600); err != nil {
+			return err
+		}
+	}
+	if first && h.existed {
+		if err := os.WriteFile(path+bakSuffix, h.orig, 0o600); err != nil {
+			return err
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -317,13 +361,6 @@ func (h *hookFile) write() error {
 	mode := os.FileMode(0o600)
 	if st, err := os.Stat(path); err == nil {
 		mode = st.Mode().Perm()
-	}
-	if bak := path + ".a2p2.bak"; h.existed {
-		if _, err := os.Stat(bak); errors.Is(err, os.ErrNotExist) {
-			if err := os.WriteFile(bak, h.orig, 0o600); err != nil {
-				return err
-			}
-		}
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".a2p2-*.tmp")
 	if err != nil {
@@ -381,6 +418,19 @@ func Install(name string, o Options) (string, error) {
 			return strings.Join(rep, "\n"), fmt.Errorf("%s mcp add failed: %w", cli, err)
 		}
 	}
+	if name == "codex" {
+		path, _ := codexConfig(o)
+		switch ok, err := grantCodexApproval(o); {
+		case o.DryRun:
+			rep = append(rep, "would approve this server's tools in "+path+" (this server only)")
+		case err != nil:
+			return strings.Join(rep, "\n"), err
+		case ok:
+			rep = append(rep, "approved this server's tools in "+path+" (this server only; uninstall removes it)")
+		default:
+			rep = append(rep, "could not find "+codexTable+" in "+path+"; approve a2p2's tools in Codex yourself")
+		}
+	}
 	if h, err = loadHooks(name, o); err != nil {
 		return strings.Join(rep, "\n"), err
 	}
@@ -398,13 +448,14 @@ func Install(name string, o Options) (string, error) {
 		rep = append(rep, fmt.Sprintf("hooks already up to date in %s", h.path))
 	} else {
 		if !o.DryRun {
-			if err := h.write(); err != nil {
+			if err := h.write(true); err != nil {
 				return strings.Join(rep, "\n"), err
 			}
 		}
 		rep = append(rep, fmt.Sprintf("%supdate hook(s) %s in %s", p, strings.Join(changed, ", "), h.path))
 		if h.existed {
-			rep = append(rep, "original saved at "+h.path+".a2p2.bak (first change only)")
+			rep = append(rep, "the file as it was before a2p2 first changed it is kept at "+h.path+bakSuffix+
+				" until uninstall restores it")
 		}
 	}
 	if name == "codex" {
@@ -413,28 +464,15 @@ func Install(name string, o Options) (string, error) {
 	return strings.Join(rep, "\n"), nil
 }
 
-// Uninstall removes exactly what Install added.
+// Uninstall removes exactly what Install added, and the records Install
+// kept to undo it, so the home is as it was (I2).
 func Uninstall(name string, o Options) (string, error) {
 	h, err := loadHooks(name, o) // validate before touching anything
 	if err != nil {
 		return "", err
 	}
-	cli := h.spec.cli
+	// The reverse of Install: the hook file first, then the registration.
 	p := prefix(o)
-	var mcp []string
-	if _, err := o.lookPath(cli); err != nil {
-		mcp = append(mcp, cli+" is not on PATH; skipped mcp remove")
-	} else {
-		mcp = append(mcp, p+"unregister MCP server: "+cli+" mcp remove a2p2")
-		if !o.DryRun {
-			if err := o.run(cli, "mcp", "remove", "a2p2"); err != nil {
-				mcp = append(mcp, "mcp remove reported: "+err.Error())
-			}
-		}
-	}
-	if h, err = loadHooks(name, o); err != nil {
-		return "", err
-	}
 	var changed []string
 	for _, ev := range hookEvents(h.spec) {
 		c, err := h.set(name, ev, false, o)
@@ -450,13 +488,120 @@ func Uninstall(name string, o Options) (string, error) {
 		rep = append(rep, "no a2p2 hooks found in "+h.path)
 	} else {
 		if !o.DryRun {
-			if err := h.write(); err != nil {
+			if err := h.write(false); err != nil {
 				return "", err
 			}
 		}
 		rep = append(rep, fmt.Sprintf("%sremove hook(s) %s from %s", p, strings.Join(changed, ", "), h.path))
 	}
+	more, err := h.restore(o.DryRun)
+	if err != nil {
+		return "", err
+	}
+	rep = append(rep, more...)
+	cli := h.spec.cli
+	var mcp []string
+	if name == "codex" {
+		path, _ := codexConfig(o)
+		if o.DryRun {
+			mcp = append(mcp, "would remove a2p2's tool approval from "+path)
+		} else if ok, err := revokeCodexApproval(o); err != nil {
+			return "", err
+		} else if ok {
+			mcp = append(mcp, "removed a2p2's tool approval from "+path)
+		}
+	}
+	if _, err := o.lookPath(cli); err != nil {
+		mcp = append(mcp, cli+" is not on PATH; skipped mcp remove")
+	} else {
+		mcp = append(mcp, p+"unregister MCP server: "+cli+" mcp remove a2p2")
+		if !o.DryRun {
+			if err := o.run(cli, "mcp", "remove", "a2p2"); err != nil {
+				mcp = append(mcp, "mcp remove reported: "+err.Error())
+			}
+		}
+	}
 	return strings.Join(append(rep, mcp...), "\n"), nil
+}
+
+// restore finishes an uninstall of the hook file once a2p2's entries are
+// gone (see bakSuffix): it writes back the original bytes when nothing
+// else changed, or deletes the file a2p2 created when only a2p2's entries
+// were in it, and removes the records. It returns lines for the report.
+func (h *hookFile) restore(dry bool) ([]string, error) {
+	path := h.realPath()
+	cur, err := h.encode()
+	if err != nil {
+		return nil, err
+	}
+	var rep []string
+	orig, err := os.ReadFile(path + bakSuffix)
+	switch {
+	case err == nil:
+		if same(orig, cur) {
+			rep = append(rep, prefixed(dry, "restore "+h.path+" from "+h.path+bakSuffix))
+			if !dry {
+				if err := writeKeepingMode(path, orig); err != nil {
+					return nil, err
+				}
+			}
+		}
+		rep = append(rep, prefixed(dry, "remove "+h.path+bakSuffix))
+		if !dry {
+			if err := os.Remove(path + bakSuffix); err != nil {
+				return nil, err
+			}
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		return nil, err
+	}
+	made, err := os.ReadFile(path + newSuffix)
+	switch {
+	case err == nil:
+		if !dry {
+			if err := os.Remove(path + newSuffix); err != nil {
+				return nil, err
+			}
+		}
+		if len(h.doc) == 0 {
+			rep = append(rep, prefixed(dry, "remove "+h.path+", which a2p2 created"))
+			if !dry {
+				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return nil, err
+				}
+				// Deepest first; a directory that holds anything else stays.
+				for _, d := range strings.Split(string(made), "\n") {
+					if d != "" {
+						_ = os.Remove(d)
+					}
+				}
+			}
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		return nil, err
+	}
+	return rep, nil
+}
+
+func prefixed(dry bool, s string) string {
+	if dry {
+		return "would " + s
+	}
+	return s
+}
+
+// same reports whether two hook files hold the same JSON value; an empty
+// file counts as an empty object.
+func same(a, b []byte) bool {
+	var x, y any
+	parse := func(b []byte, v *any) bool {
+		if len(bytes.TrimSpace(b)) == 0 {
+			*v = map[string]any{}
+			return true
+		}
+		return json.Unmarshal(b, v) == nil
+	}
+	return parse(a, &x) && parse(b, &y) && reflect.DeepEqual(x, y)
 }
 
 // Check is one doctor finding.
@@ -467,46 +612,60 @@ type Check struct {
 	Fix  string `json:"fix,omitempty"`
 }
 
-// Doctor reports whether each installed harness is wired correctly. It never
-// runs a model.
+// Doctor reports whether each installed harness is wired correctly: its
+// unread-notice hook and its MCP registration, each by name, so a half
+// install says which half is missing. It never runs a model or a harness.
 func Doctor(o Options) []Check {
 	var out []Check
 	for _, name := range Names {
 		if _, err := o.lookPath(specs[name].cli); err != nil {
 			continue
 		}
-		c := Check{Name: name + " hook", Fix: "a2p2 install " + name}
-		h, err := loadHooks(name, o)
-		if err != nil {
-			c.Info = err.Error()
-			out = append(out, c)
-			continue
-		}
-		arr, err := h.array(h.spec.first)
-		if err != nil {
-			c.Info = err.Error()
-			out = append(out, c)
-			continue
-		}
+		hook := Check{Name: name + " hook", Fix: "a2p2 install " + name}
+		reg := Check{Name: name + " MCP server", Fix: "a2p2 install " + name}
 		var found string
-		for _, e := range arr {
-			for _, cmd := range commands(e) {
-				if isOurs(name, cmd) {
-					found = cmd
+		h, err := loadHooks(name, o)
+		if err == nil {
+			var arr []json.RawMessage
+			if arr, err = h.array(h.spec.first); err == nil {
+				for _, e := range arr {
+					for _, cmd := range commands(e) {
+						if isOurs(name, cmd) {
+							found = cmd
+						}
+					}
 				}
 			}
 		}
-		want := hookCmd(name, h.spec.first, o)
-		switch {
-		case found == "":
+		isReg, command, regErr := registered(name, o)
+		if err == nil && regErr == nil && found == "" && !isReg {
 			// Not connecting a harness is a choice, not a fault.
-			c.OK, c.Info, c.Fix = true, "not connected (to connect: a2p2 install "+name+")", ""
-		case found != want:
-			c.Info = "hook in " + h.path + " points at a different a2p2 binary: " + found
-		default:
-			c.OK, c.Info, c.Fix = true, "unread-notice hook installed in "+h.path, ""
+			hook.OK, hook.Info, hook.Fix = true, "not connected (to connect: a2p2 install "+name+")", ""
+			reg.OK, reg.Info, reg.Fix = true, "not connected", ""
+			out = append(out, hook, reg)
+			continue
 		}
-		out = append(out, c)
+		switch want := hookCmd(name, specs[name].first, o); {
+		case err != nil:
+			hook.Info = err.Error()
+		case found == "":
+			hook.Info = "the unread-notice hook is missing from " + h.path + " although the MCP server is registered"
+		case found != want:
+			hook.Info = "hook in " + h.path + " points at a different a2p2 binary: " + found
+		default:
+			hook.OK, hook.Info, hook.Fix = true, "unread-notice hook installed in "+h.path, ""
+		}
+		switch {
+		case regErr != nil:
+			reg.Info = "cannot read the MCP registration: " + regErr.Error()
+		case !isReg:
+			reg.Info = "the a2p2 MCP server is not registered with " + name + " although its hook is installed"
+		case command != "" && command != o.Binary:
+			reg.Info = "the MCP server points at a different a2p2 binary: " + command
+		default:
+			reg.OK, reg.Info, reg.Fix = true, "MCP server registered with "+name, ""
+		}
+		out = append(out, hook, reg)
 	}
 	return out
 }

@@ -103,9 +103,12 @@ type (
 	Entries struct {
 		Entries []Entry `json:"entries"`
 	}
+	// ThreadReq: after, a message id in the thread, returns only what
+	// follows it.
 	ThreadReq struct {
 		Agent string `json:"agent"`
 		ID    string `json:"id"`
+		After string `json:"after,omitempty"`
 	}
 	SeenEntry struct {
 		Key     string `json:"key"`
@@ -127,8 +130,11 @@ type (
 		Agent string `json:"agent"`
 		ID    string `json:"id"`
 	}
+	// AckResp: handled is the report's id; already, that this agent had
+	// reported it before, and handled names that first report.
 	AckResp struct {
 		Handled string `json:"handled"`
+		Already bool   `json:"already,omitempty"`
 	}
 	HistoryReq struct {
 		Room   string `json:"room,omitempty"`
@@ -417,36 +423,46 @@ type Info struct {
 	Stop    func() // asks the daemon to shut down
 }
 
+// apiError is every refusal: the sentence, a code from node.ErrorCodes and
+// whether repeating the same call later may succeed (PROTOCOL-next 7).
 type apiError struct {
-	Error string `json:"error"`
+	Error     string `json:"error"`
+	Code      string `json:"code"`
+	Retryable bool   `json:"retryable"`
 }
+
+func refusal(msg, code string) apiError { return apiError{msg, code, node.Retryable(code)} }
 
 func handle[Req, Resp any](mux *http.ServeMux, name string, fn func(context.Context, Req) (Resp, error)) {
 	mux.HandleFunc("POST /v1/"+name, func(w http.ResponseWriter, r *http.Request) {
 		var req Req
 		body := http.MaxBytesReader(w, r.Body, maxBody)
 		if err := json.NewDecoder(body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-			writeJSON(w, http.StatusBadRequest, apiError{"bad request: " + err.Error()})
+			writeJSON(w, http.StatusBadRequest, refusal("bad request: "+err.Error(), node.ErrorInvalid))
 			return
 		}
 		resp, err := fn(r.Context(), req)
 		var ue *node.UserError
 		switch {
 		case errors.As(err, &ue):
-			writeJSON(w, http.StatusBadRequest, apiError{ue.Msg})
+			writeJSON(w, http.StatusBadRequest, refusal(ue.Msg, ue.CodeOf()))
 		case err != nil:
 			slog.Error("local api", "call", name, "err", err)
-			writeJSON(w, http.StatusInternalServerError, apiError{"internal error: " + err.Error()})
+			writeJSON(w, http.StatusInternalServerError, refusal("internal error: "+err.Error(), node.ErrorInternal))
 		default:
 			writeJSON(w, http.StatusOK, resp)
 		}
 	})
 }
 
+// writeJSON writes v as one line of JSON. Text is written as it is: '<',
+// '>' and '&' are not escaped, since no reader treats it as markup.
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(v)
 }
 
 func userErr(msg string) error { return &node.UserError{Msg: msg} }
@@ -609,7 +625,7 @@ func Handler(s *node.Surface, info Info) http.Handler {
 		return out, err
 	})
 	handle(mux, "thread", func(ctx context.Context, r ThreadReq) (Entries, error) {
-		es, err := s.Thread(ctx, r.Agent, r.ID)
+		es, err := s.ThreadAfter(ctx, r.Agent, r.ID, r.After)
 		return Entries{entriesOf(es)}, err
 	})
 	handle(mux, "seen", func(ctx context.Context, r SeenReq) (SeenResp, error) {
@@ -626,7 +642,7 @@ func Handler(s *node.Surface, info Info) http.Handler {
 	})
 	handle(mux, "ack", func(ctx context.Context, r AckReq) (AckResp, error) {
 		h, err := s.Ack(ctx, r.Agent, r.ID)
-		return AckResp{Handled: h.ID}, err
+		return AckResp{Handled: h.ID, Already: h.Already}, err
 	})
 	handle(mux, "history", func(ctx context.Context, r HistoryReq) (Entries, error) {
 		es, err := s.History(ctx, r.Room, r.Before, r.Limit)
@@ -672,7 +688,11 @@ func Handler(s *node.Surface, info Info) http.Handler {
 		p, err := s.JoinPreview(ctx, r.Token)
 		var ref *node.JoinRefused
 		if errors.As(err, &ref) {
-			err = userErr(ref.Error())
+			code := node.ErrorInvalid
+			if ref.Code == node.CodeRateLimited {
+				code = node.ErrorRateLimited
+			}
+			err = &node.UserError{Msg: ref.Error(), Code: code}
 		}
 		return PreviewOf(p), err
 	})
@@ -764,13 +784,36 @@ func NewClient(sock string) *Client {
 }
 
 // Error is a failure reported by the daemon. User is true when the caller
-// asked for something invalid (as opposed to the daemon breaking).
+// asked for something invalid (as opposed to the daemon breaking). Code is
+// one of node.ErrorCodes and Retryable whether the same call may succeed
+// later; a daemon that sent no code gets invalid_request for a 400 and
+// internal otherwise.
 type Error struct {
-	Msg  string
-	User bool
+	Msg       string
+	User      bool
+	Code      string
+	Retryable bool
 }
 
 func (e *Error) Error() string { return e.Msg }
+
+// Refusal is how a client reports a failed call: the sentence, its code and
+// whether retrying can help. An error that is not an *Error means the
+// daemon was not reached (unavailable, retryable).
+type Refusal struct {
+	Error     string `json:"error"`
+	Code      string `json:"code"`
+	Retryable bool   `json:"retryable"`
+}
+
+// RefusalOf describes err as a Refusal.
+func RefusalOf(err error) Refusal {
+	var e *Error
+	if errors.As(err, &e) {
+		return Refusal{e.Msg, e.Code, e.Retryable}
+	}
+	return Refusal{"the a2p2 daemon is unavailable: " + err.Error(), node.ErrorUnavailable, true}
+}
 
 // Call invokes POST /v1/<name>. req may be nil; resp may be nil.
 func (c *Client) Call(ctx context.Context, name string, req, resp any) error {
@@ -802,7 +845,15 @@ func (c *Client) CallRaw(ctx context.Context, name string, req, resp any) ([]byt
 		if ae.Error == "" {
 			ae.Error = res.Status
 		}
-		return nil, &Error{Msg: ae.Error, User: res.StatusCode == http.StatusBadRequest}
+		user := res.StatusCode == http.StatusBadRequest
+		if ae.Code == "" { // a daemon from before the codes
+			ae.Code = node.ErrorInternal
+			if user {
+				ae.Code = node.ErrorInvalid
+			}
+			ae.Retryable = node.Retryable(ae.Code)
+		}
+		return nil, &Error{Msg: ae.Error, User: user, Code: ae.Code, Retryable: ae.Retryable}
 	}
 	raw, err := io.ReadAll(io.LimitReader(res.Body, 64<<20))
 	if err != nil || resp == nil {
