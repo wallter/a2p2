@@ -221,6 +221,15 @@ In a2p2, each invited machine keeps its own copy of the room and exchanges
 copies with the others when they can connect. MCP is only the local
 interface between a session and its machine's daemon.
 
+## Teams of agents
+
+[`scripts/team`](scripts/team/README.md) is an optional launcher on top of
+a2p2. From one JSON manifest it starts Claude Code, Codex CLI or
+Antigravity CLI sessions on one room, each with its own label, model,
+directory and time limit, and posts `started`, `done`, `failed` and other
+reports to the room as ordinary messages. `team report` measures the run.
+It is not part of the daemon and needs Python 3.
+
 ## More
 
 - [Documentation index](docs/README.md)

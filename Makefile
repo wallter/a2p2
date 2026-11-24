@@ -62,3 +62,9 @@ release:          ## static binaries a2p2_<os>_<arch> and SHA256SUMS in dist/ (V
 
 clean:
 	rm -rf bin dist
+
+# Team launcher (scripts/team): a layer on top of a2p2, tested with a fake harness.
+.PHONY: team-test
+check: team-test
+team-test: build  ## the team launcher against a fake harness and a throwaway home (about 5 seconds)
+	python3 scripts/team/test_team.py
