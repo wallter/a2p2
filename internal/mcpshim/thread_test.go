@@ -84,9 +84,16 @@ func newNetDaemon(t *testing.T, name string) *netDaemon {
 	d := &netDaemon{t: t, home: home}
 	d.start()
 	t.Cleanup(d.stop)
-	d.call("net", localapi.NetReq{State: node.NetworkOn, Listen: addr}, nil)
-	d.stop()
-	d.start()
+	// The daemon applies a networking decision by itself: wait until the
+	// decision it reports is this one and it is no longer being applied.
+	var res localapi.NetResp
+	d.call("net", localapi.NetReq{State: node.NetworkOn, Listen: addr}, &res)
+	until(t, "the daemon to apply networking on", func() bool {
+		var st localapi.Status
+		err := d.c.Call(context.Background(), "status", localapi.Empty{}, &st)
+		return err == nil && st.Network.Request == res.Request && st.Network.Reason != "being applied" &&
+			st.Network.State == node.NetworkOn
+	})
 	return d
 }
 

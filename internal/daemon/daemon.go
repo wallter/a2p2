@@ -228,7 +228,18 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	defer stop()
 	// The handlers of the current run; swapped when a run starts.
 	var cur atomic.Pointer[handlers]
-	cur.Store(&handlers{ui: stopping, api: stopping})
+	// Between runs (start, stop, a networking decision being applied) the
+	// local API refuses everything except stop, which must never be lost.
+	between := &handlers{ui: stopping, api: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/stop" {
+			stop()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("{}\n"))
+			return
+		}
+		stopping(w, r)
+	})}
+	cur.Store(between)
 	var servers []*http.Server
 	defer func() {
 		shut, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -280,7 +291,7 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	for {
 		restart := make(chan struct{}, 1)
 		r := &run{home: home, version: version, cfg: cfg, id: id, st: st, o: o, cur: &cur, token: token,
-			uiURL: uiURL, uiAddr: uiLn.Addr().String(), stop: stop, restart: restart}
+			uiURL: uiURL, uiAddr: uiLn.Addr().String(), stop: stop, restart: restart, between: between}
 		again, err := r.serve(ctx, ready)
 		if err != nil || !again || ctx.Err() != nil {
 			return err
@@ -308,6 +319,7 @@ type run struct {
 	token, uiURL  string
 	uiAddr        string
 	stop          func()
+	between       *handlers // served while no run is serving
 	restart       chan struct{}
 
 	mu    sync.Mutex
@@ -413,7 +425,7 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 		// Held (waiting) pulls end at once: peer.Serve cancels every
 		// request in progress when ctx ends, before its grace period.
 		stop()
-		r.cur.Store(&handlers{ui: stopping, api: stopping})
+		r.cur.Store(r.between)
 		g.close()
 		wg.Wait()
 	}()
