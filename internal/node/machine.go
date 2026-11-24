@@ -1,0 +1,339 @@
+package node
+
+// Machine is the next version's behaviour for the rooms and agents on this
+// machine: writing signed records and reading them (DESIGN-next sections 2
+// and 6, rules [R2], [R4], [R6], [R7] of internal/model/delivery). It lives
+// beside Node until step 3b moves the surfaces over to it and deletes Node;
+// pull from other machines comes in step 5.
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/wallter/a2p2/internal/core"
+	"github.com/wallter/a2p2/internal/store"
+)
+
+// Errors of the record operations. All are user errors.
+var (
+	ErrNotHeld      = &UserError{"record not held here"}
+	ErrNotAllowed   = &UserError{"not allowed"}
+	ErrUnknownAgent = &UserError{"agent not registered"}
+)
+
+// MachineOpts injects the clock and randomness, so tests are deterministic.
+type MachineOpts struct {
+	Now  func() time.Time
+	Rand func([]byte) // fills b with random bytes; default crypto/rand
+}
+
+// Machine writes and reads records for this machine's agents.
+type Machine struct {
+	ID string // node id: the hex Ed25519 public key
+
+	st   *store.Store
+	key  ed25519.PrivateKey
+	now  func() time.Time
+	rand func([]byte)
+
+	// mu guards out. Every decision a write makes happens inside the
+	// store's write transaction, so mu only keeps out consistent.
+	mu sync.Mutex
+	// out is, per room, the epoch of the stream this run of the daemon
+	// writes [R2]. It is not durable: a new Machine (a daemon start) begins
+	// a new stream.
+	out map[string]string
+
+	// pruneDue is set when a read found text past retention that is not yet
+	// marked expired; the daemon runs Prune when it sees it (PruneDue).
+	pruneDue atomic.Bool
+}
+
+// NewMachine returns the record behaviour over st for the node whose key is
+// key. The daemon calls Prune once at start.
+func NewMachine(st *store.Store, key ed25519.PrivateKey, o MachineOpts) *Machine {
+	m := &Machine{ID: hex.EncodeToString(key.Public().(ed25519.PublicKey)), st: st, key: key,
+		now: o.Now, rand: o.Rand, out: map[string]string{}}
+	if m.now == nil {
+		m.now = time.Now
+	}
+	if m.rand == nil {
+		m.rand = func(b []byte) { _, _ = rand.Read(b) }
+	}
+	return m
+}
+
+// Register makes agent known here. The first time, in one transaction, its
+// cursors start at the current end of every stream in every room, so what
+// was written before it arrived is not unread for it. It reports whether
+// the agent is new.
+func (m *Machine) Register(ctx context.Context, agent string) (bool, error) {
+	if err := checkAgent(agent); err != nil {
+		return false, err
+	}
+	return m.st.Register(ctx, agent, m.now())
+}
+
+// Prune is the pruning pass [R6]: text 30 days old by this machine's clock
+// is marked expired, durably. Reads already treat such text as expired, and
+// ask for this pass (PruneDue); the daemon runs it at start, hourly, and
+// whenever PruneDue says so, so that text once shown as expired stays
+// expired when the clock is set back.
+func (m *Machine) Prune(ctx context.Context) error {
+	m.pruneDue.Store(false)
+	if _, err := m.st.ExpireText(ctx, m.now()); err != nil {
+		m.pruneDue.Store(true)
+		return err
+	}
+	return nil
+}
+
+// PruneDue reports whether a read found text past retention that only
+// Prune can mark durably.
+func (m *Machine) PruneDue() bool { return m.pruneDue.Load() }
+
+// pruneIfDue runs Prune before a write or a confirmation when a read asked
+// for it, so what was shown as expired is durably expired before anything
+// acts on it.
+func (m *Machine) pruneIfDue(ctx context.Context) error {
+	if m.pruneDue.Load() {
+		return m.Prune(ctx)
+	}
+	return nil
+}
+
+// Draft is what an agent sends.
+type Draft struct {
+	Room  string
+	Agent string
+	Text  string
+	// Choices are offered answers (a question for a person).
+	Choices []string
+	// To names the addressees. Empty means everyone, except for a reply,
+	// which goes to its parent's author unless Everyone is set (D10).
+	To       []core.Addressee
+	Everyone bool
+	// ReplyTo is the message answered: it sets parent and thread.
+	ReplyTo string
+	// AskHandled asks readers of a room-wide post to report handling.
+	AskHandled bool
+}
+
+// Sent is what a write returns.
+type Sent struct {
+	ID      string
+	Room    string
+	Created time.Time
+}
+
+// Send writes a message. Once it returns, the message is committed (D1).
+func (m *Machine) Send(ctx context.Context, d Draft) (Sent, error) {
+	if d.Everyone && len(d.To) > 0 {
+		return Sent{}, userErr("a post to everyone names no addressees")
+	}
+	return m.write(ctx, d.Room, d.Agent, func(v *roomView, f *core.RecordFields) error {
+		f.Kind, f.Text, f.Choices, f.AskHandled = core.KindMessage, d.Text, d.Choices, d.AskHandled
+		f.To = slices.Clone(d.To)
+		if d.ReplyTo != "" {
+			p, err := v.get(d.ReplyTo)
+			if err != nil {
+				return err
+			}
+			if p == nil || p.f.Kind != core.KindMessage {
+				return ErrNotHeld
+			}
+			f.Parent, f.Thread = p.id, p.f.Thread
+			if f.Thread == "" {
+				f.Thread = p.id
+			}
+			if len(d.To) == 0 && !d.Everyone {
+				f.To = []core.Addressee{{Node: p.author, Agent: p.f.Agent}}
+			}
+		}
+		slices.SortFunc(f.To, func(a, b core.Addressee) int {
+			if c := strings.Compare(a.Node, b.Node); c != 0 {
+				return c
+			}
+			return strings.Compare(a.Agent, b.Agent)
+		})
+		f.To = slices.Compact(f.To)
+		if f.AskHandled && len(f.To) > 0 {
+			return userErr("ask_handled is only for a post to everyone")
+		}
+		return nil
+	})
+}
+
+// Replace gives new text for one of this machine's own messages (any agent
+// here, T2). Its version is one above the highest version of that message
+// held here, with text or not, so a version is never reused.
+func (m *Machine) Replace(ctx context.Context, room, agent, ref, text string) (Sent, error) {
+	return m.amend(ctx, room, agent, ref, core.KindReplace, text)
+}
+
+// Withdraw takes back one of this machine's own messages; its text and the
+// text of its replacements are dropped here at once [R7].
+func (m *Machine) Withdraw(ctx context.Context, room, agent, ref string) (Sent, error) {
+	return m.amend(ctx, room, agent, ref, core.KindWithdraw, "")
+}
+
+func (m *Machine) amend(ctx context.Context, room, agent, ref string, k core.Kind, text string) (Sent, error) {
+	return m.write(ctx, room, agent, func(v *roomView, f *core.RecordFields) error {
+		f.Kind, f.Ref, f.Text = k, ref, text
+		t, err := v.get(ref)
+		if err != nil {
+			return err
+		}
+		if t == nil {
+			return ErrNotHeld
+		}
+		if t.author != m.ID || t.f.Kind != core.KindMessage {
+			return ErrNotAllowed
+		}
+		if k == core.KindReplace {
+			rs, err := v.refs(ref)
+			if err != nil {
+				return err
+			}
+			for _, r := range rs {
+				if r.f.Kind == core.KindReplace && r.author == m.ID && r.f.Version > f.Version {
+					f.Version = r.f.Version
+				}
+			}
+			f.Version++
+		}
+		return nil
+	})
+}
+
+// existing aborts a write whose report is already held.
+type existing struct{ r *rec }
+
+func (existing) Error() string { return "already reported" }
+
+// Handled reports that agent dealt with message ref. Only an addressee, or
+// anyone but the author on a room-wide post that asked, may report, and
+// only after it confirmed the message's text [R7]. Reporting twice returns
+// the first report.
+func (m *Machine) Handled(ctx context.Context, room, agent, ref string) (Sent, error) {
+	s, err := m.write(ctx, room, agent, func(v *roomView, f *core.RecordFields) error {
+		f.Kind, f.Ref = core.KindHandled, ref
+		t, err := v.get(ref)
+		if err != nil {
+			return err
+		}
+		if t == nil {
+			return ErrNotHeld
+		}
+		if !store.CanHandle(t.h.Record, m.ID, agent) {
+			return ErrNotAllowed
+		}
+		hs, err := v.refs(ref)
+		if err != nil {
+			return err
+		}
+		for _, h := range hs {
+			if h.f.Kind == core.KindHandled && h.author == m.ID && h.f.Agent == agent && h.h.Effect == store.EffectOK {
+				return existing{h}
+			}
+		}
+		if _, shown, err := v.rd.Read(agent, room, ref); err != nil || !shown {
+			if err == nil {
+				err = ErrNotAllowed
+			}
+			return err
+		}
+		return nil
+	})
+	var ex existing
+	if errors.As(err, &ex) {
+		return Sent{ID: ex.r.id, Room: room, Created: ex.r.f.Created}, nil
+	}
+	return s, err
+}
+
+// write builds and stores one record of this machine inside one store
+// transaction: decide fills in the record's content from what is held;
+// write adds the stream, position, links and time, signs, and stores. The
+// first write in a room after a start begins a new stream whose first
+// record links every head of this machine's own history held there [R2].
+func (m *Machine) write(ctx context.Context, room, agent string, decide func(*roomView, *core.RecordFields) error) (Sent, error) {
+	if err := checkAgent(agent); err != nil {
+		return Sent{}, err
+	}
+	if err := m.pruneIfDue(ctx); err != nil {
+		return Sent{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	var epoch string
+	r, err := m.st.Write(ctx, now, func(rd *store.Reader) (*core.VerifiedRecord, error) {
+		v := m.newView(rd, room, now)
+		if err := v.load(); err != nil {
+			return nil, err
+		}
+		if err := v.requireAgent(agent); err != nil {
+			return nil, err
+		}
+		f := core.RecordFields{Room: room, Agent: agent}
+		if err := decide(v, &f); err != nil {
+			return nil, err
+		}
+		epoch = m.out[room]
+		var contig int64
+		for _, s := range v.streams {
+			if s.Author == m.ID && s.Epoch == epoch {
+				contig = s.Contig
+			}
+		}
+		if epoch == "" || contig == 0 {
+			links, err := v.ownHeads(m.ID)
+			if err != nil {
+				return nil, err
+			}
+			epoch, f.Seq, f.Links = m.newEpoch(), 1, links
+		} else {
+			last, err := v.at(streamKey{m.ID, epoch}, contig)
+			if err != nil || last == nil {
+				return nil, errors.Join(err, errors.New("own stream lost its last record"))
+			}
+			f.Seq, f.Prev = contig+1, last.id
+		}
+		f.Epoch, f.Created = epoch, now
+		rec, err := core.NewRecord(m.key, f)
+		if err != nil {
+			return nil, userErr("cannot write: %v", err)
+		}
+		return rec.Verified()
+	})
+	if err != nil {
+		return Sent{}, err
+	}
+	m.out[room] = epoch
+	return Sent{ID: r.ID(), Room: room, Created: r.Fields().Created}, nil
+}
+
+// newEpoch is 16 random hex digits, not all zeros (PROTOCOL-next section 0).
+func (m *Machine) newEpoch() string {
+	var b [8]byte
+	for b == [8]byte{} {
+		m.rand(b[:])
+	}
+	return hex.EncodeToString(b[:])
+}
+
+func checkAgent(agent string) error {
+	if !core.ValidLabel(agent) {
+		return userErr("bad agent label")
+	}
+	return nil
+}

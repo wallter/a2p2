@@ -94,8 +94,9 @@ Limits: header 4,096 bytes, or 8,192 when `seq` = 1; signature 64 bytes.
 Count limits and byte limits both apply. A writer that would exceed either
 refuses, naming which, and never drops addressees, links or heads.
 
-**Writer rules, not checked on receipt.** `version` = the winning version
-the author knows + 1 (the message itself is 0). `thread` = the parent's
+**Writer rules, not checked on receipt.** `version` = one above the
+highest version this machine holds for the message, with or without its text
+(the message itself is 0); a version is never reused. `thread` = the parent's
 `thread`, or the parent's id if it has none. `handled` only by an agent
 that was shown the text. `withdraw` and `replace` only of the author
 machine's own messages. A writer whose heads exceed 100 links or 8,192
@@ -587,7 +588,7 @@ Socket calls are `POST /v1/<name>`, JSON in and out; errors `{"error"}` with
 | `send` (changed) | `{"agent","room","text","to"?,"reply_to"?,"ask_handled"?,"replaces"?,"choices"?}` | `{"id","room","created"}` |
 | `inbox` (changed) | `{"agent","room"?,"limit"?,"wait_ms"?}` | `{"entries":[Entry],"waiting":[Wait]}` |
 | `thread` (new) | `{"agent","id"}` | `{"entries":[Entry]}`; marks nothing |
-| `seen` (changed) | `{"agent","entries":[{"key","version"}]}` | `{}` |
+| `seen` (changed) | `{"agent","entries":[{"key","version"}]}` | `{"results":[{"key","ok","reason"?}]}`: each entry is confirmed only if the inbox would show exactly it to this agent now; the rest are applied. A replaced entry's key names the replace record |
 | `ack` | `{"agent","id"}` | `{"handled":"<record id>"}` |
 | `history` (changed) | `{"room","before"?,"limit"?}` | `{"entries":[Entry]}` |
 | `trace` (changed) | `{"id"}` | `{"id","room","saved","reason","copies":[{"node","at","member"}],"handled":[{"agent","at"}]}` |
@@ -625,8 +626,10 @@ shows the preview, asks on the terminal, then waits unless `--no-wait`),
 | `refusals` | `room`, `peer`, `reason`, `count`, `last_at` | (`room`,`peer`,`reason`) |
 | `agents` | as v0.2 | `id` |
 | `cursors` | `agent`, `room`, `author`, `epoch`, `start`, `pos` | (`agent`,`room`,`author`,`epoch`) |
-| `reads` | `agent`, `room`, `key`, `version` | (`agent`,`room`,`key`) |
+| `reads` | `agent`, `room`, `key`, `version`, `msg` (indexed) | (`agent`,`room`,`key`) |
 | `read_heads` | `agent`, `room`, `author`, `record` | (`agent`,`room`,`author`,`record`) |
+| `forks` | `room`, `author`, `epoch`, `seq`, `id`, `hdr`, `sig` (at most 3 refused records per position, as evidence) | (`room`,`author`,`epoch`,`seq`,`id`) |
+| `registrations` | `agent`, `room`, `at` (when an agent's cursors were first set) | (`agent`,`room`) |
 | `invites` | `secret_hash`, `room`, `role`, `history`, `expires_at`, `bound_key`, `state` (5.3), `request` | `secret_hash` |
 | `requests` | `id`, `kind`, `room`, `node`, `name`, `role`, `history`, `created_at`, `state`, `decided_at`, `entries` | `id` |
 | `meta` | `key`, `value`; `v02_dropped_notice` shown once | `key` |

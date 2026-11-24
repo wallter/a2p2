@@ -275,3 +275,32 @@ every history compared. Limits chosen: 1,024 held entries or 4 MiB per room,
 Still to do in `internal/core`: a type that exists only after signature
 verification, so that `members` cannot be handed an unverified entry.
 
+## D29. Records in the store and the local path, beside the old code (2026-11-24)
+
+Build step 3a. The design's step 3 was split so that nothing breaks midway:
+3a adds the new path (migration 2; `store.PutRecord`, `Write`, `View`, `Seen`,
+`ExpireText`; `node.Machine` with send, replace, withdraw, handled, inbox,
+thread and branch) and 3b switches the tools, CLI and page over and deletes
+the v0.2 delivery code. Tables added now and why: `records` and `streams`
+(signed records under the gap-free rule), `cursors`, `reads`, `read_heads`
+(the two-step read), `forks` (evidence of a second record at a held
+position, at most three kept), `registrations` (an agent registered later
+does not see the backlog as unread).
+
+Choices made in review (`research/decisions/step3a-review-sol.md`):
+- The store takes only `*core.VerifiedRecord`.
+- `Seen` confirms an entry only if the inbox would show exactly it to that
+  agent now, so an agent cannot confirm, and then report handled, something
+  it was never shown.
+- A write chooses its version, links and position inside the store's write
+  transaction; reads are read-only transactions and never write.
+- Text counts as expired once marked or once the clock passes 30 days;
+  marking happens at start, hourly, and before every write. If the clock is
+  set back before a marking pass has run (at most an hour), text can
+  reappear; after a pass it cannot.
+
+A differential test runs the delivery model and the real code side by side
+and compares every inbox, thread and stored record after each step. It found
+a defect in the model (a replace could reuse a version number once the
+winning text had expired), fixed in both.
+
