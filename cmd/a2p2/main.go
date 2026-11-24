@@ -20,7 +20,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/wallter/a2p2/internal/core"
 	"github.com/wallter/a2p2/internal/daemon"
@@ -175,12 +174,8 @@ func (c *cmd) call(name string, req, resp any, human func()) error {
 // agent's tools do; it does not prove a person answered, since a program
 // running as this user can drive a terminal or call the socket directly.
 // It asks the terminal driver (a character device such as /dev/null is
-// not a terminal).
-func terminal() bool {
-	var t syscall.Termios
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, os.Stdin.Fd(), uintptr(ioctlGetTermios), uintptr(unsafe.Pointer(&t)))
-	return errno == 0
-}
+// not a terminal); see tty_unix.go.
+func terminal() bool { return isTerminal() }
 
 var stdin = bufio.NewReader(os.Stdin)
 

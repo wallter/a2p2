@@ -686,7 +686,7 @@ func scanRequest(sc interface{ Scan(...any) error }) (Request, error) {
 // in one state if state is set.
 func (s *Store) Requests(ctx context.Context, room, state string) ([]Request, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests
-		WHERE (? = '' OR room = ?) AND (? = '' OR state = ?) ORDER BY created_at, id`, room, room, state, state)
+		WHERE (? = '' OR room = ?) AND (? = '' OR state = ?) ORDER BY created_at, rowid`, room, room, state, state)
 	if err != nil {
 		return nil, err
 	}

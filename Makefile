@@ -4,7 +4,7 @@ BIN     := bin/a2p2
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: trace build test check fmt vet lint vuln fuzz bench e2e review clean release
+.PHONY: trace build test check fmt vet windows licences lint vuln fuzz bench e2e review clean release
 
 build:            ## build bin/a2p2
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/a2p2
@@ -18,16 +18,23 @@ fmt:              ## fail if any file is not gofmt-clean
 vet:
 	$(GO) vet ./...
 
-lint:             ## staticcheck (run without installing)
-	$(GO) run honnef.co/go/tools/cmd/staticcheck@latest ./...
+windows:          ## a2p2 does not run on Windows yet, but it must build and vet there
+	GOOS=windows GOARCH=amd64 $(GO) build ./...
+	GOOS=windows GOARCH=amd64 $(GO) vet ./...
 
-vuln:
-	$(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
+licences:         ## requirement I4: only allow-listed direct dependencies; prints their licence files
+	scripts/licences.sh
+
+lint:             ## staticcheck (run without installing; needs network)
+	$(GO) run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+
+vuln:             ## govulncheck (needs network)
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
 
 trace:            ## every requirement has a row in docs/TRACE.md, and every test it names exists
 	scripts/trace.sh
 
-check: fmt vet trace test ## everything CI runs except lint/vuln (which need network)
+check: fmt vet windows licences trace test ## everything CI runs except lint/vuln (which need network)
 
 fuzz:             ## short fuzz smoke run of the record and entry decoders; FUZZTIME=10m for a long one
 	$(GO) test ./internal/core -run '^$$' -fuzz '^FuzzParseRecord$$' -fuzztime $${FUZZTIME:-20s}
@@ -42,12 +49,12 @@ e2e: build        ## real harnesses, spends model tokens: make e2e HARNESS=claud
 review:           ## independent review of uncommitted changes: make review WHO=sol
 	scripts/review.sh $${WHO:-sol}
 
-release:          ## cross-compile static binaries into dist/
-	@mkdir -p dist; for t in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64; do \
+release:          ## static binaries a2p2_<os>_<arch> and SHA256SUMS in dist/ (VERSION=v1.2.3 to name it)
+	@rm -rf dist && mkdir dist && for t in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64; do \
 	  os=$${t%/*}; arch=$${t#*/}; \
 	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags '$(LDFLAGS)' \
-	    -o dist/a2p2-$$os-$$arch ./cmd/a2p2 || exit 1; done; \
-	cd dist && shasum -a 256 a2p2-* > SHA256SUMS
+	    -o dist/a2p2_$${os}_$$arch ./cmd/a2p2 || exit 1; done; \
+	cd dist && if command -v sha256sum >/dev/null; then sha256sum a2p2_*; else shasum -a 256 a2p2_*; fi > SHA256SUMS
 
 clean:
 	rm -rf bin dist
