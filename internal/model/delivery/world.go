@@ -45,6 +45,9 @@ type World struct {
 	localFiles map[MachineID]map[string]string
 	proposals  []*proposal
 	tamperFile func(server MachineID, hash, data string) string
+	anyFiles   bool // some record has files: pulls then exchange them (exchangeFiles)
+	nextSalt   int
+	transfers  []Transfer
 
 	// continueStreams switches on the rejected rule, for the test that shows
 	// why it is rejected: after a start, keep writing the stream of the last
@@ -104,10 +107,11 @@ func (w *World) Clone() *World {
 			}
 		}
 	}
+	c.transfers = append([]Transfer(nil), w.transfers...)
 	c.proposals = make([]*proposal, len(w.proposals))
 	for i, p := range w.proposals {
 		q := *p
-		c.proposals[i] = &q // data is replaced, never modified
+		c.proposals[i] = &q
 	}
 	return &c
 }
@@ -209,6 +213,7 @@ func (w *World) Crash(id MachineID) {
 	if m := w.machines[id]; m != nil && !m.Gone {
 		m.epoch, m.seq, m.last = 0, 0, nil
 		m.Awake = true
+		m.st.files.reconcile() // F10: a start finishes deletions and removes files no row names
 		m.prune(w.Now)
 	}
 }
@@ -249,6 +254,7 @@ func (w *World) SetSkew(id MachineID, skew Time) {
 func (w *World) Restore(id MachineID, s *Snapshot) {
 	m := w.machines[id]
 	m.st = s.st.clone()
+	m.st.files.reconcile()
 	m.epoch, m.seq, m.last = 0, 0, nil
 	m.Awake = true
 	m.prune(w.Now)
@@ -342,12 +348,12 @@ type Msg struct {
 
 // Send writes a message. Once it returns, the message is on disk (D1).
 func (w *World) Send(id MachineID, agent string, msg Msg) (RecordID, error) {
-	return w.send(id, agent, msg, nil)
+	return w.send(id, agent, msg, "")
 }
 
-// send writes a message that refers to files, whose bytes the caller
-// (Decide, after a person's approval) then holds for it.
-func (w *World) send(id MachineID, agent string, msg Msg, files []FileRef) (RecordID, error) {
+// send writes a message whose header commits to manifest (or none), whose
+// bytes the caller (Decide, after a person's approval) then holds for it.
+func (w *World) send(id MachineID, agent string, msg Msg, manifest string) (RecordID, error) {
 	m, err := w.awake(id)
 	if err != nil {
 		return "", err
@@ -355,7 +361,7 @@ func (w *World) send(id MachineID, agent string, msg Msg, files []FileRef) (Reco
 	if msg.Body == "" || (msg.Everyone && len(msg.To) > 0) {
 		return "", ErrNotAllow // no empty text; a room-wide post names no addressees
 	}
-	r := &Record{Kind: Message, Agent: agent, AskHandled: msg.AskHandled, Files: append([]FileRef(nil), files...)}
+	r := &Record{Kind: Message, Agent: agent, AskHandled: msg.AskHandled, Manifest: manifest}
 	if !msg.Everyone {
 		r.To = append([]Addr(nil), msg.To...)
 	}
@@ -422,29 +428,17 @@ func (w *World) Handle(id MachineID, agent string, ref RecordID) (RecordID, erro
 
 // Withdraw takes back one of this machine's own messages.
 func (w *World) Withdraw(id MachineID, agent string, ref RecordID) (RecordID, error) {
-	return w.amend(id, agent, ref, Withdraw, "", nil, false)
+	return w.amend(id, agent, ref, Withdraw, "", "")
 }
 
 // Replace gives new text for one of this machine's own messages.
-// The replacement carries forward the files of the version it replaces
-// (F8, attach.go).
+// A replacement has no files unless its writer lists them again
+// (ReplaceWithFiles, F8).
 func (w *World) Replace(id MachineID, agent string, ref RecordID, text string) (RecordID, error) {
-	return w.amend(id, agent, ref, Replace, text, nil, true)
+	return w.amend(id, agent, ref, Replace, text, "")
 }
 
-// ReplaceWithoutFiles gives new text for one of this machine's own
-// messages and drops the files the replaced version listed.
-func (w *World) ReplaceWithoutFiles(id MachineID, agent string, ref RecordID, text string) (RecordID, error) {
-	return w.amend(id, agent, ref, Replace, text, nil, false)
-}
-
-// amendFiles writes a replacement listing files, after a person approved
-// them (Decide).
-func (w *World) amendFiles(id MachineID, agent string, ref RecordID, text string, files []FileRef) (RecordID, error) {
-	return w.amend(id, agent, ref, Replace, text, files, false)
-}
-
-func (w *World) amend(id MachineID, agent string, ref RecordID, k Kind, body string, files []FileRef, carry bool) (RecordID, error) {
+func (w *World) amend(id MachineID, agent string, ref RecordID, k Kind, body, manifest string) (RecordID, error) {
 	m, err := w.awake(id)
 	if err != nil {
 		return "", err
@@ -469,10 +463,7 @@ func (w *World) amend(id MachineID, agent string, ref RecordID, k Kind, body str
 			}
 		}
 		r.Version++
-		r.Files = append([]FileRef(nil), files...)
-		if carry {
-			r.Files = append([]FileRef(nil), m.winner(t).rec.Files...)
-		}
+		r.Manifest = manifest
 	}
 	return w.write(m, r, body).ID, nil
 }
@@ -636,5 +627,6 @@ func (w *World) release(x *exchange) (PullResult, error) {
 		}
 	}
 	p.observe(s.ID, resp, s.takes(), w.Now, w.Tick)
+	w.exchangeFiles(p, s)
 	return res, nil
 }

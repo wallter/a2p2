@@ -60,57 +60,85 @@
 
 ## Attachments (0.2 draft)
 
-Added 2026-11-24 for requirement L1; not built (`attach.go`). A message or
-a replacement lists files (name, size, hash) in its signed header; the
-bytes travel apart, on request.
+Added 2026-11-24 for requirement L1 and revised the same day after review;
+not built (`attach.go`). The signed header of a message or a replacement
+with files holds only the SHA-256 of a salted manifest (`Record.Manifest`).
+The manifest (salt; name, size and hash of each file) and the bytes are
+content: they travel apart, on request, under the text's permission.
 
-- F1 Referenced: a machine keeps a file's bytes for a message only while
-  the message's winning version by header lists it and that version's
-  text is one the machine may keep (not withdrawn, not expired by its own
-  clock, within its permission). Otherwise the bytes and any partial
-  download go in the step that ended the reference.
-- F2 Served: only to a peer the server sees as a member now that may read
-  that version's text in its view, and only bytes the server holds for
-  that message (it wrote it, or fetched them for it). Checked at every
-  request.
-- F3 Verified: never more than the declared size; a partial download is
-  hidden; the whole must match the hash or is discarded. A download may
-  resume from another holder.
-- F4 Lazy: only an agent shown the message fetches, or a machine its
-  person set to keep the room's files (Replicate).
-- F5 Told: here, partial, not asked, fetchable, unavailable (dated
-  answers) or gone with the reason.
-- F6 Confirmed: the bytes staged when the agent asked are what the person
-  approves and what is sent; declined, nothing is written.
-- F7 Budget: a fetch over the room's budget is refused before any byte
+- F1 Referenced: a machine keeps a manifest or a file for a message only
+  while the winning version by header commits to that manifest, or lists
+  the file in it, and that version's text is one the machine may keep.
+  Otherwise bytes, partials and agents' copies (all scoped to the message)
+  go in the step that ended the reference. While a replacement's manifest
+  is on its way, what is held for the message stays, unserved, until it
+  arrives.
+- F2 Served: only to a peer the sender sees as a member now that may read
+  that version's text in its view, and only bytes held for that message.
+  Checked at every request and chunk, in both directions.
+- F3 Verified: the declared total must equal the size the manifest gives
+  (a manifest: at most 16 KiB) before any byte is taken; a partial is
+  hidden; the whole must match. Permission and "shown this version" are
+  checked again before a copy is written for an agent.
+- F4 Asked: manifests are fetched automatically by a machine that may read
+  the text; file bytes only when an agent shown that version asks, or the
+  machine carries or keeps them.
+- F5 Told: here, list pending, partial, coming, not asked, fetchable,
+  unavailable (dated answers per message) or gone with the reason.
+- F6 Confirmed: the bytes staged when the agent asked are what is
+  approved, after their digests are checked again; declined, expired
+  after a day or failed, nothing is written and staging goes.
+- F7 Budget: held, partial (at its declared size), staged and copied bytes
+  count; over budget or over the size limit is refused before a byte
   moves.
-- F8 Replace: a replacement carries the files forward unless its writer
-  drops them; a file no version lists goes.
+- F8 Replace: a replacement lists only files its writer lists again.
+- F9 Carry and want: a member asked by a permitted peer for a file it may
+  keep but lacks answers "not yet" and wants it (Carry, the default;
+  FilesOff: not held; Keep: wants every file). A machine wants from a peer
+  it cannot dial in its answer to that peer's pull, only for messages the
+  peer wrote or said it holds; the peer uploads, and the receiver takes
+  only what it asked for.
+- F10 Durable cleanup: files before rows; deletions queued in the deciding
+  step; a restart finishes the queue and removes files with no row.
+- F11 Self-void: a machine that learns its own admission was voided drops
+  its staged sends.
 
-Found while modelling: a member admitted without history holds earlier
-headers, so it knows their hashes; with permission checked against any
-message naming the hash, it could list one in a message of its own and an
-honest member would serve it. F2's "held for that message" closes it
-(`TestANewReferenceToAKnownHashDoesNotWidenWhoIsServed`).
+Found while modelling. Round 1: with permission by hash alone, a member
+admitted without history could list a known hash in its own message and
+have an honest member serve it; F2's "held for that message" closes it
+(`TestANewReferenceToAKnownHashDoesNotWidenWhoIsServed`). With the
+manifest the hash is no longer in the header, so this is now defence in
+depth. Round 2: a replacement's header can arrive before its manifest, and
+dropping at that moment deleted a file the replacement still lists
+(`TestAReplacementListsOnlyTheFilesItsWriterListsAgain` failed); hence the
+pending clause of F1. Dropping only when a header arrived, not when a
+manifest did, kept a file a replacement no longer lists (seed 86 of the
+random test); a manifest's arrival now runs F1.
 
-Tests: the 16 scenarios in `attach_test.go` and
+Tests: 28 scenarios in `attach_test.go` and
 `TestRandomSchedulesWithFilesKeepTheAttachmentRules` (400 schedules of 100
-steps with withdrawals, replacements, expiry, admissions without history,
-removals, lost disks and a member serving wrong bytes; after every step
-every held file matches its hash and is kept for a message that lets the
-machine keep it and, by the true grants, read it). Removing the drop on
-storing a record, or either half of the server's check, fails named
-tests.
+steps, with random outbound-only machines and modes, withdrawals,
+replacements, expiry, admissions without history, removals, lost disks,
+wrong bytes and crashes injected at both points). After every step every
+held file matches its hash and is kept for a message that lets the machine
+keep it and, by the true grants, read it; parts and copies likewise; the
+disk is what the rows say; and every transfer so far went to a machine
+the sender saw as a member, that the true grants let read the version,
+and that could keep it. Removing the read check from serving, or the
+"asked for" check from uploads, fails named tests.
 
-Rejected: a new record kind, a body field, or a wire version for the
-reference (0.1.0 refuses the first two and blocks the author's stream;
-the third splits mixed rooms); refusing a malformed reference on receipt
-(0.1.0 and 0.2 would then store different records); bytes in the
-database or in pull pages (the database and the 4 MiB page budget are for
-text); fetching every file at once (U4, disk); permission by hash alone
-(the leak above); a separate retention for bytes (D7 and D9 would then
-differ for text and files); chunk hashes in the header (header bytes; the
-whole-file check bounds a liar's cost at the file's size).
+Rejected: a new record kind, a body field, or a wire version (0.1.0 refuses
+the first two and blocks the author's stream; the third splits mixed
+rooms); names, sizes or hashes in the header (they reach machines that may
+not read the text, and outlive a withdrawal); the file count in the header
+(more than existence, and nothing needs it before the manifest); carrying
+files forward on a replacement (it would share them with whoever may read
+the replacement without anyone choosing to); version detection for `want`
+(0.1.0 ignores it, and only a machine that asked receives an upload);
+`HEAD` (dated answers to fetches say who holds what); refusing a malformed
+reference on receipt (0.1.0 and 0.2 would store different records); bytes
+in the database or in pull pages; fetching every file at once (U4, disk),
+except where a person sets Keep.
 
 ## Membership
 
@@ -184,7 +212,7 @@ ancestor ids. T5 holds per member, as written. N1 holds with offers.
 
 Record fields: author, epoch, seq, prev, links, version, kind, agent, to,
 ask-handled, ref, parent, thread, created, body hash, signature, room;
-in the 0.2 draft, files (L1).
+in the 0.2 draft, a manifest hash (L1).
 
 ## Requirement to test
 
@@ -197,4 +225,4 @@ requirements in a comment. Examples, and the membership tests:
 | U3, T3 (R2) | `TestNewMachineInboxStartsEmpty…`, `TestNoHistoryNewcomer…`, `TestTwoGrantsThatDiffer…`, `TestHeldResponseIsChecked…` |
 | T5 (R1, R2) | `TestMessageOfARemovedAuthor…`, `TestWithdrawWrittenBeforeRemoval…`, `TestRecordWrittenAfterRemoval…`, `TestVoidedAdmission…`, `TestStaleViewHands…`, `TestHeldResponseIsNotReleased…` |
 | N1 (R3) | `TestStaleOfferCosts…`, `TestOffersDoNotStarve…`, `TestMachineThatOnlyOpensRequests…` |
-| L1 (F1–F8, 0.2 draft) | `TestAFileIsSentOnlyAfterAPersonApproves…`, `TestANewReferenceToAKnownHash…`, `TestWithdrawDeletesAFile…`, `TestRandomSchedulesWithFiles…` and the rest of `attach_test.go` |
+| L1 (F1–F11, 0.2 draft) | `TestAFileIsSentOnlyAfterAPersonApproves…`, `TestInARoomWithOneListenerAFile…`, `TestANewcomerWithoutHistoryGetsNeither…`, `TestWithdrawDeletesAFile…`, `TestRandomSchedulesWithFiles…` and the rest of `attach_test.go` |

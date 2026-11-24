@@ -101,6 +101,9 @@ type agentState struct {
 	// (Showed). The agent may report them handled. It is not seen and
 	// moves no cursor.
 	shown map[RecordID]bool
+	// shownVer: the versions whose text a read showed; an agent fetches
+	// only files of a version it was shown (attach.go).
+	shownVer map[RecordID]bool
 }
 
 func newAgent(start map[StreamID]int) *agentState {
@@ -112,6 +115,7 @@ func newAgent(start map[StreamID]int) *agentState {
 		heads:    map[MachineID][]RecordID{},
 		skip:     map[RecordID]bool{},
 		shown:    map[RecordID]bool{},
+		shownVer: map[RecordID]bool{},
 		receipts: map[string]RecordID{},
 	}
 }
@@ -140,6 +144,10 @@ func (a *agentState) clone() *agentState {
 	b.shown = make(map[RecordID]bool, len(a.shown))
 	for k, v := range a.shown {
 		b.shown[k] = v
+	}
+	b.shownVer = make(map[RecordID]bool, len(a.shownVer))
+	for k, v := range a.shownVer {
+		b.shownVer[k] = v
 	}
 	return &b
 }

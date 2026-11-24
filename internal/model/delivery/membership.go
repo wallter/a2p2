@@ -114,6 +114,11 @@ func (m *Machine) apply(c Change, now Time) {
 		if c.Machine != m.ID {
 			m.dropAuthor(c.Machine)
 			m.dropFiles(now) // with its records go the files they referred to
+		} else {
+			for n := range m.st.files.staged { // F11: nothing staged here can be sent now
+				m.dropStaged(n)
+			}
+			m.st.files.flush()
 		}
 	}
 }
