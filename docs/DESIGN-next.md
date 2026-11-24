@@ -158,17 +158,25 @@ One request type over the pinned mutual TLS, per room: the model's Pull
   Each side keeps the other's summary as a dated observation, the only
   source of copy reports [R5].
 
-**Not modelled: encoding of the model's summary.** A request carries, per
-author, a 32-byte digest of that author's summary; the server lists every
-author whose digest differs, and the requester's next requests carry its
-detail for all of them, paged under a token bound to that first snapshot
+**Not modelled: encoding of the model's summary.** A request does not
+carry the model's summary. A round opens with one hash over the requester's
+per-author digests; if the server's hash is equal, or equal to the hash the
+requester says it has already examined to no effect (`seen`), and neither
+side has log entries for the other, the answer is `same`. Otherwise the
+server answers with its digests, the requester works out which authors
+differ, and its next requests carry its detail for them, 16 at a time
 (PROTOCOL 4.3). Equal digests are treated as equal summaries, so the
-model's server would send nothing for that author and learns what a full
-summary would tell it; for the others it receives the full [R3] summary, so
-pages and copy reports are the model's. A round that stores nothing on
-either side ends the exchange until the next trigger, so mismatches that
-cannot be repaired (expired here, live there) do not loop. For 64 machines
-a digest-only request is about 9 KB.
+model's server would send nothing for that author; for the others the
+server receives the full [R3] summary, so pages are the model's. A round
+that stores nothing on either side ends the exchange until the next
+trigger, and `seen` keeps two machines with a lasting difference (one
+admitted without history, holding headers where the other holds text) idle
+afterwards. Copy reports come from `same` answers and from detail, so a
+server learns later, or for a lasting difference only in part, what the
+model's server learns at once; the differential test counts the reports it
+leaves uncompared for this reason. Measured for 64 machines after 30 days
+of daily restarts: an idle pull is 177 bytes up and 72 down; one new
+message 1.7 KB up and 14.9 KB down in three requests.
 
 **Not modelled: when and from whom.**
 
@@ -364,6 +372,9 @@ What remains partly resolved, as REQUIREMENTS section 6 limits:
 | Restored admin pulls from a stale peer and reuses a position | "An admin machine restored from backup must catch up…" |
 | A sole admin's fork never settles | "While a room has had only one admin, that key is the room" |
 | Too many heads | to be added to section 6 |
+| A machine restored to a copy in which the peer asking it is not yet a member refuses that peer until it has caught up by its own pulls; if it knows no current member, it cannot | It joins again with a token (`TestARestoredServerPagesTheLogFromAMemberThenServesANewPeer`); to be added to section 6 |
+| Two records signed by one author at one position look equal in summaries, so machines can hold different branches unnoticed and a copy report for that author can be wrong | Only a faulty or dishonest author machine can do it, since a restore starts a new stream (`TestKnownGapForkedStreamsLookEqualAndGiveAWrongCopyReport`) |
+| A removed machine is not told; its pulls are refused with an answer that says nothing | It sees refusals from every member; `poll` on its invite says `removed` (PROTOCOL 5.3) |
 
 Open: P3 against a same-user agent; stream state grows until compaction is
 designed (1,920 streams per 64-machine room after 30 days,

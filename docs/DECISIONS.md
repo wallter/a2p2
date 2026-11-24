@@ -328,3 +328,42 @@ Choices made in review (`research/decisions/step4a-review-sol.md`):
 - A machine that has been removed may still write locally (nobody takes it),
   and its own reader marks its records as from a removed author.
 
+## D31. The pull exchange and its request forms (2026-11-24)
+
+Build step 5a, beside the v0.2 code: `node.Exchange` serves and makes pulls
+over a one-method transport; migration 4 adds `observed` (what each peer
+last showed it holds, the only source of copy reports) and `refusals`. A
+differential test runs the real exchange against the delivery model on
+multi-machine schedules with lost responses, restores, clock steps, and
+machines added and removed.
+
+Choices made in review (`research/decisions/step5a-review-sol.md`):
+- **Requests carry one hash, not every digest.** The first build sent every
+  author's digest on every request: 39 KB each way for one new message
+  among 64 machines, 12.7 KB for an idle pull. Now a round opens with one
+  hash (`sum`), the server answers `same` or its digests, and the requester
+  works out the differing authors. Cost: a server learns what a peer holds
+  only from `same` answers and detail, so some copy reports arrive a round
+  later or, between two machines with a lasting difference, not at all for
+  the authors that were equal.
+- **`seen`.** Two machines can differ for 30 days for a legitimate reason
+  (one was admitted without history). Without a way to say "I have already
+  looked at exactly this", they could never be idle against each other and
+  a waiting pull could never wait.
+- **A textless floor per stream** (`x`), so a summary does not list every
+  expired position for ever.
+- **A non-member's log entries are applied all or none**, as before. Keeping
+  part of a batch would let a removed machine fill a room's entry cap
+  through any accomplice. The cost is a stated limit: a machine restored to
+  a copy in which it knows no current member must join again.
+- **A 403 says nothing about the room.** The requester instead resends its
+  log once, then waits for a change.
+- **The release point rebuilds** the response if anything was written since
+  it was built, so a withdrawal or removal in between is honoured.
+- **Kept:** text whose readability is undecided is not marked expired, since
+  only a stored `missing` mark shows it arrived in time; the decision and
+  the write are one transaction.
+- **Not done:** detecting two records by one author at one position through
+  summaries (a stated limit); a bucketed hash so that the digests answer
+  shrinks for large rooms (measure first, step 7).
+
