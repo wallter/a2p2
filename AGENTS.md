@@ -43,7 +43,7 @@ export A2P2_HOME=$(mktemp -d) && bin/a2p2 status && bin/a2p2 send --as alice hi
 | `internal/node` | Behaviour: `Machine`, `Rooms`, `Joiner`, `JoinServer`, `Exchange`, `Scheduler` and `Surface` |
 | `internal/peer` | Machine key and pinned mutual TLS serving `/p/v2/join` and `/p/v2/pull` |
 | `internal/localapi` | JSON over HTTP over the Unix socket, server and client |
-| `internal/mcpshim` | Stdio MCP server; stateless, one local API call per tool |
+| `internal/mcpshim` | Stdio MCP server backed by the local API |
 | `internal/harness` | Install, uninstall, hook output and doctor for each harness |
 | `internal/web`, `internal/daemon` | Loopback UI; the daemon that assembles the rest |
 | `internal/model/delivery` | Executable model of the delivery rules that tests compare the code against; never imported by the daemon |

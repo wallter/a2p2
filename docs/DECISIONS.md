@@ -3,6 +3,9 @@
 Append-only. One entry per decision: what, why, and what would change our mind.
 Supersede an entry by adding a new one that names it; do not rewrite history.
 
+The entries are dated history. File and package names in an entry are
+those of its date and may since have moved or been renamed.
+
 ## D1. Build a small new core; use existing projects as reference only (2026-11-22)
 
 Three independent static audits (Codex on open-agent-bridge and
@@ -10,9 +13,7 @@ agents-connector, Antigravity on agentmesh, Claude on agentmesh) reached the
 same verdict. No candidate has authenticated rooms or paired cross-machine
 transport; the strongest local experience (open-agent-bridge, ~22k lines of
 TypeScript) depends on private harness sockets and has client-side-only room
-filtering; all have under ten GitHub stars and a single maintainer. Scores and
-evidence: the two audit reports (kept in the project's working notes, not in
-this repository).
+filtering; all have under ten GitHub stars and a single maintainer.
 **Revisit if** a maintained project appears that meets must-haves 2–4.
 
 ## D2. Go, not Rust (2026-11-22)
@@ -168,8 +169,7 @@ unique ids, a member who has seen another member's message id can get its own
 message with that id to a third node first and permanently block the genuine
 one. The uniqueness key is now `(from_node, id)`; deliveries and read marks
 reference the local row. A reference by bare id (reply, ack, trace) resolves to
-the first stored row. Full review and dispositions: the code review (kept in the project's working
-notes, not in this repository).
+the first stored row.
 
 ## D22. Known gaps accepted for now (2026-11-22)
 
@@ -187,9 +187,7 @@ Recorded so they are not mistaken for oversights:
 
 Supersedes D10. Five independent reviewers were asked; four chose Apache-2.0
 for its explicit patent grant, which some companies require before they will
-embed a daemon, and one chose MIT for brevity
-(the deliberation on the owner's decisions, Q8; kept in the project's working
-notes, not in this repository). Contributions are
+embed a daemon, and one chose MIT for brevity. Contributions are
 accepted under the Developer Certificate of Origin: a `Signed-off-by` line on
 every commit and no contributor agreement. The dependencies (BSD-3-Clause and
 MIT) are compatible. Nothing had been released under MIT.
@@ -208,8 +206,7 @@ does not exist) had no mechanical check.
 The owner widened the goal (rooms that survive any machine being away or
 lost, several admins, threads, subscriptions, a path to very large rooms) and
 answered the open choices; see `REQUIREMENTS.md` section 10. Research found no
-existing system to adopt (synthesis kept in the project's working notes, not
-in this repository). The
+existing system to adopt. The
 v0.2 push-from-the-author delivery (D3, D13) will be replaced, not extended:
 nothing has been released, so there is nothing to stay compatible with. Order
 of work is in `REQUIREMENTS.md` section 9: executable scenarios first, then
@@ -219,8 +216,7 @@ the design, then the build.
 
 Hand-written rules for several admins were shown unsound twice by reviewers,
 so step 0 of the plan became two pure-Go models with exhaustive small
-scenarios (a survey of requirements and verification practice, kept in the
-project's working notes, not in this repository):
+scenarios:
 `internal/model/members` (who is a member and who is an admin, given any set
 of signed entries) and `internal/model/delivery` (store and forward in a room
 where every member keeps everything). No new dependency and no separate
@@ -260,9 +256,7 @@ disagree about the room. The contract is `PROTOCOL.md` sections 0 to 3;
 check has a failing vector that names it. The v0.2 envelope stays beside the
 new types until its last caller is converted. An independent review found two
 faults that would have been frozen (leading whitespace refused; an explicitly
-empty text field mishandled); both are fixed with vectors
-(independent review by another model family; kept in the project's working
-notes, not in this repository).
+empty text field mishandled); both are fixed with vectors.
 
 ## D28. The membership model is the membership code (2026-11-24)
 
@@ -275,8 +269,7 @@ that depended on how ids sort. A full resolve of 3,000 entries went from
 minutes to about 0.1 s by numbering entries and keeping what each had seen
 as bit sets; the old resolver is kept as a test-only reference and agrees on
 every history compared. Limits chosen: 1,024 held entries or 4 MiB per room,
-8 entries kept per (key, position). Review: an independent review by another
-model family, kept in the project's working notes, not in this repository.
+8 entries kept per (key, position). Reviewed independently by another model family.
 
 Still to do in `internal/core`: a type that exists only after signature
 verification, so that `members` cannot be handed an unverified entry.
@@ -293,8 +286,7 @@ the v0.2 delivery code. Tables added now and why: `records` and `streams`
 position, at most three kept), `registrations` (an agent registered later
 does not see the backlog as unread).
 
-Choices made in review (independent review by another model family; kept in
-the project's working notes, not in this repository):
+Choices made in review (independent review by another model family):
 - The store takes only `*core.VerifiedRecord`.
 - `Seen` confirms an entry only if the inbox would show exactly it to that
   agent now, so an agent cannot confirm, and then report handled, something
@@ -320,8 +312,7 @@ result), `requests` (changes waiting for a person) and `rooms.left_at`.
 `node.Receive` is the one way entries enter a room, from this machine or
 another.
 
-Choices made in review (independent review by another model family; kept in
-the project's working notes, not in this repository):
+Choices made in review (independent review by another model family):
 - A request records the exact action approved. If the state has moved so
   that confirming would now do something else (promote has become re-admit),
   it is refused and nothing is signed. Decisions on a request are serialised.
@@ -345,8 +336,7 @@ differential test runs the real exchange against the delivery model on
 multi-machine schedules with lost responses, restores, clock steps, and
 machines added and removed.
 
-Choices made in review (independent review by another model family; kept in
-the project's working notes, not in this repository):
+Choices made in review (independent review by another model family):
 - **Requests carry one hash, not every digest.** The first build sent every
   author's digest on every request: 39 KB each way for one new message
   among 64 machines, 12.7 KB for an idle pull. Now a round opens with one
@@ -397,8 +387,7 @@ New on the wire: `invite` in `poll` (the hash of the secret, accepted only
 from the bound key) so that a joiner resumes after a restart without
 storing the secret; `member` in the preview.
 
-Choices made in review (independent review by another model family; kept in
-the project's working notes, not in this repository):
+Choices made in review (independent review by another model family):
 - An invite is used once on the joiner too, and leaving a room ends its
   joins in the same transaction.
 - A key that is already a member is shown the role and history it has;
@@ -413,8 +402,7 @@ the project's working notes, not in this repository):
   approval, and the other admin is asked to second it. A daemon never
   seconds without its own person's approval.
 
-Added after the re-review (by the same reviewer; kept in the project's
-working notes, not in this repository):
+Added after the re-review by the same reviewer:
 - A preview has an identifier (a hash of everything shown) that `accept`
   must carry, so a second preview cannot change what a person approved.
 - The joiner reports the role and history its own log shows. A reviewer
@@ -447,8 +435,7 @@ New on the wire: `peers: true` in an opening request. Addresses used to
 travel only with a digests answer, so a machine whose answers were all
 `same` never learned of another member's address.
 
-Choices made in review (independent review by another model family; kept in
-the project's working notes, not in this repository):
+Choices made in review (independent review by another model family):
 - **Caught up means covered.** A room counts as pulled since start only
   after an exchange with a current member in which every log head that
   member advertised is accepted here. Receiving entries alone does not
@@ -492,8 +479,7 @@ New, and why each is needed now:
 - **Index `records_history`** (migration 9): `history` paged by reading
   the whole room.
 
-Choices made in review (independent review by another model family; kept in
-the project's working notes, not in this repository):
+Choices made in review (independent review by another model family):
 - `room/admin` and `room/remove` only raise a request; nothing is signed
   until a person confirms.
 - Decisions (`confirm`, `net`, accepting a join) are refused by the CLI
@@ -612,21 +598,10 @@ launcher in the core would prevent failures the text conventions do not.
 
 ## D37. The working record is kept outside the repository (2026-11-24)
 
-Research notes, audits, independent reviews, deliberation on the owner's
-decisions and the transcript of the agents' working session were kept in
-`docs/research/`. They paraphrase private discussion, contain dated
-third-party claims that would need checking before publication, and record
-deliberation rather than what the code does. They are kept outside the
-published repository, and `/docs/research/` is ignored. The harness notes,
-which contributors need, moved to [HARNESSES.md](HARNESSES.md).
+Private working notes are kept outside the public repository.
+Contributor-facing harness evidence is in [HARNESSES.md](HARNESSES.md).
 
-Earlier entries cited those files by path. The citations now name the kind
-of source in plain words (for example, an independent review by another
-model family) and say it is kept in the project's working notes; nothing
-else in those entries changed. Test comments and `FINDINGS.md` files were
-changed the same way.
-
-**Revisit if** a reviewed, indexed selection of the record is published.
+**Revisit if** a reviewed selection of the working notes is published.
 
 ## D38. The last core items before publishing (2026-11-24)
 
@@ -661,8 +636,10 @@ What changed, and why each is needed before the repository is public:
   only what follows a message it has seen instead of the whole thread
   again. D35 had left it for later.
 - Tool results and `--json` output write `<`, `>` and `&` as they are.
-  Uninstall leaves the home exactly as it was before install, and `doctor`
-  checks the MCP registration as well as the hook. A CLI call made under a
+  Uninstall removes what install added and restores a hook file a2p2
+  backed up, if nothing else has changed it since; a registration named
+  `a2p2` that existed before install was replaced by install and is not
+  brought back. `doctor` checks the MCP registration as well as the hook. A CLI call made under a
   harness agent's label no longer unregisters that agent's hook.
 - **The tool budget.** The definitions are now 3,991 of the 4,000 compact
   bytes A2 allows (998 tokens by the bytes/4 proxy).

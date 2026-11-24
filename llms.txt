@@ -6,7 +6,7 @@ Turning networking on and approving a join are decisions a person makes at a ter
 
 ## Docs
 
-- [README](README.md): install (from source, with Go or a release binary), connect a harness, send a first message, share a room between two machines, and the main limits.
+- [README](README.md): install (from source or with Go; release binaries come with the first tagged release), connect a harness, send a first message, share a room between two machines, and the main limits.
 - [MCP tools](docs/PROTOCOL.md#6-mcp-tools-golden-file): the seven tool definitions an agent sees.
 - [Local API and CLI](docs/PROTOCOL.md#7-local-api-and-cli): socket calls and command syntax.
 - [Harness notes](docs/HARNESSES.md): which harness versions were checked, the per-run and installed configurations, and what is not yet verified.
