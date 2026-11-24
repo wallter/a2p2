@@ -283,6 +283,7 @@ const (
 	opRegister // lateAgent is registered here (implementation only)
 	opPull     // machine pulls from server
 	opInject   // a record the model cannot express is placed (implementation only)
+	opLevel    // agent sets its level (n: delivery.Level)
 	opMore     // the real exchange's operations follow (pull_differential_test.go)
 )
 
@@ -348,6 +349,8 @@ func (o op) String() string {
 		return fmt.Sprintf("%s pulls from %s%s", o.machine, o.server, pullFlags(o.n))
 	case opInject:
 		return fmt.Sprintf("%s inject %d #%d", o.machine, o.n, o.target)
+	case opLevel:
+		return fmt.Sprintf("%s/%s level %s", o.machine, o.agent, delivery.Level(o.n))
 	}
 	return o.moreString()
 }
@@ -641,6 +644,13 @@ func (h *harness) do(o op, variant int) {
 		}
 	case opInject:
 		h.inject(s, o)
+	case opLevel:
+		l := delivery.Level(o.n)
+		merr := h.w.SetLevel(o.machine, o.agent, l)
+		ierr := s.m.SetLevel(ctx, diffRoom, o.agent, l.String())
+		if a, b := errClass(merr), errClass(ierr); a != b {
+			h.fail("level: model %s, implementation %s", a, b)
+		}
 	default:
 		h.px.do(h, o)
 	}
@@ -1163,6 +1173,12 @@ func (h *harness) compare() {
 		}
 		for _, a := range s.agents {
 			_, iv := h.inbox(n, a)
+			ms := slices.DeleteFunc(h.w.Skipped(n, a), func(e delivery.Entry) bool { return h.before(n, a, e.Pos) })
+			is, err := s.m.Skipped(ctx, diffRoom, a)
+			if err != nil {
+				h.fail("skipped: %v", err)
+			}
+			h.sameEntries("skipped "+string(n)+"/"+a, ms, is)
 			fromStart := h.inboxFromStart(s, a)
 			if !slices.Equal(fromStart, h.implListing(iv)) {
 				h.fail("%s/%s: walking from the start gives\n  %s\nfrom the cursors\n  %s", n, a,
@@ -1266,6 +1282,8 @@ func alphabet() []op {
 		{kind: opInject, machine: m, n: injBadHandled, target: -1},
 		{kind: opInject, machine: m, n: injReplaceReplace, target: -1},
 		{kind: opInject, machine: m, n: injBadThread, target: 0},
+		{kind: opLevel, machine: m, agent: "bob", n: int(delivery.Addressed)},
+		{kind: opLevel, machine: m, agent: "bob", n: int(delivery.All)},
 	}
 }
 
@@ -1284,6 +1302,16 @@ func exhaust(h *harness, ops []op, depth int) int {
 		c.close()
 	}
 	return n
+}
+
+// levelOp draws, now and then, a level change by one of agents on m. It
+// has its own source, so that the other operations of a seeded schedule
+// stay what they were before levels existed.
+func levelOp(r *rand.Rand, m delivery.MachineID, agents []string) (op, bool) {
+	if r.IntN(12) != 0 {
+		return op{}, false
+	}
+	return op{kind: opLevel, machine: m, agent: agents[r.IntN(len(agents))], n: r.IntN(3), same: true}, true
 }
 
 // randomOp draws one operation over machine m with agents; peers are the
@@ -1391,6 +1419,7 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 		runs = 3
 	}
 	r := rand.New(rand.NewPCG(20261123, 3))
+	lr := rand.New(rand.NewPCG(20261124, 11))
 	c := &counts{}
 	total := 0
 	for i := 0; i < runs; i++ {
@@ -1400,6 +1429,9 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 		for j := 0; j < steps && !h.stopped; j++ {
 			h = h.apply(randomOp(r, "M", agents, nil, []int{0, 0, -40 * 24, 2 * 24}))
 			total++
+			if o, ok := levelOp(lr, "M", agents); ok {
+				h = h.apply(o)
+			}
 		}
 		h.close()
 	}
@@ -1415,6 +1447,9 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 			peers := slices.DeleteFunc(slices.Clone(names), func(x delivery.MachineID) bool { return x == m })
 			h = h.apply(randomOp(r, m, machines[m], peers, []int{0, -10, 10}))
 			total++
+			if o, ok := levelOp(lr, m, machines[m]); ok {
+				h = h.apply(o)
+			}
 		}
 		h.close()
 	}

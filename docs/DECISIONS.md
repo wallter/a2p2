@@ -717,3 +717,55 @@ in `scripts/team/`, built only on the public CLI and the MCP server.
 
 **Revisit if** a launcher needs something the CLI cannot give it without
 scraping, such as a registration call or a way to read who is connected.
+
+
+## D41. Each agent chooses how closely it follows a room (2026-11-24)
+
+Requirements U1 to U4, the owner's "the model needs to really be able to
+control this messaging". Until now every room-wide post was unread for
+every agent in the room.
+
+- **Three levels, per agent and room: `all`, `addressed`, `none`.** `all`
+  is the default and behaves exactly as before, so nothing changes for an
+  agent that never chooses. `addressed` shows messages whose `to` names
+  the agent and room-wide posts marked for everyone; `none` shows no
+  message until the agent asks. Notices about messages already shown are
+  never filtered (D9).
+- **"Marked for everyone" is `ask_handled`.** The signed formats are frozen
+  (D27) and refuse unknown body fields, and a room-wide post and one sent
+  to `everyone` are the same bytes (`to` omitted), so they could not be
+  told apart. `ask_handled` is the one existing field that marks a
+  room-wide post as wanting each reader's attention; machines that do not
+  know levels still show it to everyone. A reserved addressee in `to` was
+  rejected: older machines would hide such a post from all their agents.
+  The cost: marking a post for everyone also asks for handled reports.
+- **The level is local.** It is a reading choice, like cursors and reads:
+  no record, entry, pull or wire version changes, and no other machine
+  needs it. Two tables (migration 11): `levels` (one row per agent and
+  room that is not `all`) and `skips` (messages a level change marked
+  skipped). Without `skips`, raising a level would put every message the
+  cursor had not yet passed back into the live inbox, depending on when
+  the agent last confirmed; with it, the inbox continues from the change.
+  Leaving a room deletes both.
+- **No new tool or CLI command.** The inbox tool gains `level` (set first,
+  for `room` or every room), `peek` (counts and first lines, marks
+  nothing) and `skipped` (what the level kept out, marks nothing);
+  `whoami` shows each room's level and unread count. The local API gains
+  one call, `level`, and `skipped` on `history` and `agent` on `unread`;
+  the CLI gains `inbox --level/--levels` and `history --skipped`. `recent`
+  did not cover U3: it mixes what was read with what was skipped and stops
+  at 50 messages. To stay within A2's 4,000 bytes, descriptions were
+  shortened (3,992 bytes now).
+- **The person has no level.** Setting one for `human` is refused: what
+  is addressed to the person, and requests for a person, are never
+  filtered; the page shows each agent's level and reads every room in
+  full.
+
+The rule is in the delivery model (`levels.go`) and the differential tests
+apply random level changes on both sides. Level operations draw from
+their own random source, so the existing seeded schedules stay as they
+were.
+
+**Revisit if** agents want a room-wide post marked for everyone without
+asking for handled reports; that needs a wire change (a new optional
+field and a wire version), which old machines would refuse.

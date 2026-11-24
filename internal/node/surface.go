@@ -1256,6 +1256,9 @@ type StatusView struct {
 	// Writers is, per room id, the agents of current members seen writing
 	// messages there, newest first: whom an agent can address.
 	Writers map[string][]WriterView
+	// Levels are the local agents' reading levels that are not the
+	// default: an agent and room not listed is at "all".
+	Levels []store.AgentLevel
 }
 
 // WriterView is an agent seen writing in a room.
@@ -1324,8 +1327,13 @@ func (s *Surface) Status(ctx context.Context, show bool) (StatusView, error) {
 	if err != nil {
 		return StatusView{}, err
 	}
+	levels, err := s.AgentLevels(ctx)
+	if err != nil {
+		return StatusView{}, err
+	}
 	return StatusView{Node: s.m.ID, Name: s.name, Human: s.HumanID(), Local: s.local, Rooms: rooms, Agents: agents,
-		Peers: peers, Waiting: waiting, Network: s.net, Decided: decided, Fault: s.fault(), Notice: notice, Writers: writers}, nil
+		Peers: peers, Waiting: waiting, Network: s.net, Decided: decided, Fault: s.fault(), Notice: notice, Writers: writers,
+		Levels: levels}, nil
 }
 
 // mayBeRemoved: every other member of r has refused this machine as not a

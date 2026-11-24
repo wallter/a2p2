@@ -89,6 +89,10 @@ type agentState struct {
 	// follows (one, unless the author wrote on two branches after a restore).
 	heads map[MachineID][]RecordID
 	told  []RecordID // messages it was shown whose author's admission was voided
+	// level is how closely the agent follows the room (levels.go); skip
+	// holds the messages a level change marked skipped.
+	level Level
+	skip  map[RecordID]bool
 }
 
 func newAgent(start map[StreamID]int) *agentState {
@@ -98,6 +102,7 @@ func newAgent(start map[StreamID]int) *agentState {
 		seen:    map[string]bool{},
 		seenMsg: map[RecordID]RecordID{},
 		heads:   map[MachineID][]RecordID{},
+		skip:    map[RecordID]bool{},
 	}
 }
 
@@ -114,6 +119,10 @@ func (a *agentState) clone() *agentState {
 	}
 	b.heads = copyHeads(a.heads)
 	b.told = append([]RecordID(nil), a.told...)
+	b.skip = make(map[RecordID]bool, len(a.skip))
+	for k, v := range a.skip {
+		b.skip[k] = v
+	}
 	return &b
 }
 

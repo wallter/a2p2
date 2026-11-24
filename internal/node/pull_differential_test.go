@@ -1150,6 +1150,7 @@ func TestRealExchangeAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T) {
 		agents[k] = v
 	}
 	r := rand.New(rand.NewPCG(20261124, 5))
+	lr := rand.New(rand.NewPCG(20261124, 13))
 	c := &counts{}
 	pc := &pxCounts{}
 	total := 0
@@ -1160,6 +1161,17 @@ func TestRealExchangeAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T) {
 			for _, o := range randomPullOps(r, h, agents) {
 				h = h.apply(o)
 				total++
+			}
+			var held []delivery.MachineID
+			for _, n := range slices.Sorted(maps.Keys(agents)) {
+				if h.sims[n] != nil {
+					held = append(held, n)
+				}
+			}
+			if m := held[lr.IntN(len(held))]; !h.stopped {
+				if o, ok := levelOp(lr, m, agents[m]); ok {
+					h = h.apply(o)
+				}
 			}
 		}
 		if !h.stopped {
