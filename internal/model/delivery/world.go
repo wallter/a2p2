@@ -318,6 +318,9 @@ func (w *World) Send(id MachineID, agent string, msg Msg) (RecordID, error) {
 	if err != nil {
 		return "", err
 	}
+	if msg.Body == "" || (msg.Everyone && len(msg.To) > 0) {
+		return "", ErrNotAllow // no empty text; a room-wide post names no addressees
+	}
 	r := &Record{Kind: Message, Agent: agent, AskHandled: msg.AskHandled}
 	if !msg.Everyone {
 		r.To = append([]Addr(nil), msg.To...)
@@ -403,10 +406,17 @@ func (w *World) amend(id MachineID, agent string, ref RecordID, k Kind, body str
 	if t.rec.Author != m.ID || t.rec.Kind != Message {
 		return "", ErrNotAllow
 	}
+	if k == Replace && body == "" {
+		return "", ErrNotAllow
+	}
 	r := &Record{Kind: k, Agent: agent, Ref: ref}
 	if k == Replace {
-		if _, ver, _ := m.currentText(t); ver != ref {
-			r.Version = m.get(ver).rec.Version
+		// One above the highest version held for the message, text or not:
+		// headers outlive their text, so a version is never reused.
+		for _, id := range m.st.replaced[ref] {
+			if x := m.get(id).rec; x.Author == m.ID && x.Version > r.Version {
+				r.Version = x.Version
+			}
 		}
 		r.Version++
 	}

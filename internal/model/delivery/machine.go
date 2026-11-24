@@ -431,6 +431,9 @@ func (m *Machine) insert(r *Record, body string, hasBody bool, now Time) {
 	switch r.Kind {
 	case Withdraw:
 		st.withdrawn[r.Ref] = append(st.withdrawn[r.Ref], r.ID)
+		if t := st.recs[r.Ref]; t != nil && t.rec.Kind != Message {
+			break // a withdraw refers to a message; naming anything else does nothing
+		}
 		for _, id := range append([]RecordID{r.Ref}, st.replaced[r.Ref]...) {
 			if t := st.recs[id]; t != nil && t.rec.Author == r.Author {
 				m.setBody(t, "", false, now)

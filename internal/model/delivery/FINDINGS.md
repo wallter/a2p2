@@ -15,7 +15,10 @@
 6. A header is held without text only on the holder's evidence: a signed
    withdraw, its own clock past 30 days (never undone), or no history.
    Otherwise the text is "missing here": readers wait, any holder repairs.
-7. Inbox: the highest replace version wins, then the highest id. Expired
+7. A replace takes one above the highest version held, text or not; the
+   highest wins, then the highest id. A withdraw of a non-message does
+   nothing. Writers refuse empty text and room-wide posts naming
+   addressees. Inbox: expired
    before shown: "expired"; withdrawn: nothing; missing: wait. Notices go
    only to agents who saw the original. Late: the agent confirmed a record
    of its author that this one does not follow. Only Seen moves the cursor;
@@ -36,13 +39,12 @@ learned late never undoes a removal.
   building a page and again when releasing a held response, and gives text
   only within its view of the peer's permission. Two grants: the more
   restrictive applies.
-- R3: a request may carry an offer built against the server's last summary
-  (none yet: no offer). The receiver applies R1 and rule 4.
+- R3: a request may carry an offer built on the server's last summary
+  (none: no offer); the receiver applies R1 and rule 4.
 
 Found while modelling: a grant learned after its removal re-admitted the
-machine; pages spent slots on authors the puller refuses (hence the author
-list); an offer with no summary sent everything; the release-time
-permission check had no test until a mutation showed it.
+machine; pages spent slots on authors the puller refuses; an offer with no
+summary sent everything.
 
 ## Properties
 
@@ -52,7 +54,7 @@ its permission, in responses or offers; Q15, convergence when C only ever
 pulls (half the random runs). R1: nothing held by a non-member author.
 
 - Normal run: 10,342 exhaustive plus 1,000 random, 14 s with -race.
-- Deep run: 2,987,106 exhaustive plus 20,000 random, 205 s; passes.
+- Deep run: 2,987,106 exhaustive plus 20,000 random, 181 s; passes.
 
 ## Rejected
 
@@ -78,14 +80,13 @@ Design work: summaries as changes; retire stream state after 30 days.
 
 ## Limits for users
 
-- Machines never awake together exchange nothing, unless a third relays.
+- Machines never awake together exchange nothing without a relay.
 - Away over 30 days, you learn only what expired.
 - Text with every copy lost leaves readers waiting, told why, until expiry.
 - After a restore: re-shown or expired messages, and late ones if it wrote
   before catching up. A crash before confirming re-shows.
 - A member not yet told of a removal still serves the removed machine and
   relays its new records (marked) until it learns.
-- A stale offer costs bytes, never correctness.
 
 ## Requirements to revise
 
