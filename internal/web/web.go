@@ -41,6 +41,9 @@ func Handler(s *node.Surface, token string) http.Handler {
 	for path, file := range map[string]string{"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"} {
 		mux.HandleFunc("GET "+path, sv.static(file))
 	}
+	// No icon: answered empty, so the browser logs no missing file (an
+	// inline data: icon would be refused by the page's own CSP).
+	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.HandleFunc("GET /api/state", sv.api(sv.state))
 	mux.HandleFunc("GET /api/history", sv.api(sv.history))
 	mux.HandleFunc("GET /api/thread", sv.api(sv.thread))
@@ -49,6 +52,7 @@ func Handler(s *node.Surface, token string) http.Handler {
 	mux.HandleFunc("POST /api/seen", sv.api(sv.seen))
 	mux.HandleFunc("POST /api/ack", sv.api(sv.ack))
 	mux.HandleFunc("POST /api/confirm", sv.api(sv.confirm))
+	mux.HandleFunc("POST /api/notice-shown", sv.api(sv.noticeShown))
 	return sv.guard(mux)
 }
 
@@ -152,7 +156,7 @@ func entries(es []node.Entry, err error) (any, error) {
 // state is everything the page shows at once. The human's unread entries
 // and the questions waiting for the person are read without marking
 // anything seen; the page confirms what it showed. A one-time notice comes
-// back once and is recorded as shown, so the page keeps it on screen.
+// back until the page reports it drew it (notice-shown).
 func (sv *server) state(r *http.Request) (any, error) {
 	ctx := r.Context()
 	st, err := sv.s.Status(ctx, true)
@@ -195,6 +199,11 @@ func (sv *server) state(r *http.Request) (any, error) {
 	}
 	out["questions"] = asked
 	return out, nil
+}
+
+// noticeShown records that the page drew the one-time notice.
+func (sv *server) noticeShown(r *http.Request) (any, error) {
+	return map[string]any{}, sv.s.NoticeShown(r.Context())
 }
 
 func (sv *server) history(r *http.Request) (any, error) {

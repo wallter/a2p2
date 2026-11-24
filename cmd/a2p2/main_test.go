@@ -51,3 +51,58 @@ func TestConfirmNotCaughtUpWithoutASecondYesDecidesNothing(t *testing.T) {
 		t.Fatalf("decline: %+v %v asked %v sent %+v", r, err, asked, sent)
 	}
 }
+
+func TestConfirmShowsExactTermsOnceAndInviteDeadline(t *testing.T) {
+	q := localapi.Request{
+		ID: "q_1", Name: "laptop", Deadline: "2026-11-24T12:35:00Z",
+		Text: "add machine 0123 4567 (laptop) to room team (r_1) as an admin, without earlier history",
+	}
+	var out bytes.Buffer
+	printTerms(&out, q)
+	got := out.String()
+	if strings.Count(got, q.Text) != 1 || strings.Count(got, "0123 4567") != 1 ||
+		!strings.Contains(got, q.ID) || !strings.Contains(got, clock(q.Deadline)) ||
+		!strings.Contains(got, "chose its own name") {
+		t.Fatalf("request terms shown: %q", got)
+	}
+}
+
+func TestAlertsPointAtTheCommandForRequestsAndQuestions(t *testing.T) {
+	var out bytes.Buffer
+	printAlert(&out, localapi.Alert{Kind: node.AlertRequest, ID: "q_1", Room: "r_1", Text: "add machine 0123"})
+	printAlert(&out, localapi.Alert{Kind: node.AlertQuestion, ID: "m1", Room: "r_1", Text: "bot@1a2b3c4d asks: Ship?"})
+	printAlert(&out, localapi.Alert{Kind: node.AlertNetwork, Text: "networking is on, not listening: busy"})
+	got := out.String()
+	for _, want := range []string{"Networking\n  networking is on, not listening: busy", "a2p2 net off", "Review with a2p2 confirm q_1", "Question m1 in room r_1", "bot@1a2b3c4d asks: Ship?",
+		"a2p2 send --room r_1 --reply-to m1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("alerts output %q lacks %q", got, want)
+		}
+	}
+}
+
+func TestTraceSaysWhatACopyReportIsInPlainWords(t *testing.T) {
+	var out bytes.Buffer
+	printTrace(&out, localapi.TraceResp{ID: "m1", Room: "r_1", Saved: true, Reason: store.ReasonLive,
+		Copies: []localapi.Copy{{Node: "0123456789abcdef", At: "2026-11-24T12:00:00Z", Member: true}}})
+	got := out.String()
+	if !strings.Contains(got, copyReportWords) || !strings.Contains(got, "available on this machine") ||
+		strings.Contains(got, "same position") {
+		t.Fatalf("trace: %q", got)
+	}
+}
+
+func TestCLIErrorsSayWhatToDoWithoutRuleCodes(t *testing.T) {
+	for in, want := range map[string]string{
+		"bad invite token: bad_base64 (S2): token":                 "Paste the whole invite",
+		`"bob@12345678" is not an agent of a machine in this room`: "a2p2 room list ROOM",
+		"no such request": "a2p2 confirm to list them",
+		"ask_handled is only for a post to everyone":       "leave out --to",
+		`"x" is not an agent id (label@node, as in peers)`: "human@1a2b3c4d",
+	} {
+		got := cliError(&localapi.Error{User: true, Msg: in}).Error()
+		if !strings.Contains(got, want) || strings.Contains(got, "(S") || strings.Contains(got, "as in peers") {
+			t.Errorf("%q -> %q, want it to contain %q", in, got, want)
+		}
+	}
+}

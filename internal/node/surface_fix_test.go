@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -164,24 +165,29 @@ func TestV02NoticeFromASchemaOneDatabaseIsShownToAPersonOnceEver(t *testing.T) {
 	seed := make([]byte, ed25519.SeedSize)
 	e := &surfEnv{t: t, path: loadV02(t), key: ed25519.NewKeyFromSeed(seed)}
 	e.open()
-	// An agent's status and a run that never showed it leave it due.
-	for i := 0; i < 2; i++ {
-		if st, err := e.s.Status(ctx, false); err != nil || st.Notice != NoticeV02 {
-			t.Fatalf("agent status %d: %q %v", i, st.Notice, err)
-		}
-		e.restart()
+	// An agent's status does not carry it; a person's status carries it,
+	// however often and across restarts, until a surface reports that it
+	// was shown (printed by the CLI, drawn by the page).
+	if st, err := e.s.Status(ctx, false); err != nil || st.Notice != "" {
+		t.Fatalf("agent status: %q %v", st.Notice, err)
 	}
 	if !strings.Contains(NoticeV02, "removed the messages and rooms") || !strings.Contains(NoticeV02, "room create") {
 		t.Fatalf("notice wording: %q", NoticeV02)
 	}
-	if st, err := e.s.Status(ctx, true); err != nil || st.Notice != NoticeV02 {
-		t.Fatalf("shown to a person: %q %v", st.Notice, err)
+	for i := 0; i < 2; i++ {
+		if st, err := e.s.Status(ctx, true); err != nil || st.Notice != NoticeV02 {
+			t.Fatalf("for a person %d, not yet shown: %q %v", i, st.Notice, err)
+		}
+		e.restart()
+	}
+	if err := e.s.NoticeShown(ctx); err != nil {
+		t.Fatal(err)
 	}
 	if st, _ := e.s.Status(ctx, true); st.Notice != "" {
-		t.Fatalf("shown twice in a run: %q", st.Notice)
+		t.Fatalf("after it was shown: %q", st.Notice)
 	}
 	e.restart()
-	if st, _ := e.s.Status(ctx, false); st.Notice != "" {
+	if st, _ := e.s.Status(ctx, true); st.Notice != "" {
 		t.Fatalf("shown again after a restart: %q", st.Notice)
 	}
 	if hist, err := e.s.History(ctx, "", "", 0); err != nil || len(hist) != 0 {
@@ -198,12 +204,18 @@ func TestV02NoticeFromASchemaOneDatabaseIsShownToAPersonOnceEver(t *testing.T) {
 
 func TestHistoryPagesByCreatedAndIDAndABoundaryWithdrawnSinceStillWorks(t *testing.T) {
 	ctx := context.Background()
+	// Every message is written in the same millisecond: the pages are
+	// told apart by id alone.
 	e := newSurf(t)
+	at := time.Now().Truncate(time.Millisecond)
+	e.now = func() time.Time { return at }
+	e.restart()
 	alice := e.agent("alice")
 	var ids []string
 	for i := 0; i < 5; i++ {
 		ids = append(ids, e.send(SendInput{Agent: alice, Text: "m" + string(rune('0'+i))}).ID)
 	}
+	slices.Sort(ids) // history's order for equal times
 	page := func(before string, n int) []string {
 		t.Helper()
 		es, err := e.s.History(ctx, "", before, n)
@@ -338,13 +350,15 @@ func TestQuestionsForThePersonAreListedUntilAnsweredWhateverTheBacklog(t *testin
 		}
 		return out
 	}
-	if got := ids(); len(got) != 2 || got[0] != q1.ID || got[1] != q2.ID {
+	// Both, in (created, id) order; the two may share a millisecond.
+	if got := ids(); len(got) != 2 || !slices.Contains(got, q1.ID) || !slices.Contains(got, q2.ID) {
 		t.Fatalf("questions %v, want %s %s", got, q1.ID, q2.ID)
 	}
 	// Answered: the reply, then seen and handled, as the page does it.
 	e.send(SendInput{Agent: human, ReplyTo: q1.ID, Text: "main"})
 	qs, _ := e.s.Questions(ctx)
-	if res, err := e.s.Seen(ctx, human, []store.Read{{Key: qs[0].Key, Version: qs[0].Version}}); err != nil || !res[0].Confirmed {
+	i := slices.IndexFunc(qs, func(q Entry) bool { return q.ID == q1.ID })
+	if res, err := e.s.Seen(ctx, human, []store.Read{{Key: qs[i].Key, Version: qs[i].Version}}); err != nil || !res[0].Confirmed {
 		t.Fatalf("seen: %+v %v", res, err)
 	}
 	if got := ids(); len(got) != 1 || got[0] != q2.ID {

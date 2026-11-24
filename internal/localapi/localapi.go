@@ -271,10 +271,15 @@ type (
 	}
 	// Network is a machine's networking state. NetResp is the decision
 	// recorded; it applies when the daemon next starts.
+	// Network is a networking decision. In status it is the latest one;
+	// Applied and Reason are set only when what runs differs from it: the
+	// state in effect (outbound when on cannot listen) and why.
 	Network struct {
 		State   string `json:"state"`
 		Listen  string `json:"listen,omitempty"`
 		Request string `json:"request,omitempty"`
+		Applied string `json:"applied,omitempty"`
+		Reason  string `json:"reason,omitempty"`
 	}
 	NetResp struct {
 		Network
@@ -283,8 +288,11 @@ type (
 	}
 	StatusReq struct {
 		// ShowNotice: a person is shown this status, so a one-time notice
-		// is returned and recorded as shown.
+		// still to be shown is returned (not recorded as shown).
 		ShowNotice bool `json:"show_notice,omitempty"`
+		// NoticeShown: the caller printed or drew the notice; it is
+		// recorded as shown before the status is read.
+		NoticeShown bool `json:"notice_shown,omitempty"`
 	}
 	RoomListReq struct {
 		Room string `json:"room,omitempty"`
@@ -324,6 +332,9 @@ type (
 		// Waiting is the number of requests in this room waiting for this
 		// machine's person.
 		Waiting int `json:"waiting"`
+		// MayBeRemoved: every other member has kept refusing this machine
+		// as not a member (node.MaybeRemovedAfter); a display rule only.
+		MayBeRemoved bool `json:"may_be_removed,omitempty"`
 	}
 	RoomsResp struct {
 		Rooms []Room `json:"rooms"`
@@ -453,7 +464,8 @@ func entriesOf(es []node.Entry) []Entry {
 // RoomOf renders a room as room/list shows it.
 func RoomOf(r node.RoomInfo) Room {
 	out := Room{ID: r.ID, Label: r.Label, Members: []Member{}, Admins: append([]string{}, r.Admins...), Pending: []Change{},
-		NoEffect: []NoEffect{}, Forks: []Fork{}, Limits: append([]string{}, r.Limits...), Waiting: len(r.Requests)}
+		NoEffect: []NoEffect{}, Forks: []Fork{}, Limits: append([]string{}, r.Limits...), Waiting: len(r.Requests),
+		MayBeRemoved: r.MayBeRemoved}
 	for _, m := range r.Members {
 		out.Members = append(out.Members, Member{Node: m.Node, Name: m.Name, Admin: m.Admin})
 	}
@@ -516,7 +528,7 @@ func PreviewOf(p node.Preview) PreviewResp {
 func StatusOf(st node.StatusView, listen []string, info Info) Status {
 	out := Status{Node: st.Node, Name: st.Name, Human: st.Human, Local: st.Local, Rooms: roomsOf(st.Rooms),
 		Agents: st.Agents, Peers: []Peer{}, Listen: listen, Version: info.Version, PID: info.PID, Notice: st.Notice,
-		Network: NetworkOf(st.Network), Waiting: st.Waiting}
+		Network: statusNetwork(st), Waiting: st.Waiting}
 	if out.Listen == nil {
 		out.Listen = []string{}
 	}
@@ -530,6 +542,20 @@ func StatusOf(st node.StatusView, listen []string, info Info) Status {
 		out.UI = info.UIURL()
 	}
 	return out
+}
+
+// statusNetwork is the latest decision, with what is applied when it
+// differs.
+func statusNetwork(st node.StatusView) Network {
+	n := NetworkOf(st.Network)
+	switch {
+	case st.Decided.State != "" && st.Decided.Request != st.Network.Request:
+		n = NetworkOf(st.Decided)
+		n.Applied, n.Reason = st.Network.State, "being applied"
+	case st.Fault != "" && st.Network.State == node.NetworkOn:
+		n.Applied, n.Reason = node.NetworkOutbound, st.Fault
+	}
+	return n
 }
 
 // Handler serves the local API over s.
@@ -671,6 +697,11 @@ func Handler(s *node.Surface, info Info) http.Handler {
 		return out, err
 	})
 	handle(mux, "status", func(ctx context.Context, r StatusReq) (Status, error) {
+		if r.NoticeShown {
+			if err := s.NoticeShown(ctx); err != nil {
+				return Status{}, err
+			}
+		}
 		st, err := s.Status(ctx, r.ShowNotice)
 		return StatusOf(st, s.Addrs(), info), err
 	})
@@ -681,7 +712,7 @@ func Handler(s *node.Surface, info Info) http.Handler {
 	// this user can call this socket.
 	handle(mux, "net", func(ctx context.Context, r NetReq) (NetResp, error) {
 		n, err := s.SetNetwork(ctx, node.Network{State: r.State, Listen: r.Listen})
-		return NetResp{Network: NetworkOf(n), Text: node.NetworkText(n), Applies: "when the daemon next starts"}, err
+		return NetResp{Network: NetworkOf(n), Text: node.NetworkText(n), Applies: "now: the daemon applies it at once"}, err
 	})
 	handle(mux, "stop", func(ctx context.Context, _ Empty) (Empty, error) {
 		if info.Stop != nil {

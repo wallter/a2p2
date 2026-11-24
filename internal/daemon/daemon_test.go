@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -114,7 +115,12 @@ type machine struct {
 	c    *localapi.Client
 	done chan error
 	node string
-	x    *node.Exchange // this run's pull exchange
+
+	realBind bool // listen on the decided address, not through ln
+
+	mu        sync.Mutex
+	xx        *node.Exchange // the current run's pull exchange
+	onHandler func(path string, enter bool)
 }
 
 // newMachine starts a machine with networking on, decided through the
@@ -129,6 +135,11 @@ func newMachine(t *testing.T, name string) *machine {
 // machine starts with networking off, as a new one does.
 func newMachineWith(t *testing.T, name string, prepare func(home string)) *machine {
 	t.Helper()
+	return newMachineOpts(t, name, prepare, false)
+}
+
+func newMachineOpts(t *testing.T, name string, prepare func(home string), realBind bool) *machine {
+	t.Helper()
 	home, err := os.MkdirTemp("/tmp", "a2p2")
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +151,7 @@ func newMachineWith(t *testing.T, name string, prepare func(home string)) *machi
 	if prepare != nil {
 		prepare(home)
 	}
-	m := &machine{t: t, home: home, ln: newStableListener(t)}
+	m := &machine{t: t, home: home, ln: newStableListener(t), realBind: realBind}
 	m.start()
 	t.Cleanup(m.stop)
 	return m
@@ -152,8 +163,13 @@ func (m *machine) start() {
 	m.done = make(chan error, 1)
 	done, ready := m.done, make(chan struct{})
 	go func() {
-		done <- RunWith(context.Background(), m.home, "test", RunOpts{PeerListener: m.ln.view(), Ready: func() { close(ready) },
-			Exchange: func(x *node.Exchange) { m.x = x }})
+		var listen func(string) (net.Listener, error) // a real bind on the decided address
+		if !m.realBind {
+			listen = func(string) (net.Listener, error) { return m.ln.view(), nil }
+		}
+		done <- RunWith(context.Background(), m.home, "test", RunOpts{
+			Listen: listen, Ready: func() { close(ready) },
+			Exchange: func(x *node.Exchange) { m.setX(x) }, Handler: m.hook})
 	}()
 	select {
 	case <-ready:
@@ -167,25 +183,56 @@ func (m *machine) start() {
 	m.node = call[localapi.Status](m, "status", localapi.Empty{}).Node
 }
 
-// setNet records a networking decision through the local API's net call
-// and restarts the daemon to apply it.
+// setNet records a networking decision through the local API's net call,
+// as a2p2 net does, and waits for the daemon to apply it by itself.
 func (m *machine) setNet(state string) localapi.Status {
 	m.t.Helper()
 	req := localapi.NetReq{State: state}
 	if state == node.NetworkOn {
 		req.Listen = m.ln.ln.Addr().String()
 	}
+	return m.decide(req)
+}
+
+func (m *machine) decide(req localapi.NetReq) localapi.Status {
+	m.t.Helper()
 	res := call[localapi.NetResp](m, "net", req)
-	if res.State != state || res.Request == "" {
-		m.t.Fatalf("net %s = %+v", state, res)
+	if res.State != req.State || res.Request == "" {
+		m.t.Fatalf("net %s = %+v", req.State, res)
 	}
-	m.stop()
-	m.start()
-	st := call[localapi.Status](m, "status", localapi.Empty{})
-	if st.Network.State != state || st.Network.Request != res.Request {
-		m.t.Fatalf("after net %s and a restart: %+v", state, st.Network)
+	var st localapi.Status
+	eventually(m.t, "the daemon to apply net "+req.State, func() bool {
+		st = localapi.Status{}
+		err := m.c.Call(context.Background(), "status", localapi.Empty{}, &st)
+		return err == nil && st.Network.Request == res.Request && st.Network.Reason != "being applied"
+	})
+	if st.Network.State != req.State {
+		m.t.Fatalf("after net %s: %+v", req.State, st.Network)
 	}
 	return st
+}
+
+func (m *machine) setX(x *node.Exchange) {
+	m.mu.Lock()
+	m.xx = x
+	m.mu.Unlock()
+}
+
+// exchange is the pull exchange of the daemon's current run.
+func (m *machine) exchange() *node.Exchange {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.xx
+}
+
+// hook passes the daemon's handler entries and exits to onHandler.
+func (m *machine) hook(path string, enter bool) {
+	m.mu.Lock()
+	f := m.onHandler
+	m.mu.Unlock()
+	if f != nil {
+		f(path, enter)
+	}
 }
 
 // ui calls the page's API of m with its token.
@@ -455,20 +502,36 @@ func TestV02NoticeFromASchemaOneFileIsShownOnceEverThroughStatus(t *testing.T) {
 	if st := call[localapi.Status](newMachineWith(t, "fresh", nil), "status", localapi.StatusReq{ShowNotice: true}); st.Notice != "" {
 		t.Fatalf("notice on a new home: %q", st.Notice)
 	}
+	logs := captureLog(t)
 	m := newMachineWith(t, "old", func(home string) { loadV02(t, home) })
-	// An agent's status (whoami, peers) does not use it up, nor does a
-	// run in which no person saw it.
-	if st := call[localapi.Status](m, "status", localapi.Empty{}); st.Notice != node.NoticeV02 {
+	// An agent's status (whoami, peers) does not carry it. A person's
+	// status and the page's state return it, across a restart, until the
+	// CLI or the page reports that it printed or drew it.
+	if st := call[localapi.Status](m, "status", localapi.Empty{}); st.Notice != "" {
 		t.Fatalf("agent status: %q", st.Notice)
 	}
-	m.stop()
-	m.start()
-	st := call[localapi.Status](m, "status", localapi.StatusReq{ShowNotice: true})
-	if st.Notice != node.NoticeV02 || len(st.Rooms) != 1 || st.Rooms[0].Label != node.LocalLabel {
-		t.Fatalf("shown: notice %q rooms %+v", st.Notice, st.Rooms)
+	var page struct {
+		Status localapi.Status `json:"status"`
+	}
+	for i := 0; i < 2; i++ {
+		st := call[localapi.Status](m, "status", localapi.StatusReq{ShowNotice: true})
+		if st.Notice != node.NoticeV02 || len(st.Rooms) != 1 || st.Rooms[0].Label != node.LocalLabel {
+			t.Fatalf("not yet shown %d: notice %q rooms %+v", i, st.Notice, st.Rooms)
+		}
+		if code := m.ui("GET", "/api/state", nil, &page); code != 200 || page.Status.Notice != node.NoticeV02 {
+			t.Fatalf("page state %d: %d %q", i, code, page.Status.Notice)
+		}
+		m.stop()
+		m.start()
+	}
+	if code := m.ui("POST", "/api/notice-shown", map[string]any{}, nil); code != 200 {
+		t.Fatalf("notice-shown: %d", code)
 	}
 	if st := call[localapi.Status](m, "status", localapi.StatusReq{ShowNotice: true}); st.Notice != "" {
 		t.Fatalf("shown twice: %q", st.Notice)
+	}
+	if strings.Contains(logs.String(), "removed the messages") {
+		t.Fatal("the notice is written to the daemon's log")
 	}
 	if h := call[localapi.Entries](m, "history", localapi.HistoryReq{}); len(h.Entries) != 0 {
 		t.Fatalf("v0.2 messages shown: %+v", h)
@@ -534,6 +597,14 @@ func TestNetworkStatesAfterARestart(t *testing.T) {
 	join(t, a, b, room, localapi.InviteReq{}, false)
 	bea := b.agent("bea")
 	tok := call[localapi.InviteResp](a, "room/invite", localapi.InviteReq{Room: room}).Token
+	// A join accepted and waiting for a's person: join polling, had it
+	// run while off, would dial a.
+	room2 := call[localapi.Room](a, "room/create", localapi.RoomReq{Room: "second"}).ID
+	tok2 := call[localapi.InviteResp](a, "room/invite", localapi.InviteReq{Room: room2}).Token
+	pv2 := call[localapi.PreviewResp](b, "room/join", localapi.JoinReq{Token: tok2})
+	if acc := call[localapi.AcceptResp](b, "room/join/accept", localapi.AcceptReq{Token: tok2, Preview: pv2.Preview}); acc.State != node.JoinStateAccepted {
+		t.Fatalf("seeded join: %+v", acc)
+	}
 
 	st := b.setNet(node.NetworkOff)
 	if len(st.Listen) != 0 {
@@ -612,21 +683,39 @@ func TestNetworkStatesAfterARestart(t *testing.T) {
 func TestStopDuringAWaitingCallEndsItBeforeTheStoreCloses(t *testing.T) {
 	m := newMachineWith(t, "solo", nil)
 	ann := m.agent("ann")
+	entered, left := make(chan struct{}), make(chan struct{})
+	m.mu.Lock()
+	m.onHandler = func(path string, enter bool) {
+		if path != "/v1/inbox" {
+			return
+		}
+		if enter {
+			close(entered)
+		} else {
+			close(left)
+		}
+	}
+	m.mu.Unlock()
 	res := make(chan error, 1)
 	go func() {
 		res <- m.c.Call(context.Background(), "inbox", localapi.InboxReq{Agent: ann, WaitMS: 100000}, &localapi.InboxResp{})
 	}()
-	time.Sleep(300 * time.Millisecond) // the read is waiting
+	select {
+	case <-entered: // the read is in its handler
+	case <-time.After(10 * time.Second):
+		t.Fatal("the read did not reach its handler")
+	}
 	start := time.Now()
-	m.stop()
+	m.stop() // returns once the daemon has returned, its store closed
 	if d := time.Since(start); d > 5*time.Second {
 		t.Fatalf("stop took %v with a waiting read", d)
 	}
 	select {
-	case <-res:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the waiting read outlived the daemon")
+	case <-left:
+	default:
+		t.Fatal("the daemon returned while the waiting read was still in its handler")
 	}
+	<-res
 }
 
 func TestPageDecisionNeedsTheExactOriginAndShowsTheFullFingerprint(t *testing.T) {
@@ -697,7 +786,7 @@ func TestStopReleasesAHeldPullAtOnce(t *testing.T) {
 	ann := a.agent("ann")
 	join(t, a, b, room, localapi.InviteReq{}, false)
 	bea := b.agent("bea")
-	held := a.x.NextHold(room, b.node)
+	held := a.exchange().NextHold(room, b.node)
 	// The message wakes any hold already there; the pull that follows it
 	// is the one held.
 	call[localapi.SendResp](a, "send", localapi.SendReq{Agent: ann, Room: room, Text: "ping", To: []string{bea}})
@@ -754,4 +843,31 @@ func TestAMachineThatDoesNotListenReachesItsPeerAfterARestartFromStoredAddresses
 	if es := inboxWait(b, bea); len(es) != 1 || es[0].ID != msg.ID {
 		t.Fatalf("after the restart: %+v", es)
 	}
+}
+
+// lockedBuffer is a log destination safe for the daemon's goroutines.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// captureLog sends the daemon's log to a buffer for the rest of the test.
+func captureLog(t *testing.T) *lockedBuffer {
+	buf := &lockedBuffer{}
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return buf
 }

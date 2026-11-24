@@ -48,17 +48,21 @@ type ForkInfo struct {
 
 // RoomInfo is one room as room/list shows it.
 type RoomInfo struct {
-	ID       string
-	Label    string
-	CreateID string
-	Gen      int64
-	Members  []MemberInfo
-	Admins   []string
-	Pending  []LogChange // waiting for a matching entry from another admin [M4]
-	NoEffect []LogChange // with reasons (A4)
-	Forks    []ForkInfo
-	Limits   []string
-	Requests []store.Request // waiting for this machine's person
+	// MayBeRemoved: every other member has refused this machine as not a
+	// member for MaybeRemovedAfter (a display rule; nothing is left or
+	// deleted).
+	MayBeRemoved bool
+	ID           string
+	Label        string
+	CreateID     string
+	Gen          int64
+	Members      []MemberInfo
+	Admins       []string
+	Pending      []LogChange // waiting for a matching entry from another admin [M4]
+	NoEffect     []LogChange // with reasons (A4)
+	Forks        []ForkInfo
+	Limits       []string
+	Requests     []store.Request // waiting for this machine's person
 }
 
 // Limits stated for a room's shape (REQUIREMENTS section 6).
@@ -74,6 +78,13 @@ const (
 	AlertRequest = "request"
 	AlertFork    = "fork"
 	AlertMissing = "missing" // a record's text not here a day after it was written
+	// AlertQuestion: a message for this machine's person not yet answered
+	// or dismissed (Surface.Questions).
+	AlertQuestion = "question"
+	// AlertNetwork: networking is on but this machine does not listen.
+	AlertNetwork = "network"
+	// AlertRemoved: every other member keeps refusing this machine.
+	AlertRemoved = "removed"
 )
 
 // MissingAlertAfter is how long a record's text may be missing before a
@@ -213,19 +224,95 @@ func (r *Rooms) Alerts(ctx context.Context) ([]Alert, error) {
 			}
 		}
 	}
-	ms, err := r.m.st.MissingBefore(ctx, r.m.now().Add(-MissingAlertAfter), maxMissingAlerts)
+	ms, err := r.missing(ctx, labels)
 	if err != nil {
 		return nil, err
 	}
 	for _, m := range ms {
-		if _, ok := labels[m.Room]; !ok {
-			continue
-		}
 		out = append(out, Alert{Kind: AlertMissing, ID: m.ID, Room: m.Room, Since: m.Created,
 			Text: "the text of record " + m.ID + " has not arrived here in the day since it was written; " +
 				"no machine this one reached could hand it over"})
 	}
 	return out, nil
+}
+
+// missing lists up to maxMissingAlerts records of rooms held here whose
+// text has been missing for MissingAlertAfter and would be shown to this
+// machine's readers: not past retention by this machine's clock, readable
+// under this machine's permission (not undecided), and after where its
+// readers start. The rule is applied before the limit, page by page.
+func (r *Rooms) missing(ctx context.Context, rooms map[string]string) ([]store.MissingRecord, error) {
+	now := r.m.now()
+	var out []store.MissingRecord
+	var after store.MissingRecord
+	for len(out) < maxMissingAlerts {
+		page, err := r.m.st.MissingBetween(ctx, now.Add(-store.Retention), now.Add(-MissingAlertAfter), after, maxMissingAlerts)
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range page {
+			if _, ok := rooms[m.Room]; !ok {
+				continue
+			}
+			ok, err := r.wantedText(ctx, m)
+			if err != nil {
+				return nil, err
+			}
+			if ok && len(out) < maxMissingAlerts {
+				out = append(out, m)
+			}
+		}
+		if len(page) < maxMissingAlerts {
+			break
+		}
+		after = page[len(page)-1]
+	}
+	return out, nil
+}
+
+// wantedText reports whether a reader here would wait for m's text: this
+// machine may hold it (readable, not undecided or hidden) and it is after
+// the reading frontier of the author's stream.
+func (r *Rooms) wantedText(ctx context.Context, m store.MissingRecord) (bool, error) {
+	r.mu.Lock()
+	rl, err := r.room(m.Room)
+	if err != nil {
+		r.mu.Unlock()
+		return false, nil // left meanwhile
+	}
+	perm, member := rl.st.Permissions[r.m.ID]
+	from := readFrom(perm, rl.lookup(nil))
+	r.mu.Unlock()
+	if !member {
+		return false, nil
+	}
+	wanted := false
+	err = r.m.view(ctx, m.Room, func(v *roomView) error {
+		h, err := v.get(m.ID)
+		if err != nil || h == nil {
+			return err
+		}
+		if h.author == r.m.ID {
+			wanted = true
+			return nil
+		}
+		acc, err := textAccess(v, perm, h.author, h.f, h.id)
+		if err != nil || acc != store.TextReadable {
+			return err
+		}
+		for _, id := range from[h.author] {
+			head, err := v.get(id)
+			if err != nil {
+				return err
+			}
+			if head == nil || head.author != h.author || head.id == h.id || v.descends(head, h) {
+				return nil // start undecided, or at or before the start
+			}
+		}
+		wanted = true
+		return nil
+	})
+	return wanted, err
 }
 
 // requestText says exactly what approving q does, naming the machine by

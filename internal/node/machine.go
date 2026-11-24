@@ -36,6 +36,27 @@ func (e *UserError) Error() string { return e.Msg }
 
 func userErr(format string, a ...any) error { return &UserError{fmt.Sprintf(format, a...)} }
 
+// writeErr says in plain words why a message could not be written and
+// what to do, without the protocol's rule codes.
+func writeErr(err error) error {
+	var r *core.Refusal
+	if !errors.As(err, &r) {
+		return err
+	}
+	switch {
+	case r.Code == core.CodeTooLarge && r.Field == "body":
+		return userErr("the message is too long: its text and choices may take about 16 KB (%d bytes). "+
+			"Shorten it, or split it into several messages", core.MaxBodyBytes)
+	case r.Code == core.CodeTooLarge || r.Code == core.CodeTooManyHeads:
+		return userErr("the message has too many addressees or choices to fit; send it to fewer, or to everyone")
+	case r.Field == "text" || r.Field == "choices":
+		return userErr("the %s is not valid UTF-8 text; send plain text", r.Field)
+	case r.Field == "to":
+		return userErr("the message names too many addressees; send it to everyone instead")
+	}
+	return userErr("the message could not be written (%s)", r.Code)
+}
+
 // Errors of the record operations. All are user errors.
 var (
 	ErrNotHeld      = &UserError{"record not held here"}
@@ -401,7 +422,7 @@ func (m *Machine) write(ctx context.Context, room, agent string, decide func(*ro
 		f.Epoch, f.Created = epoch, now
 		rec, err := core.NewRecord(m.key, f)
 		if err != nil {
-			return nil, userErr("cannot write: %v", err)
+			return nil, writeErr(err)
 		}
 		return rec.Verified()
 	})

@@ -3,40 +3,68 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>a2p2</title>
+<title>a2p2 rooms</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+<div id="connection" role="status">Connecting to this machine…</div>
 <div id="authfail" hidden>
-  <p>This page needs a fresh link. Run <code>a2p2 ui</code> in a terminal and open the address it prints.</p>
+  <h1>Open a fresh link</h1>
+  <p>Run <code>a2p2 ui</code> in a terminal and open the address it prints.</p>
 </div>
 <div id="app" hidden>
-  <aside id="side">
+  <aside id="side" aria-label="Rooms and machine details">
     <h1>a2p2</h1>
-    <section><h2>Rooms</h2><ul id="rooms" class="list"></ul></section>
-    <section><h2>Node</h2><div id="node"></div></section>
+    <nav aria-labelledby="rooms-title">
+      <h2 id="rooms-title">Rooms</h2>
+      <ul id="rooms" class="list"></ul>
+    </nav>
+    <details class="machine-details">
+      <summary>Room and machine details</summary>
+      <div id="node"></div>
+    </details>
   </aside>
   <main>
     <div id="notice" class="notice" hidden></div>
-    <section id="needs" hidden><h2>Needs you</h2><div id="outcome" class="sub"></div><div id="requests"></div><div id="alerts"></div><div id="questions"></div></section>
-    <header id="roomhead"></header>
-    <div id="empty" hidden>
-      <p><strong>Nothing here yet.</strong></p>
-      <p>Connect a coding agent by running <code>a2p2 install claude</code>, then start a session.</p>
-      <p>Messages from your agents will show up in this window, and you can write back from the box below.</p>
-    </div>
-    <div id="stream"><button id="older" hidden>Load older messages</button><div id="msgs"></div></div>
-    <form id="compose">
-      <div id="replying" hidden></div>
-      <div class="row">
-        <select id="to" title="Recipients"></select>
-        <textarea id="text" rows="2" placeholder="Write a message. Enter sends, Shift+Enter adds a line."></textarea>
-        <button type="submit">Send</button>
+    <section id="needs" aria-labelledby="needs-title" hidden>
+      <h2 id="needs-title">Needs you</h2>
+      <div id="outcome" class="sub" role="status"></div>
+      <div id="requests"></div>
+      <div id="alerts"></div>
+      <div id="questions"></div>
+    </section>
+    <section id="conversation" aria-labelledby="roomhead">
+      <h2 id="roomhead" tabindex="-1"></h2>
+      <div id="roomnote" class="notice" role="status" hidden></div>
+      <div id="stream" role="region" aria-label="Room history" tabindex="0">
+        <button id="older" type="button" hidden>Load older messages</button>
+        <div id="empty" hidden>
+          <h3>No messages in this room yet</h3>
+          <p>Write the first message below.</p>
+          <p id="install-tip" hidden>No coding agent is connected yet: run <code>a2p2 install claude</code> (or codex, agy), then start a session.</p>
+        </div>
+        <div id="msgs"></div>
       </div>
-      <div id="err" role="alert"></div>
-    </form>
+      <form id="compose" aria-label="Send a message">
+        <div id="replying" hidden></div>
+        <div class="row">
+          <label for="text">Message</label>
+          <textarea id="text" rows="2" aria-describedby="send-help"></textarea>
+          <div class="send-row">
+            <label for="to">To</label>
+            <select id="to"></select>
+            <button type="submit">Send</button>
+          </div>
+        </div>
+        <div id="send-help" class="sub">Enter to send. Shift+Enter for a new line.</div>
+        <div id="err" role="alert"></div>
+      </form>
+    </section>
   </main>
-  <dialog id="trace"><div id="tracebody"></div><button id="traceclose" type="button">Close</button></dialog>
+  <dialog id="trace" aria-labelledby="dialog-title">
+    <div id="tracebody"></div>
+    <button id="traceclose" type="button">Close</button>
+  </dialog>
 </div>
 <script src="/app.js"></script>
 </body>

@@ -59,7 +59,24 @@ type SurfaceOpts struct {
 	Addrs  func() []string // where joiners and peers reach this machine; empty: no listener
 	// Network is the networking state this run applies (zero: off).
 	Network Network
+	// NetworkFault, if set, says why networking on does not listen (the
+	// address could not be bound, or the listener stopped); "" when it does.
+	NetworkFault func() string
+	// OnNetwork, if set, is called after a networking decision is
+	// recorded: the daemon applies it at once.
+	OnNetwork func(Network)
+	// NotMember, if set, lists the peers that keep refusing this machine
+	// as not a member of a room, with since when (Exchange.NotMemberSince).
+	NotMember func(room string) map[string]time.Time
 }
+
+// MaybeRemovedAfter is how long every other member of a room must have
+// refused this machine as not a member before the surfaces say it may
+// have been removed.
+const MaybeRemovedAfter = 10 * time.Minute
+
+// MaybeRemovedText is what the surfaces say of such a room.
+const MaybeRemovedText = "this machine may have been removed from this room; ask an admin"
 
 // Surface serves the surfaces of one machine.
 type Surface struct {
@@ -71,6 +88,9 @@ type Surface struct {
 	addrs func() []string
 	local string
 	net   Network
+	fault func() string
+	onNet func(Network)
+	notMb func(room string) map[string]time.Time
 	// waiting, if set (tests), is called each time Inbox starts to wait:
 	// a readiness barrier.
 	waiting func()
@@ -81,7 +101,10 @@ type Surface struct {
 // registers the human.
 func OpenSurface(ctx context.Context, m *Machine, r *Rooms, o SurfaceOpts) (*Surface, error) {
 	s := &Surface{m: m, r: r, j: o.Joiner, book: o.Book, name: o.Name, addrs: o.Addrs, local: localRoomID(m.ID),
-		net: o.Network}
+		net: o.Network, fault: o.NetworkFault, onNet: o.OnNetwork, notMb: o.NotMember}
+	if s.fault == nil {
+		s.fault = func() string { return "" }
+	}
 	if s.net.State == "" {
 		s.net.State = NetworkOff
 	}
@@ -135,21 +158,27 @@ func (s *Surface) LocalRoom() string { return s.local }
 // HumanID is the agent id of this machine's person.
 func (s *Surface) HumanID() string { return s.agentID(HumanLabel, s.m.ID) }
 
-// Notice returns the v0.2 notice if it is still to be shown, and with
-// show records it as shown, so that a person sees it once ever. Callers
-// pass show only when a person is shown the result (status at the CLI,
-// the page), never for an agent tool.
+// Notice returns the v0.2 notice while it has not been shown, for a
+// person (show: status at the CLI, the page) and never for an agent tool.
+// Reading it records nothing: the surface that printed or drew it calls
+// NoticeShown afterwards, so a failed request or an unrendered page does
+// not use it up.
 func (s *Surface) Notice(ctx context.Context, show bool) (string, error) {
+	if !show {
+		return "", nil
+	}
 	pending, err := s.m.st.V02Pending(ctx)
 	if err != nil || !pending {
 		return "", err
 	}
-	if show {
-		if first, err := s.m.st.V02Shown(ctx); err != nil || !first {
-			return "", err
-		}
-	}
 	return NoticeV02, nil
+}
+
+// NoticeShown records that a person was shown the notice: it is not
+// returned again.
+func (s *Surface) NoticeShown(ctx context.Context) error {
+	_, err := s.m.st.V02Shown(ctx)
+	return err
 }
 
 // Addrs are where other machines reach this one; empty when networking is off.
@@ -1052,7 +1081,12 @@ type StatusView struct {
 	Peers  []PeerView
 	// Waiting is the number of requests waiting for this machine's person.
 	Waiting int
+	// Network is what this run applies; Decided the latest decision, which
+	// differs while it is being applied; Fault why networking on does not
+	// listen.
 	Network Network
+	Decided Network
+	Fault   string
 	Notice  string
 }
 
@@ -1081,14 +1115,39 @@ func (s *Surface) Status(ctx context.Context, show bool) (StatusView, error) {
 	for _, r := range rooms {
 		waiting += len(r.Requests)
 	}
+	decided, err := LoadNetwork(ctx, s.m.st)
+	if err != nil {
+		return StatusView{}, err
+	}
 	return StatusView{Node: s.m.ID, Name: s.name, Human: s.HumanID(), Local: s.local, Rooms: rooms, Agents: agents,
-		Peers: peers, Waiting: waiting, Network: s.net, Notice: notice}, nil
+		Peers: peers, Waiting: waiting, Network: s.net, Decided: decided, Fault: s.fault(), Notice: notice}, nil
+}
+
+// mayBeRemoved: every other member of r has refused this machine as not a
+// member, each for MaybeRemovedAfter.
+func (s *Surface) mayBeRemoved(r RoomInfo) bool {
+	if s.notMb == nil || r.ID == s.local {
+		return false
+	}
+	refused, now, others := s.notMb(r.ID), s.m.now(), 0
+	for _, m := range r.Members {
+		if m.Node == s.m.ID {
+			continue
+		}
+		others++
+		since, ok := refused[m.Node]
+		if !ok || now.Sub(since) < MaybeRemovedAfter {
+			return false
+		}
+	}
+	return others > 0
 }
 
 // named fills in this machine's own name where a room lists it without
 // one (its create entry names nobody).
 func (s *Surface) named(rooms []RoomInfo) {
 	for i := range rooms {
+		rooms[i].MayBeRemoved = s.mayBeRemoved(rooms[i])
 		for k := range rooms[i].Members {
 			if m := &rooms[i].Members[k]; m.Node == s.m.ID && m.Name == "" {
 				m.Name = s.name
@@ -1146,7 +1205,29 @@ func (s *Surface) Alerts(ctx context.Context, wait time.Duration) ([]Alert, erro
 	for {
 		wakes := s.wakes(ctx, "")
 		as, err := s.r.Alerts(ctx)
-		if err != nil || len(as) > 0 || wait == 0 {
+		if err != nil {
+			return nil, err
+		}
+		if rs, err := s.RoomList(ctx, ""); err == nil {
+			for _, r := range rs {
+				if r.MayBeRemoved {
+					as = append(as, Alert{Kind: AlertRemoved, Room: r.ID, Text: "room " + r.Label + ": " + MaybeRemovedText})
+				}
+			}
+		} else {
+			return nil, err
+		}
+		if f := s.fault(); f != "" && s.net.State == NetworkOn {
+			as = append(as, Alert{Kind: AlertNetwork, Text: "networking is on, " + f})
+		}
+		qs, err := s.Questions(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, q := range qs {
+			as = append(as, Alert{Kind: AlertQuestion, ID: q.ID, Room: q.Room, Since: q.Created, Text: q.From + " asks: " + q.Text})
+		}
+		if len(as) > 0 || wait == 0 {
 			return as, err
 		}
 		if !waitAny(ctx, wakes, deadline) {
