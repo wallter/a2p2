@@ -1,0 +1,7 @@
+{
+  "type": "record",
+  "note": "an unknown top-level field, any value but null, is kept in the id and ignored",
+  "room": "r_00112233445566778899aabbccddeeff",
+  "wire": "{\"h\":\"eyJ4X2Z1dHVyZSI6eyJrIjpbMCwxLjUsZmFsc2Use30sIiIsW11dfSwidiI6Miwicm9vbSI6InJfMDAxMTIyMzM0NDU1NjY3Nzg4OTlhYWJiY2NkZGVlZmYiLCJhdXRob3IiOiJmMDdhNzVjNWI2ZTA0YjkyOWMyMGZiZTEyZjZlZjliNWI4ZmFhMTY4ZGRlYzY0MTU0ZWQ0OWRlNTdkMGE2YmU2IiwiZXBvY2giOiIwMTIzNDU2Nzg5YWJjZGVmIiwic2VxIjozLCJwcmV2IjoiMTAwZTllOTE2OGMzMjg2ODU1YjdiMmIwMWQ4ZDA1OGMiLCJraW5kIjoibWVzc2FnZSIsImFnZW50IjoiY2xhdWRlIiwiYXNrX2hhbmRsZWQiOnRydWUsImNyZWF0ZWQiOiIyMDI2LTExLTIzVDEyOjAwOjAwLjAwMFoiLCJib2R5IjoiYzkyZmQwMjgxMDQyZGZmZGI0ZDA1YjA0ODg1NjhkNWJjMDZlYzk3MzQ2ZGU3ODJmZDdlNTBmNzViOWFjZGJkOSIsInNpemUiOjE4fQ==\",\"s\":\"2rXOOJ4GMgTv4Y0YC/QbuE7FG8BUrr4GqvUgvC5tCl4pHUniUzy8FOioDDq+PhbHSXwpLsNMhTdEgx6sTGTADg==\",\"b\":\"eyJ0ZXh0IjoiQW55b25lPyJ9\"}",
+  "id": "c6d18fbfcde92e80f6da27c53716913d"
+}

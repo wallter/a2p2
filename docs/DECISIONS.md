@@ -243,3 +243,18 @@ Codex declined to review the membership model (its provider flagged the
 request as a possible cybersecurity risk); that review came from a different
 Claude model instead. The delivery model was reviewed by Codex.
 
+## D27. Signed formats frozen in `internal/core` (2026-11-23)
+
+Build step 1 of `DESIGN-next.md`. Records and log entries are signed over the
+exact header bytes and identified by a hash of a type label, one zero byte
+and those bytes; nothing is ever re-encoded. Decoding is strict (duplicate
+keys, number spellings, base64 padding, nesting depth, sizes checked before
+allocation), because two machines that disagree about whether bytes are valid
+disagree about the room. The contract is `PROTOCOL-next.md` sections 0 to 3;
+53 vectors in `internal/core/testdata/vectors` pin it, and every receive
+check has a failing vector that names it. The v0.2 envelope stays beside the
+new types until its last caller is converted. An independent review found two
+faults that would have been frozen (leading whitespace refused; an explicitly
+empty text field mishandled); both are fixed with vectors
+(`research/decisions/core-formats-review-sol.md`).
+

@@ -1,0 +1,8 @@
+{
+  "type": "record",
+  "note": "S9: a field other than text and choices",
+  "room": "r_00112233445566778899aabbccddeeff",
+  "wire": "{\"h\":\"eyJ2IjoyLCJyb29tIjoicl8wMDExMjIzMzQ0NTU2Njc3ODg5OWFhYmJjY2RkZWVmZiIsImF1dGhvciI6ImYwN2E3NWM1YjZlMDRiOTI5YzIwZmJlMTJmNmVmOWI1YjhmYWExNjhkZGVjNjQxNTRlZDQ5ZGU1N2QwYTZiZTYiLCJlcG9jaCI6IjAxMjM0NTY3ODlhYmNkZWYiLCJzZXEiOjIsInByZXYiOiIwODM2NDUxNjc4OTQ5ZmU2ZjE4Y2M5YTI4ZWM2ODk0YyIsImtpbmQiOiJtZXNzYWdlIiwiYWdlbnQiOiJjbGF1ZGUiLCJjcmVhdGVkIjoiMjAyNi0xMS0yM1QxMjowMDowMC4wMDBaIiwiYm9keSI6ImQ1NGE3N2RiNzFlZDVmNDJkOTZjZDM1NWQzZmJlNmZhY2YyZWFmMDQyMDU2ZGViNWE2MDk1NDJiOGM2NzEyZTgiLCJzaXplIjoyMX0=\",\"s\":\"LObWvWr4bCQSxP+hbaxWQgTVyD8xQAnInVrdIwDU7ETqm9rPmOZIvEsBD/S18anyjkeDyPQX78Ms1GQGumJxBg==\",\"b\":\"eyJ0ZXh0IjoiaGkiLCJ4IjoieSJ9\"}",
+  "code": "bad_body",
+  "check": "S9"
+}

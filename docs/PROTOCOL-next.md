@@ -25,11 +25,13 @@ file says exactly what. Cited there as "PROTOCOL n".
 **Strict JSON** (headers, entries, bodies, and every peer request and
 response): RFC 8259, UTF-8 without BOM. Invalid UTF-8, and `\u` escapes
 that form a lone surrogate, are errors. Object keys are case-sensitive and
-compared after unescaping; a duplicate key at any depth is an error. `null`
-is never a valid value. Writers emit compact JSON with fields in any order
+compared after unescaping; a duplicate key at any depth is an error. Signed
+JSON nests at most 16 levels; deeper is `bad_json`. `null` is never a valid
+value, at any depth. Writers emit compact JSON with fields in any order
 and omit every field whose value would be zero, empty, false or absent;
 receivers accept insignificant whitespace, parse by name, and treat a
-present zero, empty string, empty array or `false` as an error. Signed bytes
+present zero, empty string, empty array or `false` in a known field as an
+error. An unknown top-level field may hold any value except null. Signed bytes
 are never re-encoded: they are stored and passed on exactly as received.
 
 A peer's key is its node id, learned from the room log or an invite token;
@@ -89,6 +91,8 @@ Bodies (strict JSON, ≤ 16,384 bytes encoded):
 | `handled`, `withdraw` | no body (zero bytes; `size` omitted) |
 
 Limits: header 4,096 bytes, or 8,192 when `seq` = 1; signature 64 bytes.
+Count limits and byte limits both apply. A writer that would exceed either
+refuses, naming which, and never drops addressees, links or heads.
 
 **Writer rules, not checked on receipt.** `version` = the winning version
 the author knows + 1 (the message itself is 0). `thread` = the parent's
@@ -109,13 +113,13 @@ the first failure gives the code and the record is not stored.
 |---|---|---|
 | S1 | wire object is strict JSON with keys `h`, `s`, optional `b` only, each a string | `bad_wire` |
 | S2 | each is valid Base64 (section 0) | `bad_base64` |
-| S3 | signature is 64 bytes; header ≤ 4,096 bytes (8,192 if it parses with `seq` 1); body ≤ 16,384 bytes | `too_large` |
+| S3 | signature is 64 bytes; header ≤ 4,096 bytes (8,192 if it parses with `seq` 1); body ≤ 16,384 bytes. The wire object's own size is bounded by the enclosing request (4.6) | `too_large` |
 | S4 | header is valid UTF-8 with no lone surrogate | `bad_utf8` |
 | S5 | header is one strict JSON object, no duplicate keys, nothing after it | `bad_json` |
 | S6 | every field has its type and format (section 0, 1); no `null`; no present zero, empty or `false` | `bad_field` |
 | S7 | required and forbidden fields for its kind and `seq`; `to`, `links` order and uniqueness | `bad_field` |
 | S8 | `handled`, `withdraw`: `b` absent or empty, `body` = SHA-256 of zero bytes | `bad_body` |
-| S9 | `b` present: length = `size`, SHA-256 = `body`, body is valid per kind (section 1) | `bad_body` |
+| S9 | `b` present: length = `size`, SHA-256 = `body`, body is valid per kind (section 1). `b` present but empty on a `message` or `replace` | `bad_body` |
 
 **Version, room, admission, signature**
 
@@ -653,11 +657,13 @@ code, and a one-line note.
 | `bad-base64-unpadded`, `bad-base64-pad-bits`, `bad-base64-newline` | S2 |
 | `too-large-header`, `too-large-body`, `bad-signature-length` | S3 |
 | `bad-utf8`, `bad-utf8-lone-surrogate` | S4 |
-| `bad-json-duplicate-key`, `bad-json-duplicate-after-unescape`, `bad-json-trailing` | S5 |
-| `bad-field-null`, `bad-field-false`, `bad-field-empty-array`, `bad-field-float`, `bad-field-exponent`, `bad-field-leading-zero`, `bad-field-too-big`, `bad-field-uppercase-hex`, `bad-field-time` | S6 |
+| `bad-json-duplicate-key`, `bad-json-duplicate-after-unescape`, `bad-json-trailing`, `bad-json-too-deep`, `bad-field-leading-zero` | S5 |
+| `bad-field-null`, `bad-field-false`, `bad-field-empty-array`, `bad-field-float`, `bad-field-exponent`, `bad-field-too-big`, `bad-field-uppercase-hex`, `bad-field-time` | S6 |
 | `bad-field-forbidden-ref-on-message`, `bad-field-missing-prev`, `bad-field-links-unsorted`, `bad-field-to-duplicate`, `bad-field-ask-with-to` | S7 |
 | `bad-body-handled-nonempty` | S8 |
-| `bad-body-hash`, `bad-body-size`, `bad-body-blank-text`, `bad-body-unknown-field` | S9 |
+| `bad-body-hash`, `bad-body-size`, `bad-body-blank-text`, `bad-body-unknown-field`, `bad-body-empty-b` | S9 |
+| `record-handled-empty-b`, `record-wire-whitespace` | valid: an empty `b` on a record without text; whitespace around the wire object |
+| `author-not-admitted` | A1 (checked by the caller, not by `internal/core`) |
 | `bad-version` | V1 |
 | `wrong-room` | R1 |
 | `bad-signature` | G1 |

@@ -1,0 +1,7 @@
+{
+  "type": "record",
+  "note": "record-replace's fields in another order: a different id, still valid",
+  "room": "r_00112233445566778899aabbccddeeff",
+  "wire": "{\"h\":\"eyJ2ZXJzaW9uIjoxLCJ2IjoyLCJzaXplIjoyNSwic2VxIjo2LCJyb29tIjoicl8wMDExMjIzMzQ0NTU2Njc3ODg5OWFhYmJjY2RkZWVmZiIsInJlZiI6IjUxOWE0MTY2MmZhMjM0OTU2MzkxYjg0NGQyODM3MjRmIiwicHJldiI6ImQzYjM4ZDY5ZmIxNDdiODZkYTc3NGQyNWRiZWQ3YWJmIiwia2luZCI6InJlcGxhY2UiLCJlcG9jaCI6IjAxMjM0NTY3ODlhYmNkZWYiLCJjcmVhdGVkIjoiMjAyNi0xMS0yM1QxMjowMDowMC4wMDBaIiwiYm9keSI6IjlmMWRlOTVjNDFjNWY4ZTg2NTE5OTExMmIyNzI4YzY4ZTcyZDM3OTIxYTQ1MDcyYmVjNGEyZTllZjdkMDk1ZmQiLCJhdXRob3IiOiJmMDdhNzVjNWI2ZTA0YjkyOWMyMGZiZTEyZjZlZjliNWI4ZmFhMTY4ZGRlYzY0MTU0ZWQ0OWRlNTdkMGE2YmU2IiwiYWdlbnQiOiJjbGF1ZGUifQ==\",\"s\":\"icNLc9qyTQQxnd4IvKJVxvVi6ZpEjVrs6cAmRAFO8kIlZ1wht7iRUCHBso1wnxmwgum7t7KT3yZJsPRfEaxpAA==\",\"b\":\"eyJ0ZXh0IjoiQW55b25lIGF0IGFsbD8ifQ==\"}",
+  "id": "3e0a52af1c72038f220c18e6d969dc71"
+}

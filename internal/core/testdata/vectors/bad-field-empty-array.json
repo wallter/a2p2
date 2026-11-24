@@ -1,0 +1,8 @@
+{
+  "type": "record",
+  "note": "S6: to []",
+  "room": "r_00112233445566778899aabbccddeeff",
+  "wire": "{\"h\":\"eyJ0byI6W10sInYiOjIsInJvb20iOiJyXzAwMTEyMjMzNDQ1NTY2Nzc4ODk5YWFiYmNjZGRlZWZmIiwiYXV0aG9yIjoiZjA3YTc1YzViNmUwNGI5MjljMjBmYmUxMmY2ZWY5YjViOGZhYTE2OGRkZWM2NDE1NGVkNDlkZTU3ZDBhNmJlNiIsImVwb2NoIjoiMDEyMzQ1Njc4OWFiY2RlZiIsInNlcSI6MSwia2luZCI6Im1lc3NhZ2UiLCJhZ2VudCI6ImNsYXVkZSIsImNyZWF0ZWQiOiIyMDI2LTExLTIzVDEyOjAwOjAwLjAwMFoiLCJib2R5IjoiYTZlZDFjNTk2ZWJhZmM0NzIzYjhjMjk1YzRlYmU3ZTA2MmMwMTRkZWJmMGQzNDEyNTFiZjVmYjkyZDI2YjIyOSIsInNpemUiOjE2fQ==\",\"s\":\"qNoZ1l5NELnO7KfLSPD8QgCILyE8Lqbz3yfsAazlDRhLpuD4Ba4csFMjITmRw1RVDl8730UMWzNopYXAfnWRDA==\",\"b\":\"eyJ0ZXh0IjoiZmlyc3QifQ==\"}",
+  "code": "bad_field",
+  "check": "S6"
+}

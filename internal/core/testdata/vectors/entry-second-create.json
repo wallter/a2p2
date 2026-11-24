@@ -1,0 +1,9 @@
+{
+  "type": "entry",
+  "note": "C1: a create entry that is not the room's pinned create",
+  "room": "r_00112233445566778899aabbccddeeff",
+  "create": "fac110f103fad5a7ccda942b23cf72a3",
+  "wire": "{\"h\":\"eyJ2IjoyLCJyb29tIjoicl8wMDExMjIzMzQ0NTU2Njc3ODg5OWFhYmJjY2RkZWVmZiIsImF1dGhvciI6IjBmMWZiYmJmZWI2YzhkZDhlOTdkZmNjM2E2YTljYTdkN2Q5MWVhN2Q5ZGU2NTAwY2FkMmEyMGFkOTYyZTZmNzgiLCJzZXEiOjEsImtpbmQiOiJjcmVhdGUiLCJsYWJlbCI6ImltcG9zdG9yIiwiY3JlYXRlZCI6IjIwMjYtMTEtMjNUMTI6MDA6MDAuMDAwWiJ9\",\"s\":\"3R+Dj7bPrsrlCFILVkWYAedZd1Xcfmv6DoD5U5FCZNQUdL+NSFGoLfV+l5tVTafp5gPQQ7nM3aMHJl/5h3irDQ==\"}",
+  "code": "second_create",
+  "check": "C1"
+}

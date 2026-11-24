@@ -1,0 +1,7 @@
+{
+  "type": "record",
+  "note": "withdraw: empty-body hash, no b, no size",
+  "room": "r_00112233445566778899aabbccddeeff",
+  "wire": "{\"h\":\"eyJ2IjoyLCJyb29tIjoicl8wMDExMjIzMzQ0NTU2Njc3ODg5OWFhYmJjY2RkZWVmZiIsImF1dGhvciI6ImYwN2E3NWM1YjZlMDRiOTI5YzIwZmJlMTJmNmVmOWI1YjhmYWExNjhkZGVjNjQxNTRlZDQ5ZGU1N2QwYTZiZTYiLCJlcG9jaCI6IjAxMjM0NTY3ODlhYmNkZWYiLCJzZXEiOjUsInByZXYiOiI5YjM1ODFmM2U4NTMyMjYwNGRiOTliMGJkODMxYTdhNCIsImtpbmQiOiJ3aXRoZHJhdyIsImFnZW50IjoiY2xhdWRlIiwicmVmIjoiMTAwZTllOTE2OGMzMjg2ODU1YjdiMmIwMWQ4ZDA1OGMiLCJjcmVhdGVkIjoiMjAyNi0xMS0yM1QxMjowMDowMC4wMDBaIiwiYm9keSI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ==\",\"s\":\"zc++DATWPFsJi5zdgQnChg2O/F+yk1BwbgIVBhYkdBDFNQvDPIfFLuDxzkRQl+xc+XB5mCLxX78jshVXmfncBg==\"}",
+  "id": "d3b38d69fb147b86da774d25dbed7abf"
+}
