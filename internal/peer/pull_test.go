@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -436,6 +437,59 @@ func rawPost(t *testing.T, from *Identity, to *pm, body []byte, size int64) (int
 	return resp.StatusCode, b, resp.Header
 }
 
+// rawBurst sends n copies of body at once over one pinned HTTP/2 connection
+// and returns the first 429 answer, if any. Requests that fail are skipped.
+func rawBurst(t *testing.T, from *Identity, to *pm, body []byte, n int) (int, []byte, http.Header, bool) {
+	t.Helper()
+	cert, err := selfSigned(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protos := new(http.Protocols)
+	protos.SetHTTP2(true)
+	tr := &http.Transport{Protocols: protos, TLSClientConfig: &tls.Config{
+		MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}, InsecureSkipVerify: true,
+		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
+			got, err := certNode(raw)
+			if err == nil && got != to.node() {
+				err = errors.New("wrong key")
+			}
+			return err
+		}}}
+	defer tr.CloseIdleConnections()
+	cl := &http.Client{Transport: tr}
+	type answer struct {
+		status int
+		body   []byte
+		hdr    http.Header
+	}
+	got := make(chan answer, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, err := http.NewRequestWithContext(bg, http.MethodPost, "https://"+to.addr+pathPullV2, bytes.NewReader(body))
+			if err != nil {
+				return
+			}
+			resp, err := cl.Do(req)
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+			b, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode == http.StatusTooManyRequests {
+				got <- answer{resp.StatusCode, b, resp.Header}
+			}
+		}()
+	}
+	wg.Wait()
+	close(got)
+	a, ok := <-got
+	return a.status, a.body, a.hdr, ok
+}
+
 type zeros struct{}
 
 func (zeros) Read(p []byte) (int, error) {
@@ -500,20 +554,33 @@ func TestOverTLSTheRateLimitGives429WithRetryAfter(t *testing.T) {
 	room := group(t, a, b)
 	q := &node.PullRequest{V: node.PullVersion, Room: "r_" + strings.Repeat("ab", 16), Sum: strings.Repeat("0", 64),
 		Log: node.PullLog{Heads: []string{strings.Repeat("1", 32)}}}
+	// Requests are sent at once, not one after another: the bucket holds
+	// 40 and refills at 20 a second, so a slow machine sending in sequence
+	// may never exceed it.
+	const burst = 160
+	var mu sync.Mutex
 	var limited *node.PullError
-	for i := 0; i < 200 && limited == nil; i++ {
-		_, err := b.cl.Pull(bg, a.node(), q)
-		var pe *node.PullError
-		if errors.As(err, &pe) && pe.Status == 429 {
-			limited = pe
-		}
+	var wg sync.WaitGroup
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := b.cl.Pull(bg, a.node(), q)
+			var pe *node.PullError
+			if errors.As(err, &pe) && pe.Status == 429 {
+				mu.Lock()
+				limited = pe
+				mu.Unlock()
+			}
+		}()
 	}
+	wg.Wait()
 	if limited == nil || limited.Code != node.CodeRateLimited || limited.RetryAfter < time.Second {
 		t.Fatalf("no 429 with Retry-After: %+v", limited)
 	}
-	status, body, hdr := rawPost(t, b.id, a, mustBody(t, q), -1)
-	if status != 429 || hdr.Get("Retry-After") == "" || !strings.HasPrefix(string(body), `{"error":"rate_limited"`) {
-		t.Fatalf("raw: %d %s %v", status, body, hdr)
+	status, rb, hdr, ok := rawBurst(t, b.id, a, mustBody(t, q), burst)
+	if !ok || hdr.Get("Retry-After") == "" || !strings.HasPrefix(string(rb), `{"error":"rate_limited"`) {
+		t.Fatalf("raw: no 429 among %d requests sent at once, or a malformed one: %d %s %v", burst, status, rb, hdr)
 	}
 	_ = room
 }
