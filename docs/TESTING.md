@@ -246,19 +246,28 @@ commands are shadowed by stubs, so no model is ever called.
 
 ## CI
 
-The [CI workflow](../.github/workflows/ci.yml) runs on every push to `main`
-and on pull requests. On Linux and macOS it runs `make check` (which
-includes the Windows build gate and the licence check), then
-`make release`, which builds the Linux and macOS binaries. On Linux alone
-it runs `make lint`, `make vuln` and `make fuzz FUZZTIME=30s`; the fuzz job
-exercises `FuzzParseRecord` and `FuzzParseEntry`, and the Go test suite
-also runs the seeds for `FuzzDecodeToken`.
+Most testing is local, and the hosted CI is kept small on purpose
+([releasing](RELEASING.md#what-is-tested-where)). The
+[CI workflow](../.github/workflows/ci.yml) is one Linux job. It runs on a
+pull request that changes Go code, `go.mod`, `go.sum`, the Makefile,
+`scripts/`, the workflows or test data, and when started by hand. It runs
+`make check` and `make lint`. Nothing runs on a push to `main`, and no job
+runs on macOS.
 
 The [release workflow](../.github/workflows/release.yml) runs when a tag
 starting with `v` is pushed. On Linux, without a module or build cache, it
-runs `make check` and `make release VERSION=<tag>`, checks that the Linux
-binary reports the tag, and publishes the binaries and `SHA256SUMS` as a
-GitHub release (a prerelease when the tag contains a hyphen).
+runs `make check`, `make lint` and `make vuln`, checks that CHANGELOG.md
+has a section for the tag, runs `make release VERSION=<tag>`, checks that
+the Linux binary reports the tag, and publishes the binaries and
+`SHA256SUMS` as a GitHub release with that section as its notes (a
+prerelease when the tag contains a hyphen).
+
+Before a tag, a maintainer runs `make prerelease` on their own machine:
+`make check`, `make lint`, `make vuln`, `make check-linux` and a 60-second
+`make chaos` run. `make check-linux` runs `go vet` and the race tests on
+Linux in a Docker container, so a macOS machine also tests Linux.
+`make chaos` runs real daemons in Docker containers through kills, pauses
+and network splits (see [Chaos runs of real daemons](#chaos-runs-of-real-daemons)).
 
 ## Optional checks
 

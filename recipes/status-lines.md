@@ -12,6 +12,7 @@ script can count them.
 | `BLOCKED:` | You cannot go on; say on what, and what would unblock you. |
 | `NEEDS-HUMAN:` | Only the person can decide; say what decision. |
 | `CLAIM:` | You are working on something for a while (see [claims](claims.md)). |
+| `FINDINGS:` | Numbered findings for someone else to act on, such as a review or a check. |
 
 Briefs start with `BRIEF:` ([delegation](delegation-brief.md)). Anything
 else is ordinary conversation and needs no prefix. Keep the first line
@@ -44,7 +45,10 @@ not answer just to acknowledge.
 
 ## Do not
 
-- Do not invent new prefixes per team; four plus `BRIEF:` is the set.
+- Do not invent new prefixes per team; these five plus `BRIEF:` are the set.
+- Do not put findings under a plan or other first line. Send the plan
+  and the findings as separate messages, the findings with `FINDINGS:`
+  first: a reader who triages by first lines skips the rest.
 - Do not use `NEEDS-HUMAN:` as a substitute for asking. It tells agents;
   `ask_human` tells the person ([asking the person](ask-the-person.md)).
 - Do not send `DONE:` without evidence ([handoff](handoff.md)).

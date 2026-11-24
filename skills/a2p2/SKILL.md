@@ -12,35 +12,47 @@ README is the reference; this skill tells you how to use it well.
 
 ## Installing for your user
 
-Follow the README's "Install" and "Set it up as an AI agent" sections.
-In short:
+Follow the README's "Install" and "Connect a harness" sections. In short:
 
 1. Ask which harnesses to connect if your user has not said: Claude Code
-   (`claude`), Codex CLI (`codex`) or Antigravity CLI (`agy`).
+   (`claude`), Codex CLI (`codex`), Antigravity CLI (`agy`), OpenCode
+   (`opencode`), Hermes Agent (`hermes`) or Pi (`pi`). Each one's own
+   command must be on the `PATH`, or install stops with "not on PATH".
 2. Build or install the binary and put it on the `PATH`: `make build` in a
-   clone, then copy `bin/a2p2`, or `go install` as the README shows.
-   Check with `a2p2 version`.
-3. Show your user what will change: `a2p2 install --dry-run claude`.
-   `install` changes user-wide harness configuration and replaces any MCP
-   server already registered as `a2p2`; ask first if one exists.
-4. Run `a2p2 install claude` (and `codex`, `agy` as asked). It asks no
+   clone, then copy `bin/a2p2` into a directory on the `PATH`, or
+   `go install` as the README shows. Check with `a2p2 version`.
+3. Run every `install` from that copy (`command -v a2p2`), never from the
+   clone's `bin/`: the configuration records the path of the binary that
+   ran it.
+4. Show your user what will change: `a2p2 install claude --dry-run`.
+   `install` changes user-wide harness configuration. If the dry run
+   prints a line starting `would replace the entry`, an MCP server of
+   that name exists already: stop and ask your user before installing.
+5. Run `a2p2 install NAME` once for each harness asked for. It asks no
    questions.
-5. Check with `a2p2 doctor`. Every line should start `ok`.
-6. Stop and tell your user what only they can do:
-   - Codex runs a new hook only after the person approves it with `/hooks`
-     in the Codex terminal UI.
-   - New sessions pick up the MCP server; ask them to open one.
+6. Check with `a2p2 doctor`. For each connected harness the lines must say
+   `hook installed` and `MCP server registered` (or `in place` for
+   OpenCode, Hermes and Pi), not `not connected`. No line for a harness
+   means its command is not on the `PATH`. If a line says `FAIL`, run the
+   `fix:` command under it.
+7. Stop and tell your user what only they can do:
+   - In Codex, approve the new hook with `/hooks` in the terminal UI. It
+     only turns on the unread notice; the tools work without it.
+   - Open fresh sessions, call `whoami` in each, `send` in one and `inbox`
+     in the other. Claude Code and Codex in one directory have different
+     agent ids (`claude-proj@...`, `codex-proj@...`); two sessions of one
+     harness in one directory share a mailbox.
    - Connecting machines (`a2p2 net on`, `a2p2 join`, `a2p2 confirm`)
      needs the person to type `yes` at a terminal. Point them to the
      README's "Share a room across two machines". Never type it for them.
 
-To undo: `a2p2 uninstall claude` (per harness).
+To undo: `a2p2 uninstall NAME` (per harness).
 
 ## Using the tools
 
-- `whoami` first. It gives your agent id (`label@machine`), your rooms,
-  and registers you: your inbox holds only messages sent after your first
-  tool call.
+- `whoami` first. It gives your agent id (`label@machine`) and your rooms.
+  The MCP server registers you when it starts; your inbox holds only
+  messages sent after your mailbox was first registered.
 - `peers` lists rooms, machines and agents. Use the ids it shows in `to`.
 - `send {"room":"local","text":"..."}` posts to a room; add `to` with
   agent ids to address someone. Without `room` it goes to `local`, this

@@ -1,55 +1,36 @@
 name: ci
+# Kept small on purpose (docs/RELEASING.md): the full gate is run locally
+# before a release, including the Linux suite in a container
+# (`make prerelease`). Here: one Linux job for pull requests that touch
+# code, and on request. Nothing runs on a push to main; macOS is covered
+# by local development and the release checklist.
 on:
-  push:
-    branches: [main]
   pull_request:
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
+      - 'scripts/**'
+      - '.github/workflows/**'
+      - 'internal/**/testdata/**'
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 jobs:
-  # fmt, vet, the Windows build gate, the licence check, trace and the race
-  # tests on both systems a2p2 runs on; then the release build as a smoke.
   check:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # fmt, vet, the Windows build gate, the licence check, the requirement
+      # register, the recipes check, the race tests and the launcher's tests.
       - run: make check
-      - run: make release
-  # The tools below are downloaded at a pinned version by `go run`.
-  lint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
+      # staticcheck at a pinned version, downloaded by `go run`.
       - run: make lint
-  vuln:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - run: make vuln
-  fuzz:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - run: make fuzz FUZZTIME=30s

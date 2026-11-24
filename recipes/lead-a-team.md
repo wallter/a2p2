@@ -34,7 +34,7 @@ cheaper.
 Example plan:
 
 ```text
-send {"room":"team-auth","text":"Plan for session expiry. worker-a owns internal/session/. worker-b owns docs/. reviewer reviews both, writes nothing. Report by reply to your brief, first line DONE:, BLOCKED: or NEEDS-HUMAN:. No reply needed."}
+send {"room":"team-auth","text":"Plan for session expiry. worker-a owns internal/session/. worker-b owns docs/. reviewer reviews both, writes nothing. Report by reply to your brief, first line DONE:, BLOCKED: or NEEDS-HUMAN:. Findings for another member go in their own reply, first line FINDINGS:. No reply needed."}
 ```
 
 ## When to stop

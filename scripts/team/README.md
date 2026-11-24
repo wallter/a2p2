@@ -187,7 +187,9 @@ A2P2_HOME="$d/home" bin/a2p2 stop
 [examples/run-2026-11-24](examples/run-2026-11-24/report.md) is the report
 of that run with Codex CLI 0.171.0 (gpt-6-luna) and Claude Code 2.1.331
 (haiku): both connected, posted a plan and a `DONE:` report, and exited 0
-in 25 and 15 seconds.
+in 25 and 15 seconds. [examples/run-2026-11-24-readme](examples/run-2026-11-24-readme/README.md)
+is a four-member review of README.md with Codex CLI, Antigravity CLI and
+Claude Code, and what its report missed.
 
 ## What it does not do
 

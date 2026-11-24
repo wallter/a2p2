@@ -957,3 +957,30 @@ key. And `ask_handled` did two jobs, so a post could not reach everyone at
 **Revisit if** receipts grow large for agents that read but never call
 `Seen`: they are bounded by the inbox limit per read, but a cleanup by
 age may be needed.
+
+## D46. Versions, a changelog, a written release process, and small hosted CI (2026-11-24)
+
+The owner asked for ordinary versioning and release practice, and for the
+hosted CI to stay small: testing should happen locally, with containers
+where another system is needed.
+
+- Semantic Versioning with annotated `vX.Y.Z` tags; `-rc.N` candidates are
+  pre-releases; a pushed tag is never moved. `CHANGELOG.md` in the Keep a
+  Changelog form is written for users, and the release workflow publishes
+  the version's section as the release notes (`scripts/changelog.sh`).
+  The process is `docs/RELEASING.md`.
+- Hosted CI went from five jobs on every push (Linux and macOS checks,
+  lint, vuln, fuzz: about 15 wall-clock minutes a push, and macOS minutes
+  are billed at ten times the Linux rate on a private repository) to one
+  Linux job on pull requests that touch code and on request. Nothing runs
+  on a push to `main`. The release workflow still runs the full check,
+  lint and the vulnerability scan on Linux before it builds.
+- What moved local: `make prerelease` runs the check, lint, the
+  vulnerability scan, the test suite on Linux in a container
+  (`make check-linux`) and a short chaos run. macOS is the development
+  system, so it is tested on every local `make check`.
+
+Cost: a broken `main` is caught by the next local run or the next pull
+request, not by a push. Accepted: one maintainer, and the release gate is
+strict. Revisit if outside contributions become frequent.
+

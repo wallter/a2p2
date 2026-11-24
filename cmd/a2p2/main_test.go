@@ -2,6 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"flag"
+	"io"
 	"strings"
 	"testing"
 
@@ -146,6 +150,62 @@ func TestAskHandledWithAnAddresseeExplainsWhy(t *testing.T) {
 	for _, want := range []string{"posts to the whole room", "leave out --to", "addressee can always report a message handled"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("%q lacks %q", got, want)
+		}
+	}
+}
+
+func TestInstallAndUninstallAcceptFlagsOnEitherSideOfTheHarnessName(t *testing.T) {
+	for _, name := range []string{"install", "uninstall"} {
+		for _, args := range [][]string{
+			{"claude", "--dry-run", "--on-stop"},
+			{"--dry-run", "claude", "--on-stop"},
+			{"--dry-run", "--on-stop", "claude"},
+			{"claude", "--on-stop=true", "--dry-run", "--json"},
+		} {
+			c := newCmd(context.Background(), name)
+			target, o, err := installArgs(c.fs, name, args)
+			if err != nil || target != "claude" || !o.DryRun || !o.OnStop {
+				t.Fatalf("%s %v: %q %+v %v", name, args, target, o, err)
+			}
+		}
+		for _, args := range [][]string{{}, {"claude", "codex"}, {"claude", "--nope"}} {
+			c := newCmd(context.Background(), name)
+			c.fs.SetOutput(io.Discard)
+			if _, _, err := installArgs(c.fs, name, args); !errors.Is(err, errUsage) {
+				t.Fatalf("%s %v: want a usage error, got %v", name, args, err)
+			}
+		}
+	}
+}
+
+// Every flag a usage line shows after a positional argument works there,
+// including flags that take a value.
+func TestFlagsAfterPositionalArgumentsAreParsed(t *testing.T) {
+	fs := flag.NewFlagSet("x", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	b := fs.Bool("b", false, "")
+	s := fs.String("s", "", "")
+	n := fs.Int("wait", 0, "")
+	for _, tc := range []struct {
+		args []string
+		pos  []string
+		b    bool
+		s    string
+		n    int
+	}{
+		{[]string{"invite", "ROOM", "--b"}, []string{"invite", "ROOM"}, true, "", 0},
+		{[]string{"ID", "--s", "bob", "--b"}, []string{"ID"}, true, "bob", 0},
+		{[]string{"--wait", "5", "--b"}, nil, true, "", 5},
+		{[]string{"on", "--wait=3", "ADDR"}, []string{"on", "ADDR"}, false, "", 3},
+		{[]string{"-", "--b"}, []string{"-"}, true, "", 0},
+		{[]string{"ID", "--", "--b"}, []string{"ID", "--b"}, false, "", 0},
+	} {
+		*b, *s, *n = false, "", 0
+		if err := fs.Parse(permute(fs, tc.args)); err != nil {
+			t.Fatalf("%v: %v", tc.args, err)
+		}
+		if strings.Join(fs.Args(), " ") != strings.Join(tc.pos, " ") || *b != tc.b || *s != tc.s || *n != tc.n {
+			t.Fatalf("%v: args %q b=%v s=%q wait=%d", tc.args, fs.Args(), *b, *s, *n)
 		}
 	}
 }

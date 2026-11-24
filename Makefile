@@ -64,6 +64,22 @@ release:          ## static binaries a2p2_<os>_<arch> and SHA256SUMS in dist/ (V
 	    -o dist/a2p2_$${os}_$$arch ./cmd/a2p2 || exit 1; done; \
 	cd dist && if command -v sha256sum >/dev/null; then sha256sum a2p2_*; else shasum -a 256 a2p2_*; fi > SHA256SUMS
 
+# The same tests on Linux, in a container, without leaving this machine:
+# the hosted CI is kept small on purpose (docs/RELEASING.md). The module and
+# build caches live in named volumes so a second run is quick.
+.PHONY: check-linux prerelease
+GO_IMAGE ?= golang:$(shell awk '/^go /{print $$2}' go.mod)
+check-linux:      ## go vet and the race tests on Linux in a container (needs Docker)
+	docker run --rm -v "$(CURDIR)":/src:ro -v a2p2-gomod:/go/pkg/mod -v a2p2-gocache:/root/.cache/go-build \
+	  -w /work $(GO_IMAGE) sh -c 'cp -a /src/. /work/ && rm -rf /work/bin /work/dist /work/.chaos /work/.a2p2-dev /work/.claude && go vet ./... && go test -race -count=1 ./...'
+
+prerelease:       ## the local gate before a tag: check, lint, vuln, Linux in a container, a short chaos run
+	$(MAKE) check
+	$(MAKE) lint
+	$(MAKE) vuln
+	$(MAKE) check-linux
+	$(MAKE) chaos DURATION=$${DURATION:-60}
+
 clean:
 	rm -rf bin dist
 

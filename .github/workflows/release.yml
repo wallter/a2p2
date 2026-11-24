@@ -1,7 +1,9 @@
 name: release
 # Pushing a tag such as v0.3.0 builds the static binaries a2p2_<os>_<arch>
 # for linux and darwin on amd64 and arm64 with `make release`, writes
-# SHA256SUMS, and attaches them to a GitHub release made with the gh CLI.
+# SHA256SUMS, and attaches them to a GitHub release made with the gh CLI,
+# with that version's section of CHANGELOG.md as the notes. This is the only
+# workflow that runs without a person asking; see docs/RELEASING.md.
 on:
   push:
     tags: ['v*']
@@ -25,6 +27,10 @@ jobs:
           # must not be able to change what goes into a released binary.
           cache: false
       - run: make check
+      - run: make lint
+      - run: make vuln
+      - name: the changelog has a section for this version
+        run: scripts/changelog.sh "$GITHUB_REF_NAME" > notes.md && test -s notes.md
       - run: make release VERSION="$GITHUB_REF_NAME"
       - name: the binary reports the tag
         run: test "$(dist/a2p2_linux_amd64 version)" = "a2p2 $GITHUB_REF_NAME"
@@ -36,4 +42,4 @@ jobs:
           case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
           gh release create "$GITHUB_REF_NAME" dist/a2p2_* dist/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
-            --generate-notes --verify-tag $pre
+            --notes-file notes.md --verify-tag $pre

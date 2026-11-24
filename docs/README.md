@@ -11,6 +11,8 @@ agent or share a room.
 | [Testing](TESTING.md) | Test layers, fault cases and verification status |
 | [Trace register](TRACE.md) | Which requirements the code meets today, and the tests that show it |
 | [Decisions](DECISIONS.md) | Why the design took its current shape |
+| [Releasing](RELEASING.md) | Version numbers, what is tested where, and how a release is made |
+| [Changelog](../CHANGELOG.md) | What changed in each version |
 | [Harness notes](HARNESSES.md) | What was verified with Claude Code, Codex and Antigravity CLI, with versions and dates, and the configuration each uses |
 
 See [AGENTS.md](../AGENTS.md) for the code map and contribution rules,

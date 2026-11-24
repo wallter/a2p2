@@ -6,7 +6,7 @@ implementation. The design cites these sections as "PROTOCOL n".
 
 - [Conventions](#0-conventions), [record header](#1-record-header), and [receiving a record](#2-receiving-a-record)
 - [Log entry](#3-log-entry), [pull](#4-pull), and [join](#5-join)
-- [MCP tools](#6-mcp-tools-golden-file), [local API and CLI](#7-local-api-and-cli), [schema](#8-schema-migrations-2-to-10), and [golden vectors](#9-golden-vectors)
+- [MCP tools](#6-mcp-tools-golden-file), [local API and CLI](#7-local-api-and-cli), [schema](#8-schema-migrations-2-to-12), and [golden vectors](#9-golden-vectors)
 
 ## 0. Conventions
 

@@ -16,15 +16,22 @@ changing direction. For delivery changes, also read the
 
 ```bash
 make build                      # bin/a2p2 (static, no cgo)
-make check                      # gofmt, go vet, make trace, go test -race ./...  (what CI runs)
+make check                      # gofmt, go vet, make trace, go test -race ./... and more; CI runs it with make lint
 go test -race -run TestName ./internal/node    # one test
 go test -race -count=20 ./internal/node        # hunt a flaky test
 make trace                      # docs/TRACE.md matches the requirements and the tests
 make fuzz                       # fuzz the record and entry decoders (FUZZTIME=10m for longer)
 make lint vuln                  # staticcheck, govulncheck (need network)
+make check-linux                # go vet and the race tests on Linux in a Docker container
+make chaos                      # real daemons in Docker containers through kills and network splits
+make prerelease                 # before a tag: check, lint, vuln, check-linux and a short chaos run
 make e2e HARNESS=claude         # real harness end to end; spends model tokens
 make review WHO=sol             # review of uncommitted changes by another model family
 ```
+
+CI is one Linux job (`make check`, `make lint`) on pull requests that touch
+code and on request; nothing runs on a push to `main`. A pushed `v*` tag
+runs the release workflow. See [releasing](docs/RELEASING.md).
 
 Try a change by hand without touching your own state:
 

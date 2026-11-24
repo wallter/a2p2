@@ -1,0 +1,53 @@
+{
+ "room": "readme",
+ "a2p2_home": "<throwaway home>",
+ "a2p2": "<repo>/bin/a2p2",
+ "state_dir": "<state dir>",
+ "max_members": 4,
+ "lead": "lead",
+ "poll_seconds": 5,
+ "silence_seconds": 420,
+ "kickoff": "Final editorial pass on README.md before the repository is made public. sol-editor edits; luna-check, hydrogen-reader and sonnet-installer post numbered findings as replies here within eight minutes; the editor takes or rejects each. Everyone ends with a DONE: or BLOCKED: reply to this message.",
+ "members": [
+  {
+   "label": "sol-editor",
+   "harness": "codex",
+   "model": "gpt-6.2-sol",
+   "sandbox": "workspace-write",
+   "worktree": "<repo>",
+   "limit_seconds": 2100,
+   "brief_file": "<briefs>/editor.md"
+  },
+  {
+   "label": "luna-check",
+   "harness": "codex",
+   "model": "gpt-6-luna",
+   "sandbox": "read-only",
+   "worktree": "<repo>",
+   "limit_seconds": 900,
+   "brief_file": "<briefs>/luna.md"
+  },
+  {
+   "label": "hydrogen-reader",
+   "harness": "agy",
+   "model": "gemini-4-hydrogen-high",
+   "limit_seconds": 900,
+   "brief_file": "<briefs>/hydrogen.md"
+  },
+  {
+   "label": "sonnet-installer",
+   "harness": "claude",
+   "model": "sonnet",
+   "allowed_tools": [
+    "Read",
+    "Grep",
+    "Glob"
+   ],
+   "permission_mode": "default",
+   "max_budget_usd": 2,
+   "worktree": "<repo>",
+   "limit_seconds": 900,
+   "brief_file": "<briefs>/sonnet.md"
+  }
+ ]
+}

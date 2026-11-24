@@ -252,21 +252,18 @@ func run(ctx context.Context, name string, args []string) (err error) {
 		return nil
 
 	case "install", "uninstall":
-		onStop := c.fs.Bool("on-stop", false, "also check for mail when the agent finishes a turn (may start another turn)")
-		dry := c.fs.Bool("dry-run", false, "show what would change")
-		if err := c.fs.Parse(args); err != nil || c.fs.NArg() != 1 {
-			return usagef("a2p2 %s <%s> [--on-stop] [--dry-run]", name, strings.Join(harness.Names, "|"))
-		}
-		exe, err := os.Executable()
+		target, o, err := installArgs(c.fs, name, args)
 		if err != nil {
 			return err
 		}
-		o := harness.Options{Binary: exe, OnStop: *onStop, DryRun: *dry}
+		if o.Binary, err = os.Executable(); err != nil {
+			return err
+		}
 		fn := harness.Install
 		if name == "uninstall" {
 			fn = harness.Uninstall
 		}
-		report, err := fn(c.fs.Arg(0), o)
+		report, err := fn(target, o)
 		printReport(os.Stdout, report)
 		return err
 
@@ -291,7 +288,7 @@ func run(ctx context.Context, name string, args []string) (err error) {
 	}
 
 	// Everything below talks to the daemon.
-	if err := c.fs.Parse(permute(args)); err != nil {
+	if err := c.fs.Parse(permute(c.fs, args)); err != nil {
 		return errUsage
 	}
 	rest := c.fs.Args()
@@ -327,6 +324,17 @@ func run(ctx context.Context, name string, args []string) (err error) {
 		return c.call("ack", localapi.AckReq{Agent: me, ID: rest[0]}, &r, func() { fmt.Println(ackText(r)) })
 	}
 	return usagef("unknown command %q; run a2p2 help", name)
+}
+
+// installArgs reads install and uninstall arguments: the harness name and
+// its flags, in either order.
+func installArgs(fs *flag.FlagSet, name string, args []string) (string, harness.Options, error) {
+	onStop := fs.Bool("on-stop", false, "also check for mail when the agent finishes a turn (may start another turn)")
+	dry := fs.Bool("dry-run", false, "show what would change")
+	if err := fs.Parse(permute(fs, args)); err != nil || fs.NArg() != 1 {
+		return "", harness.Options{}, usagef("a2p2 %s <%s> [--on-stop] [--dry-run]", name, strings.Join(harness.Names, "|"))
+	}
+	return fs.Arg(0), harness.Options{OnStop: *onStop, DryRun: *dry}, nil
 }
 
 // ackText is what a2p2 ack prints: a repeated ack names the first report
@@ -381,25 +389,40 @@ func cliError(err *localapi.Error) error {
 	return err
 }
 
-// permute moves flags before positional arguments so "a2p2 trace ID --json"
-// works. Flags that take a value must use the --flag=value form after a
-// positional argument.
-func permute(args []string) []string {
+// permute moves flags before positional arguments, so a flag works on
+// either side of them: "a2p2 install claude --dry-run" and "a2p2 trace ID
+// --json". It asks fs which flags take a value, so "--wait 5" stays
+// together wherever it appears. Everything after "--" is positional.
+func permute(fs *flag.FlagSet, args []string) []string {
 	var flags, pos []string
-	for i, a := range args {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		if a == "--" {
 			pos = append(pos, args[i+1:]...)
 			break
 		}
-		if strings.HasPrefix(a, "-") && len(a) > 1 && len(pos) > 0 {
-			flags = append(flags, a)
-		} else if len(pos) > 0 || !strings.HasPrefix(a, "-") {
+		if len(a) < 2 || a[0] != '-' {
 			pos = append(pos, a)
-		} else {
-			flags = append(flags, a)
+			continue
+		}
+		flags = append(flags, a)
+		name := strings.TrimLeft(a, "-")
+		if strings.Contains(name, "=") {
+			continue
+		}
+		f := fs.Lookup(name)
+		if f == nil {
+			continue // Parse reports it
+		}
+		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+			continue
+		}
+		if i+1 < len(args) {
+			i++
+			flags = append(flags, args[i])
 		}
 	}
-	return append(flags, pos...)
+	return append(append(flags, "--"), pos...)
 }
 
 func clock(t string) string {
@@ -588,7 +611,7 @@ func printTrace(w io.Writer, t localapi.TraceResp) {
 // terminal it shows the preview only.
 func join(c *cmd, args []string) error {
 	noWait := c.fs.Bool("no-wait", false, "do not wait for the admin machine's person")
-	if err := c.fs.Parse(permute(args)); err != nil || c.fs.NArg() > 1 {
+	if err := c.fs.Parse(permute(c.fs, args)); err != nil || c.fs.NArg() > 1 {
 		return usagef("a2p2 join [TOKEN] [--no-wait]")
 	}
 	token := c.fs.Arg(0)
@@ -659,7 +682,7 @@ func room(c *cmd, args []string) error {
 	history := c.fs.Bool("history", false, "invite: the joiner may read earlier history")
 	member := c.fs.Bool("member", false, "invite: as a member")
 	admin := c.fs.Bool("admin", false, "invite: as an admin")
-	if err := c.fs.Parse(permute(args)); err != nil {
+	if err := c.fs.Parse(permute(c.fs, args)); err != nil {
 		return errUsage
 	}
 	rest := c.fs.Args()
@@ -763,7 +786,7 @@ func printTerms(w io.Writer, q localapi.Request) {
 // and recorded; no agent tool reaches it.
 func confirm(c *cmd, args []string) error {
 	decline := c.fs.Bool("decline", false, "decline instead of approving")
-	if err := c.fs.Parse(permute(args)); err != nil || c.fs.NArg() > 1 {
+	if err := c.fs.Parse(permute(c.fs, args)); err != nil || c.fs.NArg() > 1 {
 		return usagef("a2p2 confirm [ID] [--decline]")
 	}
 	var qs localapi.RequestsResp
@@ -853,7 +876,7 @@ func decide(send func(localapi.ConfirmReq) (localapi.ConfirmResp, []byte, error)
 
 func alerts(c *cmd, args []string) error {
 	wait := c.fs.Int("wait", 0, "wait up to this many seconds (at most 120) for something")
-	if err := c.fs.Parse(permute(args)); err != nil {
+	if err := c.fs.Parse(permute(c.fs, args)); err != nil {
 		return errUsage
 	}
 	var res localapi.AlertsResp
@@ -889,7 +912,7 @@ func printAlert(w io.Writer, a localapi.Alert) {
 // and applied by the daemon at once.
 func netCmd(c *cmd, args []string) error {
 	outbound := c.fs.Bool("outbound-only", false, "connect out only; listen on nothing")
-	if err := c.fs.Parse(permute(args)); err != nil {
+	if err := c.fs.Parse(permute(c.fs, args)); err != nil {
 		return errUsage
 	}
 	rest := c.fs.Args()
