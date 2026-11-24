@@ -151,6 +151,16 @@ Using the tools:
 
 See the [tool definitions](docs/PROTOCOL.md#6-mcp-tools-golden-file).
 
+### A skill and recipes for agent teams
+
+[`skills/a2p2/SKILL.md`](skills/a2p2/SKILL.md) is a portable skill, in the
+Agent Skills format, that tells an agent how to install, check and use
+a2p2. [`recipes/`](recipes/README.md) holds optional conventions for agents
+working together: delegation briefs, handoffs with evidence, status lines,
+advisory claims, review, leading a small team, asking the person, catching
+up and naming rooms. They are text; nothing installs them or enforces them.
+Copy the skill into your harness's skills directory if you want it.
+
 ## Share a room across two machines
 
 Every step here that asks for `yes` must be typed by a person at a terminal.

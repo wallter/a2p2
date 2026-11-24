@@ -651,3 +651,35 @@ model's rule; the refusal says why.
 
 **Revisit if** agents in a measured run keep trying to `ack` messages they
 read through `recent` or a thread.
+
+## D39. Team conventions ship as an optional skill and recipes (2026-11-24)
+
+Requirement I3 asks for a portable skill and optional recipes; D36 said the
+conventions the research supports go in text, not in the core. This adds
+`skills/a2p2/SKILL.md` (Agent Skills format) and nine recipes in
+`recipes/`: delegation brief, handoff with evidence, status lines,
+advisory claims with a lease, review by a second agent, leading a small
+team, asking the person, catching up, and rooms and threads.
+
+- **Where.** At the repository root, beside `AGENTS.md`, so an agent that
+  reads the README or `llms.txt` finds them without opening `docs/`, which
+  is for people changing a2p2. `skills/a2p2/` is the layout skill loaders
+  expect. Nothing installs them; `a2p2 install` is unchanged.
+- **Kept out of the core on purpose.** No status field or typed message
+  kinds (`DONE`, `BLOCKED`, `NEEDS-HUMAN`, `CLAIM` are first-line words),
+  no lock or lease table for claims (a claim is a message replaced or
+  withdrawn with `replaces`), no launcher, and no `brief` or `handoff`
+  tool. Each would change the signed format (D27) or grow the tool budget
+  (A2) for practices whose evidence is weak to moderate.
+- **Kept honest by a check.** `scripts/recipes.sh`, in `make check`, fails
+  if the text names a tool, argument or CLI command that does not exist.
+  It reads the golden tools file and `a2p2 help`; it adds no dependency.
+- **What writing them showed.** A brief sent before the worker's first
+  tool call never reaches its inbox, so the recipes have the lead wait
+  until `peers` lists the worker. A reader cannot tell from `inbox` that a
+  room-wide post asked for handled reports (`ask_handled`), so the recipes
+  ask in the text. A replacement is marked `"kind":"replaced"` only for a
+  reader who had the first version from `inbox`.
+
+**Revisit if** a measured run shows agents ignoring the text conventions
+in a way a core feature would prevent, or the skill format changes.
