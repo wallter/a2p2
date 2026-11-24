@@ -99,6 +99,21 @@ Rows marked "model" include tests of the rules in `internal/members` or
 3. The seven MCP tool definitions match their fixture and fit the token budget
    in `TestToolsGolden` and `TestToolDefinitionsFitTheTokenBudget`.
 
+## Team launcher
+
+`make team-test` (part of `make check`) runs `scripts/team/test_team.py`
+in about five seconds: the launcher with a fake harness that calls the
+real `a2p2 mcp` over stdio, against a throwaway home. No model is called.
+
+| Scenario | What happens | Test |
+|---|---|---|
+| A member's tool server connects | `started` is posted only after the member's MCP server registered its label after launch; a member that never starts one gets no `started`, and its `done` says so | `test_watcher_reports_each_ending_and_the_run_is_measured` |
+| A member exits 0, exits non-zero, passes its wall-clock limit, goes quiet or asks the person | `done` with the saved answer, `failed` with the exit status, `limit` and the process group stopped, `silent`, `needs input`; each posted once | `test_watcher_reports_each_ending_and_the_run_is_measured` |
+| A member posts text that looks like launcher commands or notices | Nothing is stopped or changed | `test_watcher_reports_each_ending_and_the_run_is_measured` |
+| `team report` after a run | Messages, multi-inbox replies, questions to the person, refusals by code and empty polls from the logs, exit state and `DONE:`/`BLOCKED:` per member, as JSON and Markdown | `test_watcher_reports_each_ending_and_the_run_is_measured` |
+| `team status`, `team logs`, `team stop LABEL` on a running member | The roster shows it running; its log is printed; it is stopped and `stopped` is posted; a second `up` on the same state is refused | `test_status_logs_and_stop_one_member` |
+| A manifest over its member cap, or with a repeated or reserved label | Refused before any daemon starts | `test_manifest_limits` |
+
 ## CI
 
 The [CI workflow](../.github/workflows/ci.yml) runs on every push to `main`

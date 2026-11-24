@@ -1,0 +1,702 @@
+#!/usr/bin/env python3
+"""team: start a small formation of AI coding harnesses that coordinate
+through an a2p2 room, watch them, stop them and measure the run.
+
+It is a layer on top of a2p2: it uses only the a2p2 CLI and passes the
+a2p2 MCP server to each harness for one run on its command line (or, for
+Antigravity, in a workspace file in a directory the launcher created). It
+never edits a harness's configuration and never reads a harness's screen:
+it uses exit statuses, the files a harness writes and what the room shows.
+Text that members post is never treated as an instruction to the launcher.
+
+    team [-m MANIFEST] up [--wait]
+    team [-m MANIFEST] status
+    team [-m MANIFEST] stop [LABEL]
+    team [-m MANIFEST] logs LABEL [-n LINES]
+    team [-m MANIFEST] report
+
+MANIFEST defaults to $TEAM_MANIFEST, then ./team.json. See README.md.
+Python 3 standard library only.
+"""
+import argparse
+import datetime
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+HARNESSES = ("claude", "codex", "agy", "command")
+HARD_CAP = 16
+REFUSAL_CODES = ("invalid_request", "not_found", "not_allowed", "not_shown",
+                 "already_done", "not_registered", "too_large", "networking_off",
+                 "not_caught_up", "rate_limited", "unavailable", "internal")
+FINISHED = ("done", "failed", "limit", "stopped")
+KILL_GRACE = 5.0
+
+
+class Fail(Exception):
+    pass
+
+
+# ---------------------------------------------------------------- manifest
+
+def load_manifest(path):
+    path = os.path.abspath(path)
+    try:
+        with open(path) as f:
+            m = json.load(f)
+    except (OSError, ValueError) as e:
+        raise Fail(f"cannot read manifest {path}: {e}")
+    base = os.path.dirname(path)
+
+    def p(v):
+        return v if v is None else os.path.normpath(os.path.join(base, os.path.expanduser(v)))
+
+    for k in ("room", "a2p2_home", "members"):
+        if k not in m:
+            raise Fail(f"manifest: {k!r} is required")
+    a2p2 = m.get("a2p2", "a2p2")
+    if os.sep in a2p2 or a2p2.startswith("."):
+        a2p2 = p(a2p2)
+    else:
+        a2p2 = shutil.which(a2p2) or a2p2
+    stem = os.path.splitext(os.path.basename(path))[0]
+    man = {
+        "path": path,
+        "room": m["room"],
+        "home": p(m["a2p2_home"]),
+        "a2p2": a2p2,
+        "state": p(m.get("state_dir") or os.path.join(".team", stem)),
+        "max_members": int(m.get("max_members", 4)),
+        "lead": m.get("lead", "lead"),
+        "watcher": m.get("watcher_label", "team"),
+        "kickoff": m.get("kickoff", ""),
+        "prelude": p(m["prelude"]) if m.get("prelude") else os.path.join(HERE, "prelude.md"),
+        "poll": float(m.get("poll_seconds", 5)),
+        "silence": float(m.get("silence_seconds", 300)),
+        "members": [],
+    }
+    if not LABEL_RE.match(man["room"]):
+        raise Fail("manifest: room must be a short lower-case label")
+    if man["max_members"] > HARD_CAP:
+        raise Fail(f"manifest: max_members is at most {HARD_CAP}")
+    if len(m["members"]) > man["max_members"]:
+        raise Fail(f"manifest: {len(m['members'])} members, more than max_members {man['max_members']}")
+    seen = {man["lead"], man["watcher"], "human"}
+    for i, mm in enumerate(m["members"]):
+        label = mm.get("label", "")
+        if not LABEL_RE.match(label):
+            raise Fail(f"manifest: member {i}: label must match {LABEL_RE.pattern}")
+        if label in seen:
+            raise Fail(f"manifest: label {label!r} is used twice (or is the lead, watcher or human)")
+        seen.add(label)
+        h = mm.get("harness")
+        if h not in HARNESSES:
+            raise Fail(f"manifest: {label}: harness must be one of {', '.join(HARNESSES)}")
+        if h != "command" and not mm.get("model"):
+            raise Fail(f"manifest: {label}: model is required for {h}")
+        if h == "command" and not isinstance(mm.get("command"), list):
+            raise Fail(f"manifest: {label}: command must be a list of arguments")
+        if mm.get("workdir") and mm.get("worktree"):
+            raise Fail(f"manifest: {label}: give workdir or worktree, not both")
+        if h == "agy" and mm.get("workdir"):
+            raise Fail(f"manifest: {label}: agy needs a directory the launcher creates (omit workdir)")
+        brief = mm.get("brief", "")
+        if mm.get("brief_file"):
+            with open(p(mm["brief_file"])) as f:
+                brief = f.read()
+        man["members"].append({
+            "label": label,
+            "harness": h,
+            "model": mm.get("model", ""),
+            "sandbox": mm.get("sandbox", "read-only"),
+            "permission_mode": mm.get("permission_mode", ""),
+            "allowed_tools": list(mm.get("allowed_tools", [])),
+            "max_budget_usd": mm.get("max_budget_usd"),
+            "limit": float(mm.get("limit_seconds", 900)),
+            "silence": float(mm.get("silence_seconds", man["silence"])),
+            "workdir": p(mm.get("workdir")),
+            "worktree": p(mm.get("worktree")),
+            "command": mm.get("command"),
+            "mcp_harness": mm.get("mcp_harness", "command"),
+            "brief": brief,
+        })
+    if not man["members"]:
+        raise Fail("manifest: no members")
+    return man
+
+
+# ------------------------------------------------------------------- a2p2
+
+def a2p2(man, *args, check=True):
+    env = dict(os.environ, A2P2_HOME=man["home"])
+    r = subprocess.run([man["a2p2"], *args], env=env, stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True, timeout=60)
+    if check and r.returncode != 0:
+        raise Fail(f"a2p2 {args[0]} failed: {r.stderr.strip() or r.stdout.strip()}")
+    return r.stdout
+
+
+def a2p2_json(man, *args):
+    return json.loads(a2p2(man, *args, "--json"))
+
+
+def post(man, text):
+    """An ordinary room message from the watcher label. Never peer text."""
+    try:
+        return a2p2(man, "send", "--as", man["watcher"], "--room", man["room"], text).strip()
+    except (Fail, subprocess.SubprocessError) as e:
+        log(f"post failed: {e}")
+        return ""
+
+
+def history(man, since=None, page=200):
+    """Room history oldest first; pages back until `since` (epoch) is passed."""
+    out, before = [], None
+    while True:
+        args = ["history", "--room", man["room"], "-n", str(page)]
+        if before:
+            args += ["--before", before]
+        try:
+            ents = a2p2_json(man, *args).get("entries", [])
+        except (Fail, ValueError, subprocess.SubprocessError):
+            break
+        out = ents + out
+        if len(ents) < page or since is None or not ents or ts(ents[0]["created"]) < since:
+            break
+        before = ents[0]["id"]
+    return out
+
+
+def ts(iso):
+    return datetime.datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+
+
+def iso(t):
+    return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if t else ""
+
+
+# ------------------------------------------------------------------ state
+
+def roster_path(man):
+    return os.path.join(man["state"], "roster.json")
+
+
+def load_roster(man):
+    try:
+        with open(roster_path(man)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        raise Fail(f"no run found in {man['state']}; start one with: team up")
+
+
+def save_roster(man, r):
+    tmp = roster_path(man) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(r, f, indent=2)
+    os.replace(tmp, roster_path(man))
+
+
+def mdir(man, label):
+    return os.path.join(man["state"], "members", label)
+
+
+def alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def watcher_alive(man):
+    try:
+        with open(os.path.join(man["state"], "watcher.pid")) as f:
+            return alive(int(f.read().strip()))
+    except (OSError, ValueError):
+        return False
+
+
+def log(msg):
+    print(f"{iso(time.time())} {msg}", flush=True)
+
+
+# ----------------------------------------------------------------- launch
+
+def prompt_for(man, m, kickoff_id, lead_id):
+    with open(man["prelude"]) as f:
+        prelude = f.read()
+    for k, v in (("{label}", m["label"]), ("{room}", man["room"]),
+                 ("{lead}", lead_id), ("{kickoff}", kickoff_id)):
+        prelude = prelude.replace(k, v)
+    return prelude + m["brief"].strip() + "\n"
+
+
+def prepare(man, m, prompt):
+    """Builds the member's command line and its per-run files. Returns
+    (argv, cwd, env, final_path)."""
+    d = mdir(man, m["label"])
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "prompt.md"), "w") as f:
+        f.write(prompt)
+    if m["workdir"]:
+        work = m["workdir"]
+    elif m["worktree"]:
+        work = os.path.join(d, "work")
+        if not os.path.isdir(work):
+            r = subprocess.run(["git", "-C", m["worktree"], "worktree", "add", "--detach", work, "HEAD"],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                raise Fail(f"{m['label']}: git worktree add failed: {r.stderr.strip()}")
+    else:
+        work = os.path.join(d, "work")
+        os.makedirs(work, exist_ok=True)
+    final = os.path.join(d, "final.txt")
+    label, home, exe = m["label"], man["home"], man["a2p2"]
+    env = dict(os.environ, A2P2_HOME=home)
+    h = m["harness"]
+    if h == "claude":
+        cfg = os.path.join(d, "mcp.json")
+        with open(cfg, "w") as f:
+            json.dump({"mcpServers": {"a2p2": {"command": exe, "args": ["mcp", "--harness", "claude", "--name", label],
+                                               "env": {"A2P2_HOME": home}}}}, f)
+        argv = ["claude", "-p", prompt, "--model", m["model"], "--no-session-persistence",
+                "--mcp-config", cfg, "--strict-mcp-config",
+                "--allowedTools", ",".join(["mcp__a2p2__*"] + m["allowed_tools"]),
+                "--output-format", "stream-json", "--verbose"]
+        if m["permission_mode"]:
+            argv += ["--permission-mode", m["permission_mode"]]
+        if m["max_budget_usd"] is not None:
+            argv += ["--max-budget-usd", str(m["max_budget_usd"])]
+    elif h == "codex":
+        argv = ["codex", "exec", prompt, "-m", m["model"], "-s", m["sandbox"], "--ephemeral",
+                "--skip-git-repo-check", "-C", work,
+                "-c", "mcp_servers.a2p2.command=" + json.dumps(exe),
+                "-c", "mcp_servers.a2p2.args=" + json.dumps(["mcp", "--harness", "codex", "--name", label]),
+                "-c", "mcp_servers.a2p2.env={A2P2_HOME=" + json.dumps(home) + "}",
+                "-c", 'mcp_servers.a2p2.default_tools_approval_mode="approve"',
+                "--json", "-o", final]
+    elif h == "agy":
+        os.makedirs(os.path.join(work, ".agents"), exist_ok=True)
+        with open(os.path.join(work, ".agents", "mcp_config.json"), "w") as f:
+            json.dump({"mcpServers": {"a2p2": {"command": exe, "args": ["mcp", "--harness", "agy", "--name", label],
+                                               "env": {"A2P2_HOME": home}}}}, f)
+        argv = ["agy", "--settings", json.dumps({"permissions": {"allow": ["mcp(a2p2/*)"]}}),
+                "--model", m["model"], "--print-timeout", f"{int(m['limit'])}s", "-p=" + prompt]
+    else:
+        vals = {"a2p2": exe, "home": home, "label": label, "room": man["room"], "workdir": work,
+                "final": final, "prompt_file": os.path.join(d, "prompt.md"), "team_dir": HERE}
+        argv = [str(a).format(**vals) for a in m["command"]]
+        env.update(A2P2_BIN=exe, TEAM_LABEL=label, TEAM_ROOM=man["room"], TEAM_FINAL=final,
+                   TEAM_PROMPT_FILE=vals["prompt_file"], TEAM_MCP_HARNESS=m["mcp_harness"])
+    return argv, work, env, final
+
+
+def server_harness(m):
+    return m["mcp_harness"] if m["harness"] == "command" else m["harness"]
+
+
+# -------------------------------------------------------------------- up
+
+def cmd_up(man, args):
+    if os.path.exists(roster_path(man)):
+        raise Fail(f"{man['state']} already holds a run; remove it or set another state_dir")
+    if not os.path.isdir(man["home"]):
+        os.makedirs(man["home"], mode=0o700)
+    st = a2p2_json(man, "status")
+    node8 = st["node"][:8]
+    if man["room"] not in [r["label"] for r in st.get("rooms", [])]:
+        a2p2(man, "room", "create", man["room"])
+    # An agent sees only room posts made after it registered, so register
+    # every label (and the watcher) before the kickoff is posted.
+    for label in [m["label"] for m in man["members"]] + [man["watcher"]]:
+        a2p2(man, "inbox", "--as", label, "--room", man["room"], "--peek", "--json")
+    lead_id = f"{man['lead']}@{node8}"
+    roster_line = ", ".join(f"{m['label']} ({m['harness']})" for m in man["members"])
+    kickoff = man["kickoff"] or "Kickoff. Each member has its own brief."
+    kickoff += f"\n\nMembers: {roster_line}. Lead: {lead_id}. Reply to this message with your plan, and later with your DONE: or BLOCKED: report."
+    kickoff_id = a2p2(man, "send", "--as", man["lead"], "--room", man["room"], kickoff).strip()
+    os.makedirs(os.path.join(man["state"], "members"), exist_ok=True)
+    roster = {"room": man["room"], "home": man["home"], "node8": node8, "lead": lead_id,
+              "watcher": f"{man['watcher']}@{node8}", "kickoff": kickoff_id, "started": time.time(),
+              "ended": None, "manifest": man["path"], "members": []}
+    for m in man["members"]:
+        prompt = prompt_for(man, m, kickoff_id, lead_id)
+        argv, work, _, final = prepare(man, m, prompt)
+        d = mdir(man, m["label"])
+        roster["members"].append({
+            "label": m["label"], "id": f"{m['label']}@{node8}", "harness": m["harness"],
+            "server_harness": server_harness(m), "model": m["model"], "limit": m["limit"],
+            "silence": m["silence"], "workdir": work, "out": os.path.join(d, "out.log"),
+            "err": os.path.join(d, "err.log"), "final": final, "pid": None, "state": "pending",
+            "launched": None, "connected": None, "ended": None, "exit": None, "note": ""})
+    save_roster(man, roster)
+    with open(os.path.join(man["state"], "watcher.log"), "a") as wl:
+        w = subprocess.Popen([sys.executable, os.path.realpath(__file__), "-m", man["path"], "_watch"],
+                             stdin=subprocess.DEVNULL, stdout=wl, stderr=subprocess.STDOUT,
+                             start_new_session=True)
+    with open(os.path.join(man["state"], "watcher.pid"), "w") as f:
+        f.write(str(w.pid))
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        r = load_roster(man)
+        if all(x["pid"] or x["state"] in FINISHED for x in r["members"]) or w.poll() is not None:
+            break
+        time.sleep(0.1)
+    print(f"kickoff {kickoff_id} in room {man['room']}; state in {man['state']}")
+    cmd_status(man, args)
+    if args.wait:
+        w.wait()
+        cmd_report(man, args)
+
+
+# ---------------------------------------------------------------- watcher
+
+def connected(agents, member):
+    """The member's MCP server registered its label with the harness name
+    after the member was launched. The launcher registered the label
+    earlier with harness "cli", so only the tool server can produce this."""
+    for a in agents:
+        if a.get("id") == member["id"] and a.get("harness") == member["server_harness"] \
+                and a.get("last_seen") and ts(a["last_seen"]) >= member["launched"]:
+            return a
+    return None
+
+
+def killpg(pid, sig):
+    try:
+        os.killpg(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def cmd_watch(man, _args):
+    roster = load_roster(man)
+    procs, term_at, silent_posted, asked = {}, {}, set(), set()
+    mans = {m["label"]: m for m in man["members"]}
+    for x in roster["members"]:
+        m = mans[x["label"]]
+        with open(os.path.join(mdir(man, x["label"]), "prompt.md")) as f:
+            prompt = f.read()
+        argv, work, env, _ = prepare(man, m, prompt)
+        try:
+            with open(x["out"], "w") as out, open(x["err"], "w") as err:
+                p = subprocess.Popen(argv, cwd=work, env=env, stdin=subprocess.DEVNULL,
+                                     stdout=out, stderr=err, start_new_session=True)
+        except OSError as e:
+            x.update(state="failed", ended=time.time(), launched=time.time(), note=f"could not start: {e}")
+            post(man, f"failed: {x['label']} could not start ({x['harness']}: {e.strerror or e}).")
+            continue
+        procs[x["label"]] = p
+        x.update(pid=p.pid, state="launched", launched=time.time())
+        log(f"launched {x['label']} pid {p.pid}")
+    save_roster(man, roster)
+    while True:
+        now = time.time()
+        try:
+            agents = a2p2_json(man, "status").get("agents", [])
+        except (Fail, ValueError, subprocess.SubprocessError):
+            agents = []
+        hist = history(man)
+        for x in roster["members"]:
+            if x["state"] in FINISHED:
+                continue
+            p = procs.get(x["label"])
+            if x["state"] == "launched":
+                a = connected(agents, x)
+                if a:
+                    x.update(state="running", connected=now)
+                    post(man, f"started: {x['label']} ({x['harness']}{', ' + x['model'] if x['model'] else ''}); "
+                              f"its a2p2 tool server connected as {x['id']} after {now - x['launched']:.0f}s.")
+            mine = [e for e in hist if e.get("from") == x["id"] and ts(e["created"]) >= x["launched"] - 1]
+            for e in mine:
+                if e["id"] not in asked and any(t.startswith("human@") for t in e.get("to") or []):
+                    asked.add(e["id"])
+                    post(man, f"needs input: {x['label']} asked the person a question (message {e['id']}).")
+            code = p.poll() if p else None
+            stop_marker = os.path.join(mdir(man, x["label"]), "stop")
+            if code is not None:
+                x.update(ended=now, exit=code)
+                el = now - x["launched"]
+                where = x["final"] if os.path.exists(x["final"]) and os.path.getsize(x["final"]) else x["out"]
+                if x["harness"] == "claude":
+                    extract_claude_final(x)
+                    where = x["final"] if os.path.exists(x["final"]) else x["out"]
+                never = "" if x["connected"] else " Its a2p2 tool server never connected."
+                if x.get("limit_hit"):
+                    x["state"] = "limit"
+                elif os.path.exists(stop_marker):
+                    x["state"] = "stopped"
+                    post(man, f"stopped: {x['label']} by team stop after {el:.0f}s (exit {code}).")
+                elif code == 0:
+                    x["state"] = "done"
+                    post(man, f"done: {x['label']} exited 0 after {el:.0f}s; final answer saved at {where}.{never}")
+                else:
+                    x["state"] = "failed"
+                    post(man, f"failed: {x['label']} exited {code} after {el:.0f}s; output saved at {where}.{never}")
+                x["note"] = never.strip()
+                log(f"{x['label']} ended: {x['state']} exit {code}")
+                continue
+            if x["label"] in term_at:
+                if now - term_at[x["label"]] > KILL_GRACE:
+                    killpg(x["pid"], signal.SIGKILL)
+                continue
+            if now - x["launched"] > x["limit"]:
+                x.update(state="stopping", limit_hit=True)
+                term_at[x["label"]] = now
+                killpg(x["pid"], signal.SIGTERM)
+                post(man, f"limit: {x['label']} passed its {x['limit']:.0f}s wall-clock limit and was stopped.")
+                continue
+            if os.path.exists(stop_marker):
+                x["state"] = "stopping"
+                term_at[x["label"]] = now
+                continue
+            last = max([ts(e["created"]) for e in mine] + [x["connected"] or x["launched"]])
+            if now - last > x["silence"]:
+                if x["label"] not in silent_posted:
+                    silent_posted.add(x["label"])
+                    post(man, f"silent: {x['label']} has posted nothing in the room for {now - last:.0f}s.")
+            else:
+                silent_posted.discard(x["label"])
+        save_roster(man, roster)
+        if all(x["state"] in FINISHED for x in roster["members"]):
+            break
+        time.sleep(man["poll"])
+    roster["ended"] = time.time()
+    save_roster(man, roster)
+    write_report(man)
+    log("all members finished")
+
+
+def extract_claude_final(x):
+    """Claude Code's stream-json output ends with a result event; save its text."""
+    try:
+        res = None
+        with open(x["out"]) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("{") and '"type":"result"' in line.replace(" ", ""):
+                    try:
+                        res = json.loads(line).get("result")
+                    except ValueError:
+                        pass
+        if res is not None:
+            with open(x["final"], "w") as f:
+                f.write(res)
+    except OSError:
+        pass
+
+
+# ------------------------------------------------------------ status/stop
+
+def ago(t):
+    if not t:
+        return "-"
+    s = int(time.time() - t)
+    return f"{s}s" if s < 120 else f"{s // 60}m"
+
+
+def clean(s, n):
+    s = re.sub(r"[\x00-\x1f\x7f]+", " ", s or "").strip()
+    return s if len(s) <= n else s[: n - 1] + "~"
+
+
+def cmd_status(man, _args):
+    r = load_roster(man)
+    hist = history(man)
+    rows = [("LABEL", "HARNESS", "PID", "STATE", "LAST ROOM MESSAGE", "ELAPSED")]
+    for x in r["members"]:
+        mine = [e for e in hist if e.get("from") == x["id"]]
+        last = f"{ago(ts(mine[-1]['created']))} ago: {clean(mine[-1].get('text'), 40)}" if mine else "-"
+        el = (x["ended"] or time.time()) - x["launched"] if x["launched"] else 0
+        state = x["state"] + (f" ({x['exit']})" if x["exit"] is not None else "")
+        rows.append((x["label"], x["harness"], str(x["pid"] or "-"), state, last, f"{el:.0f}s"))
+    w = [max(len(row[i]) for row in rows) for i in range(5)]
+    for row in rows:
+        print("  ".join(c.ljust(w[i]) for i, c in enumerate(row[:5])) + "  " + row[5])
+    if not watcher_alive(man) and not r.get("ended"):
+        print("note: the watcher is not running; states may be stale")
+
+
+def cmd_stop(man, args):
+    r = load_roster(man)
+    targets = [x for x in r["members"] if x["state"] not in FINISHED and (not args.label or x["label"] == args.label)]
+    if args.label and not any(x["label"] == args.label for x in r["members"]):
+        raise Fail(f"no member {args.label!r}")
+    for x in targets:
+        open(os.path.join(mdir(man, x["label"]), "stop"), "w").close()
+        if x["pid"]:
+            killpg(x["pid"], signal.SIGTERM)
+    deadline = time.time() + KILL_GRACE + 10
+    while time.time() < deadline and watcher_alive(man):
+        r = load_roster(man)
+        if all(x["state"] in FINISHED for x in r["members"] if x["label"] in [t["label"] for t in targets]):
+            break
+        time.sleep(0.2)
+    if not watcher_alive(man):
+        # Nobody is watching: finish the records here.
+        r = load_roster(man)
+        for x in r["members"]:
+            if x["label"] in [t["label"] for t in targets] and x["state"] not in FINISHED:
+                if alive(x["pid"]):
+                    killpg(x["pid"], signal.SIGKILL)
+                x.update(state="stopped", ended=time.time())
+                post(man, f"stopped: {x['label']} by team stop (the watcher was not running).")
+        if all(x["state"] in FINISHED for x in r["members"]) and not r.get("ended"):
+            r["ended"] = time.time()
+        save_roster(man, r)
+    print(f"stopped {len(targets)} member(s)")
+
+
+def cmd_logs(man, args):
+    r = load_roster(man)
+    x = next((x for x in r["members"] if x["label"] == args.label), None)
+    if not x:
+        raise Fail(f"no member {args.label!r}")
+    for name in ("out", "err"):
+        print(f"==> {x[name]} <==")
+        try:
+            with open(x[name], errors="replace") as f:
+                lines = f.readlines()
+        except OSError:
+            lines = []
+        sys.stdout.writelines(lines[-args.n:] if args.n else lines)
+
+
+# ----------------------------------------------------------------- report
+
+CODE_RE = re.compile(r'\\*"code\\*"\s*:\s*\\*"(' + "|".join(REFUSAL_CODES) + r')\\*"\s*,\s*\\*"retryable')
+EMPTY_RE = re.compile(r'\\*"messages\\*"\s*:\s*\[\]')
+
+
+def scan_logs(x):
+    text = ""
+    for name in ("out", "err"):
+        try:
+            with open(x[name], errors="replace") as f:
+                text += f.read()
+        except OSError:
+            pass
+    codes = {}
+    for c in CODE_RE.findall(text):
+        codes[c] = codes.get(c, 0) + 1
+    return codes, len(EMPTY_RE.findall(text))
+
+
+def build_report(man):
+    r = load_roster(man)
+    hist = [e for e in history(man, since=r["started"]) if ts(e["created"]) >= r["started"] - 1]
+    msgs = [e for e in hist if e.get("kind", "message") == "message"]
+    member_ids = {x["id"] for x in r["members"]}
+    others = len(member_ids) + 1  # members and the lead; the watcher only posts
+    members = []
+    for x in r["members"]:
+        mine = [e for e in msgs if e.get("from") == x["id"]]
+        multi = [e for e in mine if e.get("parent") and
+                 (len([t for t in (e.get("to") or []) if t != x["id"]]) > 1 or (not e.get("to") and others - 1 > 1))]
+        finals = [e for e in mine if re.match(r"\s*(DONE|BLOCKED):", e.get("text") or "")]
+        codes, empty = scan_logs(x)
+        members.append({
+            "label": x["label"], "id": x["id"], "harness": x["harness"], "model": x["model"],
+            "state": x["state"], "exit": x["exit"],
+            "wall_clock_s": round((x["ended"] or time.time()) - x["launched"], 1) if x["launched"] else None,
+            "connected_after_s": round(x["connected"] - x["launched"], 1) if x["connected"] else None,
+            "messages_sent": len(mine),
+            "replies_to_more_than_one_inbox": len(multi),
+            "questions_to_person": len([e for e in mine if any(t.startswith("human@") for t in e.get("to") or [])]),
+            "refusals_by_code": codes,
+            "empty_inbox_polls_in_logs": empty,
+            "final_report": (finals[-1]["text"].strip().split(":", 1)[0] if finals else None),
+            "final_answer_file": x["final"] if os.path.exists(x["final"]) else None,
+        })
+    try:
+        waiting = sum(rm.get("waiting", 0) for rm in a2p2_json(man, "status").get("rooms", []))
+    except (Fail, ValueError, subprocess.SubprocessError):
+        waiting = None
+    return {
+        "room": r["room"], "kickoff": r["kickoff"], "lead": r["lead"],
+        "started": iso(r["started"]), "ended": iso(r["ended"]),
+        "wall_clock_s": round((r["ended"] or time.time()) - r["started"], 1),
+        "members": members,
+        "messages_in_room": len(msgs),
+        "messages_from_person": len([e for e in msgs if (e.get("from") or "").startswith("human@")]),
+        "messages_from_lead": len([e for e in msgs if e.get("from") == r["lead"]]),
+        "watcher_messages": len([e for e in msgs if e.get("from") == r["watcher"]]),
+        "person_requests_waiting": waiting,
+        "notes": "Refusals and empty inbox polls are counted from the harness logs and are only as "
+                 "complete as those logs. Room-wide replies count as reaching more than one inbox "
+                 "when the team has more than two agents.",
+    }
+
+
+def markdown(rep):
+    out = [f"Room `{rep['room']}`, {rep['started']} to {rep['ended'] or 'running'}, "
+           f"{rep['wall_clock_s']:.0f}s, {len(rep['members'])} members, {rep['messages_in_room']} messages "
+           f"({rep['watcher_messages']} from the watcher, {rep['messages_from_lead']} from the lead, "
+           f"{rep['messages_from_person']} from the person); person requests waiting: {rep['person_requests_waiting']}.", "",
+           "| Member | Harness | Model | State (exit) | Wall-clock | Connected after | Sent | Multi-inbox replies | Questions to person | Refusals | Empty polls | Report |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for m in rep["members"]:
+        refusals = ", ".join(f"{k} {v}" for k, v in sorted(m["refusals_by_code"].items())) or "0"
+        out.append(f"| {m['label']} | {m['harness']} | {m['model'] or '-'} | {m['state']} ({m['exit']}) | "
+                   f"{m['wall_clock_s']}s | {m['connected_after_s'] if m['connected_after_s'] is not None else 'never'}"
+                   f"{'s' if m['connected_after_s'] is not None else ''} | {m['messages_sent']} | "
+                   f"{m['replies_to_more_than_one_inbox']} | {m['questions_to_person']} | {refusals} | "
+                   f"{m['empty_inbox_polls_in_logs']} | {m['final_report'] or '-'} |")
+    return "\n".join(out) + "\n"
+
+
+def write_report(man):
+    rep = build_report(man)
+    with open(os.path.join(man["state"], "report.json"), "w") as f:
+        json.dump(rep, f, indent=2)
+    md = markdown(rep)
+    with open(os.path.join(man["state"], "report.md"), "w") as f:
+        f.write(md)
+    return md
+
+
+def cmd_report(man, _args):
+    sys.stdout.write(write_report(man))
+    print(f"\nwritten: {os.path.join(man['state'], 'report.json')} and report.md")
+
+
+# ------------------------------------------------------------------- main
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="team", description="Launch and watch a team of harnesses on an a2p2 room.")
+    ap.add_argument("-m", "--manifest", default=os.environ.get("TEAM_MANIFEST", "team.json"))
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    up = sub.add_parser("up", help="start every member and the watcher")
+    up.add_argument("--wait", action="store_true", help="wait until every member has finished, then report")
+    sub.add_parser("status", help="list the roster")
+    st = sub.add_parser("stop", help="end one member, or all")
+    st.add_argument("label", nargs="?")
+    lg = sub.add_parser("logs", help="print a member's output and error logs")
+    lg.add_argument("label")
+    lg.add_argument("-n", type=int, default=0, help="only the last N lines of each")
+    sub.add_parser("report", help="measure the run: report.json and report.md")
+    sub.add_parser("_watch")
+    args = ap.parse_args(argv)
+    try:
+        man = load_manifest(args.manifest)
+        {"up": cmd_up, "status": cmd_status, "stop": cmd_stop, "logs": cmd_logs,
+         "report": cmd_report, "_watch": cmd_watch}[args.cmd](man, args)
+    except Fail as e:
+        print(f"team: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -85,6 +85,19 @@ Still unverified after this check:
   home).
 - The Antigravity turn-start hook event name, `PreInvocation`.
 
+## 2026-11-24: two harnesses started by the team launcher
+
+Build `0604035`, macOS arm64, a throwaway `A2P2_HOME`. `scripts/team/team
+up --wait` started Codex CLI 0.171.0 (`gpt-6-luna`, read-only sandbox)
+and Claude Code 2.1.331 (`haiku`) with the command lines in
+[scripts/team](../scripts/team/README.md). Both MCP servers registered
+their labels under the harness's name within the first five-second poll;
+both models read the kickoff with `inbox`, replied with a plan and a
+`DONE:` report, and exited 0 (Codex after 25 s, Claude Code after 15 s).
+Codex's `reply` reached both the lead and the Claude Code member, as the
+thread rule says. The [report](../scripts/team/examples/run-2026-11-24/report.md)
+is kept.
+
 ## Earlier runs
 
 ### 2026-11-22: `scripts/e2e/run.sh`, before the delivery rewrite

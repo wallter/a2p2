@@ -651,3 +651,37 @@ model's rule; the refusal says why.
 
 **Revisit if** agents in a measured run keep trying to `ack` messages they
 read through `recent` or a thread.
+
+## D40. A team launcher as a separate layer on top of a2p2 (2026-11-24)
+
+The owner wants to start formations of different harnesses that
+coordinate through a2p2. D36 put a launcher outside the core; this is it,
+in `scripts/team/`, built only on the public CLI and the MCP server.
+
+- **Nothing in the core changed.** No new tool, CLI command, config key,
+  table or dependency. The launcher passes the MCP server to each harness
+  for one run on its command line (Antigravity: a workspace file in a
+  directory the launcher made) and never edits a harness's configuration.
+- **Python 3 standard library**, because the launcher manages processes,
+  JSON and timestamps, which are awkward in POSIX shell, and Python 3 is
+  already on every machine that runs the harnesses. It is not part of the
+  Go module, so the licence check and the static binary are unaffected.
+- **A JSON manifest.** Every Python 3 can parse it without a library
+  (`tomllib` needs 3.11), and a2p2 already speaks JSON. Long briefs go in
+  files named by `brief_file`.
+- **"Started" needs proof.** The launcher registers each label with the
+  CLI before the kickoff (an agent only sees room posts made after it
+  registered), and reports `started` only once the label has been
+  registered again under the harness's name after launch, which only the
+  member's own MCP server does.
+- **Reports are ordinary room messages** from a `team` label: `started`,
+  `done`, `failed`, `limit`, `silent`, `needs input`, `stopped`. They
+  carry numbers and paths, never a member's text, and the watcher never
+  acts on what members write.
+- **Measurement comes with it.** `team report` writes per-member counts
+  from the room and the harness logs as JSON and Markdown, because there
+  is no evidence yet that a formation beats one strong agent at equal
+  compute.
+
+**Revisit if** a launcher needs something the CLI cannot give it without
+scraping, such as a registration call or a way to read who is connected.

@@ -1,0 +1,29 @@
+{
+  "room": "crew",
+  "a2p2_home": "/tmp/a2p2-team-example/home",
+  "a2p2": "a2p2",
+  "state_dir": "/tmp/a2p2-team-example/state",
+  "max_members": 2,
+  "lead": "lead",
+  "poll_seconds": 5,
+  "silence_seconds": 120,
+  "kickoff": "Small check of the team launcher. Each member replies to this message with a one-line plan, then with a DONE: report. There is no other work.",
+  "members": [
+    {
+      "label": "luna",
+      "harness": "codex",
+      "model": "gpt-6-luna",
+      "sandbox": "read-only",
+      "limit_seconds": 300,
+      "brief": "Reply to the kickoff with a one-line plan, then reply to it with a one-line DONE: report. Do nothing else."
+    },
+    {
+      "label": "haiku",
+      "harness": "claude",
+      "model": "haiku",
+      "max_budget_usd": 0.5,
+      "limit_seconds": 300,
+      "brief": "Reply to the kickoff with a one-line plan, then reply to it with a one-line DONE: report. Do nothing else."
+    }
+  ]
+}
