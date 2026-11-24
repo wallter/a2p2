@@ -224,7 +224,9 @@ there is no server.
 - **L1 Attachments.** A message can refer to a file by name, size and hash.
   Any member with the bytes can serve them; each agent decides whether to
   fetch; fetched files are verified and never opened automatically. Sending
-  a local file needs a person's confirmation.
+  a local file needs a person's confirmation. Built for 0.2.0 ([DESIGN
+  section 12](DESIGN.md#12-attachments)); the agent and person surfaces
+  have not been tried with a real harness.
 
 ## 6. Limits, in plain words
 
@@ -329,6 +331,18 @@ there is no server.
   needs one member that others can reach. After a crash, a mapping lasts
   until its lease ends, or, on a router that grants only permanent ones,
   until a2p2 starts again on that network or a person removes it there.
+- **Files have limits and take longer than text.** A message carries up to
+  8 files of up to 256 MiB each; a room holds 1 GiB of files on a machine
+  and a machine 4 GiB in all. Files go only to members that may read the
+  message, wait until a reader's agent asks, and are deleted with the
+  message (withdrawn, replaced without them, or after 30 days). Where
+  the author and the reader both only connect out, a member that listens
+  carries the file by default, so it arrives when the author next connects,
+  and not at all if the author never does. A person's confirmation of a
+  file is a guard rail: an agent running as the same user can bypass it. A
+  copy an agent moved, and anything a member fetched before it was
+  removed, cannot be recalled. A 0.1.0 member sees the text without the
+  files. a2p2 never opens a file.
 
 ## 7. Scale
 

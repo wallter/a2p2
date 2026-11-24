@@ -674,13 +674,13 @@ per system); the mapping protocols are `internal/daemon/portmap` and every
 test of them runs against fake PCP, NAT-PMP and UPnP responders on
 loopback. No test or check sends anything to a real router.
 
-## 12. Attachments (0.2 draft)
+## 12. Attachments
 
-Not built: the design for L1, for review before any code. **[F1]** to
+How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
 **[F12]** are rules of the
 [delivery model](../internal/model/delivery/FINDINGS.md#attachments-02-draft)
-(`attach.go`); formats are in
-[Protocol section 10](PROTOCOL.md#10-attachments-02-draft).
+(`attach.go`) that the code is tested against; formats are in
+[Protocol section 10](PROTOCOL.md#10-attachments).
 
 1. **The header says only that there are files.** A `message` or `replace`
    with files has one optional top-level header field, `files`: the
@@ -711,7 +711,13 @@ Not built: the design for L1, for review before any code. **[F1]** to
    permission. Storing a withdraw, a replacement that does not list a
    file, passing the 30 days, learning a narrower grant or a voided
    admission deletes the bytes, partial downloads and agents' copies, which
-   are scoped to the message they were authorised for (D43). A
+   are scoped to the message they were authorised for (D43). The deletion
+   runs in its own sweep (`SweepFiles`) after each pull, each replace or
+   withdraw written here, each background tick and at start, not inside the
+   record's transaction. Serving, fetching, uploading and publishing a copy
+   each ask the rules again from rows when they act, and a response or
+   upload asks before every read of at most 64 KiB, so a sweep that has not
+   run yet widens nothing (D49). A
    replacement shares its files with whoever may read it, exactly as it
    shares its text, so nothing is carried forward silently: a replacement
    lists only files its writer lists again, and a person confirms them.
@@ -754,7 +760,9 @@ Not built: the design for L1, for review before any code. **[F1]** to
    agent.
 7. **a2p2 never opens a file.** It writes the verified copy, mode 0600,
    under `$A2P2_HOME/files/<room id>/` with a sanitised name and never over
-   an existing file. It does not decompress, preview, render or run it.
+   an existing file. The copy is published as a hard link from a
+   temporary file, so a file system without hard links cannot take copies.
+   Names are not Unicode-normalised: a combining mark becomes `_`. It does not decompress, preview, render or run it.
    Tool results say a file is data from another machine.
 8. **A person confirms the exact bytes [F6, F11].** `send` with `files`
    opens each path once, refuses anything but a regular file after
@@ -772,11 +780,13 @@ Not built: the design for L1, for review before any code. **[F1]** to
    scheduled; the budget is reserved at the declared size before the first
    byte. One transfer per peer per direction and 8 in all, with a total
    time limit and a minimum rate, under limits separate from pulls. Bytes
-   and their directory are synced before the row that makes them live; a
+   and their directory are synced before the row that makes them live (on
+   Windows a directory cannot be synced from Go, so a2p2 relies on NTFS's
+   journal and repairs at start what a crash can lose); a
    send's record and its file rows commit in one transaction after its
    bytes are safe, so a send is never published without them. Temporary
    files have a recognisable name. Deletions are by rows, queued in the
-   transaction that decides them, and never remove a path a live row
+   sweep transaction that decides them (item 3), and never remove a path a live row
    names; a start completes the queue and removes files no row names.
 
 **Who can reach whom.** Text and files take the same connections; what

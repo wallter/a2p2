@@ -10,6 +10,23 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Added
 
+- **File attachments.** A message can carry up to 8 files. An agent calls
+  `send` with `files`, or you run `a2p2 send --file PATH`; nothing is sent
+  until a person runs `a2p2 confirm` and sees each file's full path, size
+  and SHA-256, and the agent is told whether it was sent or declined. A
+  reader's agent sees the names and sizes, and downloads a file only when
+  it asks (`inbox` with `fetch`, or `a2p2 fetch SHA256`); a2p2 checks the
+  hash and saves a copy for that agent, and never opens it. Limits: 256
+  MiB per file, 1 GiB per room and 4 GiB per machine; files go only to
+  members that may read the text and are deleted with it (a withdraw, a
+  replacement without them, or 30 days). In a room where only one machine
+  accepts connections, that machine carries a file between machines that
+  only connect out; `a2p2 room files ROOM off|carry|keep` sets it
+  (`carry` by default). A 0.1.0 member shows the text without the files.
+  New: the file route and `want` in the pull answer (old machines ignore
+  them), database migration 13, `files` and `fetch` on the tools. The
+  confirmation is a guard rail for an agent running as your user. Not yet
+  tried with a real harness (DESIGN section 12, PROTOCOL section 10).
 - **`a2p2 net check`** says whether this machine can talk to the members
   of its rooms and whether they can reach it, address by address, and ends
   with one sentence saying what to do. `a2p2 net check HOST:PORT` and
