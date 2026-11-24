@@ -341,18 +341,28 @@ of every author in the sender's `Admitted` it holds anything of), 64 hex.
    round stored a record, text or entry on either side (for the server's
    side the requester counts records and entries it gave that it had not
    given earlier in the exchange), a new round opens.
-   If it stored nothing, the requester keeps the server's `sum` as `seen`
-   for that peer and the exchange ends until the next trigger (DESIGN 4).
+   If it stored nothing and the requester first learned in it detail from
+   which it can build an offer, one more round carries that offer. If it
+   stored nothing and nothing in it was refused, skipped, cut short or
+   counted `too_large`, the requester keeps the server's `sum` as `seen`
+   for that peer, for this generation of the room and for at most one
+   hour; either way the exchange ends until the next trigger (DESIGN 4).
    Two machines whose summaries differ for a lasting reason (one was
    admitted without history and holds headers where the other holds text)
    are therefore idle against each other after one round.
 4. A cut page, offer or log batch justifies another request; only something
-   stored counts as progress. A stream blocked by a refused record does not
-   hold back other streams. A continuation that does not advance ends the
-   exchange quietly and is counted.
+   stored, locally or as the other side acknowledges, counts as progress. A
+   stream blocked by a refused record does not hold back other streams,
+   including the same author's. Held and refused entries the peer cannot
+   list in `extra` are sent at most once in an exchange. A continuation
+   that does not advance ends the exchange quietly and is counted.
 5. A cached detail of a peer's author is discarded when that author's digest
-   from the peer changes. One author's detail must fit in one request;
-   otherwise that author is skipped and counted as `too_large`.
+   from the peer changes. One author's detail must fit in one request or
+   response; otherwise that author is skipped and counted as `too_large`.
+   A response puts its detail before its page in the size budget; detail
+   that does not fit is left out for the last authors asked, and the
+   requester asks for them again. A page record by an author not in the
+   request's `detail` is refused before anything is applied.
 6. What a peer holds is recorded only from `same` answers and from detail,
    each dated by when the request was built or received; an observation
    made earlier never replaces one made later. A copy report for an author
@@ -379,7 +389,7 @@ Sizes are measured by `TestPullSizesInASixtyFourMachineRoomAfterThirtyDaysOfDail
 | 7 | steps 4 and 6 in one transaction | 503 `unavailable` |
 | 8 | prune; build the response: `same`, or the digests answer, or for a continuing request the server's detail and the page for those authors: wanted text first, then later records per stream, predecessors and links first, stopping a stream at anything not sent, text only within the peer's current permission (section 3) | |
 | 9 | if `wait_ms` > 0 and the answer is `same`: hold until it would no longer be, or `wait_ms` passes | |
-| 10 | on release, repeat step 5; if anything was written since step 8, repeat step 8 [RM2] | 403 `not_member` |
+| 10 | on release, repeat step 5; if anything was written since step 8, or text chosen for the page has passed its retention time, repeat step 8 [RM2] | 403 `not_member` |
 
 Requester on 200: discard if the room's local generation changed since the
 request; otherwise in one transaction apply `log.entries`, then `page`
@@ -387,11 +397,11 @@ request; otherwise in one transaction apply `log.entries`, then `page`
 next request at once while differing authors are not covered, or `more`,
 `log.more` or its own offer was cut.
 
-Requester on 403 from a peer it believes is a member: forget what it had
-observed of that peer's log; the next attempt sends its accepted log from
-the start, once. If that is refused too, later attempts carry no entries
-until its own accepted log changes or a request from that peer shows
-different log heads. A server that is behind catches up through its own
+Requester on any 403 from a peer it believes is a member: forget what it
+had observed of that peer's log; the next attempt sends its accepted log
+from the start, once, with no offer. If that is refused too, later attempts
+carry neither entries nor offers until its own accepted log changes or a
+request from that peer shows different log heads. A server that is behind catches up through its own
 pulls, where `log.more` pages without limit.
 
 ### 4.5 Status codes
