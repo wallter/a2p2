@@ -1,8 +1,9 @@
 # Wire and local formats for the next version (draft, not built)
 
-**Status: draft for review, 2026-11-23; nothing here is built.** Exact
-formats for what `docs/DESIGN-next.md` describes. The design says why; this
-file says exactly what. Section numbers here are cited there as "PROTOCOL n".
+**Status: draft for review, revision 2, 2026-11-23; nothing here is built.**
+Revised after `docs/research/decisions/design-next-review3-sol.md`. Exact
+formats for what `docs/DESIGN-next.md` describes; the design says why, this
+file says exactly what. Cited there as "PROTOCOL n".
 
 ## 0. Conventions
 
@@ -10,237 +11,329 @@ file says exactly what. Section numbers here are cited there as "PROTOCOL n".
 |---|---|
 | Node id | 64 lowercase hex: the Ed25519 public key |
 | Short node | first 8 hex of the node id (display only) |
-| Record id, entry id | 32 lowercase hex (16 bytes) |
+| Key fingerprint | first 16 bytes of SHA-256(public key) |
+| Record id, entry id | 32 lowercase hex: first 16 bytes of SHA-256(domain ‖ `0x00` ‖ signed bytes exactly as received) |
+| Domains | `a2p2 record v2` for records, `a2p2 entry v2` for entries (ASCII, no terminator) |
 | Room id | `r_` + 32 lowercase hex (random) |
-| Epoch | 16 lowercase hex (random 64-bit, never `0000000000000000`) |
-| Time | RFC 3339 UTC, milliseconds, `Z`: `2026-11-23T19:00:00.000Z` |
-| Base64 | standard alphabet with padding (RFC 4648 section 4) |
+| Epoch | 16 lowercase hex, not all zeros |
+| Time | `YYYY-MM-DDTHH:MM:SS.mmmZ`, UTC, exactly 24 characters |
+| Integer | JSON number matching `0\|[1-9][0-9]*`, at most 2^53−1; no sign, fraction or exponent |
 | Agent label | `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` |
-| Agent id (display, tools) | `<label>@<short node>` |
-| JSON | UTF-8, no BOM; a duplicate object key anywhere is an error |
-| Signed JSON (headers, entries) | compact (no insignificant whitespace); a field whose value is zero, empty or false is omitted, and its presence is an error |
+| Agent id (local API, tools) | `<label>@<short node>` |
+| Base64 | RFC 4648 section 4 alphabet, `=` padding required, pad bits zero, no whitespace or line breaks |
 
-A peer's key is its node id: a machine finds it in the room log (`create`,
-`add`, `admin` targets) or in an invite token, and pins every outbound TLS
-connection to it. Addresses are hints only, learned from the token, from a
-peer's `addrs` in requests it sends, and from `peers` in responses; they are
-stored per member and tried most recent success first.
+**Strict JSON** (headers, entries, bodies, and every peer request and
+response): RFC 8259, UTF-8 without BOM. Invalid UTF-8, and `\u` escapes
+that form a lone surrogate, are errors. Object keys are case-sensitive and
+compared after unescaping; a duplicate key at any depth is an error. `null`
+is never a valid value. Writers emit compact JSON with fields in any order
+and omit every field whose value would be zero, empty, false or absent;
+receivers accept insignificant whitespace, parse by name, and treat a
+present zero, empty string, empty array or `false` as an error. Signed bytes
+are never re-encoded: they are stored and passed on exactly as received.
+
+A peer's key is its node id, learned from the room log or an invite token;
+every outbound TLS connection is pinned to it. Addresses are hints, learned
+from the token, a peer's `addrs`, and `peers` in responses, stored per
+member and tried most recent success first.
 
 ## 1. Record header
 
-| Field | Type | Rule |
+| Field | Type | Meaning |
 |---|---|---|
-| `v` | int | `2` |
-| `room` | room id | the room of the request it arrives in |
-| `author` | node id | has ever had an effective admission here |
+| `v` | integer | protocol version, `2` |
+| `room` | room id | |
+| `author` | node id | signer |
 | `epoch` | epoch | stream id |
-| `seq` | int ≥ 1 | position in the stream |
-| `prev` | record id | present iff `seq` > 1: the record at `seq - 1` |
-| `links` | array of `{"id","epoch","seq"}` | only if `seq` = 1: the author's heads held, sorted by `id`; omitted for the author's first record ever |
-| `version` | int ≥ 1 | `replace` only |
-| `kind` | string | `message`, `handled`, `withdraw`, `replace` |
-| `agent` | label | the author's agent |
-| `to` | array of `{"node","agent"}` | `message` only; ≤ 32, sorted by node then agent, no duplicates; omitted means everyone |
-| `ask_handled` | true | `message` with no `to` only |
-| `ref` | record id | required for `handled`, `withdraw`, `replace`; absent for `message` |
-| `parent` | record id | `message` only: the message answered |
-| `thread` | record id | present iff `parent`: the parent's `thread`, or the parent's id if it has none |
+| `seq` | integer ≥ 1 | position in the stream |
+| `prev` | record id | record at `seq − 1` |
+| `links` | array of `{"epoch","seq","id"}` | first record of a stream: the author's heads held |
+| `version` | integer ≥ 1 | replace version |
+| `kind` | `message`, `handled`, `withdraw`, `replace` | |
+| `agent` | label | author's agent |
+| `to` | array of `{"node","agent"}` | addressees; omitted means everyone |
+| `ask_handled` | `true` | room-wide post asks for handled reports |
+| `ref` | record id | the message concerned |
+| `parent` | record id | message answered |
+| `thread` | record id | thread's first message |
 | `created` | time | author's clock |
-| `body` | 64 hex | SHA-256 of the body bytes |
-| `size` | int | body length in bytes (omitted when 0) |
+| `body` | 64 lowercase hex | SHA-256 of the body bytes |
+| `size` | integer ≥ 1 | body length in bytes |
 
-Field order in the bytes is free; receivers parse by name and keep the
-bytes. Unknown fields are kept and ignored.
+Required (R), optional (O), forbidden (–), per kind. Every kind requires
+`v`, `room`, `author`, `epoch`, `seq`, `kind`, `agent`, `created`, `body`.
+`prev` is required iff `seq` > 1. `links` is optional iff `seq` = 1 and
+forbidden otherwise.
 
-| Kind | Body | Other rules |
-|---|---|---|
-| `message` | `{"text": "...", "choices": ["..."]}`, `text` 1 to 16,384 bytes after trimming, `choices` ≤ 8 of ≤ 200 bytes | |
-| `handled` | empty (size 0) | `ref` is a `message` the author's `agent` may report (DESIGN 2) |
-| `withdraw` | empty | `ref` has the same `author` |
-| `replace` | `{"text": "..."}` | `ref` has the same `author`; `version` = winning version known + 1 (the message is version 0) |
+| Field | `message` | `handled` | `withdraw` | `replace` |
+|---|---|---|---|---|
+| `to` | O (1–32, sorted by node then agent, unique) | – | – | – |
+| `ask_handled` | O, only without `to` | – | – | – |
+| `parent` | O | – | – | – |
+| `thread` | R iff `parent` | – | – | – |
+| `ref` | – | R | R | R |
+| `version` | – | – | – | R |
+| `size` | R | – | – | R |
+| `body` | hash of the body | `e3b0c442…b855` (empty) | `e3b0c442…b855` | hash of the body |
 
-- Signature: Ed25519 by `author` over the header bytes exactly as sent.
-- Id: first 16 bytes of SHA-256(`"a2p2 record v2"` ‖ `0x00` ‖ header bytes), hex.
-- Limits: body 16,384 bytes; header 4,096 bytes, or 8,192 when `seq` = 1.
-  A machine whose own heads do not fit in 8,192 bytes refuses to write
-  (`too_many_heads`, DESIGN 2).
+`links`: 1 or more, sorted by `id`, unique by `id` and by (`epoch`,`seq`),
+each `epoch` and `seq` valid; ≤ 100. Unknown top-level fields: any non-null
+value, kept and ignored. No unknown fields inside `links`, `to` or bodies.
 
-## 2. Record on the wire
+Bodies (strict JSON, ≤ 16,384 bytes encoded):
 
-```json
-{"h":"<base64 header bytes>","s":"<base64 64-byte signature>","b":"<base64 body bytes>"}
-```
-
-`b` is omitted when the sender does not send text. Decoded header example:
-
-```json
-{"v":2,"room":"r_9f2c4e1a0b7d4c3e8a5f6b2d1c0e9f8a","author":"ab12…(64 hex)","epoch":"5b1e0c9a7f3d2e41","seq":3,"prev":"0c6f…(32 hex)","kind":"message","agent":"claude-api","to":[{"node":"cd34…(64 hex)","agent":"codex-web"}],"parent":"7a91…","thread":"7a91…","created":"2026-11-23T19:00:00.000Z","body":"e3b0…(64 hex)","size":58}
-```
-
-Receiving one record, in order; the first failure decides:
-
-| Check | Outcome |
+| Kind | Body |
 |---|---|
-| base64, header JSON, field rules of section 1, limits | refused `bad_header` |
-| `v` = 2 | refused `bad_version` |
-| `room` = the request's room | refused `wrong_room` |
-| `author` in `Admitted` (DESIGN 2) | refused `author_not_admitted` |
-| signature | refused `bad_signature` |
-| `b` present: length = `size`, SHA-256 = `body` | refused `bad_body` |
-| `created` ≤ own clock + 24 h | not stored now (`future`) |
-| id already held | if held without text and `b` verifies, text stored; else nothing |
-| `seq` ≤ contiguous position | `fork` if a different id is held there; else nothing |
-| `seq` ≠ contiguous + 1 | nothing (`not_next`) |
-| `prev` ≠ id held at `seq - 1` | refused `fork` |
-| a link not held | nothing (`link_missing`) |
-| otherwise | stored [R4], text kept or dropped per [R6] |
+| `message` | `{"text": T}` or `{"text": T, "choices": [C, …]}`: T non-empty after trimming Unicode White_Space (stored untrimmed); 1–8 choices, each 1–200 bytes, unique |
+| `replace` | `{"text": T}`, T as above |
+| `handled`, `withdraw` | no body (zero bytes; `size` omitted) |
 
-Refusals are counted per peer and reason and shown by `trace` and `status`;
-nothing is sent back about them.
+Limits: header 4,096 bytes, or 8,192 when `seq` = 1; signature 64 bytes.
+
+**Writer rules, not checked on receipt.** `version` = the winning version
+the author knows + 1 (the message itself is 0). `thread` = the parent's
+`thread`, or the parent's id if it has none. `handled` only by an agent
+that was shown the text. `withdraw` and `replace` only of the author
+machine's own messages. A writer whose heads exceed 100 links or 8,192
+bytes refuses to write: `too_many_heads`.
+
+## 2. Receiving a record
+
+Wire object: `{"h": base64(header), "s": base64(signature), "b":
+base64(body)}`; `b` omitted when no text is sent. Checks in this order;
+the first failure gives the code and the record is not stored.
+
+**Syntax**
+
+| # | Check | Code |
+|---|---|---|
+| S1 | wire object is strict JSON with keys `h`, `s`, optional `b` only, each a string | `bad_wire` |
+| S2 | each is valid Base64 (section 0) | `bad_base64` |
+| S3 | signature is 64 bytes; header ≤ 4,096 bytes (8,192 if it parses with `seq` 1); body ≤ 16,384 bytes | `too_large` |
+| S4 | header is valid UTF-8 with no lone surrogate | `bad_utf8` |
+| S5 | header is one strict JSON object, no duplicate keys, nothing after it | `bad_json` |
+| S6 | every field has its type and format (section 0, 1); no `null`; no present zero, empty or `false` | `bad_field` |
+| S7 | required and forbidden fields for its kind and `seq`; `to`, `links` order and uniqueness | `bad_field` |
+| S8 | `handled`, `withdraw`: `b` absent or empty, `body` = SHA-256 of zero bytes | `bad_body` |
+| S9 | `b` present: length = `size`, SHA-256 = `body`, body is valid per kind (section 1) | `bad_body` |
+
+**Version, room, admission, signature**
+
+| # | Check | Code |
+|---|---|---|
+| V1 | `v` = 2 | `bad_version` |
+| R1 | `room` = the room of the request or response it arrived in | `wrong_room` |
+| A1 | `author` in `Admitted` here (DESIGN 2) | `author_not_admitted` |
+| G1 | Ed25519 signature by `author` over the header bytes as received | `bad_signature` |
+
+**Placement** (outcome, not an error code sent anywhere)
+
+| # | Condition | Outcome |
+|---|---|---|
+| P1 | `created` > own clock + 24 h | not stored now: `future` |
+| P2 | id held, no text held, `b` present, text wanted here and permitted | text stored |
+| P3 | id held otherwise | nothing |
+| P4 | `seq` ≤ contiguous position, different id held there | `fork`: kept as evidence, not stored |
+| P5 | `seq` ≠ contiguous + 1 | nothing: `not_next` |
+| P6 | `prev` ≠ id held at `seq − 1` | `fork` |
+| P7 | a link (room, author, epoch, seq, id) not held | nothing: `link_missing` |
+| P8 | otherwise | stored [R4]; text kept or dropped per [R6] |
+
+References are resolved after storing, and again whenever a target
+arrives: `ref` must be a `message` of the same room (for `withdraw` and
+`replace` by the same `author`; for `handled`, one whose `to` names
+`{author, agent}`, or with no `to` and `ask_handled`); `parent` must be a
+`message` of the same room whose `thread` (or id) equals `thread`. A
+record whose reference fails has no effect (`bad_reference` in `trace`); a
+reply that fails is shown without a parent.
+
+Codes are counted per peer in `refusals` and shown by `trace` and
+`status`; nothing is sent back.
 
 ## 3. Log entry
 
-| Field | Type | Rule |
+| Field | Type | Meaning |
 |---|---|---|
-| `v` | int | `2` |
+| `v` | integer | `2` |
 | `room` | room id | |
 | `author` | node id | signer |
-| `seq` | int ≥ 1 | per author, from 1, no gaps |
-| `prev` | entry id | present iff `seq` > 1, and also in `parents` |
-| `parents` | array of entry ids | sorted, no duplicates, ≤ 64; absent only for `create`; only entries the signer has accepted |
-| `kind` | string | `create`, `add`, `remove`, `admin` |
-| `target` | node id | absent for `create` |
-| `label` | string ≤ 64 bytes | `create` only: room label |
-| `name` | label | `add`, `admin`: the target machine's label (display) |
-| `history` | true | grant only: may read earlier history |
-| `from` | object | grant naming a non-member, without `history`: `{"<author node id>": ["<record id>", …]}`, the signer's heads per author, ids sorted |
+| `seq` | integer ≥ 1 | per author, no gaps |
+| `prev` | entry id | the author's entry at `seq − 1` |
+| `parents` | array of entry ids | entries the signer had accepted, sorted, unique, 1–64; includes `prev` |
+| `kind` | `create`, `add`, `remove`, `admin` | |
+| `target` | node id | |
+| `label` | string, 1–64 bytes UTF-8 | room label |
+| `name` | label | target's label (display) |
+| `history` | `true` | grantee may read earlier history |
+| `from` | object `{"<node id>": ["<record id>", …]}` | signer's heads per author; ids sorted, unique, 1–16 per author; ≤ 64 authors |
 | `created` | time | display only |
 
-Signature and wire form as records, without `b`: `{"h": …, "s": …}`. Id:
-first 16 bytes of SHA-256(`"a2p2 entry v2"` ‖ `0x00` ‖ entry bytes). Entry
-≤ 16,384 bytes. Checks: base64, JSON, field rules (`bad_entry`); room;
-signature; then `members.Machine.Receive`.
+| Field | `create` | `add` | `remove` | `admin` |
+|---|---|---|---|---|
+| `seq` | 1 | ≥ 1 | ≥ 1 | ≥ 1 |
+| `prev` | – | R iff `seq` > 1 | R iff `seq` > 1 | R iff `seq` > 1 |
+| `parents` | – | R | R | R |
+| `target` | – | R | R | R |
+| `label` | R | – | – | – |
+| `name` | – | R | – | O |
+| `history` | – | O | – | O |
+| `from` | – | O, only without `history` | – | O, only without `history` |
 
-**Frontier.** A record by author A is hidden from a grantee (headers only,
-no text) when it is at or before some id in `from[A]` through `prev` and
-`links`, or when that cannot be decided because a link is not held. Two or
-more effective grants for one machine: if any has `history`, only those
-without it count; the hidden set is the union of their frontiers per author.
-This is the model's per-stream maximum (`restrict` in
-`internal/model/delivery/membership.go`).
+`from` is omitted for an empty frontier. On an `admin` whose target was
+already a member in the signer's view, `history` and `from` are ignored:
+promotion does not change a permission. Entry ≤ 16,384 bytes. Wire object
+`{"h": …, "s": …}` (no `b`).
+
+Receiving an entry, in order:
+
+| # | Check | Code |
+|---|---|---|
+| S1–S7 | as for records, with this section's fields | as for records |
+| V1, R1 | as for records | as for records |
+| C1 | `create`: its id is the room's pinned create id (set at creation, or from the join preview) | `second_create` |
+| G1 | signature by `author` | `bad_signature` |
+| C2 | `seq` > 1: `prev` held, same `author`, `seq` one below; otherwise held until it is | held |
+| C3 | then `members.Machine.Receive` (positions, forks, settlement) | |
+
+C2 runs before a position is reserved or fork evidence recorded. The log
+index keeps both entries of a fork.
+
+**Frontier and current permission.** A machine's current permission comes
+from the effective grants of its current membership period (after its
+latest effective removal). If any of them has `history`, and none lacks
+it, the machine may read everything. Otherwise the frontier is the union,
+per author, of the `from` heads of those without `history`; a record by A
+is hidden (header only, no text) when it is at or before some head in the
+union through `prev` and `links`. A head that is not held, or a relation
+that cannot be decided, hides everything by that author (fail closed).
+`members.Resolve` exposes, per member, the ids of these grants.
 
 ## 4. Pull
 
-`POST /p/v2/pull`, `Content-Type: application/json`, over pinned mutual TLS
-1.3, HTTP/2 preferred.
+`POST /p/v2/pull`, strict JSON, over pinned mutual TLS 1.3, HTTP/2.
 
 ### 4.1 Request
 
 ```json
 {"v":2,"room":"r_…",
  "authors":["<node id>",…],
- "digests":{"<node id>":"<16 hex>",…},
- "detail":{"<node id>":[{"e":"<epoch>","c":12,"nb":[3,7],"w":[7]}],…},
+ "digests":{"<node id>":"<64 hex>",…},
+ "snap":"<64 hex>","detail":{"<node id>":[{"e":"<epoch>","c":12,"nb":[3,7],"w":[7]}]},
  "log":{"heads":["<entry id>",…],"extra":["<entry id>",…],"entries":[{"h":…,"s":…}]},
- "offer":[{"h":…,"s":…,"b":…}],"offer_more":false,
+ "offer":[{"h":…,"s":…,"b":…}],"offer_more":true,
  "addrs":["192.0.2.4:7443"],
- "wait_ms":240000}
+ "wait_ms":60000}
 ```
 
 | Field | Meaning | Limit |
 |---|---|---|
-| `authors` | authors the requester takes: its `Admitted` set [R3] | ≤ 1,024 |
-| `digests` | per author it holds anything of (section 4.3) | ≤ 1,024 |
-| `detail` | full summary for the authors the last response listed in `differ` | ≤ 16 authors |
-| `log.heads` | its accepted entries that no accepted entry names as parent | ≤ 64 |
-| `log.extra` | ids of entries it holds but has not accepted (held, refused) | ≤ 256 |
-| `log.entries` | its entries the server seems to lack (not at or before the server's last `log.heads`, not in its last `log.extra`) | ≤ 256 |
-| `offer` | records for the server [RM3], built against `detail` from the last response; ordered as a page | ≤ 512 |
-| `offer_more` | true if the offer was cut; the server then does not hold the response | |
-| `addrs` | the requester's current addresses | ≤ 8, each ≤ 255 bytes |
-| `wait_ms` | 0 to 240,000 | |
+| `authors` | the requester's `Admitted` set [R3] | 1–1,024 |
+| `digests` | for each author in `authors` it holds anything of (4.3) | ≤ 1,024 |
+| `snap` | the server's `snap` from the round's first response; present iff `detail` is | |
+| `detail` | the requester's detail for the next authors of that round's `differ`, in order; `[]` for an author it holds nothing of | ≤ 16 authors |
+| `log.heads` | accepted entries no accepted entry names as parent | 1–64 |
+| `log.extra` | held and refused entry ids | ≤ 256 |
+| `log.entries` | entries not at or before the server's last `log.heads` and not in its last `log.extra` | ≤ 256 |
+| `offer` | records for the server [RM3]: only authors in the server's last `authors`, built against the server's last detail, within its permission, ordered as a page | ≤ 512 |
+| `offer_more` | the offer was cut; the rest follows in the next request | |
+| `addrs` | requester's addresses | ≤ 8, each ≤ 255 bytes |
+| `wait_ms` | 0 to 60,000 | |
 
-Whole request ≤ 1 MiB.
+Request ≤ 1 MiB.
 
 ### 4.2 Response (200)
 
 ```json
 {"v":2,
- "digests":{"<node id>":"<16 hex>",…},
- "differ":["<node id>",…],
- "detail":{"<node id>":[{"e":…,"c":…,"nb":[…],"w":[…]}]},
- "log":{"heads":[…],"extra":[…],"entries":[…],"more":false},
- "page":[{"h":…,"s":…,"b":…}],"more":false,
+ "authors":["<node id>",…],
+ "digests":{"<node id>":"<64 hex>",…},
+ "snap":"<64 hex>","differ":["<node id>",…],
+ "detail":{"<node id>":[…]},
+ "log":{"heads":[…],"extra":[…],"entries":[…],"more":true},
+ "page":[{"h":…,"s":…,"b":…}],"more":true,
  "peers":[{"node":"<node id>","addrs":["…"],"seen":"<time>"}]}
 ```
 
 | Field | Meaning | Limit |
 |---|---|---|
+| `authors` | the server's `Admitted` set | |
 | `digests` | the server's, for every author in the request's `authors` it holds | |
-| `differ` | authors whose digests differ and for which the request had no `detail` | |
-| `detail` | the server's full summary for authors in `differ` | ≤ 16; more stay in `differ` |
-| `log.entries` | entries not at or before the request's `log.heads` and not in its `log.extra`: accepted ones in causal order, then held and refused ones as evidence | ≤ 256, `log.more` |
-| `page` | for authors in the request's `detail` whose digests differ (section 4.4) | ≤ 512 records, 4 MiB response |
-| `more` | the page or `differ` was cut; pull again at once | |
-| `peers` | other members the server has heard from, with addresses | ≤ 64 |
+| `snap`, `differ` | on a request without `detail`: `snap` = SHA-256 over the server's sorted `author:digest\n` lines, and every author in either `digests` whose digests differ, sorted | ≤ 1,024 |
+| `detail` | the server's detail for exactly the authors of the request's `detail` | |
+| `log.entries` | not at or before the request's `log.heads`, not in its `log.extra`: accepted in causal order, then held and refused as evidence | ≤ 256; `log.more` |
+| `page` | for the authors of the request's `detail` [R3] (4.4 step 8) | ≤ 512 records; response ≤ 4 MiB |
+| `more` | page cut at a limit | |
+| `peers` | other members with addresses | ≤ 64 |
 
-### 4.3 Digest and detail
+### 4.3 Summary exchange
 
-Detail for one author is its streams sorted by `e` ascending: `c` contiguous
-position, `nb` positions held without text (ascending), `w` the subset of
-`nb` whose text is wanted (missing here) [R3, R6]. Digest: first 8 bytes of
-SHA-256(`"a2p2 digest v2"` ‖ `0x00` ‖ lines), hex, one line per stream:
-`<e>:<c>:<nb comma-joined>:<w comma-joined>\n`. An author with nothing held
-has no digest.
+Detail of one author: its streams sorted by `e`; `c` contiguous position,
+`nb` positions held without text (ascending), `w` the subset of `nb` wanted
+[R3, R6]. An author with nothing held has detail `[]` and no digest.
+Digest: SHA-256(`"a2p2 digest v2"` ‖ `0x00` ‖ lines), 64 hex, one line per
+stream `<e>:<c>:<nb comma-joined>:<w comma-joined>\n`. Equal digests are
+treated as equal summaries.
 
-Sizes for 64 machines, one restart a day, after 30 days: digest-only
-request about 6 KB; detail about 40 bytes per stream, about 1.2 KB per
-author, about 77 KB for all 64.
+1. A request without `detail` (first of a round) gets `snap` and `differ`.
+2. The requester sends its detail for every author in `differ`, 16 per
+   request in `differ` order, each request carrying `snap`. The server
+   answers each with its own detail for those authors and their page; it
+   does not compare `snap` with its current state.
+3. When every author in `differ` has been covered, the round ends. If the
+   round stored no record, text or entry on either side, the exchange ends
+   until the next trigger (DESIGN 4); otherwise a new round starts with
+   fresh digests.
+4. A cached detail of a peer's author is discarded when that author's digest
+   from the peer changes. One author's detail must fit in one request;
+   otherwise that author is skipped and counted as `too_large`.
 
-### 4.4 Server order (one request)
+Sizes, 64 machines, one restart a day, 30 days: first request about 9 KB;
+detail about 40 bytes per stream, 1.2 KB per author.
+
+### 4.4 Server order
 
 | Step | Action | Failure |
 |---|---|---|
 | 1 | TLS peer key → node id | handshake fails |
-| 2 | size, JSON, `v`, field limits | 413 `too_large`, 400 `bad_request` |
-| 3 | rate limit for this peer | 429 `rate_limited`, `Retry-After` |
-| 4 | room known; apply `log.entries` (from a non-member only if, applied, they make it a member; otherwise discarded) | 403 `not_member` (also for an unknown room) |
+| 2 | size, strict JSON, `v`, field limits | 413 `too_large`, 400 `bad_request` |
+| 3 | rate limit for this peer | 429 `rate_limited` |
+| 4 | room known; apply `log.entries` (section 3), from a non-member only if, applied, they make it a member | 403 `not_member` (also for an unknown room) |
 | 5 | peer is a member now | 403 `not_member` |
-| 6 | store `offer` records (section 2), observed summary | |
-| 7 | steps 4 and 6 commit in one transaction | 503 `unavailable` |
-| 8 | prune; build response: authors with equal digests contribute nothing; authors with request `detail` get a page as [R3] (wanted text first, then later records per stream, predecessors and links first, stopping a stream at anything not sent), text only within the peer's permission (section 3) | |
-| 9 | if `wait_ms` > 0, `offer_more` false, and response has no page, no `differ` and no log entries: hold until any of the server's digests for the request's `authors` or its log changes, or `wait_ms` passes | |
-| 10 | on release: check step 5 and permission again, rebuild step 8 [RM2] | 403 `not_member` |
+| 6 | store `offer` (section 2) and the observed summary | |
+| 7 | steps 4 and 6 in one transaction | 503 `unavailable` |
+| 8 | prune; build the response: `snap` and `differ` if no `detail`; else server detail and page for those authors: wanted text first, then later records per stream, predecessors and links first, stopping a stream at anything not sent, text only within the peer's current permission (section 3) | |
+| 9 | if `wait_ms` > 0, `offer_more` absent, no page, no `differ`, no log entries: hold until a digest for the request's `authors` or the log changes, or `wait_ms` passes | |
+| 10 | on release, repeat steps 5 and 8 [RM2] | 403 `not_member` |
 
-Requester, on 200: if the room's local generation differs from the one the
-request was made under, discard. Otherwise in one transaction: apply
-`log.entries`, then `page` (section 2), then store the server's digests and
-detail as the observed summary. Then: if `differ` is non-empty or `more` or
-`log.more` or `offer_more`, send the next request at once.
+Requester on 200: discard if the room's local generation changed since the
+request; otherwise in one transaction apply `log.entries`, then `page`
+(section 2), then store the server's digests and detail. Send the next
+request at once while `differ` is not covered, or `more`, `log.more` or
+its own offer was cut.
 
-### 4.5 Status and reason codes
+### 4.5 Status codes
 
-| Status | `error` | Requester does |
+| Status | `error` | Requester |
 |---|---|---|
 | 200 | | apply |
-| 400 | `bad_request` | log; back off |
+| 400 | `bad_request` | back off |
 | 403 | `not_member` | stop pulling this room from this peer until its log changes |
-| 413 | `too_large` | halve the offer; retry |
-| 429 | `rate_limited` | wait `Retry-After` seconds |
-| 503 | `unavailable` | back off |
+| 413 | `too_large` | halve the offer and retry |
+| 429 | `rate_limited`, with `Retry-After` (seconds) | wait that long |
+| 503 | `unavailable`, with `Retry-After` | wait that long |
 
-Error body: `{"error":"<code>","detail":"<text ≤ 200 bytes>"}`.
+Error body: `{"error":"<code>","detail":"<≤ 200 bytes>"}`.
 
 ### 4.6 Timing and limits
 
 | Item | Value |
 |---|---|
-| Hold of a waiting pull | ≤ `wait_ms`, ≤ 240 s |
+| Hold of a waiting pull | ≤ `wait_ms` ≤ 60 s |
 | Client timeout, waiting pull | `wait_ms` + 30 s |
-| Server write deadline per request | `wait_ms` + 30 s (set per request) |
-| Server read: header 5 s, body 30 s; idle 120 s | |
-| Client timeout, other requests | 30 s; dial 3 s; TLS 5 s |
-| Probe of a rotating anchor | short pull, 10 s |
+| Server write deadline per request | `wait_ms` + 30 s |
+| Server read | header 5 s, body 30 s; idle 120 s |
+| Client, other requests | 30 s; dial 3 s; TLS 5 s |
+| Probe of a rotating anchor | 10 s |
 | Back-off | 1 s doubling to 5 min, ±20 % jitter |
 | Per peer | one waiting pull per room; 4 other concurrent; 20 per s, burst 40 |
 | Inbound connections | 256 |
@@ -250,46 +343,61 @@ Error body: `{"error":"<code>","detail":"<text ≤ 200 bytes>"}`.
 ### 5.1 Token
 
 ```text
-a2p2:7K3Q-M9XD-2HTW-PB4R-C8NV-QF6J-W1ZA-5TME@203.0.113.7:7443,[2001:db8::7]:7443
+a2p2:KSWT-54VG-HARN-HH1N-C9M1-BVJJ-RG88-Z3MN-VR9J-9VFZ-RQP1-ADMA-BM38@203.0.113.7:7443,[2001:db8::7]:7443
 ```
 
-32 Crockford base32 characters (5 bits each, 160 bits) in groups of four:
-characters 1–16 are the 80-bit secret, 17–32 the first 80 bits (10 bytes)
-of the admin's public key. Decoding ignores `-` and case and reads `I`,`L` as
-`1` and `O` as `0`. Then `@` and 1 to 8 comma-separated `host:port`. The
+52 Crockford base32 characters (260 bits) in groups of four. Characters
+1–26 are the 128-bit secret, 27–52 the admin's 128-bit key fingerprint;
+each 26-character field ends in 2 zero bits. Decoding ignores `-` and case,
+reads `I` and `L` as `1` and `O` as `0`, and refuses non-zero pad bits.
+Then `@` and 1 to 8 comma-separated `host:port` (IPv6 in brackets). An
 invite is single use and expires 30 minutes after creation; only
 SHA-256(secret) is stored.
 
-### 5.2 Exchange
+### 5.2 Requests
 
-`POST /p/v2/join` over pinned TLS. The joiner first checks that the server's
-key begins with the token's 80 bits; otherwise it stops (`wrong_key`).
+`POST /p/v2/join` over TLS. Before sending anything the joiner checks the
+server key's fingerprint against the token and stops on a mismatch
+(`wrong_key`).
 
 ```json
-{"v":2,"op":"open","secret":"7K3QM9XD2HTWPB4R","name":"laptop","addrs":["…"]}
+{"v":2,"op":"open","secret":"<26 base32>","name":"laptop","addrs":["…"],"after":0}
 ```
 
-| `op` | Server | Answer |
-|---|---|---|
-| `open` | secret valid, unexpired, unbound or bound to this key → bind to this key | 200 `{"state":"preview","room":{"id":…,"label":…},"role":"member"\|"admin","history":false,"admin":"<node id>","expires":"<time>"}` |
-| `accept` | as `open`, then raise a request for a person (DESIGN 7); repeat is a no-op | 202 `{"state":"pending","retry_ms":5000}` |
-| `poll` | | 202 pending, or 200 joined, or 403 |
+| `op` | Server |
+|---|---|
+| `open` | secret valid and unexpired; bind to this key if unbound; refuse if bound to another |
+| `accept` | as `open`, then move to accepted and raise a request for a person (DESIGN 7); repeat is a no-op |
+| `poll` | report the state |
 
-Joined, for any `op` from a key the log makes a member, expired invite or
-not: 200 `{"state":"joined","room":{"id","label"},"entries":[…],"more":bool}`,
-`entries` the room's accepted log in causal order (≤ 256); the joiner then
-pulls (section 4).
+`after` (poll only): number of log entries already received.
+
+### 5.3 States
+
+| State | Reached by | `open` / `poll` answer | `accept` answer |
+|---|---|---|---|
+| previewed | first `open` | 200 `{"state":"previewed","room":{"id","label","create"},"role":"member"\|"admin","history":bool,"admin":"<node id>","expires":"<time>"}` | 202, moves to accepted |
+| accepted | `accept` | 202 `{"state":"accepted","retry_ms":5000}` | 202 same |
+| signed | a person approves; approval and grant entries stored in one transaction | 200 `{"state":"signed","room":{…},"entries":[…],"more":bool}`, the accepted log in causal order from index `after`, ≤ 256 | 200 same |
+| refused | a person declines, or revalidation fails | 403 `declined` or `revoked` | 403 same |
+| expired | 30 minutes pass before signing | 403 `expired` | 403 `expired` |
+
+`room.create` is the create entry id the joiner pins. After signed, the
+answer stays signed, expired or not, while the key is a member; once it is
+removed the answer is 403 `removed`. A pending promotion of the joiner
+(third admin) is visible in the returned log as an entry waiting for a
+second admin. A key that left locally but is still a member gets no
+shortcut: a fresh invite goes through previewed, accepted and signed (no
+new grant is signed if it is still a member; approval returns the log).
 
 | Status | `error` | Meaning |
 |---|---|---|
-| 403 | `bad_secret` | unknown, or bound to another key |
-| 403 | `expired` | invite expired before signing |
-| 403 | `declined` | a person declined |
-| 403 | `revoked` | the admin is no longer an admin, or the joiner was removed, before signing |
-| 429 | `rate_limited` | 10 opens per minute per source address |
+| 403 | `bad_secret` | unknown secret, or bound to another key |
+| 403 | `declined`, `revoked`, `expired`, `removed` | as above |
+| 429 | `rate_limited`, `Retry-After` | 10 `open` per minute per source address |
 
-The joiner polls every `retry_ms`, doubling to 60 s, until joined or
-refused, and tells the person the outcome.
+The joiner polls every `retry_ms`, doubling to 60 s, until signed (and
+`more` is false), refused or expired, and tells the person the outcome.
 
 ## 6. MCP tools (golden file)
 
@@ -460,7 +568,7 @@ Tool behaviour:
 
 | Tool | Local call |
 |---|---|
-| `send` | `send`; `to: ["everyone"]` means everyone; with `reply_to` and no `to`, the parent's author |
+| `send` | `send`; `to: ["everyone"]` means everyone and is sent with `to` omitted on the wire; with `reply_to` and no `to`, `to` is the parent's `{author, agent}` |
 | `reply(message_id, text)` | `send` with `reply_to`, then `ack` if allowed |
 | `inbox` | `inbox`, then `seen` with every returned `key` and `version`; with `thread`, `thread` and no `seen` |
 | `ask_human` | `send` to `human@<own short node>` with `choices` |
@@ -483,8 +591,8 @@ Socket calls are `POST /v1/<name>`, JSON in and out; errors `{"error"}` with
 | `requests` (new) | `{}` | `{"requests":[{"id","kind","room","node","name","role","history","created"}]}` |
 | `confirm` (new) | `{"id","approve":bool}` | `{"id","state":"approved"\|"declined"\|"failed","reason"?}` |
 | `room/invite` (changed) | `{"room","history"?,"role"?}` | `{"token","expires","room"}` |
-| `room/join` (changed) | `{"token"}` | the preview of 5.2 |
-| `room/join/accept` (new) | `{"token","wait_ms"?}` | `{"state":"pending"\|"joined"\|"refused","room"?,"reason"?}` |
+| `room/join` (changed) | `{"token"}` | the previewed answer of 5.3 |
+| `room/join/accept` (new) | `{"token","wait_ms"?}` | `{"state":"accepted"\|"signed"\|"refused"\|"expired"\|"removed","room"?,"reason"?}` |
 | `room/admin` (new) | `{"room","node"}` | `{"entry","state":"applied"\|"pending","reason"?}` |
 | `room/remove` (changed) | `{"room","node"}` | as `room/admin` |
 | `room/leave` (new) | `{"room"}` | `{}` |
@@ -504,10 +612,10 @@ shows the preview, asks on the terminal, then waits unless `--no-wait`),
 
 | Table | Columns | Keys |
 |---|---|---|
-| `rooms` | `id`, `label`, `create_id`, `gen` int, `joined_at` | `id` |
-| `log` | `room`, `id`, `author`, `seq`, `bytes`, `sig`, `state` (`accepted`, `held`, `refused`), `batch` int | (`room`,`id`); (`room`,`author`,`seq`) |
+| `rooms` | `id`, `label`, `create_id` (pinned), `gen` int, `joined_at` | `id` |
+| `log` | `room`, `id`, `author`, `seq`, `bytes`, `sig`, `state` (`accepted`, `held`, `refused`), `batch` int, `batch_pos` int | unique (`room`,`id`); index (`room`,`author`,`seq`), not unique, so both branches of a fork fit |
 | `members` | `room`, `node`, `admin`, `name`, `addrs`, `seen_at` (cache of `Resolve`) | (`room`,`node`) |
-| `records` | `room`, `id`, `author`, `epoch`, `seq`, `kind`, `ref`, `parent`, `thread`, `agent`, `created`, `hdr`, `sig`, `body` nullable, `reason` (`live`, `expired`, `withdrawn`, `not_admitted`, `missing`) | (`room`,`id`); unique (`room`,`author`,`epoch`,`seq`); (`room`,`ref`); (`room`,`parent`); (`room`,`thread`) |
+| `records` | `room`, `id`, `author`, `epoch`, `seq`, `kind`, `ref`, `parent`, `thread`, `agent`, `created`, `hdr`, `sig`, `body` nullable, `reason` (`live`, `expired`, `withdrawn`, `not_admitted`, `missing`), `effect` (`ok`, `bad_reference`, `unresolved`) | unique (`room`,`id`); unique (`room`,`author`,`epoch`,`seq`); (`room`,`ref`); (`room`,`parent`); (`room`,`thread`) |
 | `streams` | `room`, `author`, `epoch`, `contig`, `known`, `known_at` | (`room`,`author`,`epoch`) |
 | `observed` | `room`, `peer`, `author`, `digest`, `detail` json, `at` | (`room`,`peer`,`author`) |
 | `refusals` | `room`, `peer`, `reason`, `count`, `last_at` | (`room`,`peer`,`reason`) |
@@ -515,28 +623,53 @@ shows the preview, asks on the terminal, then waits unless `--no-wait`),
 | `cursors` | `agent`, `room`, `author`, `epoch`, `start`, `pos` | (`agent`,`room`,`author`,`epoch`) |
 | `reads` | `agent`, `room`, `key`, `version` | (`agent`,`room`,`key`) |
 | `read_heads` | `agent`, `room`, `author`, `record` | (`agent`,`room`,`author`,`record`) |
-| `invites` | `secret_hash`, `room`, `role`, `history`, `expires_at`, `bound_key`, `request` | `secret_hash` |
-| `requests` | `id`, `kind`, `room`, `node`, `name`, `role`, `history`, `created_at`, `state`, `decided_at` | `id` |
+| `invites` | `secret_hash`, `room`, `role`, `history`, `expires_at`, `bound_key`, `state` (5.3), `request` | `secret_hash` |
+| `requests` | `id`, `kind`, `room`, `node`, `name`, `role`, `history`, `created_at`, `state`, `decided_at`, `entries` | `id` |
 | `meta` | `key`, `value`; `v02_dropped_notice` shown once | `key` |
 
-`gen` increases on leave and on join.
+`gen` increases on leave and on join. `batch` and `batch_pos` record
+arrival order for replaying `members.Machine`; accepted offers are applied
+in causal order within a batch.
+
+## 9. Golden vectors
+
+Step 1 generates these with a fixed test key, commits them under
+`internal/core/testdata/vectors/`, and tests that the decoder gives each
+the stated outcome. Each vector holds the wire object, the expected id or
+code, and a one-line note.
+
+| Name | Proves |
+|---|---|
+| `record-message` | a message with `to`, `parent`, `thread`, `choices`: id, signature, body hash |
+| `record-message-everyone-ask` | `to` omitted, `ask_handled` |
+| `record-first-links` | `seq` 1 with two `links` |
+| `record-handled` | empty-body hash, no `b`, no `size` |
+| `record-withdraw` | as handled |
+| `record-replace` | `version`, `ref`, body `{"text"}` |
+| `record-unknown-field` | an unknown top-level field is kept in the id and ignored |
+| `record-key-order` | same fields in another order: a different id, still valid |
+| `entry-create`, `entry-add`, `entry-add-from`, `entry-remove`, `entry-admin` | one per kind; `from` with two authors |
+| `bad-wire-extra-key` | S1 |
+| `bad-base64-unpadded`, `bad-base64-pad-bits`, `bad-base64-newline` | S2 |
+| `too-large-header`, `too-large-body`, `bad-signature-length` | S3 |
+| `bad-utf8`, `bad-utf8-lone-surrogate` | S4 |
+| `bad-json-duplicate-key`, `bad-json-duplicate-after-unescape`, `bad-json-trailing` | S5 |
+| `bad-field-null`, `bad-field-false`, `bad-field-empty-array`, `bad-field-float`, `bad-field-exponent`, `bad-field-leading-zero`, `bad-field-too-big`, `bad-field-uppercase-hex`, `bad-field-time` | S6 |
+| `bad-field-forbidden-ref-on-message`, `bad-field-missing-prev`, `bad-field-links-unsorted`, `bad-field-to-duplicate`, `bad-field-ask-with-to` | S7 |
+| `bad-body-handled-nonempty` | S8 |
+| `bad-body-hash`, `bad-body-size`, `bad-body-blank-text`, `bad-body-unknown-field` | S9 |
+| `bad-version` | V1 |
+| `wrong-room` | R1 |
+| `bad-signature` | G1 |
+| `entry-second-create` | C1 |
 
 ## Choices to review
 
-1. Invite lifetime 30 minutes (v0.2: 15), since a person must confirm on the
-   admin machine while the joiner waits.
-2. 80-bit secret and an 80-bit key prefix as the fingerprint.
-3. `created` more than 24 hours ahead is held back; 24 h is a guess at
-   tolerable clock error.
-4. The two-level summary's 16-author cap on `detail` per message, and an
-   8-byte digest.
-5. 403 `not_member` for an unknown room as well, so a non-member cannot
-   probe for rooms.
-6. A waiting pull held 240 s and deadlines of `wait_ms` + 30 s; NAT idle
-   timeouts below 4 minutes would cut it.
-7. `to: ["everyone"]` as the reserved value for "everyone" in a reply.
-8. Headers of 4 KiB, first records 8 KiB, entries 16 KiB, `parents` ≤ 64.
-9. `confirm` requires a terminal on stdin: a weak check, stated as such in
-   DESIGN 7.
-10. Rate limits (20 per second per peer, 10 join opens per minute per
-    address) are unmeasured.
+1. Unknown top-level fields are allowed (kept, ignored); none inside
+   `links`, `to`, `from` or bodies.
+2. A round that stores nothing ends the summary exchange until the next
+   trigger; an author whose detail exceeds one request is skipped.
+3. A reply whose `parent` fails its check is shown without a parent rather
+   than hidden.
+4. A frontier head that is not held hides everything by that author.
+5. Integers capped at 2^53−1; `links` ≤ 100; `from` ≤ 16 heads per author.
