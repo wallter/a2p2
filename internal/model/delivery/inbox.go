@@ -10,10 +10,11 @@ const (
 	WithdrawnNotice                      // a message you were shown was withdrawn
 	ReplacedNotice                       // a message you were shown has new text
 	ExpiredNotice                        // a message for you expired before you were shown it
+	VoidedNotice                         // a message you were shown is gone: its author's admission never counted
 )
 
 func (k EntryKind) String() string {
-	return [...]string{"?", "shown", "withdrawn", "replaced", "expired"}[k]
+	return [...]string{"?", "shown", "withdrawn", "replaced", "expired", "voided"}[k]
 }
 
 // ParentState says what became of a reply's parent, as this machine knows it.
@@ -45,6 +46,9 @@ type Entry struct {
 	// one does not follow in the author's history. Only a restore of the
 	// author from backup, followed by a write before it caught up, causes it.
 	Late bool
+	// AuthorRemoved: the author was a member and, in this machine's view,
+	// is no longer.
+	AuthorRemoved bool
 }
 
 // Gap is a stream this machine knows is longer than what it holds.
@@ -150,6 +154,7 @@ func (m *Machine) entry(h *held, k EntryKind, key string) *Entry {
 		e.Parent, e.Thread = r.Parent, r.Thread
 	}
 	e.ParentIs = m.parentState(e.Parent)
+	e.AuthorRemoved = m.st.view.ever[r.Author] && !m.st.view.now[r.Author]
 	return e
 }
 
@@ -351,8 +356,14 @@ func (w *World) Inbox(id MachineID, agent string) (View, error) {
 	if g == nil {
 		return View{}, ErrNoMachine
 	}
+	var es []Entry
+	for _, id := range g.told {
+		if k := "v:" + string(id); !g.seen[k] {
+			es = append(es, Entry{Key: k, Kind: VoidedNotice, Record: id, Message: id})
+		}
+	}
 	e, _, gaps := m.walk(g, agent, false)
-	return View{Entries: e, Waiting: gaps}, nil
+	return View{Entries: append(es, e...), Waiting: gaps}, nil
 }
 
 // Seen confirms entries the agent was shown. It is the only thing that marks

@@ -71,9 +71,10 @@ type known struct {
 }
 
 type observation struct {
-	At   Time
-	Tick int // the world's operation count, for checking reports exactly
-	Have Summary
+	At      Time
+	Tick    int // the world's operation count, for checking reports exactly
+	Have    Summary
+	Authors map[MachineID]bool // whose records the peer said it takes
 }
 
 // agentState is one agent's reading state on its machine. It is durable and
@@ -86,6 +87,7 @@ type agentState struct {
 	// heads: per author, the confirmed records no other confirmed record
 	// follows (one, unless the author wrote on two branches after a restore).
 	heads map[MachineID][]RecordID
+	told  []RecordID // messages it was shown whose author's admission was voided
 }
 
 func newAgent(start map[StreamID]int) *agentState {
@@ -110,6 +112,7 @@ func (a *agentState) clone() *agentState {
 		b.seenMsg[k] = v
 	}
 	b.heads = copyHeads(a.heads)
+	b.told = append([]RecordID(nil), a.told...)
 	return &b
 }
 
@@ -127,6 +130,7 @@ type store struct {
 	agents    map[string]*agentState
 	known     map[StreamID]known
 	obs       map[MachineID]observation
+	view      view // who this machine believes is, and was, a member
 }
 
 func newStore() *store {
@@ -141,6 +145,7 @@ func newStore() *store {
 		agents:    map[string]*agentState{},
 		known:     map[StreamID]known{},
 		obs:       map[MachineID]observation{},
+		view:      newView(),
 	}
 }
 
@@ -158,7 +163,8 @@ func (s *store) clone() *store {
 		c.at[k] = m
 	}
 	c.contig = copyInts(s.contig)
-	c.adm = s.adm // never modified after admission
+	c.adm = s.adm // replaced, never modified
+	c.view = s.view.clone()
 	c.withdrawn = copyLists(s.withdrawn)
 	c.replaced = copyLists(s.replaced)
 	c.handled = copyLists(s.handled)
@@ -218,6 +224,9 @@ type Machine struct {
 	epoch uint64
 	seq   int
 	last  *Record
+
+	// NoInbound: the machine cannot accept connections; it only pulls.
+	NoInbound bool
 
 	// Faults injected by tests: records this machine leaves out when serving.
 	withhold map[RecordID]bool
@@ -446,7 +455,7 @@ func (m *Machine) insert(r *Record, body string, hasBody bool, now Time) {
 // body for a record held with its text missing repairs it.
 func (m *Machine) accept(w *World, it wire) (stored, fork bool) {
 	r := it.rec
-	if r.verify(w.keys, it.body, it.hasBody) != nil {
+	if !m.st.view.ever[r.Author] || r.verify(w.keys, it.body, it.hasBody) != nil {
 		return false, false
 	}
 	if h, ok := m.st.recs[r.ID]; ok {
@@ -478,8 +487,8 @@ func (m *Machine) accept(w *World, it wire) (stored, fork bool) {
 
 // observe records what a peer said it held, and the highest positions it
 // knows of, so gaps can be shown.
-func (m *Machine) observe(peer MachineID, s Summary, now Time, tick int) {
-	m.st.obs[peer] = observation{At: now, Tick: tick, Have: s}
+func (m *Machine) observe(peer MachineID, s Summary, authors map[MachineID]bool, now Time, tick int) {
+	m.st.obs[peer] = observation{At: now, Tick: tick, Have: s, Authors: authors}
 	for sid, h := range s {
 		if k := m.st.known[sid]; h.Contig > k.Seq {
 			m.st.known[sid] = known{Seq: h.Contig, At: now}
@@ -492,12 +501,16 @@ func (m *Machine) observe(peer MachineID, s Summary, now Time, tick int) {
 // puller's position in each stream, predecessors first, stopping a stream
 // at the first record the server will not send, so that everything sent can
 // be stored and a refused record can never block another stream. Text the
-// puller may not read is sent as a header only.
-func (w *World) page(srv *Machine, puller MachineID, req Summary) []wire {
-	adm := w.admission[puller]
+// puller may not read, by the server's view of its permission, is sent as a
+// header only. Streams by authors the puller said it does not take are left
+// out (takes nil: not known, send all).
+func (w *World) page(srv *Machine, puller MachineID, req Summary, takes map[MachineID]bool) []wire {
+	adm := srv.st.view.adm[puller]
 	var streams []StreamID
 	for s := range srv.st.contig {
-		streams = append(streams, s)
+		if takes == nil || takes[s.Author] {
+			streams = append(streams, s)
+		}
 	}
 	sort.Slice(streams, func(i, j int) bool { return streams[i].less(streams[j]) })
 	mk := func(h *held) wire {

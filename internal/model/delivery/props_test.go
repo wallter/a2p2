@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"sync/atomic"
 	"testing"
 )
 
@@ -34,12 +35,28 @@ const (
 	opReplace
 	opDiskLost
 	opWithhold // a starts leaving its newest held record by another author out
-	opAdmit    // a admits D; without history if b is 0
+	opAdmit    // a admits D (or grants D again); without history if b is 0
+	opOffer    // a pulls from b, offering what it thinks b lacks
+	opHold     // a's request to b is held by b
+	opRelease  // the held response is sent
+	opRemove   // b removes a; only b knows at first
+	opVoid     // b finds a's admission never counted; only b knows at first
+	opLearn    // a learns the oldest membership change it has not
 )
 
 var opNames = [...]string{"sendTo", "sendAll", "pull", "pull1", "pullLost", "toggle", "crash",
 	"read", "partialRead", "peekCrash", "handle", "advance", "skew", "backup", "restore",
-	"withdraw", "replace", "diskLost", "withhold", "admit"}
+	"withdraw", "replace", "diskLost", "withhold", "admit", "offer", "hold", "release",
+	"remove", "void", "learn"}
+
+// pair says whether an operation names two machines.
+func pair(k opKind) bool {
+	switch k {
+	case opSendTo, opPull, opPullLimit1, opPullLost, opOffer, opHold, opRemove, opVoid:
+		return true
+	}
+	return false
+}
 
 var skewSteps = []Time{Day, -Day, 3 * Hour, 0}
 
@@ -51,12 +68,13 @@ type op struct {
 func (o op) String() string {
 	n := "ABCD"
 	switch o.k {
-	case opSendTo, opPull, opPullLimit1, opPullLost:
-		return fmt.Sprintf("%s(%c,%c)", opNames[o.k], n[o.a], n[o.b])
 	case opAdmit:
 		return fmt.Sprintf("admit(%c,history=%v)", n[o.a], o.b != 0)
-	case opAdvance:
-		return "advance"
+	case opAdvance, opRelease:
+		return opNames[o.k]
+	}
+	if pair(o.k) {
+		return fmt.Sprintf("%s(%c,%c)", opNames[o.k], n[o.a], n[o.b])
 	}
 	return fmt.Sprintf("%s(%c)", opNames[o.k], n[o.a])
 }
@@ -110,11 +128,12 @@ type harness struct {
 	history   map[MachineID]map[RecordID]map[int]bool
 	snaps     map[MachineID]*hsnap
 	handledBy map[string]bool
+	outSlot   int // the slot whose machine cannot accept connections, or -1
 	err       error
 }
 
-func newHarness(skews [3]Time, advance Time) *harness {
-	h := &harness{w: room("A", "B", "C"), ids: [4]MachineID{"A", "B", "C", ""}, advance: advance,
+func newHarness(skews [3]Time, advance Time, outSlot int) *harness {
+	h := &harness{w: room("A", "B", "C"), ids: [4]MachineID{"A", "B", "C", ""}, advance: advance, outSlot: outSlot,
 		skewAt: map[MachineID]int{}, writeIdx: map[RecordID]int{}, recs: map[RecordID]*Record{}, restored: map[MachineID]bool{},
 		logs: map[MachineID]map[string]*agentLog{}, should: map[MachineID]map[RecordID]bool{},
 		history: map[MachineID]map[RecordID]map[int]bool{}, snaps: map[MachineID]*hsnap{},
@@ -123,11 +142,50 @@ func newHarness(skews [3]Time, advance Time) *harness {
 		h.w.SetSkew(id, skews[i])
 		h.addMachine(id)
 	}
+	if outSlot >= 0 {
+		h.w.Machine(h.ids[outSlot]).NoInbound = true
+	}
 	for _, id := range h.ids[:3] {
 		h.backup(id)
 	}
 	h.record()
 	return h
+}
+
+// exchanged checks one pull's text against the views of the two ends.
+func (h *harness) exchanged(p, s MachineID, r PullResult) {
+	w := h.w
+	// Q13: no text reaches a machine from a server that knows it was removed.
+	if len(r.TextTo) > 0 && !w.members[p] && w.knows(s, p) {
+		h.fail("Q13: %s sent text to %s, which it knows was removed", s, p)
+	}
+	if len(r.TextFrom) > 0 && !w.members[s] && w.knows(p, s) {
+		h.fail("Q13: %s offered text to %s, which it knows was removed", p, s)
+	}
+	// Q14: text before a no-history admission never reaches the machine from
+	// one that knows its permission, in a response or in an offer.
+	for _, id := range r.TextTo {
+		if w.knows(s, p) && !mayRead(w.admission[p], h.recs[id]) {
+			h.fail("Q14: %s gave %s text from before its admission", s, p)
+		}
+	}
+	for _, id := range r.TextFrom {
+		if w.knows(p, s) && !mayRead(w.admission[s], h.recs[id]) {
+			h.fail("Q14: %s offered %s text from before its admission", p, s)
+		}
+	}
+}
+
+// completePull extends a's should-set by b's, for records a takes.
+func (h *harness) completePull(a, b MachineID) {
+	if len(h.w.Machine(b).withhold) != 0 {
+		return
+	}
+	for id := range h.should[b] {
+		if au := h.recs[id].Author; h.w.Machine(a).st.view.ever[au] && (au == b || h.w.Machine(b).st.view.ever[au]) {
+			h.should[a][id] = true
+		}
+	}
 }
 
 func (h *harness) addMachine(id MachineID) {
@@ -216,7 +274,7 @@ func (h *harness) step(o op) {
 	w := h.w
 	w.Tick++
 	a, b := h.ids[o.a], h.ids[o.b]
-	if a == "" || (b == "" && o.k <= opPullLost && o.k != opSendAll) {
+	if a == "" || (b == "" && pair(o.k)) {
 		h.record()
 		h.check()
 		return
@@ -243,11 +301,35 @@ func (h *harness) step(o op) {
 		if err == nil && !opt.LostReply && r.Sent != r.Stored {
 			h.fail("Q12: %s pulled from %s: %+v; a page slot went on something refused", a, b, r)
 		}
-		if err == nil && o.k == opPull && len(w.Machine(b).withhold) == 0 {
-			for id := range h.should[b] {
-				h.should[a][id] = true
-			}
+		h.exchanged(a, b, r)
+		if err == nil && o.k == opPull {
+			h.completePull(a, b)
 		}
+	case opOffer:
+		r, err := w.Pull(a, b, PullOpt{Offer: true})
+		if err == nil && r.Sent != r.Stored {
+			h.fail("Q12: %s pulled from %s with an offer: %+v", a, b, r)
+		}
+		h.exchanged(a, b, r)
+		if err == nil {
+			h.completePull(a, b)
+		}
+	case opHold:
+		if len(w.pending) == 0 {
+			_, _ = w.Hold(a, b, PullOpt{})
+		}
+	case opRelease:
+		if len(w.pending) > 0 {
+			x := w.pending[0]
+			r, _ := w.Release(0)
+			h.exchanged(x.puller, x.server, r)
+		}
+	case opRemove:
+		_ = w.Remove(a, b)
+	case opVoid:
+		_ = w.VoidAdmission(a, b)
+	case opLearn:
+		_, _ = w.Learn(a)
 	case opToggle:
 		if ma.Awake {
 			w.Sleep(a)
@@ -331,7 +413,11 @@ func (h *harness) step(o op) {
 			}
 		}
 	case opDiskLost:
+		if !w.members[a] {
+			break // only a member is re-added
+		}
 		n := w.DiskLost(a)
+		w.Machine(n).NoInbound = o.a == h.outSlot
 		h.ids[o.a] = n
 		h.addMachine(n)
 		h.backup(n)
@@ -346,10 +432,11 @@ func (h *harness) step(o op) {
 			w.Withhold(a, best.ID)
 		}
 	case opAdmit:
-		if h.ids[3] != "" || !w.members[a] {
+		if h.ids[3] != "" {
+			_, _ = w.Grant(h.ids[3], a, o.b != 0) // a second grant
 			break
 		}
-		if _, err := w.Admit("D", a, o.b != 0, "d"); err == nil {
+		if _, err := w.Grant("D", a, o.b != 0, "d"); err == nil {
 			w.SetSkew("D", 0)
 			h.ids[3] = "D"
 			h.addMachine("D")
@@ -398,6 +485,13 @@ func (h *harness) read(id MachineID, half bool) {
 		}
 		l := h.logs[id][a]
 		for _, e := range es {
+			if e.Kind == VoidedNotice {
+				if l.keys[e.Key] || !l.keys[string(e.Record)] {
+					h.fail("R1: %s/%s told of a voided message it was not shown, or twice", id, a)
+				}
+				l.keys[e.Key] = true
+				continue
+			}
 			h.checkShown(m, a, e)
 			if l.keys[e.Key] {
 				h.fail("Q1: %s/%s shown %s %s twice", id, a, e.Kind, e.Key)
@@ -460,6 +554,19 @@ func (h *harness) check() {
 	if w.Forks != 0 {
 		h.fail("fork: %d", w.Forks)
 	}
+	for _, id := range w.order {
+		m := w.Machine(id)
+		if m.Gone {
+			continue
+		}
+		// R1: a machine holds records only by authors that are or were
+		// members in its view.
+		for _, x := range m.st.recs {
+			if x.rec.Author != id && !m.st.view.ever[x.rec.Author] {
+				h.fail("R1: %s holds a record by %s, never a member in its view", id, x.rec.Author)
+			}
+		}
+	}
 	for _, id := range w.Members() {
 		m := w.Machine(id)
 		// Q8: every machine holds a gap-free prefix of every stream, closed
@@ -497,7 +604,7 @@ func (h *harness) check() {
 		}
 		// Q5 and D2: a time-ordered chain of complete pulls carries every record.
 		for rid := range h.should[id] {
-			if m.st.recs[rid] == nil {
+			if m.st.recs[rid] == nil && m.st.view.ever[h.recs[rid].Author] {
 				h.fail("Q5: %s lacks %s, carried to it by a chain of complete pulls", id, rid)
 			}
 		}
@@ -505,7 +612,9 @@ func (h *harness) check() {
 		// of the operation before the report was made).
 		for peer, ob := range m.st.obs {
 			for rid, x := range m.st.recs {
-				if ob.Have.HoldsBody(x.rec.Pos()) && !h.history[peer][rid][ob.Tick-1] {
+				// A response's summary is taken after the server stored the
+				// offer, so it may describe the end of the operation itself.
+				if ob.Have.HoldsBody(x.rec.Pos()) && !h.history[peer][rid][ob.Tick-1] && !h.history[peer][rid][ob.Tick] {
 					h.fail("Q7: %s says %s held %s at tick %d; it did not", id, peer, rid, ob.Tick)
 				}
 			}
@@ -558,22 +667,23 @@ func (h *harness) pullAll() {
 		moved := false
 		for _, p := range members {
 			for _, s := range members {
-				if p == s {
+				if p == s || w.Machine(s).NoInbound {
 					continue
 				}
 				w.Tick++
-				r, err := w.Pull(p, s, PullOpt{})
+				r, err := w.Pull(p, s, PullOpt{Offer: true})
 				if err != nil {
 					h.fail("quiesce pull: %v", err)
 				}
-				if r.Stored > 0 {
+				h.exchanged(p, s, r)
+				if r.Stored > 0 || r.Offered > 0 {
 					moved = true
 				}
 				h.record()
 			}
 		}
 		h.check()
-		if !moved {
+		if !moved && rounds > 0 {
 			return
 		}
 	}
@@ -595,7 +705,8 @@ func (h *harness) readAll() {
 func (h *harness) boundedProgress() {
 	w := h.w
 	members := w.Members()
-	for moved, rounds := true, 0; moved; rounds++ {
+	// At least two rounds: an offer needs a summary from an earlier contact.
+	for moved, rounds := true, 0; moved || rounds < 2; rounds++ {
 		if rounds > 200 {
 			h.fail("Q12: limited pulls did not settle")
 			return
@@ -603,18 +714,21 @@ func (h *harness) boundedProgress() {
 		moved = false
 		for _, p := range members {
 			for _, s := range members {
-				if p == s {
+				if p == s || w.Machine(s).NoInbound {
 					continue
 				}
 				w.Tick++
-				r, err := w.Pull(p, s, PullOpt{Limit: 1})
+				r, err := w.Pull(p, s, PullOpt{Limit: 1, Offer: true})
 				if err != nil {
 					h.fail("bounded pull: %v", err)
 				}
 				if r.Sent != r.Stored {
 					h.fail("Q12: %s from %s: %+v under a page limit", p, s, r)
 				}
-				moved = moved || r.Stored > 0
+				h.exchanged(p, s, r)
+				// A refused offer was built on a stale summary; the response
+				// refreshed it, so try again.
+				moved = moved || r.Stored > 0 || r.Offered > 0
 				h.record()
 			}
 		}
@@ -622,8 +736,12 @@ func (h *harness) boundedProgress() {
 	}
 	for _, p := range members {
 		for _, s := range members {
-			if p != s && len(w.page(w.Machine(s), p, w.Machine(p).summary())) != 0 {
+			mp, ms := w.Machine(p), w.Machine(s)
+			if p != s && len(w.page(ms, p, mp.summary(), mp.takes())) != 0 {
 				h.fail("Q12: %s still has records for %s after limited pulls settled", s, p)
+			}
+			if p != s && ms.NoInbound && len(w.page(ms, p, mp.summary(), mp.takes())) != 0 {
+				h.fail("Q15: %s, which only pulls, still has records for %s", s, p)
 			}
 		}
 	}
@@ -635,10 +753,17 @@ func (h *harness) boundedProgress() {
 // Q4. Then it lets 33 days pass and checks that nothing is left waiting.
 func (h *harness) quiesce() {
 	w := h.w
-	members := w.Members()
-	for _, id := range members {
+	w.pending = nil
+	for _, id := range w.order {
 		w.Wake(id)
+		for more := true; more && !w.Machine(id).Gone; {
+			more, _ = w.Learn(id)
+		}
 	}
+	w.Tick++
+	h.record()
+	h.check()
+	members := w.Members()
 	h.boundedProgress()
 	for _, id := range members {
 		w.Machine(id).withhold = map[RecordID]bool{}
@@ -687,6 +812,21 @@ func (h *harness) quiesce() {
 			}
 		}
 	}
+	// Q13 at rest: once every member knows, a machine that is no longer a
+	// member gets nothing and gives nothing.
+	for _, x := range w.order {
+		if w.members[x] || w.Machine(x).Gone {
+			continue
+		}
+		for _, s := range members {
+			if _, err := w.Pull(x, s, PullOpt{Offer: true}); err == nil {
+				h.fail("Q13: %s, no longer a member, pulled from %s", x, s)
+			}
+			if _, err := w.Pull(s, x, PullOpt{Offer: true}); err == nil {
+				h.fail("Q13: %s pulled from %s, no longer a member", s, x)
+			}
+		}
+	}
 	// Text lost with every copy leaves a reader waiting until it would have
 	// expired; after that, nothing may be left.
 	w.Advance(33 * Day)
@@ -704,8 +844,8 @@ func (h *harness) quiesce() {
 	}
 }
 
-func runSchedule(skews [3]Time, adv Time, ops []op) error {
-	h := newHarness(skews, adv)
+func runSchedule(skews [3]Time, adv Time, ops []op, outSlot int) error {
+	h := newHarness(skews, adv, outSlot)
 	for i, o := range ops {
 		h.step(o)
 		if h.err != nil {
@@ -725,18 +865,19 @@ func alphabet(n int) []op {
 	for a := 0; a < n; a++ {
 		for b := 0; b < n; b++ {
 			if a != b {
-				ops = append(ops, op{opSendTo, a, b}, op{opPull, a, b}, op{opPullLost, a, b}, op{opPullLimit1, a, b})
+				ops = append(ops, op{opSendTo, a, b}, op{opPull, a, b}, op{opPullLost, a, b}, op{opPullLimit1, a, b},
+					op{opOffer, a, b}, op{opHold, a, b}, op{opRemove, a, b}, op{opVoid, a, b})
 			}
 		}
 		for _, k := range []opKind{opSendAll, opToggle, opCrash, opRead, opPartialRead, opPeekCrash,
-			opHandle, opSkew, opRestore, opWithdraw, opBackup, opReplace, opWithhold} {
+			opHandle, opSkew, opRestore, opWithdraw, opBackup, opReplace, opWithhold, opLearn} {
 			ops = append(ops, op{k: k, a: a})
 		}
 		if a < 3 {
 			ops = append(ops, op{k: opAdmit, a: a}, op{k: opAdmit, a: a, b: 1})
 		}
 	}
-	return append(ops, op{k: opAdvance})
+	return append(ops, op{k: opAdvance}, op{k: opRelease})
 }
 
 func deep() bool { return os.Getenv("A2P2_MODEL_DEEP") == "1" }
@@ -748,46 +889,69 @@ var seeds = [][]op{
 	{{opSendTo, 0, 2}, {opBackup, 0, 0}, {opSendTo, 0, 2}, {opPull, 1, 0}},
 	{{opSendTo, 0, 2}, {opPull, 2, 0}, {opRead, 2, 0}, {opBackup, 2, 0}},
 	{{opSendTo, 0, 2}, {opPull, 2, 0}, {opAdmit, 2, 0}, {opSendTo, 2, 0}, {opPull, 3, 2}},
+	// D admitted by C without history, told to A; A then removed by B.
+	{{opSendTo, 0, 2}, {opPull, 1, 0}, {opAdmit, 2, 0}, {opLearn, 0, 0}, {opOffer, 3, 2}, {opRemove, 0, 1}},
 }
 
-// Requirements: D2, D3, D4, D5, D6, D7, D9, U3 (Q1-Q11 over every schedule to a small depth)
+// Requirements: D2, D3, D4, D5, D6, D7, D9, U3, R1-R3 (Q1-Q15 over every schedule to a small depth)
 func TestEverySmallScheduleKeepsTheDeliveryProperties(t *testing.T) {
-	depth := 2
-	if deep() {
-		depth = 3
-	}
-	ops := alphabet(4)
+	full := alphabet(4)
 	for a := 0; a < 4; a++ {
-		ops = append(ops, op{k: opDiskLost, a: a})
+		full = append(full, op{k: opDiskLost, a: a})
 	}
-	count := 0
-	var rec func(prefix []op, d int)
-	rec = func(prefix []op, d int) {
+	var member []op // the membership, offer and held-response operations
+	for _, o := range full {
+		if o.k >= opOffer {
+			member = append(member, o)
+		}
+	}
+	var count atomic.Int64
+	var rec func(t *testing.T, prefix []op, levels [][]op, out int)
+	rec = func(t *testing.T, prefix []op, levels [][]op, out int) {
 		if t.Failed() {
 			return
 		}
-		count++
-		if err := runSchedule([3]Time{0, 0, 0}, 16*Day, prefix); err != nil {
-			t.Fatal(err)
+		count.Add(1)
+		if err := runSchedule([3]Time{0, 0, 0}, 16*Day, prefix, out); err != nil {
+			t.Fatalf("outbound-only slot %d: %v", out, err)
 		}
-		if d == 0 {
+		if len(levels) == 0 {
 			return
 		}
-		for _, o := range ops {
-			rec(append(append([]op(nil), prefix...), o), d-1)
+		for _, o := range levels[0] {
+			rec(t, append(append([]op(nil), prefix...), o), levels[1:], out)
 		}
 	}
-	for i, s := range seeds {
-		d := depth
-		if !deep() && i != 3 {
-			d = 1 // keeps the normal run quick
+	t.Run("seeds", func(t *testing.T) {
+		for i, s := range seeds {
+			levels := [][]op{full}
+			switch {
+			case deep() && (i == 0 || i == 3):
+				levels = [][]op{full, full, member}
+			case deep():
+				levels = [][]op{full, full}
+			case i == 3:
+				levels = [][]op{full, member} // the full product is in the deep run
+			}
+			t.Run(fmt.Sprint(i), func(t *testing.T) {
+				t.Parallel()
+				if len(levels) == 3 { // split the largest searches by first step
+					rec(t, s, nil, -1)
+					for k, o := range levels[0] {
+						prefix := append(append([]op(nil), s...), o)
+						t.Run(fmt.Sprint(k), func(t *testing.T) {
+							t.Parallel()
+							rec(t, prefix, levels[1:], -1)
+						})
+					}
+				} else {
+					rec(t, s, levels, -1)
+				}
+				rec(t, s, [][]op{full}, 2)
+			})
 		}
-		if deep() && (i == 1 || i == 2) {
-			d = 2 // keeps the deep run to a few minutes
-		}
-		rec(s, d)
-	}
-	t.Logf("%d schedules, depth %d, alphabet %d", count, depth, len(ops))
+	})
+	t.Logf("%d schedules, alphabet %d (%d membership)", count.Load(), len(full), len(member))
 }
 
 // Requirements: D2, D3, D4, D5, D6, D7, D9, U3 (Q1-Q11 over long random schedules)
@@ -804,7 +968,7 @@ func TestRandomSchedulesKeepTheDeliveryProperties(t *testing.T) {
 	}
 	weights := func(o op) int {
 		switch o.k {
-		case opDiskLost, opRestore, opAdvance, opSkew, opAdmit:
+		case opDiskLost, opRestore, opAdvance, opSkew, opAdmit, opRemove, opVoid:
 			return 1
 		case opPull, opSendTo, opRead:
 			return 6
@@ -819,6 +983,10 @@ func TestRandomSchedulesKeepTheDeliveryProperties(t *testing.T) {
 	}
 	skewSet := []Time{0, Day, -Day, 3 * Hour}
 	for run := 0; run < runs; run++ {
+		out := -1
+		if run%2 == 1 {
+			out = 2 // C only ever pulls
+		}
 		var skews [3]Time
 		for i := range skews {
 			skews[i] = skewSet[rng.Intn(len(skewSet))]
@@ -827,21 +995,21 @@ func TestRandomSchedulesKeepTheDeliveryProperties(t *testing.T) {
 		for i := 0; i < steps; i++ {
 			sched = append(sched, bag[rng.Intn(len(bag))])
 		}
-		if err := runSchedule(skews, 10*Day, sched); err != nil {
-			small := shrink(skews, 10*Day, sched)
-			t.Fatalf("seed %d run %d skews %v: %v\nsmallest failing schedule: %v\n%v",
-				seed, run, skews, err, small, runSchedule(skews, 10*Day, small))
+		if err := runSchedule(skews, 10*Day, sched, out); err != nil {
+			small := shrink(skews, 10*Day, sched, out)
+			t.Fatalf("seed %d run %d skews %v outbound-only slot %d: %v\nsmallest failing schedule: %v\n%v",
+				seed, run, skews, out, err, small, runSchedule(skews, 10*Day, small, out))
 		}
 	}
 }
 
 // shrink removes operations from a failing schedule while it still fails.
-func shrink(skews [3]Time, adv Time, ops []op) []op {
+func shrink(skews [3]Time, adv Time, ops []op, out int) []op {
 	for again := true; again; {
 		again = false
 		for i := range ops {
 			try := append(append([]op(nil), ops[:i]...), ops[i+1:]...)
-			if runSchedule(skews, adv, try) != nil {
+			if runSchedule(skews, adv, try, out) != nil {
 				ops, again = try, true
 				break
 			}

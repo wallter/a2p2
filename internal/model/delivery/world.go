@@ -17,14 +17,15 @@ type Admission struct {
 }
 
 // World is the room: its machines, the true time, and the key table every
-// member uses to check signatures. Membership is fixed apart from Admit and
-// the re-admission after a lost disk; membership changes proper are modelled
-// in internal/model/members.
+// member uses to check signatures. members and admission are the truth;
+// each machine acts on its own view (membership.go).
 type World struct {
 	Now       Time
 	machines  map[MachineID]*Machine
 	order     []MachineID
 	members   map[MachineID]bool
+	changes   []Change
+	pending   []*exchange // responses a server is holding
 	keys      map[MachineID]string
 	admission map[MachineID]Admission
 	nextEpoch uint64
@@ -73,6 +74,8 @@ func (w *World) Clone() *World {
 		c.machines[k] = v.clone()
 	}
 	c.order = append([]MachineID(nil), w.order...)
+	c.changes = append([]Change(nil), w.changes...)
+	c.pending = append([]*exchange(nil), w.pending...)
 	c.members = map[MachineID]bool{}
 	for k, v := range w.members {
 		c.members[k] = v
@@ -104,20 +107,26 @@ func (w *World) newMachine(id MachineID, agents []string, adm Admission) *Machin
 	return m
 }
 
-// AddMachine adds a founding member, awake, with the given agents.
+// AddMachine adds a founding member, awake, with the given agents. Every
+// machine knows of it at once.
 func (w *World) AddMachine(id MachineID, agents ...string) *Machine {
-	return w.newMachine(id, agents, Admission{History: true})
+	m := w.newMachine(id, agents, Admission{History: true})
+	for _, c := range w.changes {
+		m.apply(c, w.Now)
+	}
+	w.tellAll(w.change(Add, id, m.st.adm))
+	return m
 }
 
-// Admit adds a new machine, admitted by member by. Its inbox starts empty
-// (U3). history says whether members may hand it records from before.
+// Admit adds a new machine, admitted by member by, and tells every machine
+// at once. Its inbox starts empty (U3). history says whether members may
+// hand it records from before.
 func (w *World) Admit(id MachineID, by MachineID, history bool, agents ...string) (*Machine, error) {
-	b, ok := w.machines[by]
-	if !ok || !w.members[by] {
-		return nil, ErrNoMachine
+	m, err := w.Grant(id, by, history, agents...)
+	if err == nil {
+		w.tellAll(w.changes[len(w.changes)-1])
 	}
-	adm := Admission{Heads: copyInts(b.st.contig), History: history}
-	return w.newMachine(id, agents, adm), nil
+	return m, err
 }
 
 // Machine returns a machine by id.
@@ -232,6 +241,7 @@ func (w *World) DiskLost(id MachineID) MachineID {
 	m := w.machines[id]
 	m.Gone, m.Awake = true, false
 	delete(w.members, id)
+	w.tellAll(w.change(Remove, id, Admission{}))
 	nid := id + "'"
 	for w.machines[nid] != nil {
 		nid += "'"
@@ -242,7 +252,7 @@ func (w *World) DiskLost(id MachineID) MachineID {
 		break
 	}
 	if by == "" {
-		w.newMachine(nid, m.agents, Admission{History: true})
+		w.AddMachine(nid, m.agents...)
 	} else if _, err := w.Admit(nid, by, true, m.agents...); err != nil {
 		panic(err)
 	}
@@ -405,43 +415,149 @@ func (w *World) amend(id MachineID, agent string, ref RecordID, k Kind, body str
 
 // PullOpt injects faults into one pull.
 type PullOpt struct {
-	Limit     int  // at most this many records in the response (0: no limit)
+	Limit     int  // at most this many records in the response, and in the offer (0: no limit)
 	LostReply bool // the server answered; the answer never arrived
+	Offer     bool // the request carries what the puller thinks the server lacks
 }
 
 // PullResult says what one pull did.
 type PullResult struct {
 	Sent, Stored, Refused int
+	Offered, OfferStored  int
+	TextTo                []RecordID // records whose text the server sent the puller
+	TextFrom              []RecordID // records whose text the puller offered the server
+}
+
+// exchange is one pull: a request, and a response that may be held.
+type exchange struct {
+	puller, server MachineID
+	opt            PullOpt
+	req            Summary
+	items          []wire
+	res            PullResult
 }
 
 // Pull is the one operation that moves data. Puller opens a connection to
-// server and sends its summary; server answers with every record puller
-// lacks, in order, and its own summary. Each side records what the other
-// said it held. Puller stores the answer in one step. Both must be awake.
+// server and sends its summary, the authors it takes records from and, with
+// Offer, a page built against what server last said it held. Server answers
+// with every record puller lacks, in order, and its own summary. Each side
+// records what the other said it held, and each acts only if it sees the
+// other as a member now. Both must be awake.
 func (w *World) Pull(puller, server MachineID, opt PullOpt) (PullResult, error) {
+	x, err := w.request(puller, server, opt)
+	if err != nil {
+		return PullResult{}, err
+	}
+	return w.release(x)
+}
+
+// Hold sends a request whose response the server holds (a long poll). It
+// returns a handle for Release.
+func (w *World) Hold(puller, server MachineID, opt PullOpt) (int, error) {
+	x, err := w.request(puller, server, opt)
+	if err != nil {
+		return 0, err
+	}
+	w.pending = append(w.pending, x)
+	return len(w.pending) - 1, nil
+}
+
+// Release sends a held response.
+func (w *World) Release(h int) (PullResult, error) {
+	x := w.pending[h]
+	w.pending = append(append([]*exchange(nil), w.pending[:h]...), w.pending[h+1:]...)
+	return w.release(x)
+}
+
+func (m *Machine) takes() map[MachineID]bool {
+	t := map[MachineID]bool{}
+	for k := range m.st.view.ever {
+		t[k] = true
+	}
+	return t
+}
+
+func (w *World) request(puller, server MachineID, opt PullOpt) (*exchange, error) {
 	if puller == server {
-		return PullResult{}, ErrNotAllow
+		return nil, ErrNotAllow
 	}
 	p, err := w.awake(puller)
 	if err != nil {
-		return PullResult{}, err
+		return nil, err
 	}
 	s, err := w.awake(server)
 	if err != nil {
-		return PullResult{}, err
+		return nil, err
 	}
-	if !w.members[puller] || !w.members[server] {
-		return PullResult{}, ErrNotAllow
+	if s.NoInbound || !p.st.view.now[server] || !s.st.view.now[puller] {
+		return nil, ErrNotAllow
 	}
-	req := p.summary()
-	s.observe(p.ID, req, w.Now, w.Tick)
-	items := w.page(s, p.ID, req)
-	if opt.Limit > 0 && len(items) > opt.Limit {
-		items = items[:opt.Limit]
+	x := &exchange{puller: puller, server: server, opt: opt}
+	if ob, seen := p.st.obs[server]; opt.Offer && seen { // nothing to build on: no offer
+		offer := w.page(p, server, ob.Have, ob.Authors)
+		if opt.Limit > 0 && len(offer) > opt.Limit {
+			offer = offer[:opt.Limit]
+		}
+		x.res.Offered = len(offer)
+		for _, it := range offer {
+			if it.hasBody {
+				x.res.TextFrom = append(x.res.TextFrom, it.rec.ID)
+			}
+			ok, fork := s.accept(w, it)
+			if fork {
+				w.Forks++
+			}
+			if ok {
+				x.res.OfferStored++
+			}
+		}
 	}
-	res := PullResult{Sent: len(items)}
-	if opt.LostReply {
+	x.req = p.summary()
+	s.observe(p.ID, x.req, p.takes(), w.Now, w.Tick)
+	x.items = w.page(s, p.ID, x.req, p.takes())
+	if opt.Limit > 0 && len(x.items) > opt.Limit {
+		x.items = x.items[:opt.Limit]
+	}
+	return x, nil
+}
+
+// release sends the response. The server checks its view again: nothing
+// goes to a machine it now knows was removed, and no text that its view of
+// the puller's permission now forbids. The puller takes it only from a
+// machine it still sees as a member.
+func (w *World) release(x *exchange) (PullResult, error) {
+	res := x.res
+	p, err := w.awake(x.puller)
+	if err != nil {
+		return res, err
+	}
+	s, err := w.awake(x.server)
+	if err != nil {
+		return res, err
+	}
+	if !s.st.view.now[x.puller] {
+		return res, ErrNotAllow
+	}
+	adm := s.st.view.adm[x.puller]
+	var items []wire
+	for _, it := range x.items {
+		if it.hasBody && !mayRead(adm, it.rec) {
+			if it.rec.Seq <= x.req[it.rec.Stream()].Contig {
+				continue // a repair it may no longer have
+			}
+			it.body, it.hasBody = "", false
+		}
+		if it.hasBody {
+			res.TextTo = append(res.TextTo, it.rec.ID)
+		}
+		items = append(items, it)
+	}
+	res.Sent = len(items)
+	if x.opt.LostReply {
 		return res, nil
+	}
+	if !p.st.view.now[x.server] {
+		return res, ErrNotAllow
 	}
 	resp := s.summary()
 	for _, it := range items {
@@ -455,6 +571,6 @@ func (w *World) Pull(puller, server MachineID, opt PullOpt) (PullResult, error) 
 			res.Refused++
 		}
 	}
-	p.observe(s.ID, resp, w.Now, w.Tick)
+	p.observe(s.ID, resp, s.takes(), w.Now, w.Tick)
 	return res, nil
 }
