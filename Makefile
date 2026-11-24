@@ -9,10 +9,16 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 build:            ## build bin/a2p2
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/a2p2
 
-# -timeout: internal/node takes about four minutes under the race detector
-# here and more than Go's default ten on a two-core hosted runner.
-test:             ## unit, property and integration tests with the race detector
-	$(GO) test -race -count=1 -timeout 30m ./...
+# The race tests with -count=1 -timeout 30m. Packages whose tests take 20
+# seconds or more by scripts/test-timings.tsv run as SHARDS processes of
+# one compiled test binary (scripts/gotest.sh; docs/TESTING.md). SHARDS
+# defaults to the number of CPUs, at most 12.
+.PHONY: test-timings
+test:             ## unit, property and integration tests with the race detector, slow packages sharded [SHARDS=n]
+	GO=$(GO) scripts/gotest.sh
+
+test-timings:     ## run the tests and rewrite scripts/test-timings.tsv, by which the shards are balanced
+	GO=$(GO) TIMINGS_OUT=scripts/test-timings.tsv scripts/gotest.sh
 
 fmt:              ## fail if any file is not gofmt-clean
 	@out=$$(gofmt -l cmd internal); [ -z "$$out" ] || { echo "gofmt needed:"; echo "$$out"; exit 1; }
@@ -42,7 +48,11 @@ trace:            ## every requirement has a row in docs/TRACE.md, and every tes
 recipes:          ## requirement I3: the recipes and the skill name only tools, arguments and commands that exist
 	scripts/recipes.sh
 
-check: fmt vet windows licences trace test recipes ## everything CI runs except lint/vuln (which need network)
+# The steps of check run at the same time (scripts/gate.sh): one line per
+# step with its time, then the full log of any step that failed.
+CHECK_STEPS := fmt vet windows licences trace recipes test team-test
+check:            ## everything CI runs except lint/vuln (which need network), steps at the same time
+	@scripts/gate.sh $(foreach s,$(CHECK_STEPS),$(s)='$(MAKE) --no-print-directory $(s)')
 
 fuzz:             ## short fuzz smoke run of the record and entry decoders; FUZZTIME=10m for a long one
 	$(GO) test ./internal/core -run '^$$' -fuzz '^FuzzParseRecord$$' -fuzztime $${FUZZTIME:-20s}
@@ -85,23 +95,31 @@ release:          ## static binaries a2p2_<os>_<arch> (.exe on Windows) and SHA2
 # build caches live in named volumes so a second run is quick.
 .PHONY: check-linux prerelease
 GO_IMAGE ?= golang:$(shell awk '/^go /{print $$2}' go.mod)
-check-linux:      ## go vet and the race tests on Linux in a container (needs Docker)
+LINUX_SHARDS ?= 8
+check-linux:      ## go vet and the race tests on Linux in a container, sharded as make test (needs Docker)
 	docker run --rm -v "$(CURDIR)":/src:ro -v a2p2-gomod:/go/pkg/mod -v a2p2-gocache:/root/.cache/go-build \
-	  -w /work $(GO_IMAGE) sh -c 'cp -a /src/. /work/ && rm -rf /work/bin /work/dist /work/.chaos /work/.a2p2-dev /work/.claude && go vet ./... && go test -race -count=1 -timeout 30m ./...'
+	  -e SHARDS=$(LINUX_SHARDS) -w /work $(GO_IMAGE) sh -c 'cp -a /src/. /work/ && rm -rf /work/bin /work/dist /work/.chaos /work/.prerelease /work/.a2p2-dev /work/.claude && go vet ./... && scripts/gotest.sh'
 
-prerelease:       ## the local gate before a tag: check, lint, vuln, Linux in a container, one chaos run (its default length: shorter runs are inconclusive)
-	$(MAKE) check
-	$(MAKE) lint
-	$(MAKE) vuln
-	$(MAKE) check-linux
-	$(MAKE) chaos
+# check, lint, vuln, check-linux and chaos at the same time, each to its
+# own log in .prerelease/; on a pass on a clean tree it writes
+# .prerelease/stamp, which make tag requires (scripts/prerelease.sh).
+prerelease:       ## the local gate before a tag, steps at the same time; writes the stamp make tag needs
+	@MAKE='$(MAKE)' scripts/prerelease.sh
+
+.PHONY: tag verify-release
+tag:              ## make tag VERSION=v1.2.3: refuses unless make prerelease passed on HEAD, the tree is clean and pushed, and CHANGELOG.md has the section; then tags and pushes
+	@[ "$(origin VERSION)" = "command line" ] || { echo "usage: make tag VERSION=v1.2.3"; exit 2; }
+	scripts/tag.sh $(VERSION)
+
+verify-release:   ## make verify-release VERSION=v1.2.3: waits for the release workflow, checks assets, checksum and version from this machine (needs gh)
+	@[ "$(origin VERSION)" = "command line" ] || { echo "usage: make verify-release VERSION=v1.2.3"; exit 2; }
+	scripts/verify-release.sh $(VERSION)
 
 clean:
 	rm -rf bin dist
 
 # Team launcher (scripts/team): a layer on top of a2p2, tested with a fake harness.
 .PHONY: team-test
-check: team-test
 team-test: build  ## the team launcher against a fake harness and a throwaway home (about 5 seconds)
 	python3 scripts/team/test_team.py
 

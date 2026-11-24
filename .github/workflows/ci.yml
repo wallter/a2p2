@@ -42,7 +42,8 @@ jobs:
           go-version-file: go.mod
       # fmt, vet, the Windows build gate, the licence check, the requirement
       # register, the recipes check, the race tests and the launcher's tests.
-      - run: make check
+      # Two cores: the slow packages run as two shards (scripts/gotest.sh).
+      - run: make check SHARDS=2
       # staticcheck at a pinned version, downloaded by `go run`.
       - run: make lint
   # Windows: only a run by hand that asks for windows or all, never a pull

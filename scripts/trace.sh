@@ -22,11 +22,11 @@ while IFS= read -r line; do
   status=$(printf '%s' "$line" | awk -F'|' '{gsub(/^ +| +$/,"",$3); print $3}')
   named=$(printf '%s' "$line" | grep -oE '`(Test|Fuzz)[A-Za-z0-9_]+`' | tr -d '`' || true)
   for t in $named; do
-    printf '%s\n' "$tests" | grep -qx "$t" || { echo "trace: $id names $t, which does not exist"; fail=1; }
+    grep -qx -- "$t" <<< "$tests" || { echo "trace: $id names $t, which does not exist"; fail=1; }
   done
   if [ "$status" = met ]; then
     ok=0
-    for t in $named; do printf '%s\n' "$built" | grep -qx "$t" && ok=1; done
+    for t in $named; do grep -qx -- "$t" <<< "$built" && ok=1; done
     [ "$ok" = 1 ] || { echo "trace: $id is 'met' without a test of the built code (model tests do not count)"; fail=1; }
   fi
   case "$status" in met|partly|untested|"not yet") ;; *) echo "trace: $id has unknown status '$status'"; fail=1 ;; esac

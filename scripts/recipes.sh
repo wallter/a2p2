@@ -76,15 +76,17 @@ for f in "${files[@]}"; do
       [ -n "$call" ] || continue
       name=${call%% *}
       args=$(printf '%s\n' "$toolargs" | awk -F: -v n="$name" '$1 == n { print $2 }')
-      if ! printf '%s\n' "$tools" | grep -qx "$name"; then bad "$where: no tool named $name"; continue; fi
+      if ! grep -qx -- "$name" <<< "$tools"; then bad "$where: no tool named $name"; continue; fi
       for k in $(printf '%s' "$call" | grep -oE '[{,]"[a-z_]+":' | tr -d '{,":'); do
         case " $args " in *" $k "*) ;; *) bad "$where: tool $name has no argument $k" ;; esac
       done
     done < <(printf '%s\n' "$c" | grep -oE '(^|[^a-z_])[a-z_]+ \{"[^`]*' | sed -E 's/^[^a-z_]//')
     # Bare words.
-    if printf '%s' "$c" | grep -qxE '[a-z_]+'; then
-      printf '%s\n' "$tools" "$allargs" $allow | grep -qx "$c" ||
-        printf '%s\n' "$help" | grep -qE "a2p2 ([a-z]+ \| )*$c([ |)]|$)" ||
+    # Here-strings and process substitution, not pipes: under pipefail a
+    # grep -q that stops reading early fails the printf that feeds it.
+    if grep -qxE '[a-z_]+' <<< "$c"; then
+      grep -qx -- "$c" < <(printf '%s\n' "$tools" "$allargs" $allow) ||
+        grep -qE "a2p2 ([a-z]+ \| )*$c([ |)]|$)" <<< "$help" ||
         bad "$where: \`$c\` is not a tool, an argument, a command or an allowed word"
     fi
     # CLI commands.
@@ -101,7 +103,7 @@ for f in "${files[@]}"; do
       if [ -z "$h" ]; then bad "$where: a2p2 help lists no command 'a2p2 $key'"; continue; fi
       for fl in $(printf '%s' "$cmd" | grep -oE -- '--[a-z-]+' || true); do
         case "$fl" in --json|--as) continue ;; esac
-        printf '%s\n' "$h" | grep -q -- "$fl" || bad "$where: 'a2p2 $key' has no flag $fl"
+        grep -q -- "$fl" <<< "$h" || bad "$where: 'a2p2 $key' has no flag $fl"
       done
     done < <(printf '%s\n' "$c" | grep -oE 'a2p2 [a-z][^;&|`]*' | sed -E 's/ a2p2 .*//')
   done < <(code "$f")
