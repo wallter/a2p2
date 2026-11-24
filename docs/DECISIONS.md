@@ -651,3 +651,65 @@ model's rule; the refusal says why.
 
 **Revisit if** agents in a measured run keep trying to `ack` messages they
 read through `recent` or a thread.
+
+## D44. OpenCode, Hermes Agent and Pi, for agents on local models (2026-11-24)
+
+People run agents on local models through harnesses other than the three
+a2p2 supported: OpenCode, Nous Research's Hermes Agent and the Pi coding
+agent are the ones asked for. Each was run against a throwaway a2p2 home on
+Ollama models on one macOS computer, first with a2p2 given for one run and
+then through the configuration `a2p2 install` writes (into a scratch home);
+the results are in the [harness notes](HARNESSES.md#local-models-opencode-hermes-agent-and-pi).
+
+- **Three new arguments to `install`, `uninstall` and `doctor`, no new
+  command:** `opencode`, `hermes` and `pi`. Each writes one entry in one
+  file and nothing else, keeps the original as `<file>.a2p2.bak` or marks a
+  file it created, and `uninstall` puts the home back (I2).
+- **a2p2 edits these files itself** instead of going through the harness's
+  CLI, as it does for the other three. `opencode mcp add` (1.18.30) only
+  prompts. `hermes mcp add` (0.15.2) cannot pass an argument starting with
+  `--` to the server, connects to the server to list its tools (which
+  would start a daemon and register an agent during install) and then
+  prompts. Pi has no MCP.
+- **OpenCode:** `mcp.a2p2` in `~/.config/opencode/opencode.json` (or under
+  `$XDG_CONFIG_HOME`), which OpenCode merges with the `opencode.jsonc` it
+  creates itself. a2p2 writes only plain JSON and refuses a file with
+  comments. No permission entry is needed: the default agent allows MCP
+  tools, also in `opencode run`.
+- **Hermes:** the `a2p2` entry under `mcp_servers` in
+  `$HERMES_HOME/config.yaml` (default `~/.hermes`). There is no YAML
+  library in the module and adding one for a single entry is not worth a
+  dependency, so the edit is textual and refuses layouts it cannot follow
+  (flow style, tabs, several documents). Hermes passes a server only a few
+  environment variables, so an `A2P2_HOME` set at install time is written
+  into the entry.
+- **Pi:** a skill, `~/.pi/agent/skills/a2p2/SKILL.md` (or under
+  `$PI_CODING_AGENT_DIR`), that tells the model to use the CLI with `--as
+  pi-<directory>`. Pi's documented way to add a capability is a skill
+  pointing at a command-line tool; an MCP extension would be a2p2 code
+  running inside Pi.
+- **No hooks for these three.** OpenCode has plugins and Hermes has shell
+  hooks (its `pre_llm_call` event can add context), but neither was tried
+  in a run, and a hook is installed only once it has been seen to reach
+  the model. The tool descriptions and the skill tell the model to check
+  `inbox`.
+
+What the CLI cannot do that the tools can, as Pi sees it: there is no
+`whoami` or `peers` (the agent reads `status --json`), `send --reply-to`
+addresses only the author and does not report the message handled (the
+agent runs `ack`), `ask_human` has no choices, and the inbox `--json`
+output has no notice that messages are information, not instructions (the
+skill says it).
+
+**Revisit if** OpenCode's or Hermes's CLI gains a non-interactive way to
+register a stdio server with arbitrary arguments, or a harness's hook is
+seen to reach the model.
+
+The tool definitions change in one place: the description of `inbox`'s
+`recent` argument now ends "not new mail" (3,996 of 4,000 bytes), because
+an 8B model read its mail with `recent` and could then not report it
+handled; with the new wording it stopped doing so in seven runs. A weaker
+model would also be helped by a description for `reply`'s and `ack`'s
+`id` ("message id from inbox") and by optional string arguments that
+accept null, but the first needs bytes the budget does not have and the
+second changes the schema, so both are left.

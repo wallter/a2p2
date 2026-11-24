@@ -76,7 +76,7 @@ func seed(t *testing.T, name string, o Options) string {
 }
 
 func TestInstallFresh(t *testing.T) {
-	for _, name := range Names {
+	for _, name := range hookNames {
 		o, r := setup(t)
 		rep, err := Install(name, o)
 		if err != nil {
@@ -111,7 +111,7 @@ func TestInstallFresh(t *testing.T) {
 }
 
 func TestExistingSurvivesIdempotentOnStopUninstall(t *testing.T) {
-	for _, name := range Names {
+	for _, name := range hookNames {
 		o, r := setup(t)
 		body := seed(t, name, o)
 		p := hookPath(name, o)
@@ -179,7 +179,7 @@ func TestUninstallFreshLeavesEmptyObject(t *testing.T) {
 }
 
 func TestInvalidJSONRefused(t *testing.T) {
-	for _, name := range Names {
+	for _, name := range hookNames {
 		o, r := setup(t)
 		p := hookPath(name, o)
 		os.MkdirAll(filepath.Dir(p), 0o755)
@@ -197,7 +197,7 @@ func TestInvalidJSONRefused(t *testing.T) {
 }
 
 func TestDryRunAndMissingCLI(t *testing.T) {
-	for _, name := range Names {
+	for _, name := range hookNames {
 		o, r := setup(t)
 		o.DryRun = true
 		rep, err := Install(name, o)
@@ -218,7 +218,7 @@ func TestDryRunAndMissingCLI(t *testing.T) {
 func TestDoctor(t *testing.T) {
 	o, _ := setup(t)
 	o.LookPath = func(f string) (string, error) {
-		if f == "agy" {
+		if f != "claude" && f != "codex" {
 			return "", errors.New("no")
 		}
 		return f, nil
@@ -279,7 +279,7 @@ func hookEnv(t *testing.T) (c *localapi.Client, send func(), unread func() int) 
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
 	var codex string
-	for _, h := range Names {
+	for _, h := range hookNames {
 		a, err := s.Register(ctx, h, h+"-web", "/work/proj")
 		if err != nil {
 			t.Fatal(err)
@@ -324,14 +324,14 @@ func TestHookOutputs(t *testing.T) {
 		"codex":  `{"cwd":"/work/proj"}`,
 		"agy":    `{"workspacePaths":["/work/proj"],"cwd":"/nope"}`,
 	}
-	for _, name := range Names {
+	for _, name := range hookNames {
 		if got := run(name, "UserPromptSubmit", in[name]); got != "" {
 			t.Fatalf("%s: idle mesh printed %q", name, got)
 		}
 	}
 	send()
 	send()
-	for _, name := range Names {
+	for _, name := range hookNames {
 		ev := map[string]string{"claude": "UserPromptSubmit", "codex": "UserPromptSubmit", "agy": "PreInvocation"}[name]
 		got := run(name, ev, in[name])
 		if strings.Contains(got, "SECRET BODY") || strings.Count(got, "\n") != 1 {

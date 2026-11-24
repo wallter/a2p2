@@ -538,8 +538,8 @@ and tells the person the outcome.
 
 ## 6. MCP tools (golden file)
 
-The [golden file](../internal/mcpshim/testdata/tools.json) is 3,991 bytes
-in compact JSON. The A2 proxy is ⌈3,991 / 4⌉ = 998 ≤ 1,000.
+The [golden file](../internal/mcpshim/testdata/tools.json) is 3,996 bytes
+in compact JSON. The A2 proxy is ⌈3,996 / 4⌉ = 999 ≤ 1,000.
 
 Annotations: `whoami` and `peers` are read-only (and idempotent). The
 others write and say so with an explicit `destructiveHint`: `send` is
@@ -625,7 +625,7 @@ add records; `ack` is idempotent, since a repeat changes nothing.
           "type": "integer"
         },
         "recent": {
-          "description": "1-50: last N messages of room (default local)",
+          "description": "1-50: past N of room (default local); not new mail",
           "type": "integer"
         },
         "room": {

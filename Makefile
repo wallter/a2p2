@@ -46,6 +46,10 @@ bench:
 e2e: build        ## real harnesses, spends model tokens: make e2e HARNESS=claude
 	scripts/e2e/run.sh $${HARNESS:-all}
 
+.PHONY: e2e-local
+e2e-local: build  ## OpenCode, Hermes, Pi on local Ollama models: make e2e-local HARNESS=opencode MODELS="gemma4:e4b"
+	scripts/e2e/local.sh $${HARNESS:-all} $${MODELS:-}
+
 review:           ## independent review of uncommitted changes: make review WHO=sol
 	scripts/review.sh $${WHO:-sol}
 

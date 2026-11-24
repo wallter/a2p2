@@ -36,7 +36,7 @@ var version = "dev" // set by -ldflags at release
 const usage = `a2p2 - peer-to-peer messaging for AI agents and the people who run them
 
 Getting started
-  a2p2 install claude|codex|agy [--on-stop] [--dry-run]
+  a2p2 install claude|codex|agy|opencode|hermes|pi [--on-stop] [--dry-run]
                                   connect a harness (undo with: a2p2 uninstall NAME)
                                   --on-stop also checks for messages when a turn ends.
   a2p2 ui                         open the local web page

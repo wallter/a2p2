@@ -75,7 +75,7 @@
           "type": "integer"
         },
         "recent": {
-          "description": "1-50: last N messages of room (default local)",
+          "description": "1-50: past N of room (default local); not new mail",
           "type": "integer"
         },
         "room": {
