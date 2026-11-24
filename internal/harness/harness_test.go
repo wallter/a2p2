@@ -3,6 +3,7 @@ package harness
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"net"
@@ -236,7 +237,11 @@ func TestDoctor(t *testing.T) {
 
 // --- Hook ---
 
-func hookEnv(t *testing.T) (*localapi.Client, func()) {
+// hookEnv serves the local API over a machine with three hook agents in
+// /work/proj and bob elsewhere; send posts a message from bob, and unread
+// counts what the codex agent has not confirmed (the hook must never
+// change it).
+func hookEnv(t *testing.T) (c *localapi.Client, send func(), unread func() int) {
 	t.Helper()
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "a2p2.db"))
@@ -244,11 +249,16 @@ func hookEnv(t *testing.T) (*localapi.Client, func()) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	n, err := node.New(ctx, st, strings.Repeat("ab", 32), "solo", time.Now)
+	m := node.NewMachine(st, ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)), node.MachineOpts{})
+	rooms, err := node.OpenRooms(ctx, m)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := node.NewMesh(n, nil, func() []string { return nil })
+	s, err := node.OpenSurface(ctx, m, rooms, node.SurfaceOpts{Name: "solo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hookNode = m.ID
 	dir, _ := os.MkdirTemp("/tmp", "a2p2")
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "s")
@@ -256,29 +266,43 @@ func hookEnv(t *testing.T) (*localapi.Client, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: localapi.Handler(n, m, localapi.Info{})}
+	srv := &http.Server{Handler: localapi.Handler(s, localapi.Info{})}
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
+	var codex string
 	for _, h := range Names {
-		if _, err := n.Register(ctx, h, h+"-web", "/work/proj"); err != nil {
+		a, err := s.Register(ctx, h, h+"-web", "/work/proj")
+		if err != nil {
 			t.Fatal(err)
 		}
+		if h == "codex" {
+			codex = a.ID
+		}
 	}
-	other, err := n.Register(ctx, "other", "bob", "/elsewhere")
+	other, err := s.Register(ctx, "other", "bob", "/elsewhere")
 	if err != nil {
 		t.Fatal(err)
 	}
-	send := func() {
-		if _, err := n.Send(ctx, node.SendReq{From: other.ID, Text: "SECRET BODY"}); err != nil {
+	send = func() {
+		if _, err := s.Send(ctx, node.SendInput{Agent: other.ID, Text: "SECRET BODY"}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	return localapi.NewClient(sock), send
+	unread = func() int {
+		v, err := s.Inbox(ctx, codex, "", 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(v.Entries)
+	}
+	return localapi.NewClient(sock), send, unread
 }
+
+var hookNode string
 
 func TestHookOutputs(t *testing.T) {
 	t.Setenv("CLAUDE_PROJECT_DIR", "")
-	c, send := hookEnv(t)
+	c, send, unread := hookEnv(t)
 	run := func(name, event, in string) string {
 		var out bytes.Buffer
 		if err := Hook(context.Background(), c, name, event, strings.NewReader(in), &out); err != nil {
@@ -304,7 +328,7 @@ func TestHookOutputs(t *testing.T) {
 		if strings.Contains(got, "SECRET BODY") || strings.Count(got, "\n") != 1 {
 			t.Errorf("%s: bad output %q", name, got)
 		}
-		n := "[a2p2] 2 unread messages from bob@" + strings.Repeat("ab", 32)[:8]
+		n := "[a2p2] 2 unread messages from bob@" + hookNode[:8]
 		var v map[string]any
 		if err := json.Unmarshal([]byte(got), &v); err != nil {
 			t.Fatalf("%s: %v: %q", name, err, got)
@@ -332,6 +356,10 @@ func TestHookOutputs(t *testing.T) {
 		if len(sv) != 2 || sv["decision"] != want || !strings.HasPrefix(sv["reason"].(string), "[a2p2] 2 unread") {
 			t.Errorf("%s: stop output %q", name, stop)
 		}
+	}
+	// U4: however often the hook runs, it marks nothing seen.
+	if n := unread(); n != 2 {
+		t.Fatalf("after the hooks ran, %d unread, want 2", n)
 	}
 	// Loop guard, malformed, empty, unknown cwd.
 	if got := run("claude", "Stop", `{"cwd":"/work/proj","stop_hook_active":true}`); got != "" {
@@ -499,7 +527,7 @@ func (b *blockAfter) Read(p []byte) (int, error) {
 
 func TestHookStdinNotWaitingForEOF(t *testing.T) {
 	t.Setenv("CLAUDE_PROJECT_DIR", "")
-	c, send := hookEnv(t)
+	c, send, _ := hookEnv(t)
 	send()
 	var out bytes.Buffer
 	done := make(chan struct{})
@@ -518,7 +546,7 @@ func TestHookStdinNotWaitingForEOF(t *testing.T) {
 }
 
 func TestHookStdinAbandonedOnCancel(t *testing.T) {
-	c, _ := hookEnv(t)
+	c, _, _ := hookEnv(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	var out bytes.Buffer
 	done := make(chan struct{})

@@ -1,6 +1,7 @@
-// Package daemon assembles a node: home directory, key, database, local API,
-// peer listener and web UI. It also knows how to find or start the daemon
-// from another process.
+// Package daemon assembles a machine: home directory, key, database, the
+// next version's path (records, room log, pull, join), local API, peer
+// listener and web UI. It also knows how to find or start the daemon from
+// another process.
 package daemon
 
 import (
@@ -17,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -30,7 +32,7 @@ import (
 
 // Config is home/config.json. Everything is optional.
 type Config struct {
-	Name      string   `json:"name,omitempty"`      // node name shown to peers; default: hostname
+	Name      string   `json:"name,omitempty"`      // machine name shown to peers; default: hostname
 	Listen    string   `json:"listen,omitempty"`    // peer listener, e.g. "0.0.0.0:7423"; empty = networking off
 	Advertise []string `json:"advertise,omitempty"` // addresses to give peers instead of detected ones
 	UI        string   `json:"ui,omitempty"`        // web UI address; default 127.0.0.1:7422
@@ -175,29 +177,68 @@ func Run(ctx context.Context, home, version string) error {
 		return err
 	}
 	defer st.Close()
-	n, err := node.New(ctx, st, id.NodeID(), cfg.Name, time.Now)
+
+	// The next version's path (DESIGN-next section 9): records, the room
+	// log, pull and join. No v0.2 node is constructed; the v0.2 tables stay
+	// in the database, unread.
+	m := node.NewMachine(st, id.Key, node.MachineOpts{})
+	rooms, err := node.OpenRooms(ctx, m)
 	if err != nil {
 		return err
 	}
-	ctx, stop := context.WithCancel(ctx)
-	defer stop()
-
+	if err := m.Prune(ctx); err != nil {
+		return err
+	}
 	var peerLn net.Listener
-	if cfg.Listen != "" {
+	if cfg.Listen != "" { // networking is a person's choice: a2p2 net on
 		if peerLn, err = net.Listen("tcp4", cfg.Listen); err != nil {
 			return fmt.Errorf("peer listener: %w", err)
 		}
 	}
-	addrs := func() []string { return advertised(cfg, peerLn) }
-	mesh := node.NewMesh(n, peer.NewTransport(id), addrs)
-	go mesh.Run(ctx)
-	if peerLn != nil {
-		refresh := func(room string) { go mesh.Refresh(ctx, room) }
+	addrs := advertised(cfg, peerLn)
+	if len(addrs) > node.MaxAddrs {
+		addrs = addrs[:node.MaxAddrs]
+	}
+	book := node.NewAddrBook()
+	pulls := peer.NewPullClient(id, book)
+	defer pulls.Close()
+	x := node.NewExchange(rooms, pulls, node.ExchangeOpts{Book: book, Addrs: addrs})
+	joiner := node.NewJoiner(rooms, peer.NewJoinClient(id), node.JoinerOpts{Name: cfg.Name, Addrs: addrs})
+	surf, err := node.OpenSurface(ctx, m, rooms, node.SurfaceOpts{Name: cfg.Name, Joiner: joiner, Book: book,
+		Addrs: func() []string { return addrs }})
+	if err != nil {
+		if peerLn != nil {
+			peerLn.Close()
+		}
+		return err
+	}
+	if n := surf.Notice(); n != "" {
+		slog.Warn(n)
+	}
+
+	ctx, stop := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	// Deferred calls run last first: stop, then wait for every loop, and
+	// only then close the store.
+	defer wg.Wait()
+	defer stop()
+	run := func(fn func()) {
+		wg.Add(1)
 		go func() {
-			if err := peer.Serve(ctx, peerLn, id, n, refresh); err != nil && ctx.Err() == nil {
+			defer wg.Done()
+			fn()
+		}()
+	}
+	run(func() { node.NewScheduler(x, node.SchedOpts{}).Run(ctx) })
+	run(func() { resumeJoins(ctx, surf) })
+	run(func() { prune(ctx, m) })
+	if peerLn != nil {
+		h := peerHandler{JoinServer: node.NewJoinServer(rooms), x: x}
+		run(func() {
+			if err := peer.Serve(ctx, peerLn, id, h, nil); err != nil && ctx.Err() == nil {
 				slog.Error("peer listener stopped", "err", err)
 			}
-		}()
+		})
 	}
 
 	// Web UI: loopback only, token required. If the port is taken, pick any.
@@ -216,10 +257,11 @@ func Run(ctx context.Context, home, version string) error {
 		}
 	}
 	if !uiLn.Addr().(*net.TCPAddr).IP.IsLoopback() {
+		uiLn.Close()
 		return fmt.Errorf("the UI must listen on a loopback address, not %s", uiLn.Addr())
 	}
 	uiURL := fmt.Sprintf("http://%s/#%s", uiLn.Addr(), token)
-	uiSrv := &http.Server{Handler: web.Handler(n, mesh, token), ReadHeaderTimeout: 5 * time.Second}
+	uiSrv := &http.Server{Handler: web.Handler(surf, token), ReadHeaderTimeout: 5 * time.Second}
 	go uiSrv.Serve(uiLn)
 
 	// Local API on the Unix socket. We hold the lock, so a leftover socket
@@ -230,23 +272,90 @@ func Run(ctx context.Context, home, version string) error {
 	apiLn, err := net.Listen("unix", sock)
 	syscall.Umask(old)
 	if err != nil {
+		uiSrv.Close()
 		return fmt.Errorf("local socket: %w", err)
 	}
 	defer os.Remove(sock)
-	apiSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: localapi.Handler(n, mesh, localapi.Info{
-		Version: version, Addrs: addrs, UIURL: func() string { return uiURL }, PID: os.Getpid(), Stop: stop,
+	apiSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: localapi.Handler(surf, localapi.Info{
+		Version: version, UIURL: func() string { return uiURL }, PID: os.Getpid(), Stop: stop,
 	})}
 	go apiSrv.Serve(apiLn)
 
-	slog.Info("a2p2 daemon started", "node", core.ShortNode(n.ID), "name", cfg.Name, "home", home,
-		"ui", uiLn.Addr().String(), "listen", addrs(), "version", version)
+	slog.Info("a2p2 daemon started", "node", core.ShortNode(m.ID), "name", cfg.Name, "home", home,
+		"ui", uiLn.Addr().String(), "listen", addrs, "version", version)
 	<-ctx.Done()
 	shut, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = apiSrv.Shutdown(shut)
 	_ = uiSrv.Shutdown(shut)
+	apiSrv.Close() // waiting reads that outlived the grace period
+	uiSrv.Close()
 	slog.Info("a2p2 daemon stopped")
 	return nil
+}
+
+// resumeJoins follows joins waiting for the admin machine's person: at
+// start, then every node.JoinRetry, one poll each.
+func resumeJoins(ctx context.Context, s *node.Surface) {
+	for {
+		if _, err := s.ResumeJoins(ctx, 0); err != nil && ctx.Err() == nil {
+			slog.Warn("resuming joins", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(node.JoinRetry):
+		}
+	}
+}
+
+// prune runs the pruning pass hourly, and within a minute of a read
+// asking for it.
+func prune(ctx context.Context, m *node.Machine) {
+	last := time.Now()
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if m.PruneDue() || time.Since(last) >= time.Hour {
+			last = time.Now()
+			if err := m.Prune(ctx); err != nil && ctx.Err() == nil {
+				slog.Warn("pruning", "err", err)
+			}
+		}
+	}
+}
+
+// peerHandler serves the next version's peer routes, /p/v2/join and
+// /p/v2/pull. The v0.2 routes, which peer.Serve still mounts until they are
+// deleted, refuse everything: no v0.2 node exists to answer them.
+type peerHandler struct {
+	*node.JoinServer
+	x *node.Exchange
+}
+
+func (h peerHandler) Serve(ctx context.Context, from string, q *node.PullRequest) (*node.PullResponse, error) {
+	return h.x.Serve(ctx, from, q)
+}
+
+func (peerHandler) Receive(_ context.Context, _ string, req node.DeliverReq, _ func(string)) []node.Result {
+	out := make([]node.Result, 0, len(req.Envelopes))
+	for _, e := range req.Envelopes {
+		out = append(out, node.Result{ID: e.ID, Status: node.ResRejected, Reason: "this machine runs the next version of a2p2"})
+	}
+	return out
+}
+
+func (peerHandler) HandleJoin(context.Context, string, node.JoinReq) (store.Room, error) {
+	return store.Room{}, node.ErrForbidden
+}
+
+func (peerHandler) HandleRoom(context.Context, string, node.RoomReq) (store.Room, error) {
+	return store.Room{}, node.ErrForbidden
 }
 
 // Connect returns a client for the daemon of home, starting the daemon in the
@@ -285,6 +394,9 @@ func Connect(ctx context.Context, home string) (*localapi.Client, error) {
 	}
 	return nil, fmt.Errorf("the a2p2 daemon did not start; see %s", filepath.Join(home, "daemon.log"))
 }
+
+// SockPath is the local API socket of home.
+func SockPath(home string) string { return sockPath(home) }
 
 func ping(ctx context.Context, c *localapi.Client) error {
 	ctx, cancel := context.WithTimeout(ctx, time.Second)

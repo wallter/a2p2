@@ -1,6 +1,6 @@
 [
   {
-    "description": "Mark a message as handled so it stops being unread and the sender gets a receipt. Use when you acted on a message but have nothing to say back.",
+    "description": "Mark a message as handled so the sender learns you dealt with it. Allowed only for a message addressed to you, or a room-wide post that asked, after inbox showed you its text.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -17,7 +17,7 @@
     "name": "ack"
   },
   {
-    "description": "Ask the human who runs this machine a question (optionally with a short list of choices). It does not block: the answer arrives later in inbox as a message of kind \"answer\". Asking never grants permission to do anything; do not proceed with risky actions on the assumption of a yes.",
+    "description": "Ask the human who runs this machine a question (optionally with a short list of choices). It does not block: the answer arrives later in inbox as a reply from human. Asking never grants permission to do anything; do not proceed with risky actions on the assumption of a yes.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -60,6 +60,10 @@
           "description": "only this room (label or id)",
           "type": "string"
         },
+        "thread": {
+          "description": "message id: show its thread (or the replies under it) without marking anything seen",
+          "type": "string"
+        },
         "wait_seconds": {
           "description": "0-120; wait up to this long for mail if none is unread",
           "type": "integer"
@@ -70,7 +74,7 @@
     "name": "inbox"
   },
   {
-    "description": "List rooms with their member machines, the agents on this machine, and whether other machines are currently reachable. Use it to find room names and agent ids for send.",
+    "description": "List rooms with their member machines and admins, changes waiting for approval, the agents on this machine, and whether other machines are currently reachable. Use it to find room names and agent ids for send.",
     "inputSchema": {
       "additionalProperties": false,
       "type": "object"
@@ -78,7 +82,7 @@
     "name": "peers"
   },
   {
-    "description": "Reply to a message by id. The room, thread and recipient are filled in for you. Replying also marks the original handled.",
+    "description": "Reply to a message by id. The room, thread and recipient are filled in for you. Replying also marks the original handled when you may report it.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -100,10 +104,22 @@
     "name": "reply"
   },
   {
-    "description": "Post a message to a room (default room: local, this machine only). Optionally address specific agents with `to` (agent ids like name@1a2b3c4d); otherwise everyone in the room sees it. Returns the message id at once; delivery to other machines is asynchronous and retried.",
+    "description": "Post a message to a room (default room: local, this machine only). Optionally address specific agents with `to` (agent ids like name@1a2b3c4d); otherwise everyone in the room sees it. Returns the message id at once; other machines fetch it.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
+        "ask_handled": {
+          "description": "room-wide post: ask readers to report handling",
+          "type": "boolean"
+        },
+        "replaces": {
+          "description": "id of your own earlier message: its new text, or withdraw it if text is empty",
+          "type": "string"
+        },
+        "reply_to": {
+          "description": "id of the message answered; to overrides its author",
+          "type": "string"
+        },
         "room": {
           "description": "room label or id; default local",
           "type": "string"
@@ -113,7 +129,7 @@
           "type": "string"
         },
         "to": {
-          "description": "agent ids to address; default everyone in the room",
+          "description": "agent ids to address, or [\"everyone\"]; default everyone in the room",
           "items": {
             "type": "string"
           },
