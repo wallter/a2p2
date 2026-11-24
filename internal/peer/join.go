@@ -1,8 +1,8 @@
 package peer
 
-// POST /p/v2/join (PROTOCOL-next 5.2): the next version's join exchange on
-// the existing listener, beside v0.2's /p/v1/join. Like it, it is reached
-// by a key the server has not pinned: the listener accepts any well-formed
+// POST /p/v2/join (PROTOCOL-next 5.2): the join exchange on the peer
+// listener, beside /p/v2/pull. It is reached by a key the server has not
+// pinned: the listener accepts any well-formed
 // node certificate, and the node decides. The body is strict JSON, checked
 // by internal/node; here only its size is bounded, before it is read, and
 // the requester's identity (from TLS) and source address are passed on.
@@ -33,8 +33,7 @@ var (
 	maxJoinV2Resp int64 = 8 << 20 // 256 log entries near their size limit, with framing
 )
 
-// JoinHandler answers the join exchange (node.JoinServer). A Handler
-// passed to Serve that also implements it serves /p/v2/join.
+// JoinHandler answers the join exchange (node.JoinServer) on /p/v2/join.
 type JoinHandler interface {
 	Handle(ctx context.Context, from, source string, body []byte) node.JoinReply
 }
@@ -151,8 +150,8 @@ func (c *JoinClient) Join(ctx context.Context, addrs []string, check func(string
 		cfg := &tls.Config{
 			MinVersion:   tls.VersionTLS13,
 			Certificates: []tls.Certificate{c.cert},
-			// As in Transport.client: no CA, so chain verification is
-			// replaced by the check of the key itself, inside the handshake.
+			// No CA, so chain verification is replaced by the check of
+			// the key itself, inside the handshake (as in PullClient).
 			InsecureSkipVerify: true,
 			VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
 				got, err := certNode(raw)

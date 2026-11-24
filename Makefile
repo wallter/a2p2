@@ -29,8 +29,9 @@ trace:            ## every requirement has a row in docs/TRACE.md, and every tes
 
 check: fmt vet trace test ## everything CI runs except lint/vuln (which need network)
 
-fuzz:             ## short fuzz smoke run; FUZZTIME=10m for a long one
-	$(GO) test ./internal/core -run '^$$' -fuzz FuzzDecodeEnvelope -fuzztime $${FUZZTIME:-20s}
+fuzz:             ## short fuzz smoke run of the record and entry decoders; FUZZTIME=10m for a long one
+	$(GO) test ./internal/core -run '^$$' -fuzz '^FuzzParseRecord$$' -fuzztime $${FUZZTIME:-20s}
+	$(GO) test ./internal/core -run '^$$' -fuzz '^FuzzParseEntry$$' -fuzztime $${FUZZTIME:-20s}
 
 bench:
 	$(GO) test -run '^$$' -bench . -benchmem ./...

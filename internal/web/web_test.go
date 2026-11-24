@@ -44,22 +44,33 @@ type env struct {
 	id   string
 	ctx  context.Context
 	peer *env
+	st   *store.Store
+	seed byte
 }
 
 func open(t *testing.T, seed byte, peer *env) *env {
 	t.Helper()
-	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "a2p2.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
+	return openOn(t, st, seed, peer)
+}
+
+// restart opens e's machine again over its store, as a restarted daemon
+// does: no room has been checked with another member since.
+func (e *env) restart(t *testing.T) *env { return openOn(t, e.st, e.seed, e.peer) }
+
+func openOn(t *testing.T, st *store.Store, seed byte, peer *env) *env {
+	t.Helper()
+	ctx := context.Background()
 	m := node.NewMachine(st, ed25519.NewKeyFromSeed(append([]byte{seed}, make([]byte, 31)...)), node.MachineOpts{})
 	rooms, err := node.OpenRooms(ctx, m)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &env{ctx: ctx, id: m.ID, js: node.NewJoinServer(rooms), peer: peer}
+	e := &env{ctx: ctx, id: m.ID, js: node.NewJoinServer(rooms), peer: peer, st: st, seed: seed}
 	var j *node.Joiner
 	if peer != nil {
 		j = node.NewJoiner(rooms, joinNet{from: m.ID, admin: &peer.js, id: &peer.id}, node.JoinerOpts{Name: "joiner"})
@@ -350,5 +361,49 @@ func TestPageApprovesAndDeclinesRequestsNamingExactlyWhatIsApproved(t *testing.T
 	}
 	if st := admin.state(t); len(st.Requests) != 0 || len(st.Status.Rooms) != 2 {
 		t.Fatalf("after: %+v", st)
+	}
+}
+
+// TestPageAsksASecondApprovalBeforeSigningWhenNotCaughtUp: after a restart
+// with another member in the room, an approval that would sign answers
+// reason not_caught_up and decides nothing; the page shows the warning
+// (the same text as node.NotCaughtUpWarning) and only the second, explicit
+// approval (not_caught_up_ok) signs, which is recorded with the request.
+func TestPageAsksASecondApprovalBeforeSigningWhenNotCaughtUp(t *testing.T) {
+	admin := setup(t)
+	room, err := admin.s.CreateRoom(admin.ctx, "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joiner := open(t, 2, admin)
+	joinRequest(t, admin, joiner, room.ID, node.RoleMember)
+	q := admin.state(t).Requests[0]
+	if c, b := admin.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": q.Text}, origin); c != 200 {
+		t.Fatalf("approve the join: %d %s", c, b)
+	}
+	admin = admin.restart(t)
+	if _, err := admin.s.Remove(admin.ctx, room.ID, joiner.id); err != nil {
+		t.Fatal(err)
+	}
+	q = admin.state(t).Requests[0]
+	c, b := admin.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": q.Text}, origin)
+	var cf localapi.ConfirmResp
+	if c != 200 || json.Unmarshal(b, &cf) != nil || cf.State != store.RequestFailed || cf.Reason != node.ReasonNotCaughtUp || len(cf.Entries) != 0 {
+		t.Fatalf("first approval: %d %s", c, b)
+	}
+	if got, err := admin.st.GetRequest(admin.ctx, q.ID); err != nil || got.State != store.RequestPending {
+		t.Fatalf("after the first approval the request is %+v %v, want pending", got, err)
+	}
+	c, b = admin.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": q.Text, "not_caught_up_ok": true}, origin)
+	if c != 200 || json.Unmarshal(b, &cf) != nil || cf.State != store.RequestApproved || len(cf.Entries) == 0 {
+		t.Fatalf("second approval: %d %s", c, b)
+	}
+	if got, err := admin.st.GetRequest(admin.ctx, q.ID); err != nil || !got.NotCaughtUp {
+		t.Fatalf("the override was not recorded: %+v %v", got, err)
+	}
+	js, _ := assets.ReadFile("static/app.js")
+	page := strings.Join(strings.Fields(strings.NewReplacer("\" +", "", "\"", "").Replace(string(js))), " ")
+	if !strings.Contains(page, node.NotCaughtUpWarning) || !strings.Contains(string(js), "not_caught_up_ok") {
+		t.Fatal("the page does not show node.NotCaughtUpWarning before sending not_caught_up_ok")
 	}
 }

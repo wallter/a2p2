@@ -92,7 +92,7 @@ func TestOverTLSAWaitingPullCountsAgainstTheConcurrencyLimitUntilItIsHeld(t *tes
 	set(t, &pullConcurrent, 1)
 	a, b := newPM(t, "alice", false), newPM(t, "bob", false)
 	h := &stubPull{release: make(chan struct{}), entered: make(chan struct{}, 1)}
-	a.addr = serve(t, a.id, h, nil, nil)
+	a.addr = serve(t, a.id, h, nil)
 	busy := make(chan int, 1)
 	go func() { st, _, _ := rawPost(t, b.id, a, openingJSON(0), -1); busy <- st }()
 	<-h.entered // the first is in progress at the server
@@ -155,7 +155,7 @@ func TestOverTLSShuttingDownReleasesAHeldPullAtOnce(t *testing.T) {
 	a.h.x.Store(a.x)
 	ctx, cancel := context.WithCancel(bg)
 	served := make(chan error, 1)
-	go func() { served <- Serve(ctx, ln, a.id, a.h, nil) }()
+	go func() { served <- Serve(ctx, ln, a.id, a.h) }()
 	room := group(t, a, b)
 	held := a.x.NextHold(room, b.node())
 	got := make(chan error, 1)

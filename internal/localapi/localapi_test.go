@@ -266,3 +266,61 @@ func TestDeclinedJoinIsRefusedOnTheJoiner(t *testing.T) {
 		t.Fatalf("accept after decline = %+v", acc)
 	}
 }
+
+// TestConfirmBeforeCatchingUpAnswersNotCaughtUpAndSignsOnlyWithTheOverride:
+// a restarted admin whose room has another member has not checked the
+// room's log with anyone since it started. confirm then answers reason
+// not_caught_up and leaves the request pending; repeated with
+// not_caught_up_ok it signs, and the override is recorded.
+func TestConfirmBeforeCatchingUpAnswersNotCaughtUpAndSignsOnlyWithTheOverride(t *testing.T) {
+	ctx := context.Background()
+	a, b := newPair(t)
+	room := call[Room](t, a.c, "room/create", RoomReq{Room: "team"})
+	inv := call[InviteResp](t, a.c, "room/invite", InviteReq{Room: room.ID, Role: node.RoleMember})
+	pv := call[PreviewResp](t, b.c, "room/join", JoinReq{Token: inv.Token})
+	call[AcceptResp](t, b.c, "room/join/accept", AcceptReq{Token: inv.Token, Preview: pv.Preview})
+	qs := call[RequestsResp](t, a.c, "requests", Empty{})
+	if cf := call[ConfirmResp](t, a.c, "confirm", ConfirmReq{ID: qs.Requests[0].ID, Approve: true}); cf.State != store.RequestApproved {
+		t.Fatalf("admitting b: %+v", cf)
+	}
+
+	// a restarts: the same store and key, a new machine and socket.
+	mach := node.NewMachine(a.st, ed25519.NewKeyFromSeed(append([]byte{1}, make([]byte, 31)...)), node.MachineOpts{})
+	rooms, err := node.OpenRooms(ctx, mach)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := node.OpenSurface(ctx, mach, rooms, node.SurfaceOpts{Name: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp("/tmp", "a2p2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	l, err := net.Listen("unix", filepath.Join(dir, "s"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: Handler(s, Info{Version: "t"})}
+	go srv.Serve(l)
+	t.Cleanup(func() { srv.Close() })
+	c := NewClient(filepath.Join(dir, "s"))
+
+	ch := call[ChangeResp](t, c, "room/remove", MemberReq{Room: room.ID, Node: b.id})
+	cf := call[ConfirmResp](t, c, "confirm", ConfirmReq{ID: ch.Request, Approve: true})
+	if cf.State != store.RequestFailed || cf.Reason != node.ReasonNotCaughtUp || len(cf.Entries) != 0 {
+		t.Fatalf("first approval = %+v", cf)
+	}
+	if q, err := a.st.GetRequest(ctx, ch.Request); err != nil || q.State != store.RequestPending {
+		t.Fatalf("after the first approval: %+v %v, want pending", q, err)
+	}
+	cf = call[ConfirmResp](t, c, "confirm", ConfirmReq{ID: ch.Request, Approve: true, NotCaughtUpOK: true})
+	if cf.State != store.RequestApproved || len(cf.Entries) == 0 {
+		t.Fatalf("second approval = %+v", cf)
+	}
+	if q, err := a.st.GetRequest(ctx, ch.Request); err != nil || !q.NotCaughtUp {
+		t.Fatalf("the override was not recorded: %+v %v", q, err)
+	}
+}

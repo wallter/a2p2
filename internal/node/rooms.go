@@ -3,9 +3,7 @@ package node
 // Rooms is the room log and membership on this machine (DESIGN-next
 // sections 3, 5 and 7): one members.Machine per room, rebuilt on start by
 // replaying the stored log in arrival batches, fed by one ingress function
-// (Receive). It lives beside Node, like Machine, and is exercised only by
-// its own tests until the surfaces switch over; joining over the network is
-// step 4b and pull is step 5, and both call Receive.
+// (Receive). Joining (Joiner) and pull (Exchange) both call Receive.
 
 import (
 	"context"

@@ -275,6 +275,8 @@ func (sv *server) confirm(r *http.Request) (any, error) {
 		ID      string `json:"id"`
 		Approve bool   `json:"approve"`
 		Text    string `json:"text"`
+		// The second approval after a first answered not_caught_up.
+		NotCaughtUpOK bool `json:"not_caught_up_ok"`
 	}
 	if err := decode(r, &in); err != nil {
 		return nil, err
@@ -295,6 +297,6 @@ func (sv *server) confirm(r *http.Request) (any, error) {
 	if !shown {
 		return nil, &node.UserError{Msg: "no such request is waiting"}
 	}
-	c, err := sv.s.Confirm(r.Context(), in.ID, in.Approve)
+	c, err := sv.s.Confirm(r.Context(), in.ID, in.Approve, in.NotCaughtUpOK)
 	return localapi.ConfirmResp{ID: c.ID, State: c.State, Reason: c.Reason, Entries: c.Entries, Effect: c.Effect}, err
 }

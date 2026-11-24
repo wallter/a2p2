@@ -26,6 +26,7 @@ import (
 	"github.com/wallter/a2p2/internal/harness"
 	"github.com/wallter/a2p2/internal/localapi"
 	"github.com/wallter/a2p2/internal/mcpshim"
+	"github.com/wallter/a2p2/internal/node"
 	"github.com/wallter/a2p2/internal/store"
 )
 
@@ -673,17 +674,46 @@ func confirm(c *cmd, args []string) error {
 	if ask(verb+" this? Type yes: ") != "yes" {
 		return errors.New("nothing decided")
 	}
-	var r localapi.ConfirmResp
-	return c.call("confirm", localapi.ConfirmReq{ID: id, Approve: !*decline}, &r, func() {
-		fmt.Printf("%s %s", r.ID, r.State)
-		if r.Effect != "" {
-			fmt.Printf(" (%s)", r.Effect)
-		}
-		if r.Reason != "" {
-			fmt.Printf(": %s", r.Reason)
-		}
-		fmt.Println()
-	})
+	send := func(q localapi.ConfirmReq) (localapi.ConfirmResp, []byte, error) {
+		var r localapi.ConfirmResp
+		raw, err := cl.CallRaw(c.ctx, "confirm", q, &r)
+		return r, raw, err
+	}
+	r, raw, err := decide(send, ask, os.Stderr, localapi.ConfirmReq{ID: id, Approve: !*decline})
+	if err != nil {
+		return err
+	}
+	if *c.json {
+		_, err := os.Stdout.Write(raw)
+		return err
+	}
+	fmt.Printf("%s %s", r.ID, r.State)
+	if r.Effect != "" {
+		fmt.Printf(" (%s)", r.Effect)
+	}
+	if r.Reason != "" {
+		fmt.Printf(": %s", r.Reason)
+	}
+	fmt.Println()
+	return nil
+}
+
+// decide sends a decision. If an approval answers not_caught_up (this
+// machine has not checked the room's log with another member since it
+// started), it shows the risk on warn and asks again; only a second
+// "yes" repeats the approval with not_caught_up_ok, which is recorded.
+func decide(send func(localapi.ConfirmReq) (localapi.ConfirmResp, []byte, error), ask func(string) string, warn io.Writer,
+	q localapi.ConfirmReq) (localapi.ConfirmResp, []byte, error) {
+	r, raw, err := send(q)
+	if err != nil || !q.Approve || r.Reason != node.ReasonNotCaughtUp {
+		return r, raw, err
+	}
+	fmt.Fprintf(warn, "\nWARNING: %s\n\n", node.NotCaughtUpWarning)
+	if ask("Approve anyway, accepting this risk? Type yes: ") != "yes" {
+		return r, raw, errors.New("nothing decided; the request still waits")
+	}
+	q.NotCaughtUpOK = true
+	return send(q)
 }
 
 func alerts(c *cmd, args []string) error {

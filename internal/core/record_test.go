@@ -281,7 +281,7 @@ func TestRecordFieldsPerKindAndSeq(t *testing.T) {
 			f.Kind, f.Text, f.Choices = KindMessage, "t", []string{strings.Repeat("é", 101)}
 		},
 		"invalid utf-8 text":     func(f *RecordFields) { f.Kind, f.Text = KindMessage, "\xff" },
-		"local room":             func(f *RecordFields) { f.Kind, f.Text, f.Room = KindMessage, "t", LocalRoom },
+		"local room":             func(f *RecordFields) { f.Kind, f.Text, f.Room = KindMessage, "t", "local" },
 		"ask_handled on handled": func(f *RecordFields) { f.Kind, f.Ref, f.AskHandled = KindHandled, fakeID("r"), true },
 		"parent on replace": func(f *RecordFields) {
 			f.Kind, f.Ref, f.Version, f.Text, f.Parent = KindReplace, fakeID("r"), 1, "t", fakeID("x")

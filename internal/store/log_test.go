@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/wallter/a2p2/internal/core"
@@ -94,7 +95,9 @@ func TestDatabaseAtVersionTwoUpgradesToTheLogSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if err := s.AddRoom(ctx, logRoom, "team", "", t0); err != nil {
+	// A room the next version holds, as migration 2's code wrote it.
+	if _, err := s.db.Exec(`INSERT INTO rooms (id, label, owner, version, created_at, create_id, gen, joined_at)
+		VALUES (?, 'team', '', 0, 0, ?, 1, 0)`, logRoom, strings.Repeat("c", 32)); err != nil {
 		t.Fatal(err)
 	}
 	var v int
