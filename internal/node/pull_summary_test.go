@@ -1,6 +1,6 @@
 package node
 
-// The two-level summary (PROTOCOL-next 4.3) on the wire, and the sizes of
+// The two-level summary (PROTOCOL 4.3) on the wire, and the sizes of
 // requests and responses in a large room.
 
 import (
@@ -111,7 +111,7 @@ func TestPullWithMoreThanSixteenDifferingAuthorsSplitsTheDetail(t *testing.T) {
 	a.change(room, Change{Kind: core.EntryAdd, Target: b.id, Name: "bee", History: true})
 	b.pin(room, a.lnode)
 	b.register("bob")
-	var ids, ws []string
+	var ws []string
 	for i := 0; i < 20; i++ {
 		w := newLNode(t, fmt.Sprintf("w%02d", i), clock)
 		ws = append(ws, w.id)
@@ -119,7 +119,7 @@ func TestPullWithMoreThanSixteenDifferingAuthorsSplitsTheDetail(t *testing.T) {
 		w.pin(room, a.lnode)
 		w.pull(room, a.lnode)
 		w.register("wes")
-		ids = append(ids, w.send(room, "wes", "hi"))
+		w.send(room, "wes", "hi")
 		for _, r := range w.records(room) {
 			a.take(r)
 		}

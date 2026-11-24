@@ -593,7 +593,7 @@ func TestJoinRestoredMachineThatKnowsNoCurrentMemberCatchesUp(t *testing.T) {
 }
 
 // Bootstrap from nothing over the join exchange: three machines reach
-// three admins with exactly the confirmations DESIGN-next section 7 lists
+// three admins with exactly the confirmations DESIGN section 7 lists
 // (the second: its admin and itself; the third: the admitting admin, the
 // other admin seconding, and itself) and no others; then fourth machines
 // join as plain members, with and without history, and their agents'
@@ -705,7 +705,7 @@ func TestJoinBootstrapThreeMachinesFromNothingThenAFourthAsAMember(t *testing.T)
 // a key that presented a valid secret is limited to 10 requests a minute,
 // whatever its source address (the peer layer limits each address).
 //
-// Requirements: T3; PROTOCOL-next sections 0 and 5.3
+// Requirements: T3; PROTOCOL sections 0 and 5.3
 func TestJoinRequestsAreStrictAndOpensAreRateLimited(t *testing.T) {
 	clock := lclock()
 	a, b := newLNode(t, "a", clock), newLNode(t, "b", clock)

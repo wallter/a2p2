@@ -250,12 +250,12 @@ Claude model instead. The delivery model was reviewed by Codex.
 
 ## D27. Signed formats frozen in `internal/core` (2026-11-23)
 
-Build step 1 of `DESIGN-next.md`. Records and log entries are signed over the
+Build step 1 of `DESIGN.md`. Records and log entries are signed over the
 exact header bytes and identified by a hash of a type label, one zero byte
 and those bytes; nothing is ever re-encoded. Decoding is strict (duplicate
 keys, number spellings, base64 padding, nesting depth, sizes checked before
 allocation), because two machines that disagree about whether bytes are valid
-disagree about the room. The contract is `PROTOCOL-next.md` sections 0 to 3;
+disagree about the room. The contract is `PROTOCOL.md` sections 0 to 3;
 53 vectors in `internal/core/testdata/vectors` pin it, and every receive
 check has a failing vector that names it. The v0.2 envelope stays beside the
 new types until its last caller is converted. An independent review found two
@@ -627,3 +627,50 @@ else in those entries changed. Test comments and `FINDINGS.md` files were
 changed the same way.
 
 **Revisit if** a reviewed, indexed selection of the record is published.
+
+## D38. The last core items before publishing (2026-11-24)
+
+What changed, and why each is needed before the repository is public:
+
+- **Refusals carry a code.** Every refusal of the local API and the tools
+  is `{"error","code","retryable"}`: a sentence, one of twelve stable codes
+  (`node.ErrorCodes`, PROTOCOL 7) and whether repeating the call later may
+  succeed, so a program or agent can decide what to do without parsing
+  the wording.
+- **The inbox tool waits at most 30 seconds**, says when a wait ended with
+  nothing, and marks nothing seen when the call is cancelled. Codex ends a
+  tool call after 60 seconds by default, so a longer wait would be cut
+  off. The CLI and the local API keep 120 seconds.
+- **Tool annotations.** Each tool says whether it reads, adds or rewrites.
+  Codex refuses unannotated MCP tool calls by default since 0.169.
+- **The Codex installer approves a2p2's tools.** `a2p2 install codex` adds
+  one line, `default_tools_approval_mode = "approve" # added by a2p2
+  install`, under `[mcp_servers.a2p2]` in `~/.codex/config.toml`, so the
+  approval covers this server only; `uninstall` removes exactly that line.
+  Without it Codex refuses every call in a headless run. The installer
+  says when it cannot find the table and leaves approval to the person.
+- **`id` on `reply` and `ack`.** The parameter was `message_id`; every
+  result names a message `id`, so the tools now take the name an agent
+  has just read.
+- **`ack` is idempotent.** A second report by the same agent, including an
+  `ack` after `reply` has reported the message, succeeds with `already`
+  and names the first report instead of failing. The CLI prints "already
+  reported handled". A repeated report changes nothing, so refusing it
+  only gave the agent an error to handle.
+- **A thread read takes `after`**, so an agent following a thread reads
+  only what follows a message it has seen instead of the whole thread
+  again. D35 had left it for later.
+- Tool results and `--json` output write `<`, `>` and `&` as they are.
+  Uninstall leaves the home exactly as it was before install, and `doctor`
+  checks the MCP registration as well as the hook. A CLI call made under a
+  harness agent's label no longer unregisters that agent's hook.
+- **The tool budget.** The definitions are now 3,991 of the 4,000 compact
+  bytes A2 allows (998 tokens by the bytes/4 proxy).
+
+Left undone on purpose: an agent shown a message only through `recent` or
+a thread read still cannot report it handled, because recording "shown"
+without marking it seen needs a new table and a change to the delivery
+model's rule; the refusal says why.
+
+**Revisit if** agents in a measured run keep trying to `ack` messages they
+read through `recent` or a thread.

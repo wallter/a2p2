@@ -1,7 +1,7 @@
 package node
 
 // Surface is the thin layer the local API, the MCP shim, the CLI, the page
-// and the hooks call (PROTOCOL-next sections 6 and 7). It adds only what
+// and the hooks call (PROTOCOL sections 6 and 7). It adds only what
 // those surfaces need and the new path does not have by itself: rooms named
 // by label, the default local room, agent ids (label@short node), the
 // unread summary for hooks, waiting reads, history and trace. Behaviour
@@ -45,7 +45,7 @@ const (
 )
 
 // NoticeV02 is shown to a person once ever, after the upgrade removed the
-// v0.2 messages and rooms the database held (migration 10; PROTOCOL-next
+// v0.2 messages and rooms the database held (migration 10; PROTOCOL
 // section 8).
 const NoticeV02 = "This upgrade removed the messages and rooms this machine held from the earlier version of " +
 	"a2p2 (v0.2); they cannot be read any more. Make your rooms again with a2p2 room create, and pair your " +
@@ -128,7 +128,7 @@ func OpenSurface(ctx context.Context, m *Machine, r *Rooms, o SurfaceOpts) (*Sur
 }
 
 // localRoomID is the local room's id: fixed per machine, so it is found
-// again without being stored, and of the form of PROTOCOL-next section 0.
+// again without being stored, and of the form of PROTOCOL section 0.
 func localRoomID(node string) string {
 	h := sha256.Sum256([]byte("a2p2 local room\x00" + node))
 	return "r_" + hex.EncodeToString(h[:16])
@@ -380,7 +380,7 @@ func (s *Surface) Requests(ctx context.Context) ([]store.Request, error) { retur
 // log with another member since it started is not decided: it answers
 // state failed with reason not_caught_up, the request stays pending, and
 // the surface shows the risk and may repeat with notCaughtUpOK, the
-// person's second, explicit approval, which is recorded (PROTOCOL-next 7).
+// person's second, explicit approval, which is recorded (PROTOCOL 7).
 func (s *Surface) Confirm(ctx context.Context, id string, approve, notCaughtUpOK bool) (Confirmation, error) {
 	c, err := s.r.ConfirmWith(ctx, id, approve, ConfirmOpts{NotCaughtUpOK: notCaughtUpOK})
 	if errors.Is(err, ErrNotCaughtUp) {
@@ -558,7 +558,7 @@ func (s *Surface) AgentFor(ctx context.Context, harness, cwd string) (store.Agen
 
 // ---- writing ----
 
-// SendInput is the send call (PROTOCOL-next section 7).
+// SendInput is the send call (PROTOCOL section 7).
 type SendInput struct {
 	Agent      string
 	Room       string

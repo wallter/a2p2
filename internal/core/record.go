@@ -12,7 +12,7 @@ import (
 	"unicode/utf8"
 )
 
-// Record kinds besides KindMessage (PROTOCOL-next section 1).
+// Record kinds besides KindMessage (PROTOCOL section 1).
 const (
 	KindHandled  Kind = "handled"
 	KindWithdraw Kind = "withdraw"
@@ -199,9 +199,9 @@ func NewRecord(key ed25519.PrivateKey, f RecordFields) (*Record, error) {
 }
 
 // ParseRecord decodes a received wire object and runs the syntax checks of
-// PROTOCOL-next section 2 (S1 to S9) and V1, in that order, returning the
+// PROTOCOL section 2 (S1 to S9) and V1, in that order, returning the
 // first failure as a *Refusal. It does not bound the wire object itself:
-// the caller has already bounded the request it came in (PROTOCOL-next
+// the caller has already bounded the request it came in (PROTOCOL
 // 4.6), and nothing larger than the section 1 limits is decoded. It does
 // not check the signature (G1, see VerifySignature), which comes after the
 // caller's room (R1) and admission (A1) checks, nor anything that needs

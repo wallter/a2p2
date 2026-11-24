@@ -1,6 +1,6 @@
 package node
 
-// Changes to a room's member list wait for a person (P3, DESIGN-next
+// Changes to a room's member list wait for a person (P3, DESIGN
 // section 7). Propose records a request; Confirm, the person's step,
 // revalidates it against the room's state at that moment and only then
 // signs the entry and applies it through the same ingress as any other
@@ -32,7 +32,7 @@ type Change struct {
 	// Admin, with Kind add, also makes the machine an admin: on approval
 	// this machine signs the add and then its own admin entry, which waits
 	// for a matching one from another admin [M4] (the third admin,
-	// DESIGN-next section 7). One confirmation covers both.
+	// DESIGN section 7). One confirmation covers both.
 	Admin bool
 }
 
@@ -49,12 +49,12 @@ const (
 
 // fromWithHistory: every admitting grant carries the signer's heads as
 // the reading frontier, with or without history (lead's ruling on [R8]).
-// internal/core refuses from together with history today (PROTOCOL-next
+// internal/core refuses from together with history today (PROTOCOL
 // section 3, S7), so a grant with history carries none and its grantee's
 // agents start at 0; set this once core accepts both.
 const fromWithHistory = true
 
-// maxHeadsPerAuthor is PROTOCOL-next section 3's bound on from heads.
+// maxHeadsPerAuthor is PROTOCOL section 3's bound on from heads.
 const maxHeadsPerAuthor = 16
 
 // actionOf is what an entry of kind on target would do in state st.
@@ -271,7 +271,7 @@ func (r *Rooms) Confirm(ctx context.Context, id string, approve bool) (Confirmat
 const ReasonNotCaughtUp = "not_caught_up"
 
 // ErrNotCaughtUp: the approval would sign an entry for a room whose log
-// this machine has not caught up with since it started (DESIGN-next 3);
+// this machine has not caught up with since it started (DESIGN 3);
 // nothing was signed and the request stays pending. Signing now risks
 // reusing a position this machine signed before a restore, or building on
 // a log other members have moved past.
@@ -394,7 +394,7 @@ func (r *Rooms) ConfirmWith(ctx context.Context, id string, approve bool, o Conf
 		wires, ids = append(wires, v.Wire()), append(ids, v.ID())
 	}
 	if invited && !slices.Contains(dry.Members, q.Node) {
-		// The joiner was shown that it would be admitted (DESIGN-next 7).
+		// The joiner was shown that it would be admitted (DESIGN 7).
 		return fail(ReasonNotAdmitted)
 	}
 	res, err := r.ingest(ctx, rl, 0, wires, &completion{request: id, entry: strings.Join(ids, ","), notCaughtUp: override})
@@ -423,7 +423,7 @@ func (r *Rooms) ConfirmWith(ctx context.Context, id string, approve bool, o Conf
 
 // maySign enforces "since starting, a daemon signs no entry for a room
 // until it has caught up with that room's log from another member"
-// (DESIGN-next section 3). rl.pulled is set by an exchange with a current
+// (DESIGN section 3). rl.pulled is set by an exchange with a current
 // member in which every log head that member advertised is accepted here
 // (Exchange.Pull), by a join that completes with every head of its last
 // page accepted (Joiner.verify), and for a room created in this run.

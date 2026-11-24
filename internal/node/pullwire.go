@@ -1,6 +1,6 @@
 package node
 
-// The pull exchange's wire types and its two-level summary (PROTOCOL-next
+// The pull exchange's wire types and its two-level summary (PROTOCOL
 // sections 4.1 to 4.3, rules [R3], [R5] of internal/model/delivery). A
 // summary is, per author, a digest of that author's detail; the detail of
 // an author is, per stream, its contiguous position, the positions held
@@ -24,7 +24,7 @@ import (
 // PullVersion is the protocol version of a pull request and response.
 const PullVersion = 2
 
-// Limits of PROTOCOL-next 4.1, 4.2 and 4.6.
+// Limits of PROTOCOL 4.1, 4.2 and 4.6.
 const (
 	MaxPullAuthors    = 1024
 	MaxDetailAuthors  = 16
@@ -53,7 +53,7 @@ var (
 	maxLogExtra      = MaxLogExtra
 )
 
-// PullRequest is the body of POST /p/v2/pull (PROTOCOL-next 4.1): the
+// PullRequest is the body of POST /p/v2/pull (PROTOCOL 4.1): the
 // opening request of a round carries sum (and seen), a continuing request
 // snap and detail. Fields whose value would be zero or empty are omitted,
 // as section 0 requires.
@@ -82,7 +82,7 @@ type PullLog struct {
 	More    bool              `json:"more,omitempty"` // response only
 }
 
-// PullResponse is the 200 response (PROTOCOL-next 4.2): to an opening
+// PullResponse is the 200 response (PROTOCOL 4.2): to an opening
 // request same, or the server's authors, digests and sum; to a continuing
 // one its detail and page.
 type PullResponse struct {
@@ -105,7 +105,7 @@ type PullPeer struct {
 	Seen  string   `json:"seen,omitempty"`
 }
 
-// PullError is a pull refused with a status (PROTOCOL-next 4.5). Detail
+// PullError is a pull refused with a status (PROTOCOL 4.5). Detail
 // never carries a body; not_member carries nothing else at all.
 type PullError struct {
 	Status int    `json:"-"`
@@ -122,7 +122,7 @@ func (e *PullError) Error() string {
 	return fmt.Sprintf("pull refused: %d %s", e.Status, e.Code)
 }
 
-// Status codes of PROTOCOL-next 4.5.
+// Status codes of PROTOCOL 4.5.
 const (
 	CodeBadRequest  = "bad_request"
 	CodeNotMember   = "not_member"
@@ -146,10 +146,8 @@ func badRequest(format string, a ...any) *PullError {
 // non-member learns nothing of the room or its log.
 func notMember() *PullError { return pullErr(403, CodeNotMember, "") }
 
-var errNotMember = notMember()
-
 // digestOf is an author's digest: SHA-256 of the domain, a zero byte and
-// one line per stream, in epoch order (PROTOCOL-next 4.3).
+// one line per stream, in epoch order (PROTOCOL 4.3).
 func digestOf(d []store.StreamDetail) string {
 	h := sha256.New()
 	h.Write([]byte(digestDomain))
@@ -264,7 +262,7 @@ func uniqueIDs(xs []string) bool {
 	return true
 }
 
-// validate is step 2 of PROTOCOL-next 4.4 for what survives decoding:
+// validate is step 2 of PROTOCOL 4.4 for what survives decoding:
 // version and field limits. Strict JSON (duplicate keys, case of keys) is
 // the HTTP decoder's job (step 5b).
 func (q *PullRequest) validate() *PullError {

@@ -1,5 +1,5 @@
 // Package mcpshim is the stdio MCP server a harness launches. It keeps no
-// state: every tool call is one request to the daemon (PROTOCOL-next
+// state: every tool call is one request to the daemon (PROTOCOL
 // section 6: reply also reports handling, inbox also confirms what it
 // showed). No tool reaches a request for a person (P3).
 package mcpshim
@@ -40,7 +40,7 @@ type shim struct {
 	id                  string
 }
 
-// Tool descriptions: PROTOCOL-next section 6 (the golden file). Every
+// Tool descriptions: PROTOCOL section 6 (the golden file). Every
 // tool's result is one JSON object; a refusal is a tool error in plain text.
 const (
 	descAck      = "Tell a message's sender you handled it. Only for a message addressed to you, or a room-wide post that asked, after inbox showed you its text (not a thread view)."

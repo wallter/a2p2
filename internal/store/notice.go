@@ -33,7 +33,7 @@ ALTER TABLE agents DROP COLUMN joined_n;
 const v02Removed = "v02_removed"
 
 // NoticeV02Key is the meta key that records that the v0.2 notice was
-// shown to a person (PROTOCOL-next section 8).
+// shown to a person (PROTOCOL section 8).
 const NoticeV02Key = "v02_dropped_notice"
 
 // V02Pending reports whether the v0.2 notice is still to be shown: the

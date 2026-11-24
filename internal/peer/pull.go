@@ -1,6 +1,6 @@
 package peer
 
-// POST /p/v2/pull (PROTOCOL-next section 4): the pull exchange on the
+// POST /p/v2/pull (PROTOCOL section 4): the pull exchange on the
 // peer listener, beside /p/v2/join. The requester's node id comes from
 // the TLS certificate only; the body is size-checked before it is read and
 // strict JSON (checked by internal/node); the per-peer rate and concurrency
@@ -32,7 +32,7 @@ import (
 
 const pathPullV2 = "/p/v2/pull"
 
-// Limits and deadlines of PROTOCOL-next 4.6. Variables so tests can
+// Limits and deadlines of PROTOCOL 4.6. Variables so tests can
 // shorten them.
 var (
 	maxPullBody     int64 = node.MaxRequestBytes
@@ -165,7 +165,7 @@ func (s *pullServer) leave(from string) {
 	}
 }
 
-// pullRefuse writes a refusal of PROTOCOL-next 4.5, with Retry-After (in
+// pullRefuse writes a refusal of PROTOCOL 4.5, with Retry-After (in
 // whole seconds, at least 1) on a 429 or 503.
 func pullRefuse(w http.ResponseWriter, e *node.PullError) {
 	w.Header().Set("Content-Type", "application/json")

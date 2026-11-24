@@ -146,7 +146,7 @@ func TestJoinRouteRefusesOversizeBodies(t *testing.T) {
 // The join route limits each source address to 10 requests a minute
 // before it reads a body, whatever key each request presents.
 //
-// Requirements: T3; PROTOCOL-next 5.3; second review should-fix 7
+// Requirements: T3; PROTOCOL 5.3; second review should-fix 7
 func TestJoinRouteLimitsEachSourceAddressBeforeReadingTheBody(t *testing.T) {
 	id := newID(t)
 	h := &joinH{js: node.NewJoinServer(machine(t, id))}

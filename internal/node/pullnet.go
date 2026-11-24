@@ -1,7 +1,7 @@
 package node
 
 // Bodies of POST /p/v2/pull as the HTTP layer (internal/peer) carries
-// them: strict JSON (PROTOCOL-next section 0) checked here, like the join
+// them: strict JSON (PROTOCOL section 0) checked here, like the join
 // exchange's, so the rules of the wire live with the exchange.
 
 import (
@@ -13,7 +13,7 @@ import (
 	"github.com/wallter/a2p2/internal/core"
 )
 
-// The top-level fields of a request and a response (PROTOCOL-next 4.1,
+// The top-level fields of a request and a response (PROTOCOL 4.1,
 // 4.2): each, if present, must hold a non-zero value at every depth. All
 // but detail: section 4.3 gives detail its own form, in which an author
 // held nothing of is [] and a floor x of 0 is written (checkDetail checks
@@ -138,7 +138,7 @@ func strictPull(body []byte, known []string, sh shape) bool {
 	return true
 }
 
-// DecodePullRequest is step 2 of PROTOCOL-next 4.4 for a body already
+// DecodePullRequest is step 2 of PROTOCOL 4.4 for a body already
 // within the size limit: strict JSON, then the version and field limits.
 // Its refusal is a 400.
 func DecodePullRequest(body []byte) (*PullRequest, *PullError) {
@@ -164,7 +164,7 @@ func DecodePullResponse(body []byte) (*PullResponse, error) {
 
 var errNotStrictResponse = &UserError{Msg: "pull: the response is not strict json"}
 
-// DecodePullError maps a refusal's status and body (PROTOCOL-next 4.5) to
+// DecodePullError maps a refusal's status and body (PROTOCOL 4.5) to
 // a *PullError. A code that does not fit the status, or a body that is not
 // an error body, gives the status's own code; retry is its Retry-After.
 func DecodePullError(status int, body []byte, retry time.Duration) *PullError {

@@ -16,7 +16,7 @@ import (
 // WireVersion is the protocol version of records and log entries (field v).
 const WireVersion = 2
 
-// Refusal codes, PROTOCOL-next sections 1 to 3. A refusal is counted per peer
+// Refusal codes, PROTOCOL sections 1 to 3. A refusal is counted per peer
 // and shown locally; nothing is sent back.
 const (
 	CodeBadWire           = "bad_wire"
@@ -35,7 +35,7 @@ const (
 )
 
 // Refusal is the error every parse, verify and construct function returns.
-// Check is the check that failed (S1 to S9, V1, G1 from PROTOCOL-next
+// Check is the check that failed (S1 to S9, V1, G1 from PROTOCOL
 // sections 2 and 3; empty for a writer's refusal). Field is a known field
 // name or a fixed reason, never a string a peer chose or a value.
 type Refusal struct {
@@ -101,7 +101,7 @@ func fieldName(k string) string {
 	return "unknown field"
 }
 
-// Limits from PROTOCOL-next sections 1 and 3.
+// Limits from PROTOCOL sections 1 and 3.
 // MaxTo is the most addressees a message names.
 const MaxTo = 32
 

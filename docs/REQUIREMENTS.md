@@ -4,10 +4,9 @@
 [section 10](#10-decided-and-what-still-needs-the-owner). These requirements
 include the unreleased stage 1 core and later work such as subscription
 levels (U1–U4), large rooms and attachments (L1). See
-[Design](DESIGN-next.md) for stage 1 and [Testing](TESTING.md) for checks
+[Design](DESIGN.md) for stage 1 and [Testing](TESTING.md) for checks
 on the code, and the [requirement register](TRACE.md) for which
-requirements the code meets today. The v0.2 design describes the previous
-delivery core.
+requirements the code meets today.
 
 Draft 0.4 applies findings from the [membership model](../internal/members/FINDINGS.md)
 and [delivery model](../internal/model/delivery/FINDINGS.md), mainly to

@@ -2,6 +2,7 @@ package mcpshim
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -37,7 +38,9 @@ func record(t *testing.T, real string) (*localapi.Client, *recorder) {
 		t.Fatal(err)
 	}
 	rec := &recorder{}
-	up := &http.Client{Transport: &http.Transport{Dial: func(string, string) (net.Conn, error) { return net.Dial("unix", real) }}}
+	up := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", real)
+	}}}
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		name := strings.TrimPrefix(r.URL.Path, "/v1/")

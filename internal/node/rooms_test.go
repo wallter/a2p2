@@ -289,7 +289,7 @@ func permutations(xs [][]byte, fn func([][]byte)) {
 	rec(0)
 }
 
-// The first three machines of a room become its admins (DESIGN-next section
+// The first three machines of a room become its admins (DESIGN section
 // 7, T9 default): the second by one admin entry confirmed on the creator;
 // the third added by one admin, then made admin by matching entries from
 // both, the second raised on the other admin by the first's entry. Three
@@ -523,7 +523,7 @@ func TestForkInTwoAdminRoomIsSettledByTheOtherAdminsRemoval(t *testing.T) {
 // as they were, and what follows a restart is decided as it would have
 // been without one.
 //
-// Requirements: DESIGN-next section 5; members rule M11
+// Requirements: DESIGN section 5; members rule M11
 func TestRestartReplaysTheLogToTheSameStateAndDecidesLaterEntriesTheSame(t *testing.T) {
 	clock := lclock()
 	a, b := newLNode(t, "a", clock), newLNode(t, "b", clock)
@@ -642,7 +642,7 @@ func TestRequestConfirmedAfterTheStateChangedUnderneathItIsRefusedWithAReason(t 
 // and a response prepared under the old generation is not applied, even
 // after joining again.
 //
-// Requirements: DESIGN-next section 7 (leaving), section 4 (requester)
+// Requirements: DESIGN section 7 (leaving), section 4 (requester)
 func TestLeaveThenALateResponseIsNotApplied(t *testing.T) {
 	clock := lclock()
 	a, b := newLNode(t, "a", clock), newLNode(t, "b", clock)
@@ -700,7 +700,7 @@ func TestLeaveThenALateResponseIsNotApplied(t *testing.T) {
 // Entries are checked at ingress before the membership machine: the room
 // (R1), the pinned create (C1), the signature (G1) and the strict decoding.
 //
-// Requirements: PROTOCOL-next section 3 checks R1, C1, G1, S1
+// Requirements: PROTOCOL section 3 checks R1, C1, G1, S1
 func TestIngressRefusesWrongRoomSecondCreateAndBadSignature(t *testing.T) {
 	clock := lclock()
 	a, b := newLNode(t, "a", clock), newLNode(t, "b", clock)

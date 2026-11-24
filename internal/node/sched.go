@@ -1,7 +1,7 @@
 package node
 
 // The scheduler of the pull exchange: when to pull and from whom
-// (DESIGN-next section 4, the trigger table; PROTOCOL-next 4.5 and 4.6).
+// (DESIGN section 4, the trigger table; PROTOCOL 4.5 and 4.6).
 //
 //   - Start: short pulls of every room from two members.
 //   - Steady state: a waiting pull per room to each of two anchors: the
@@ -37,7 +37,7 @@ import (
 	"time"
 )
 
-// Timing of DESIGN-next 4 and PROTOCOL-next 4.6.
+// Timing of DESIGN 4 and PROTOCOL 4.6.
 const (
 	SchedWait       = 60 * time.Second // a waiting pull
 	SchedProbe      = 10 * time.Second // the probe of a newly chosen rotating anchor
@@ -479,7 +479,7 @@ func (s *Scheduler) succeeded(room, peer string) {
 	ps.ok++
 }
 
-// failed applies PROTOCOL-next 4.5 to a failed exchange with peer.
+// failed applies PROTOCOL 4.5 to a failed exchange with peer.
 func (s *Scheduler) failed(room, peer string, err error) {
 	now := s.o.Now()
 	s.mu.Lock()

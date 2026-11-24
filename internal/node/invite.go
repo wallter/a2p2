@@ -1,7 +1,7 @@
 package node
 
-// Invites and the admin's side of the join exchange (DESIGN-next section 7,
-// PROTOCOL-next section 5, requirements T3, T9, P3). An admin issues a
+// Invites and the admin's side of the join exchange (DESIGN section 7,
+// PROTOCOL section 5, requirements T3, T9, P3). An admin issues a
 // token; the joiner opens it (the invite binds to the joiner's key and the
 // admin answers with a preview), accepts it after a person on the joiner
 // confirmed (which raises a request for a person here, through the same
@@ -31,7 +31,7 @@ import (
 // JoinVersion is the protocol version of a join request.
 const JoinVersion = 2
 
-// Join limits and timing (PROTOCOL-next 5.1 to 5.3).
+// Join limits and timing (PROTOCOL 5.1 to 5.3).
 const (
 	JoinInviteTTL      = 30 * time.Minute
 	JoinRetry          = 5 * time.Second  // retry_ms while accepted
@@ -48,7 +48,7 @@ const (
 // near the entry size limit still fit a response; tests lower it.
 var maxJoinPageBytes = 3 << 20
 
-// Operations, states and refusal codes of PROTOCOL-next 5.2 and 5.3.
+// Operations, states and refusal codes of PROTOCOL 5.2 and 5.3.
 const (
 	JoinOpen   = "open"
 	JoinAccept = "accept"
@@ -88,7 +88,7 @@ type Invitation struct {
 // Invite issues a single-use invite to room, valid for JoinInviteTTL. This
 // machine must be an admin of the room. role is RoleMember, RoleAdmin, or
 // empty for the default: the first three machines of a room are its admins
-// (DESIGN-next section 7, T9), so while the room has fewer than three
+// (DESIGN section 7, T9), so while the room has fewer than three
 // members the invite is for an admin. Without history the joiner may not
 // read what was said before its grant. addrs are where joiners reach this
 // machine (1 to 8 host:port, given by the caller, which knows whether
@@ -156,7 +156,7 @@ func (r *Rooms) inviteOf(ctx context.Context, q store.Request, now time.Time) (i
 
 // ---- the wire ----
 
-// JoinRequest is the body of POST /p/v2/join (PROTOCOL-next 5.2). Invite
+// JoinRequest is the body of POST /p/v2/join (PROTOCOL 5.2). Invite
 // is this implementation's reading for a joiner that restarted: poll may
 // name the invite by its hash instead of the secret, which is never stored
 // (see JoinServer.Handle).
@@ -182,7 +182,7 @@ type JoinRoom struct {
 	Create string `json:"create"`
 }
 
-// JoinAnswer is every answer of PROTOCOL-next 5.3; fields whose value
+// JoinAnswer is every answer of PROTOCOL 5.3; fields whose value
 // would be zero or false are omitted (section 0).
 type JoinAnswer struct {
 	State   string    `json:"state,omitempty"`
@@ -254,7 +254,7 @@ func badJoin(detail string) JoinReply {
 	return joinReply(http.StatusBadRequest, JoinAnswer{Error: CodeBadRequest + ": " + detail})
 }
 
-// decodeJoinRequest checks a request body: strict JSON (PROTOCOL-next
+// decodeJoinRequest checks a request body: strict JSON (PROTOCOL
 // section 0), then the fields each operation takes.
 func decodeJoinRequest(body []byte) (JoinRequest, string) {
 	var q JoinRequest
@@ -360,7 +360,7 @@ func (s *JoinServer) spendUnknown(now time.Time) {
 // is read). The secret never appears in what is logged, stored or
 // answered.
 //
-// Readings (PROTOCOL-next 5.2): poll may carry, instead of the secret,
+// Readings (PROTOCOL 5.2): poll may carry, instead of the secret,
 // "invite": the hex SHA-256 of the secret, accepted only from the key the
 // invite is bound to, so a joiner that restarted can resume polling
 // although it never stores the secret; polls naming an unknown invite
@@ -464,7 +464,7 @@ func (s *JoinServer) phase(inv store.Invite, from string, after int64) JoinReply
 	return joinRefusal(CodeRevoked)
 }
 
-// invitePhase is the state of PROTOCOL-next 5.3 an invite is in, or the
+// invitePhase is the state of PROTOCOL 5.3 an invite is in, or the
 // refusal code once refused or expired.
 func invitePhase(inv store.Invite) string {
 	switch {
@@ -551,7 +551,7 @@ func (r *Rooms) shownID(rl *roomLog, inv store.Invite) string {
 		History: inv.Shown.History, Member: inv.Shown.Member, Admin: r.m.ID, Expires: inv.Expires})
 }
 
-// accept raises the request for a person (DESIGN-next section 7) through
+// accept raises the request for a person (DESIGN section 7) through
 // the path Propose uses, and moves the invite to accepted with it, in one
 // transaction, if the accept names the preview last shown to its key and
 // the terms it showed still hold. An invite accepted or decided meanwhile

@@ -1,7 +1,7 @@
 package node
 
 // Membership and records ([RM1], [RM2] of internal/model/delivery and
-// DESIGN-next sections 2 and 3). A record is stored only if its author is
+// DESIGN sections 2 and 3). A record is stored only if its author is
 // or was admitted (members.State.Admitted) or is this machine. Whether this
 // machine may hold a record's text is its own current history permission:
 // without history, text at or before a head of its admission frontier is

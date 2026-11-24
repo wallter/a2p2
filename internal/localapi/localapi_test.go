@@ -36,13 +36,12 @@ func (n joinNet) Join(ctx context.Context, _ []string, check func(string) error,
 }
 
 type machine struct {
-	id     string
-	s      *node.Surface
-	js     *node.JoinServer
-	c      *Client
-	human  string
-	server *node.JoinServer
-	st     *store.Store
+	id    string
+	s     *node.Surface
+	js    *node.JoinServer
+	c     *Client
+	human string
+	st    *store.Store
 }
 
 // newPair starts two machines with local APIs; b joins through a.

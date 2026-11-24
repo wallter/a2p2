@@ -1,6 +1,6 @@
 // Command a2p2 is the whole product: daemon, CLI, MCP shim and harness hook
 // in one binary. See docs/DESIGN.md. The commands are wiring over the local
-// API (PROTOCOL-next section 7); --json prints a response unchanged.
+// API (PROTOCOL section 7); --json prints a response unchanged.
 package main
 
 import (
@@ -36,7 +36,9 @@ var version = "dev" // set by -ldflags at release
 const usage = `a2p2 - peer-to-peer messaging for AI agents and the people who run them
 
 Getting started
-  a2p2 install claude|codex|agy   connect a harness (undo with: a2p2 uninstall ...)
+  a2p2 install claude|codex|agy [--on-stop] [--dry-run]
+                                  connect a harness (undo with: a2p2 uninstall NAME)
+                                  --on-stop also checks for messages when a turn ends.
   a2p2 ui                         open the local web page
   a2p2 doctor                     check the daemon and harness connections
 
@@ -262,7 +264,7 @@ func run(ctx context.Context, name string, args []string) (err error) {
 			fn = harness.Uninstall
 		}
 		report, err := fn(c.fs.Arg(0), o)
-		fmt.Print(report)
+		printReport(os.Stdout, report)
 		return err
 
 	case "doctor":
@@ -319,9 +321,29 @@ func run(ctx context.Context, name string, args []string) (err error) {
 			return err
 		}
 		var r localapi.AckResp
-		return c.call("ack", localapi.AckReq{Agent: me, ID: rest[0]}, &r, func() { fmt.Println("handled, report", r.Handled) })
+		return c.call("ack", localapi.AckReq{Agent: me, ID: rest[0]}, &r, func() { fmt.Println(ackText(r)) })
 	}
 	return usagef("unknown command %q; run a2p2 help", name)
+}
+
+// ackText is what a2p2 ack prints: a repeated ack names the first report
+// rather than looking like a new one.
+func ackText(r localapi.AckResp) string {
+	if r.Already {
+		return "already reported handled, report " + r.Handled
+	}
+	return "handled, report " + r.Handled
+}
+
+// printReport prints an install or uninstall report as whole lines.
+func printReport(w io.Writer, report string) {
+	if report == "" {
+		return
+	}
+	if !strings.HasSuffix(report, "\n") {
+		report += "\n"
+	}
+	fmt.Fprint(w, report)
 }
 
 // The daemon's user errors are shared with the MCP tools. Point CLI callers
@@ -344,7 +366,8 @@ func cliError(err *localapi.Error) error {
 	case err.Msg == "no such request":
 		return &localapi.Error{User: true, Msg: "no request with that ID is waiting. Run a2p2 confirm to list them"}
 	case err.Msg == "ask_handled is only for a post to everyone":
-		return &localapi.Error{User: true, Msg: "--ask-handled is only for a message to everyone; leave out --to"}
+		return &localapi.Error{User: true, Msg: "--ask-handled is for posts to the whole room, so leave out --to. " +
+			"An addressee can always report a message handled with a2p2 ack ID"}
 	case err.Msg == "everyone is the only addressee when given":
 		return &localapi.Error{User: true, Msg: "--to everyone cannot be combined with other --to names"}
 	case err.Msg == members.ReasonAlreadyAdmin:
@@ -854,7 +877,7 @@ func printAlert(w io.Writer, a localapi.Alert) {
 
 // netCmd is a person's networking decision: shown exactly, asked at a
 // terminal, recorded by the daemon (a decided request of kind network),
-// and applied by restarting it.
+// and applied by the daemon at once.
 func netCmd(c *cmd, args []string) error {
 	outbound := c.fs.Bool("outbound-only", false, "connect out only; listen on nothing")
 	if err := c.fs.Parse(permute(args)); err != nil {
@@ -960,7 +983,7 @@ func doctor(c *cmd, args []string) error {
 		}
 	}
 	if *c.json {
-		if err := writeJSON(checks); err != nil {
+		if err := writeJSON(os.Stdout, checks); err != nil {
 			return err
 		}
 	} else {
@@ -1093,8 +1116,11 @@ func history(c *cmd, args []string) error {
 	})
 }
 
-func writeJSON(v any) error {
-	enc := json.NewEncoder(os.Stdout)
+// writeJSON prints v as indented JSON with text as written: '<', '>' and
+// '&' are not escaped, as in the local API's own responses.
+func writeJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
 }

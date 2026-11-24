@@ -317,7 +317,7 @@ func TestExpiredTextStaysExpiredWhenTheClockGoesBackOrTextIsOfferedAgain(t *test
 	wantReason(t, s, m.ID(), ReasonWithdrawn)
 }
 
-// PROTOCOL-next P1: a record dated more than 24 hours ahead is not stored.
+// PROTOCOL P1: a record dated more than 24 hours ahead is not stored.
 func TestRecordDatedMoreThanADayAheadIsNotStoredYet(t *testing.T) {
 	s, _ := openTest(t)
 	m := mk(t, testKey("a"), core.RecordFields{Created: t0.Add(futureSlack + time.Millisecond)})

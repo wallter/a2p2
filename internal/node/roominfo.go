@@ -1,7 +1,7 @@
 package node
 
 // What a person is shown about a room's membership (room/list and alerts,
-// PROTOCOL-next section 7; DESIGN-next section 3): members, admins, changes
+// PROTOCOL section 7; DESIGN section 3): members, admins, changes
 // waiting for a second admin, entries without effect with their reasons,
 // fork evidence, the stated limits that apply to the room's shape, and the
 // requests waiting for this machine's person.
@@ -73,7 +73,7 @@ const (
 		"lost key cannot be retired and no new admin can be named."
 )
 
-// Alert kinds (PROTOCOL-next section 7).
+// Alert kinds (PROTOCOL section 7).
 const (
 	AlertRequest = "request"
 	AlertFork    = "fork"

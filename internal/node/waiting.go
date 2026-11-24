@@ -1,6 +1,6 @@
 package node
 
-// Waiting pulls (PROTOCOL-next 4.4 steps 9 and 10, 4.6): an opening
+// Waiting pulls (PROTOCOL 4.4 steps 9 and 10, 4.6): an opening
 // request with wait_ms whose answer is same is held until the answer would
 // no longer be same (this machine's sum for the room, or its log, changed)
 // or wait_ms passes, then released through the release point (Exchange.
@@ -211,7 +211,7 @@ func (x *Exchange) wantPeers(rl *roomLog, peer string, now time.Time) bool {
 	return true
 }
 
-// validPeer checks one entry of a response's peers (PROTOCOL-next 4.2):
+// validPeer checks one entry of a response's peers (PROTOCOL 4.2):
 // a node id, 1 to MaxAddrs addresses of 1 to MaxAddrBytes bytes, and a
 // time of section 0 if seen is there. A malformed one refuses the
 // response.

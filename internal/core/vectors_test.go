@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-// Golden vectors, PROTOCOL-next section 9. Regenerate after a deliberate
+// Golden vectors, PROTOCOL section 9. Regenerate after a deliberate
 // format change with:
 //
 //	go test ./internal/core -run TestGoldenVectors -update
@@ -64,10 +64,10 @@ type vector struct {
 	Wire   string `json:"wire"`
 	ID     string `json:"id,omitempty"`
 	Code   string `json:"code,omitempty"`
-	Check  string `json:"check,omitempty"` // the check that fails, PROTOCOL-next sections 2 and 3
+	Check  string `json:"check,omitempty"` // the check that fails, PROTOCOL sections 2 and 3
 }
 
-// outcome runs the stateless receive checks in the order of PROTOCOL-next
+// outcome runs the stateless receive checks in the order of PROTOCOL
 // sections 2 and 3, doing the caller's part (R1, A1, C1) as a node will. It
 // returns the id, or the code and check of the first failure.
 func outcome(v vector) (id, code, check string) {

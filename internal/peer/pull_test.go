@@ -448,7 +448,7 @@ func (zeros) Read(p []byte) (int, error) {
 // A body over the limit gets 413 before it is read: the node never sees
 // it.
 //
-// Requirements: PROTOCOL-next 4.4 step 2, 4.6
+// Requirements: PROTOCOL 4.4 step 2, 4.6
 func TestOverTLSAnOversizedBodyGets413BeforeItIsRead(t *testing.T) {
 	a, b := newPM(t, "alice", true), newPM(t, "bob", false)
 	group(t, a, b)
@@ -462,9 +462,9 @@ func TestOverTLSAnOversizedBodyGets413BeforeItIsRead(t *testing.T) {
 	}
 }
 
-// Malformed and non-strict JSON (PROTOCOL-next section 0) get 400.
+// Malformed and non-strict JSON (PROTOCOL section 0) get 400.
 //
-// Requirements: PROTOCOL-next section 0, 4.4 step 2
+// Requirements: PROTOCOL section 0, 4.4 step 2
 func TestOverTLSMalformedOrNonStrictJSONGets400(t *testing.T) {
 	a, b := newPM(t, "alice", true), newPM(t, "bob", false)
 	room := group(t, a, b)
@@ -494,7 +494,7 @@ func TestOverTLSMalformedOrNonStrictJSONGets400(t *testing.T) {
 // More than the burst of requests at once: 429 rate_limited with a
 // Retry-After the client maps back.
 //
-// Requirements: PROTOCOL-next 4.5, 4.6
+// Requirements: PROTOCOL 4.5, 4.6
 func TestOverTLSTheRateLimitGives429WithRetryAfter(t *testing.T) {
 	a, b := newPM(t, "alice", true), newPM(t, "bob", false)
 	room := group(t, a, b)
@@ -635,7 +635,7 @@ func TestOverTLSWaitingPullsToOnePeerShareOneConnection(t *testing.T) {
 // The server's write deadline for a waiting pull is wait_ms plus the
 // slack: a hold within it is answered, one past it is cut.
 //
-// Requirements: PROTOCOL-next 4.6
+// Requirements: PROTOCOL 4.6
 func TestOverTLSTheWriteDeadlineOfAWaitingPullIsItsWaitPlusTheSlack(t *testing.T) {
 	a, b := newPM(t, "alice", true), newPM(t, "bob", false)
 	room := group(t, a, b)

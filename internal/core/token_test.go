@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// Golden token vectors (PROTOCOL-next 5.1) under testdata/tokens.
+// Golden token vectors (PROTOCOL 5.1) under testdata/tokens.
 // Regenerate after a deliberate format change with:
 //
 //	go test ./internal/core -run TestTokenVectors -update
@@ -165,17 +165,17 @@ func equalVector(a, b tokenVector) bool {
 		slices.Equal(a.Addrs, b.Addrs) && a.Canonical == b.Canonical && a.Error == b.Error
 }
 
-// Every refusal of PROTOCOL-next 5.1, and the folding of I, L, O and case.
+// Every refusal of PROTOCOL 5.1, and the folding of I, L, O and case.
 //
 // Requirements: T3
-// protocolExample is the token PROTOCOL-next 5.1 shows, as text; its
+// protocolExample is the token PROTOCOL 5.1 shows, as text; its
 // bytes below were computed apart from this package's decoder.
 const protocolExample = "a2p2:KSWT-54VG-HARN-HH1N-C9M1-BVJJ-RG88-Z3MN-VR9J-9VFZ-RQP1-ADMA-BM38@203.0.113.7:7443,[2001:db8::7]:7443"
 
-// The example token of PROTOCOL-next 5.1 decodes to the bytes worked out
+// The example token of PROTOCOL 5.1 decodes to the bytes worked out
 // independently of this decoder.
 //
-// Requirements: T3; PROTOCOL-next 5.1
+// Requirements: T3; PROTOCOL 5.1
 func TestTokenProtocolExampleDecodesToItsBytes(t *testing.T) {
 	tok, err := DecodeToken(protocolExample)
 	if err != nil {

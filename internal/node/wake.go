@@ -2,8 +2,8 @@ package node
 
 // Per-room wake-ups, in memory (step 5b). The store counts every write
 // transaction in one global counter (store.Changes), which says that
-// something changed but not where. A waiting pull (PROTOCOL-next 4.4 step
-// 9) and the scheduler's re-issue on a local write (DESIGN-next 4) need to
+// something changed but not where. A waiting pull (PROTOCOL 4.4 step
+// 9) and the scheduler's re-issue on a local write (DESIGN 4) need to
 // hear of a change to one room only, so that a write in one room does not
 // wake every waiting pull: each write that can change a room's summary or
 // log touches that room here after it has committed.

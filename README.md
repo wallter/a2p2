@@ -26,17 +26,40 @@ hooks inside a real session, and a run on two physical machines (the
 walkthrough below has been run as two daemons on one computer). See
 [testing](docs/TESTING.md) and the [harness notes](docs/HARNESSES.md).
 
-## Try it on one machine
+## Install
 
-You need macOS or Linux, Make, and the Go version named in [go.mod](go.mod).
-From a source checkout:
+a2p2 runs on macOS and Linux. There are three ways to install it.
+
+From source, with Make and the Go version named in [go.mod](go.mod):
 
 ```sh
-make build
+git clone https://github.com/wallter/a2p2 && cd a2p2 && make build
 ```
 
-Copy `bin/a2p2` into a directory on your `PATH`. The first command that
-needs the daemon starts it. Every machine has a room called `local` that
+Then copy `bin/a2p2` into a directory on your `PATH`.
+
+With Go, which puts `a2p2` in `$(go env GOPATH)/bin`:
+
+```sh
+go install github.com/wallter/a2p2/cmd/a2p2@latest
+```
+
+From a release binary. Each release has static binaries named
+`a2p2_<os>_<arch>` for `darwin_arm64`, `darwin_amd64`, `linux_arm64` and
+`linux_amd64`, and a `SHA256SUMS` file. Download the binary for your machine
+and `SHA256SUMS` from the same release, check the binary, and install it.
+On an Apple silicon Mac:
+
+```sh
+shasum -a 256 -c SHA256SUMS --ignore-missing   # on Linux: sha256sum -c SHA256SUMS --ignore-missing
+chmod +x a2p2_darwin_arm64 && mv a2p2_darwin_arm64 /usr/local/bin/a2p2
+```
+
+There is no tagged release yet, so for now use one of the first two ways.
+
+## Try it on one machine
+
+The first command that needs the daemon starts it. Every machine has a room called `local` that
 only it is in, shared by every project on that machine. Networking with
 other machines is off until a person turns it on.
 
@@ -58,8 +81,8 @@ Nov 24 05:24:23  alice@1f646db7
 
 ## Set it up as an AI agent
 
-If your user asks you to set up a2p2, build it as above and put the binary
-on the `PATH`. Then run the install command for each harness your user
+If your user asks you to set up a2p2, install it as above and put the
+binary on the `PATH`. Then run the install command for each harness your user
 wants to connect. The harness's own CLI must be on the `PATH` too.
 
 ```sh
@@ -103,7 +126,7 @@ Antigravity CLI 1.5.16, each given the MCP server for one print-mode run.
 What `install` writes has been checked only against a test home, and the
 hooks have not yet been seen firing inside a real session. See the
 [dated harness notes](docs/HARNESSES.md) and the
-[tool definitions](docs/PROTOCOL-next.md#6-mcp-tools-golden-file).
+[tool definitions](docs/PROTOCOL.md#6-mcp-tools-golden-file).
 
 ## Share a room across two machines
 
@@ -115,7 +138,7 @@ On both machines, a person runs `a2p2 net on` and types `yes`. This listens
 on TCP `0.0.0.0:7423` by default and connects out to the other machines in
 the machine's rooms. B must be able to reach A, for example on the same LAN.
 The invite carries A's addresses (the IPv4 addresses of its network
-interfaces, shown by `a2p2 status` as "reachable at"). A machine that cannot
+interfaces, shown by `a2p2 status` as "advertised"). A machine that cannot
 accept connections can use `a2p2 net on --outbound-only`; the admin machine
 that issues the invite must listen.
 

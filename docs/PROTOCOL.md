@@ -1,10 +1,8 @@
 # Wire protocol and local interfaces
 
-**Status.** The unreleased daemon uses the stage 1 protocol. This document
-started as revision 2 on 2026-11-23, after the review in
-`design-next-review3-sol.md`. See [Design](DESIGN-next.md) for the rules and
-[Decisions](DECISIONS.md) for changes made during implementation.
-The design cites these sections as "PROTOCOL n".
+This is the stage 1 protocol the daemon speaks. See [Design](DESIGN.md)
+for the rules and [Decisions](DECISIONS.md) for changes made during
+implementation. The design cites these sections as "PROTOCOL n".
 
 - [Conventions](#0-conventions), [record header](#1-record-header), and [receiving a record](#2-receiving-a-record)
 - [Log entry](#3-log-entry), [pull](#4-pull), and [join](#5-join)

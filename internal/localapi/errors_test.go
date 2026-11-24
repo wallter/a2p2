@@ -72,9 +72,9 @@ func TestEveryRefusalCarriesAStableCodeAndWhetherRetryingCanHelp(t *testing.T) {
 			t.Errorf("%s: client error %#v", x.name, err)
 		}
 	}
-	// Every code is in the one list with its retry rule, and PROTOCOL-next
+	// Every code is in the one list with its retry rule, and PROTOCOL
 	// section 7 lists each one.
-	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "PROTOCOL-next.md"))
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "PROTOCOL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestEveryRefusalCarriesAStableCodeAndWhetherRetryingCanHelp(t *testing.T) {
 	sec := s[strings.Index(s, "## 7. Local API"):strings.Index(s, "## 8. ")]
 	for _, c := range node.ErrorCodes {
 		if !strings.Contains(sec, "`"+c+"`") {
-			t.Errorf("PROTOCOL-next section 7 does not list code %s", c)
+			t.Errorf("PROTOCOL section 7 does not list code %s", c)
 		}
 	}
 	// An unreachable daemon is unavailable and retryable.

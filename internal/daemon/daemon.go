@@ -341,7 +341,7 @@ func (r *run) getFault() string {
 // decision is recorded (true: run again to apply it).
 func (r *run) serve(parent context.Context, ready func()) (again bool, err error) {
 	st, o := r.st, r.o
-	// Records, the room log, pull and join (DESIGN-next section 9).
+	// Records, the room log, pull and join (DESIGN sections 2 to 4 and 7).
 	m := node.NewMachine(st, r.id.Key, node.MachineOpts{})
 	rooms, err := node.OpenRooms(parent, m)
 	if err != nil {

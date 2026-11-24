@@ -2,7 +2,7 @@
 
 Written 2026-11-23 by the sub-agent that built this package (Claude Opus),
 saved by the project lead. Built as `internal/model/members`; promoted to
-`internal/members` in step 2 (docs/DESIGN-next.md section 9). The rules are
+`internal/members` in step 2 (docs/DESIGN.md section 9). The rules are
 `resolve.go` (the pure function), `machine.go` (what one machine accepts),
 `adapter.go` (verified `core` entries in, with the signed-bytes id
 injected in place of the model hash) and the tests beside them. In the

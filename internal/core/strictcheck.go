@@ -9,7 +9,7 @@ import (
 var ErrNotStrict = errors.New("not strict json")
 
 // CheckStrictObject checks a peer request or response body against
-// PROTOCOL-next section 0 before encoding/json decodes it: one strict JSON
+// PROTOCOL section 0 before encoding/json decodes it: one strict JSON
 // object (valid UTF-8, no lone surrogate, no duplicate key after
 // unescaping, nothing after it, at most 16 levels deep), no null at any
 // depth, every field named in known present with a non-zero, non-empty,

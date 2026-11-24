@@ -9,7 +9,7 @@ import (
 	"unicode/utf8"
 )
 
-// EntryKind is the kind of a room log entry (PROTOCOL-next section 3).
+// EntryKind is the kind of a room log entry (PROTOCOL section 3).
 type EntryKind string
 
 const (
@@ -123,7 +123,7 @@ func NewEntry(key ed25519.PrivateKey, f EntryFields) (*Entry, error) {
 }
 
 // ParseEntry decodes a received wire object and runs S1 to S7 and V1 of
-// PROTOCOL-next section 3, in that order, returning the first failure as a
+// PROTOCOL section 3, in that order, returning the first failure as a
 // *Refusal. As for ParseRecord, the caller bounds the wire object. The
 // caller then checks the room (R1) and the pinned create id (C1, using ID)
 // before VerifySignature (G1), then the chain (C2).

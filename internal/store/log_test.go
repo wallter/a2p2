@@ -24,7 +24,7 @@ func testCreate(t *testing.T) LogRow {
 // A log batch is one transaction: a failure after its rows are written
 // leaves no row, no member cache change and no approval behind.
 //
-// Requirements: DESIGN-next section 5 (one transaction each)
+// Requirements: DESIGN section 5 (one transaction each)
 func TestLogBatchThatFailsLeavesNothingApplied(t *testing.T) {
 	s, _ := openTest(t)
 	ctx := context.Background()

@@ -17,7 +17,7 @@ var memberTerms = Terms{Role: "member"}
 // while a signed or declined one is never touched. Leaving the room
 // deletes its invites.
 //
-// Requirements: T3; PROTOCOL-next 5.3, 8
+// Requirements: T3; PROTOCOL 5.3, 8
 func TestInviteStatesAndExpiry(t *testing.T) {
 	s, _ := openTest(t)
 	ctx := context.Background()

@@ -25,7 +25,7 @@ import (
 	"github.com/wallter/a2p2/internal/store"
 )
 
-// Entry kinds, as the local API shows them (PROTOCOL-next section 7).
+// Entry kinds, as the local API shows them (PROTOCOL section 7).
 const (
 	EntryMessage   = "message"   // a message, with its current text
 	EntryWithdrawn = "withdrawn" // a message you were shown was withdrawn
@@ -34,7 +34,7 @@ const (
 	EntryVoided    = "voided"    // a message you were shown is gone: its author's admission never counted
 )
 
-// Parent states of a reply (PROTOCOL-next section 7).
+// Parent states of a reply (PROTOCOL section 7).
 const (
 	ParentHere      = "here"
 	ParentMissing   = "missing" // not held, or its text not here
@@ -77,7 +77,7 @@ type Entry struct {
 	Seq     int64
 }
 
-// Wait is a stream the inbox cannot pass yet (PROTOCOL-next Wait).
+// Wait is a stream the inbox cannot pass yet (PROTOCOL Wait).
 type Wait struct {
 	Room   string
 	Author string
@@ -844,7 +844,7 @@ func (v *roomView) entry(h *rec, kind, key string) (*Entry, error) {
 	if msg != nil {
 		e.To = msg.f.To
 		// A reply whose parent fails its check is shown without a parent
-		// (PROTOCOL-next section 2).
+		// (PROTOCOL section 2).
 		if msg.h.Effect != store.EffectBadReference {
 			e.Parent, e.Thread = msg.f.Parent, msg.f.Thread
 		}

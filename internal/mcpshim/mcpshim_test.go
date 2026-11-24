@@ -155,10 +155,10 @@ func agentID(t *testing.T, cs *mcp.ClientSession) string {
 	return w["agent"].(string)
 }
 
-// protocolTools is the JSON block of docs/PROTOCOL-next.md section 6.
+// protocolTools is the JSON block of docs/PROTOCOL.md section 6.
 func protocolTools(t *testing.T) []byte {
 	t.Helper()
-	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "PROTOCOL-next.md"))
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "PROTOCOL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestToolsGolden(t *testing.T) {
 		t.Fatalf("tool list differs from %s (run with -update)", path)
 	}
 	if !bytes.Equal(golden, protocolTools(t)) {
-		t.Fatal("testdata/tools.json differs from the definitions in docs/PROTOCOL-next.md section 6")
+		t.Fatal("testdata/tools.json differs from the definitions in docs/PROTOCOL.md section 6")
 	}
 }
 

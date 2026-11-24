@@ -2,7 +2,7 @@ package node
 
 // Refusal codes: every error the local API and the agent tools return
 // carries one, with whether repeating the same call later can succeed
-// without changing it (PROTOCOL-next section 7). This is the only list;
+// without changing it (PROTOCOL section 7). This is the only list;
 // a code is never renamed once shipped, and a new one is added here and
 // in the protocol together. The sentence beside the code says what to do.
 const (

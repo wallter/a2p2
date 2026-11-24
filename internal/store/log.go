@@ -1,7 +1,7 @@
 package store
 
 // The room log, the member cache derived from it, and requests waiting for
-// a person (DESIGN-next sections 3, 5 and 7; PROTOCOL-next section 8). This
+// a person (DESIGN sections 3, 5 and 7; PROTOCOL section 8). This
 // is migration 3 and the methods over it.
 
 import (
@@ -15,7 +15,7 @@ import (
 
 // schemaLog is migration 3: the room log.
 //
-// Differences from PROTOCOL-next section 8: the member cache is the table
+// Differences from PROTOCOL section 8: the member cache is the table
 // room_members, not members, because the v0.2 members table (same name,
 // other columns) is still read by the v0.2 trust checks (MemberByNode,
 // IsMember) until step 3b drops it, and a node listed only in a
@@ -730,7 +730,7 @@ func (s *Store) DecideRequest(ctx context.Context, id, state, reason string, now
 	})
 }
 
-// LeaveRoom is leaving a room locally (DESIGN-next section 7): the room's
+// LeaveRoom is leaving a room locally (DESIGN section 7): the room's
 // records, reading state, log, member cache and requests are deleted, and
 // the room row stays as a tombstone with the next generation, so a
 // response prepared before is refused (ErrStaleGeneration). It returns the

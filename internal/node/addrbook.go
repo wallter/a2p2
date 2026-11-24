@@ -1,6 +1,6 @@
 package node
 
-// Peers' addresses (PROTOCOL-next section 0: "addresses are hints, learned
+// Peers' addresses (PROTOCOL section 0: "addresses are hints, learned
 // from the token, a peer's addrs, and peers in responses, stored per member
 // and tried most recent success first"). In memory, and with
 // LoadAddrBook also in the store's peer_addrs (migration 8), so a machine
@@ -329,5 +329,5 @@ func (b *AddrBook) peers(members []string) []PullPeer {
 	return sorted
 }
 
-// timeFormat is the time format of PROTOCOL-next section 0.
+// timeFormat is the time format of PROTOCOL section 0.
 const timeFormat = "2006-01-02T15:04:05.000Z"

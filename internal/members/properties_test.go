@@ -112,16 +112,6 @@ func idsOf(es []entry) []string {
 	return out
 }
 
-func latestBy(es []entry, author string) string {
-	best := entry{}
-	for _, e := range es {
-		if e.Author == author && e.Seq > best.Seq {
-			best = e
-		}
-	}
-	return best.ID
-}
-
 // machinesOf returns the machines the generators use for history h: the
 // four base machines plus any other machine named in h.
 func machinesOf(h history) []string {

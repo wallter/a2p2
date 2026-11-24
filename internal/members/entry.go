@@ -1,6 +1,6 @@
 // Package members decides a room's member list: who is a member, who is
 // an admin, what each entry did and why, and each member's history
-// permission, from the set of the room's log entries (docs/DESIGN-next.md
+// permission, from the set of the room's log entries (docs/DESIGN.md
 // section 3). It began as an executable model (FINDINGS.md); the daemon
 // uses it through the adapter in adapter.go, which takes entries already
 // parsed and signature-checked by internal/core.

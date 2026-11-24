@@ -369,7 +369,7 @@ func (h *harness) addSim(n delivery.MachineID, agents []string) *sim {
 func (h *harness) change(c Change) {
 	h.t.Helper()
 	r := h.sims[h.px.admin].r
-	// The model has no "pull before signing" rule (DESIGN-next 3, not
+	// The model has no "pull before signing" rule (DESIGN 3, not
 	// modelled): the admin's log is in step with the schedule's, so it
 	// counts as pulled even after a crash or restore.
 	r.mu.Lock()

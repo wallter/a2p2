@@ -1,7 +1,7 @@
 package store
 
 // Signed records, streams, fork evidence and per-agent reading state
-// (DESIGN-next sections 2, 5 and 6; PROTOCOL-next section 8). This file is
+// (DESIGN sections 2, 5 and 6; PROTOCOL section 8). This file is
 // migration 2 and the methods over it. Migration 10 (notice.go) drops the
 // v0.2 tables.
 
@@ -17,7 +17,7 @@ import (
 )
 
 // schemaRecords is migration 2. The v0.2 rooms table gains the columns of
-// PROTOCOL-next section 8 (its old owner and version columns stay until 3b
+// PROTOCOL section 8 (its old owner and version columns stay until 3b
 // drops the v0.2 data); the v0.2 meta table already has the key/value shape
 // section 8 asks for and is reused as it is. log, observed, refusals,
 // invites (new shape) and requests come with the steps that use them.
@@ -76,7 +76,7 @@ const (
 	ReasonMissing     = "missing"      // text not here yet; any holder may repair it
 )
 
-// Effects of a record's ref or parent (PROTOCOL-next section 2, after
+// Effects of a record's ref or parent (PROTOCOL section 2, after
 // placement). Records of other rooms are never targets. Only a record whose
 // effect is ok counts.
 const (
@@ -93,14 +93,14 @@ const Retention = 30 * 24 * time.Hour
 func TextExpired(created, now time.Time) bool { return !now.Before(created.Add(Retention)) }
 
 // futureSlack is how far ahead of this machine's clock a record may be dated
-// and still be stored (PROTOCOL-next P1).
+// and still be stored (PROTOCOL P1).
 const futureSlack = 24 * time.Hour
 
 // MaxForksPerPosition bounds the fork evidence kept: at most this many
 // refused records for one position of one stream.
 const MaxForksPerPosition = 3
 
-// Outcome is what placement did with a record (PROTOCOL-next P1 to P8).
+// Outcome is what placement did with a record (PROTOCOL P1 to P8).
 // Only OutcomeStored and OutcomeRepaired change records.
 type Outcome string
 
@@ -551,7 +551,7 @@ func reasonFor(rd *Reader, id, author string, f core.RecordFields, o PutOpts, ha
 }
 
 // effectOf resolves a record's ref or parent against what is held
-// (PROTOCOL-next section 2): a withdraw or replace needs a message by the
+// (PROTOCOL section 2): a withdraw or replace needs a message by the
 // same author; a handled one its author's agent may report; a reply's
 // thread must be its parent's thread, or the parent's id if it has none.
 func effectOf(rd *Reader, author string, f core.RecordFields) (string, error) {

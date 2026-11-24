@@ -212,7 +212,7 @@ func from(log []sent, id string) []sent {
 	return out
 }
 
-// DESIGN-next 4, start: short pulls of the room from two members, then
+// DESIGN 4, start: short pulls of the room from two members, then
 // waiting pulls.
 //
 // Requirements: D2, D6
@@ -248,7 +248,7 @@ func TestSchedulerStartsWithShortPullsOfEveryRoomFromTwoMembers(t *testing.T) {
 	})
 }
 
-// DESIGN-next 4, steady state: the rotating anchor goes through every
+// DESIGN 4, steady state: the rotating anchor goes through every
 // member, past one that cannot be reached, each newly chosen one probed
 // with a 10 s wait first; the stable anchor stays.
 //
@@ -302,7 +302,7 @@ func TestSchedulerRotatesTheSecondAnchorThroughEveryMemberPastAFailure(t *testin
 	})
 }
 
-// PROTOCOL-next 4.6: a sleeping peer is tried 1 s, 2 s, 4 s ... apart up
+// PROTOCOL 4.6: a sleeping peer is tried 1 s, 2 s, 4 s ... apart up
 // to 5 min, and no more often; once it answers the back-off starts again
 // from 1 s.
 //
@@ -350,7 +350,7 @@ func TestSchedulerBacksOffASleepingPeerAndStartsAgainWhenItAnswers(t *testing.T)
 	})
 }
 
-// DESIGN-next 4: a local write abandons the waiting pulls and issues them
+// DESIGN 4: a local write abandons the waiting pulls and issues them
 // again at once, with an offer that carries the write, without any time
 // passing.
 //
@@ -427,7 +427,7 @@ func TestAnIdleRoomCostsAFewRequestsPerMachinePerMinute(t *testing.T) {
 	})
 }
 
-// DESIGN-next 3: a daemon restored from an older copy signs nothing for a
+// DESIGN 3: a daemon restored from an older copy signs nothing for a
 // room until it has pulled the room's log from another member; then it
 // can, on the log it pulled.
 //
@@ -462,7 +462,7 @@ func TestARestoredDaemonSignsNothingForARoomUntilItHasPulledItsLog(t *testing.T)
 	}
 }
 
-// PROTOCOL-next 4.5 as the scheduler applies it: a first 403 is tried
+// PROTOCOL 4.5 as the scheduler applies it: a first 403 is tried
 // again at once (the exchange resends its whole log), a second mutes the
 // peer until this machine's log of the room changes; 413 halves the offer
 // and retries at once; 429 and 503 wait their Retry-After; anything else

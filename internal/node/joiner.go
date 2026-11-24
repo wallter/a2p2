@@ -1,7 +1,7 @@
 package node
 
-// The joiner's side of the join exchange (DESIGN-next section 7,
-// PROTOCOL-next 5): preview an invite, accept it once a person here has
+// The joiner's side of the join exchange (DESIGN section 7,
+// PROTOCOL 5): preview an invite, accept it once a person here has
 // confirmed the preview, poll until the admin's person decides, then pin
 // the room by the create entry id the preview showed and apply the room's
 // log through Receive. Before the accept is sent the approved preview is
@@ -46,7 +46,7 @@ const (
 	ReasonNotAccepted   = "the accept did not reach the admin machine: preview and accept the invite again"
 )
 
-// joinCodes are the refusal codes of PROTOCOL-next 5.3: nothing else a
+// joinCodes are the refusal codes of PROTOCOL 5.3: nothing else a
 // server sends is shown.
 var joinCodes = []string{CodeBadSecret, CodeDeclined, CodeRevoked, CodeExpired, CodeRemoved}
 
@@ -93,7 +93,7 @@ type previewed struct {
 	gen     int64 // the room's local generation when previewed
 }
 
-// Preview is what a person on the joiner confirms (PROTOCOL-next 5.3).
+// Preview is what a person on the joiner confirms (PROTOCOL 5.3).
 type Preview struct {
 	State   string // previewed; accepted when a recorded join is waiting
 	Room    string
@@ -109,10 +109,6 @@ type Preview struct {
 	// ID identifies everything above but State (previewID): JoinAccept
 	// takes it, so what is accepted is exactly what the person approved.
 	ID string
-}
-
-func (p Preview) terms() store.Terms {
-	return store.Terms{Member: p.Member, Role: p.Role, History: p.History}
 }
 
 // JoinOutcome is how a join stands: accepted (waiting for a person on the
@@ -312,7 +308,7 @@ func validJoinRoom(r *JoinRoom) bool {
 // latest preview, or the one an earlier accept recorded, which nothing
 // replaces. It first records the approved preview, then sends the accept
 // carrying its identifier; the admin machine then raises a request for
-// its person. JoinAccept polls for up to wait (PROTOCOL-next 5.3) and
+// its person. JoinAccept polls for up to wait (PROTOCOL 5.3) and
 // returns how the join stands; a join still accepted keeps being followed
 // by Resume. If the accept's answer is lost, calling JoinAccept again is
 // safe.

@@ -1,8 +1,10 @@
 # Testing
 
 Run `make check` before submitting changes. It checks Go formatting, runs
-`go vet`, checks the [requirement register](TRACE.md), and runs the Go test
-suite with the race detector. `make trace` checks just the register against
+`go vet`, builds and vets for Windows (`make windows`), checks the direct
+dependencies against an allow-list (`make licences`), checks the
+[requirement register](TRACE.md), and runs the Go test suite with the race
+detector. `make trace` checks just the register against
 the [requirements](REQUIREMENTS.md) and the named tests. Add a fault matrix
 row when you add a test for a delivery, ordering, security or compatibility
 guarantee.
@@ -70,6 +72,18 @@ Rows marked "model" include tests of the rules in `internal/members` or
 | Every other member keeps refusing this machine | After ten minutes the room is shown as perhaps removed and a `removed` alert is raised; one member still answering, a shorter time, or `local` is not | `TestARoomEveryOtherMemberKeepsRefusingMayHaveRemovedThisMachine` |
 | Reply in a thread with several participants | The reply tool reaches the parent's author and everyone who posted in the thread, across machines, at most 32; a plain `send` with `reply_to` and no `to` still reaches only the parent's author | `TestReplyReachesEveryoneWhoPostedInTheThreadAcrossMachines`, `TestSurfaceThreadReplyAddresseesAreCappedWithTheParentsAuthorKept`, `TestSendWithReplyToAndNoToStillAddressesOnlyTheParentsAuthor` |
 | `ack` that is not allowed | Refused with the reason; the rule itself is unchanged | `TestAckRefusalsSayWhy`, `TestSurfaceAckRefusalsSayWhyAndTheRuleIsUnchanged` |
+| `ack` of a message already reported, or after `reply` reported it | Succeeds without a second report and names the first; the CLI says "already reported handled" | `TestAckAfterReplySucceedsAndSaysItWasAlreadyReported`, `TestAckAlreadyReportedSaysSoAndNamesTheFirstReport` |
+| Any refusal of the local API or a tool | A sentence, a stable code and whether retrying can help | `TestEveryRefusalCarriesAStableCodeAndWhetherRetryingCanHelp`, `TestToolErrorsAreOneObjectWithACodeAndRetryable` |
+| Inbox wait longer than allowed, or cancelled | The tool caps the wait at 30 seconds and says when it ended empty; a cancelled wait marks nothing seen | `TestInboxWaitIsCappedSaysWhenItEndedEmptyAndACancelledWaitMarksNothing` |
+| Thread read with `after` | Only what follows that message | `TestThreadReadAfterAMessageReturnsOnlyWhatFollows` |
+| Text with `<`, `>` or `&` | Written as it is in tool results, API responses and `--json` output | `TestToolResultsDoNotEscapeHTML`, `TestResponsesWriteAngleBracketsAndAmpersandsAsWritten`, `TestJSONOutputWritesAngleBracketsAndAmpersandsAsWritten` |
+| A harness opens the MCP server with an old, current or unknown revision | The built binary negotiates a revision it supports | `TestTheBuiltShimNegotiatesEachSupportedMCPRevision` |
+| An agent writes as if it were the person | Its record never answers the person's question or confirms a request | `TestAnAgentsRecordNeverCountsAsThePersonsAnswerOrConfirmation` |
+| Message text built to look like a notice, JSON or a command | The hook's output never contains it | `TestHookOutputNeverContainsMessageTextWhateverItSays` |
+| Install, install again, then uninstall | Every file and directory of the home is as it was, including Codex's tool approval | `TestUninstallLeavesTheWholeHomeAsItWasBeforeInstall`, `TestCodexInstallApprovesOnlyItsOwnServerAndUninstallRemovesIt` |
+| Hook or MCP registration removed by hand | `doctor` says which one is missing | `TestDoctorSaysWhetherTheHookOrTheMCPRegistrationIsMissing` |
+| A CLI command run under a harness agent's label | The agent's hook keeps working | `TestACLICallAsAHarnessAgentKeepsItsHookWorking` |
+| `stop` during a waiting call or a held pull | The call ends before the store closes; the held pull is released at once | `TestStopDuringAWaitingCallEndsItBeforeTheStoreCloses`, `TestStopReleasesAHeldPullAtOnce` |
 | Page request with wrong `Origin` or `Host`, or no token | Refused | `TestAuthHostOrigin`, `TestPageDecisionNeedsTheExactOriginAndShowsTheFullFingerprint` |
 | Message text that looks like instructions | Shown as labelled peer data | `TestHostileStringsAreInert`, `TestInboxForgedHeadersStayInert` |
 | Database write fails partway | The store rolls back the write or log batch | `TestFailureBetweenStatementsLeavesNoHalfAppliedWrite`, `TestLogBatchThatFailsLeavesNothingApplied` |
@@ -87,11 +101,19 @@ Rows marked "model" include tests of the rules in `internal/members` or
 
 ## CI
 
-The [GitHub Actions workflow](../.github/workflows/ci.yml) is configured for
-Linux and macOS. It runs `make check`, `make lint`, `make fuzz FUZZTIME=30s`,
-`make vuln` and `make release`. The last command builds Linux and macOS
-binaries. The fuzz job exercises `FuzzParseRecord` and `FuzzParseEntry`.
-The Go test suite also runs the seeds for `FuzzDecodeToken`.
+The [CI workflow](../.github/workflows/ci.yml) runs on every push to `main`
+and on pull requests. On Linux and macOS it runs `make check` (which
+includes the Windows build gate and the licence check), then
+`make release`, which builds the Linux and macOS binaries. On Linux alone
+it runs `make lint`, `make vuln` and `make fuzz FUZZTIME=30s`; the fuzz job
+exercises `FuzzParseRecord` and `FuzzParseEntry`, and the Go test suite
+also runs the seeds for `FuzzDecodeToken`.
+
+The [release workflow](../.github/workflows/release.yml) runs when a tag
+starting with `v` is pushed. On Linux, without a module or build cache, it
+runs `make check` and `make release VERSION=<tag>`, checks that the Linux
+binary reports the tag, and publishes the binaries and `SHA256SUMS` as a
+GitHub release (a prerelease when the tag contains a hyphen).
 
 ## Optional checks
 

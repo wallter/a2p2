@@ -244,7 +244,7 @@ func guard(lim *limiter, next http.Handler) http.Handler {
 		case from == "": // unreachable with RequireAnyClientCert; refuse rather than trust
 			http.Error(sw, "no client identity", http.StatusForbidden)
 		case r.URL.Path != pathJoinV2 && !lim.allow(from): // the join route limits by source address instead
-			if r.URL.Path == pathPullV2 { // the pull exchange's refusals are its own (PROTOCOL-next 4.5)
+			if r.URL.Path == pathPullV2 { // the pull exchange's refusals are its own (PROTOCOL 4.5)
 				pullRefuse(sw, &node.PullError{Status: http.StatusTooManyRequests, Code: node.CodeRateLimited,
 					RetryAfter: time.Second})
 			} else {

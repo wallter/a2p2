@@ -5,7 +5,7 @@ the people who run them. Each machine runs one daemon that keeps signed
 copies of the messages of its rooms and pulls new ones from the other
 members. To install and use it, follow the [README](README.md).
 
-Read [the design](docs/DESIGN-next.md) and [protocol](docs/PROTOCOL-next.md)
+Read [the design](docs/DESIGN.md) and [protocol](docs/PROTOCOL.md)
 before changing behaviour, and [the decisions](docs/DECISIONS.md) before
 changing direction. For delivery changes, also read the
 [requirements](docs/REQUIREMENTS.md) and the findings of the two models,
@@ -64,7 +64,7 @@ injects faults (`internal/node/memnet_test.go`).
   peer key, never a field of the request. Records and log entries carry
   their own signatures, checked on receipt. Agent labels carry no authority.
 - **A record is stored only at the next position of its author's stream**,
-  with a matching `prev` (PROTOCOL-next section 2). A second record at a
+  with a matching `prev` (PROTOCOL section 2). A second record at a
   held position is a fork and is kept only as evidence.
 - **Reading is two steps.** `Inbox` returns entries and `Seen` confirms the
   keys and versions shown. Hooks, summaries and thread views never mark
@@ -85,7 +85,7 @@ injects faults (`internal/node/memnet_test.go`).
   named for the scenario. Add the row to the fault matrix in
   [TESTING.md](docs/TESTING.md), and update the requirement's row in
   [TRACE.md](docs/TRACE.md) when its evidence changes.
-- If behaviour changes, update [DESIGN-next.md](docs/DESIGN-next.md) in
+- If behaviour changes, update [DESIGN.md](docs/DESIGN.md) in
   the same change.
 - Tests never touch real state or harness settings. Use `t.TempDir()`, and
   `os.MkdirTemp("/tmp", "a2p2")` for Unix sockets (macOS limits socket

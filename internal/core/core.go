@@ -14,7 +14,7 @@ const (
 	MaxLabel     = 64
 )
 
-// Kind is a record's kind (PROTOCOL-next section 1).
+// Kind is a record's kind (PROTOCOL section 1).
 type Kind string
 
 // KindMessage is ordinary text; the other kinds are in record.go.

@@ -1,6 +1,6 @@
 // Package web is the loopback page for the person who runs this machine:
 // rooms, members and admins, messages with threads, alerts, and requests
-// waiting for a person with approve and decline (DESIGN-next sections 6
+// waiting for a person with approve and decline (DESIGN sections 6
 // and 7). The person acts as the human agent of this machine. Every call is
 // one call into node.Surface.
 package web
@@ -34,7 +34,7 @@ type server struct {
 }
 
 // Handler serves the page. Every API request must present token; see
-// DESIGN.md section 6.
+// PROTOCOL.md section 7.
 func Handler(s *node.Surface, token string) http.Handler {
 	sv := &server{s, token}
 	mux := http.NewServeMux()

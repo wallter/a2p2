@@ -248,9 +248,6 @@ func (m *Machine) clock(now Time) Time { return now + m.Skew }
 
 func (m *Machine) contigOf(s StreamID) int { return m.st.contig[s] }
 
-// hasPos reports whether position p is held.
-func (m *Machine) hasPos(p Pos) bool { return p.Seq <= m.contigOf(p.Stream) }
-
 func (m *Machine) get(id RecordID) *held { return m.st.recs[id] }
 
 func (m *Machine) at(p Pos) *held {

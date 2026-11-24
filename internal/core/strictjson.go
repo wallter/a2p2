@@ -7,7 +7,7 @@ import (
 	"unicode/utf8"
 )
 
-// Strict JSON and Base64 as PROTOCOL-next section 0 defines them. The parser
+// Strict JSON and Base64 as PROTOCOL section 0 defines them. The parser
 // keeps every member in received order with its key unescaped, keeps numbers
 // as their text, and refuses what encoding/json accepts silently: duplicate
 // keys, invalid UTF-8, lone surrogates and trailing data.
@@ -128,7 +128,7 @@ func hex4(b []byte, i int) (rune, bool) {
 }
 
 // maxDepth bounds nesting in signed JSON (headers, entries, bodies) so a
-// hostile header cannot drive deep recursion. Not in PROTOCOL-next yet.
+// hostile header cannot drive deep recursion. Not in PROTOCOL yet.
 const maxDepth = 16
 
 type jparser struct {

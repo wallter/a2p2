@@ -1,6 +1,6 @@
 // Package localapi is the daemon's API for processes on the same machine:
-// JSON over HTTP over a Unix socket (PROTOCOL-next section 7). Access to
-// the socket is the only credential; see "Trust model" in docs/DESIGN.md.
+// JSON over HTTP over a Unix socket (PROTOCOL section 7). Access to
+// the socket is the only credential; see "Trust and access" in SECURITY.md.
 // Every call is one call into node.Surface.
 package localapi
 
@@ -24,7 +24,7 @@ import (
 // maxBody bounds a request body.
 const maxBody = 256 << 10
 
-// Time renders a time as PROTOCOL-next section 0 does; zero is empty.
+// Time renders a time as PROTOCOL section 0 does; zero is empty.
 func Time(t time.Time) string {
 	if t.IsZero() {
 		return ""
@@ -241,7 +241,7 @@ type (
 		Label  string `json:"label"`
 		Create string `json:"create"`
 	}
-	// PreviewResp is the previewed answer of PROTOCOL-next 5.3, with the
+	// PreviewResp is the previewed answer of PROTOCOL 5.3, with the
 	// preview's id, which accept must name.
 	PreviewResp struct {
 		State   string   `json:"state"`
@@ -285,11 +285,11 @@ type (
 		State  string `json:"state"`
 		Listen string `json:"listen,omitempty"`
 	}
-	// Network is a machine's networking state. NetResp is the decision
-	// recorded; it applies when the daemon next starts.
 	// Network is a networking decision. In status it is the latest one;
 	// Applied and Reason are set only when what runs differs from it: the
-	// state in effect (outbound when on cannot listen) and why.
+	// state in effect (outbound when on cannot listen) and why. NetResp is
+	// the decision recorded; the daemon applies it at once, without a
+	// restart.
 	Network struct {
 		State   string `json:"state"`
 		Listen  string `json:"listen,omitempty"`
@@ -424,7 +424,7 @@ type Info struct {
 }
 
 // apiError is every refusal: the sentence, a code from node.ErrorCodes and
-// whether repeating the same call later may succeed (PROTOCOL-next 7).
+// whether repeating the same call later may succeed (PROTOCOL 7).
 type apiError struct {
 	Error     string `json:"error"`
 	Code      string `json:"code"`
@@ -475,7 +475,7 @@ func waitOf(ms int64) (time.Duration, error) {
 	return time.Duration(ms) * time.Millisecond, nil
 }
 
-// EntryOf renders a node entry (PROTOCOL-next section 7, Entry).
+// EntryOf renders a node entry (PROTOCOL section 7, Entry).
 func EntryOf(e node.Entry) Entry {
 	out := Entry{Key: e.Key, Version: e.Version, Kind: e.Kind, ID: e.ID, Room: e.Room, RoomLabel: e.RoomLabel,
 		From: e.From, FromNode: e.FromNode, AuthorRemoved: e.AuthorRemoved, Parent: e.Parent, Thread: e.Thread,

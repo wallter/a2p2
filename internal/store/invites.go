@@ -1,6 +1,6 @@
 package store
 
-// Invites a machine issued (the admin side of PROTOCOL-next 5) and joins
+// Invites a machine issued (the admin side of PROTOCOL 5) and joins
 // this machine has made (the joiner side). This is migration 6; migrations
 // 2 to 4 have shipped. Used only by the new path in internal/node until the
 // surfaces switch over.
@@ -15,7 +15,7 @@ import (
 
 // schemaInvites is migration 6.
 //
-// Differences from PROTOCOL-next section 8: the table is room_invites,
+// Differences from PROTOCOL section 8: the table is room_invites,
 // because v0.2's invites table (same name, other columns) is still used by
 // v0.2 joins. Beside the columns of section 8 it keeps created_at, the
 // joiner's name and addresses as its open or accept gave them, reason (why
@@ -70,7 +70,7 @@ UPDATE rooms SET arrivals = (SELECT coalesce(max(arrival), 0) FROM log WHERE log
 CREATE INDEX log_arrival_position ON log (room, arrival);
 `
 
-// Stored states of an invite (PROTOCOL-next 5.3). An invite starts issued
+// Stored states of an invite (PROTOCOL 5.3). An invite starts issued
 // (no open yet); signed and refused by a person are read from its request.
 const (
 	InviteIssued    = "issued"
@@ -225,7 +225,7 @@ func (s *Store) ExpireInvite(ctx context.Context, hash string, now time.Time) (i
 	return inv, err
 }
 
-// OpenInvite is an open (PROTOCOL-next 5.2), in one transaction: an
+// OpenInvite is an open (PROTOCOL 5.2), in one transaction: an
 // issued invite is bound to key and moves to previewed; one bound to
 // another key is ErrInviteBound; one past its expiry and undecided is
 // expired (ErrInviteExpired). shown, computed by the caller from the
@@ -261,7 +261,7 @@ func (s *Store) OpenInvite(ctx context.Context, hash, key, name string, addrs []
 	return inv, err
 }
 
-// AcceptInvite is an accept (PROTOCOL-next 5.2), in one transaction: a
+// AcceptInvite is an accept (PROTOCOL 5.2), in one transaction: a
 // previewed, unexpired invite bound to key, whose last preview showed
 // terms now, moves to accepted and the request q for a person is created.
 // ErrInviteState: it is not previewed (accepted or decided meanwhile);

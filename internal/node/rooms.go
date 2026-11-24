@@ -1,6 +1,6 @@
 package node
 
-// Rooms is the room log and membership on this machine (DESIGN-next
+// Rooms is the room log and membership on this machine (DESIGN
 // sections 3, 5 and 7): one members.Machine per room, rebuilt on start by
 // replaying the stored log in arrival batches, fed by one ingress function
 // (Receive). Joining (Joiner) and pull (Exchange) both call Receive.
@@ -29,7 +29,7 @@ var (
 )
 
 // Reasons an entry is invalid at ingress, before the membership machine
-// (PROTOCOL-next section 3: S1 to S7 and V1 give core's codes).
+// (PROTOCOL section 3: S1 to S7 and V1 give core's codes).
 const (
 	CodeWrongRoom    = "wrong_room"    // R1
 	CodeSecondCreate = "second_create" // C1
@@ -107,7 +107,7 @@ type roomLog struct {
 	// pulled: since the daemon started, this machine has caught up with
 	// the room's log from a current member (an exchange whose advertised
 	// heads are all accepted here, or a completed join), or it created
-	// the room (DESIGN-next section 3). See maySign.
+	// the room (DESIGN section 3). See maySign.
 	pulled bool
 }
 
@@ -310,7 +310,7 @@ func entryRow(v *core.VerifiedEntry) store.LogRow {
 }
 
 // CreateRoom creates a room with this machine as its only member and
-// admin: a new room id (PROTOCOL-next section 0) and the create entry,
+// admin: a new room id (PROTOCOL section 0) and the create entry,
 // signed with this machine's key, which is pinned as the room's identity.
 // The create entry is the only log entry a daemon signs without a
 // confirmed request.
@@ -445,7 +445,7 @@ func (r *Rooms) CheckGen(room string, gen int64) error {
 	return nil
 }
 
-// Leave stops carrying room (DESIGN-next section 7): its records, reading
+// Leave stops carrying room (DESIGN section 7): its records, reading
 // state, log and requests are deleted here, and the room stays as a local
 // tombstone with a new generation, so a late response is not applied.
 // Other members still list this machine until an admin removes it.

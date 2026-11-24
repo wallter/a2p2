@@ -1,10 +1,10 @@
 package node
 
-// The pull exchange between machines (DESIGN-next section 4, PROTOCOL-next
+// The pull exchange between machines (DESIGN section 4, PROTOCOL
 // section 4; rules [R3], [R4], [R5], [RM1] to [RM3] of
 // internal/model/delivery): the one request type that moves records and
 // log entries, carried both ways. Serve is the server's side, in the order
-// of PROTOCOL-next 4.4; Pull is the requester's, one whole exchange of
+// of PROTOCOL 4.4; Pull is the requester's, one whole exchange of
 // rounds. Both work over Rooms and a PullTransport (internal/peer carries
 // it over HTTP/2); waiting pulls are in waiting.go, the scheduler in
 // sched.go.
@@ -59,7 +59,7 @@ type Exchange struct {
 	addrs      []string
 	after      func(time.Duration) <-chan time.Time
 
-	// In memory, per room and peer (PROTOCOL-next 4.5): refused, how the
+	// In memory, per room and peer (PROTOCOL 4.5): refused, how the
 	// peer last refused this machine as not a member; heard, the log heads
 	// of the last request from it; seen, the peer's sum after the last
 	// round with it that stored nothing, and this machine's then.
@@ -92,7 +92,7 @@ type Exchange struct {
 	closing  sync.Once
 
 	// Test hooks. atRelease runs where a held response is released (step
-	// 10 of PROTOCOL-next 4.4; step 5b holds there); withhold makes a
+	// 10 of PROTOCOL 4.4; step 5b holds there); withhold makes a
 	// server leave a record out of what it sends, as a faulty member would.
 	atRelease func(room, peer string, q *PullRequest)
 	withhold  func(id string) bool
@@ -193,7 +193,7 @@ func streamDetail(epoch string, c int64, noBody, wanted []int64) store.StreamDet
 	return d
 }
 
-// sum is the short form of s (PROTOCOL-next 4.3).
+// sum is the short form of s (PROTOCOL 4.3).
 func (s summary) sum() string { return sumOf(s.digests) }
 
 // rows is s as an observation: what a peer holds when its summary equals s
@@ -378,7 +378,7 @@ func readableBy(v *roomView, perm members.Permission) func(*rec) (bool, error) {
 // ---- the room log ----
 
 // logHeads are rl's accepted entries no accepted entry names as parent,
-// and its held and refused entries (PROTOCOL-next 4.1).
+// and its held and refused entries (PROTOCOL 4.1).
 func (rl *roomLog) logHeads() (heads, extra []string) {
 	parent := map[string]bool{}
 	for id, row := range rl.state {
@@ -481,7 +481,7 @@ type placed struct {
 	blocked          map[streamKey]bool
 }
 
-// place checks and places each received record wire (PROTOCOL-next
+// place checks and places each received record wire (PROTOCOL
 // section 2) inside tx under membership st, counting refusals by code.
 func (r *Rooms) place(tx *store.Tx, rl *roomLog, st members.State, look func(string) *core.VerifiedEntry,
 	wires []json.RawMessage, refused map[string]int, now time.Time) (placed, error) {
@@ -569,7 +569,7 @@ func (r *Rooms) countInvalid(ctx context.Context, rl *roomLog, peer string, res 
 // detail is known when the peer sent it (and it matches the digest), when
 // the digest equals this machine's own (so the summaries are equal), or
 // when the digest is the one stored before with its detail; otherwise it
-// is unknown until sent (PROTOCOL-next 4.3, item 4).
+// is unknown until sent (PROTOCOL 4.3, item 4).
 func observation(takes, asked []string, digests map[string]string, detail map[string][]store.StreamDetail,
 	own summary, old map[string]store.Observation) []store.Observation {
 	var out []store.Observation
@@ -726,7 +726,7 @@ const (
 	answerSeen           // same: nothing changed since a round that stored nothing
 )
 
-// answer decides the answer to the opening request q (PROTOCOL-next 4.3):
+// answer decides the answer to the opening request q (PROTOCOL 4.3):
 // same if the request was quiet (its entries and offer stored nothing,
 // and this machine has no log entry the requester lacks and evidence lets
 // it send) and this machine's sum equals the request's sum, or its seen;
@@ -749,7 +749,7 @@ func answer(rl *roomLog, q *PullRequest, own summary, stored bool, evidence func
 }
 
 // Serve answers one pull request from peer, the node id the transport
-// authenticated, in the order of PROTOCOL-next 4.4: the request's log
+// authenticated, in the order of PROTOCOL 4.4: the request's log
 // entries (from a non-member only if they make it a member), the peer a
 // member now, its offer and what it said it holds stored, all in one
 // transaction; then the response; then, at the point where a held
@@ -1071,7 +1071,7 @@ type PullOpts struct {
 	// of one offer (the scheduler halves it after a 413).
 	OfferLimit int
 	// WaitMS, above 0, makes the exchange's first request a waiting pull
-	// (PROTOCOL-next 4.4 step 9): the server holds a same answer up to it.
+	// (PROTOCOL 4.4 step 9): the server holds a same answer up to it.
 	WaitMS int64
 	// Stop, closed while that first request waits, abandons it: Pull
 	// returns ErrWaitStopped (a local change re-issues it with an offer).
@@ -1131,7 +1131,7 @@ const seenFor = time.Hour
 // differ, 16 at a time within the request limit, each answered with a
 // page, repeated while something was cut and the continuation advances. A
 // round that stored nothing on either side ends the exchange, and the
-// peer's sum is remembered as seen (PROTOCOL-next 4.3). Each response is
+// peer's sum is remembered as seen (PROTOCOL 4.3). Each response is
 // applied in one transaction, only if the room's generation is unchanged:
 // its log entries, then its page under the gap-free rule [R4] if the peer
 // is still a member here [RM1], then what the peer said it holds [R5]. A
@@ -1848,7 +1848,7 @@ func mustJSON(v any) []byte {
 }
 
 // CodeBadResponse counts a response refused because its shape did not fit
-// its request (PROTOCOL-next 4.2).
+// its request (PROTOCOL 4.2).
 const CodeBadResponse = "bad_response"
 
 // refuse counts n of code against peer.
@@ -1864,7 +1864,7 @@ func (x *Exchange) refuse(ctx context.Context, room, peer string, gen int64, cod
 // with no entries, or authors and digests whose sum is the one sent; to a
 // continuing request, the detail of the first authors asked, in order,
 // and page records only by them; the limits and the whole size
-// (PROTOCOL-next 4.2, 4.3 step 5).
+// (PROTOCOL 4.2, 4.3 step 5).
 func checkResponse(resp *PullResponse, q *PullRequest) error {
 	bad := func(what string) error { return fmt.Errorf("pull: bad response: %s", what) }
 	if resp == nil || resp.V != PullVersion {
@@ -1950,7 +1950,7 @@ type appliedResp struct {
 
 // apply applies one response to the request p in one transaction: its log
 // entries, then, if the peer is still a member here, its page and what the
-// peer said it holds, dated when p was built (PROTOCOL-next 4.4): equal to
+// peer said it holds, dated when p was built (PROTOCOL 4.4): equal to
 // this machine's summary on same (not after a same to seen, which says
 // only that nothing changed), its digests, or the detail it sent.
 func (x *Exchange) apply(ctx context.Context, room, peer string, gen int64, p prepared, resp *PullResponse) (appliedResp, error) {

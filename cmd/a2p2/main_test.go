@@ -106,3 +106,46 @@ func TestCLIErrorsSayWhatToDoWithoutRuleCodes(t *testing.T) {
 		}
 	}
 }
+
+func TestAckAlreadyReportedSaysSoAndNamesTheFirstReport(t *testing.T) {
+	if got := ackText(localapi.AckResp{Handled: "h1"}); got != "handled, report h1" {
+		t.Fatalf("first ack: %q", got)
+	}
+	if got := ackText(localapi.AckResp{Handled: "h1", Already: true}); got != "already reported handled, report h1" {
+		t.Fatalf("repeated ack: %q", got)
+	}
+}
+
+func TestJSONOutputWritesAngleBracketsAndAmpersandsAsWritten(t *testing.T) {
+	var out bytes.Buffer
+	if err := writeJSON(&out, map[string]string{"info": "<a> & b"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"<a> & b"`) || strings.Contains(out.String(), `\u003c`) {
+		t.Fatalf("doctor --json: %q", out.String())
+	}
+}
+
+func TestInstallReportsEndWithANewline(t *testing.T) {
+	for _, in := range []string{"register MCP server", "one\ntwo", "done\n"} {
+		var out bytes.Buffer
+		printReport(&out, in)
+		if !strings.HasSuffix(out.String(), "\n") || strings.HasSuffix(out.String(), "\n\n") {
+			t.Fatalf("%q printed as %q", in, out.String())
+		}
+	}
+	var out bytes.Buffer
+	printReport(&out, "")
+	if out.Len() != 0 {
+		t.Fatalf("an empty report printed %q", out.String())
+	}
+}
+
+func TestAskHandledWithAnAddresseeExplainsWhy(t *testing.T) {
+	got := cliError(&localapi.Error{User: true, Msg: "ask_handled is only for a post to everyone"}).Error()
+	for _, want := range []string{"posts to the whole room", "leave out --to", "addressee can always report a message handled"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q lacks %q", got, want)
+		}
+	}
+}

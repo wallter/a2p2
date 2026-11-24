@@ -7,7 +7,7 @@
 package node
 
 // Machine is the behaviour for the rooms and agents on this machine:
-// writing signed records and reading them (DESIGN-next sections 2 and 6,
+// writing signed records and reading them (DESIGN sections 2 and 6,
 // rules [R2], [R4], [R6], [R7] of internal/model/delivery).
 
 import (
@@ -490,7 +490,7 @@ func (m *Machine) write(ctx context.Context, room, agent string, decide func(*ro
 	return Sent{ID: r.ID(), Room: room, Created: r.Fields().Created}, nil
 }
 
-// newEpoch is 16 random hex digits, not all zeros (PROTOCOL-next section 0).
+// newEpoch is 16 random hex digits, not all zeros (PROTOCOL section 0).
 func (m *Machine) newEpoch() string {
 	var b [8]byte
 	for b == [8]byte{} {

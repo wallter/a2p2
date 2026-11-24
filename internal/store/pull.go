@@ -1,6 +1,6 @@
 package store
 
-// What the pull exchange keeps (DESIGN-next section 4, PROTOCOL-next
+// What the pull exchange keeps (DESIGN section 4, PROTOCOL
 // sections 4 and 8): each peer's last observed summary, the only source of
 // copy reports [R5], and counts of what each peer sent that was refused.
 // This is migration 4; migrations 2 and 3 have shipped.
@@ -19,7 +19,7 @@ import (
 // schemaPull is migration 4.
 //
 // observed holds, per room, peer and author, the digest the peer last
-// reported for that author, its detail (PROTOCOL-next 4.3, as JSON) when
+// reported for that author, its detail (PROTOCOL 4.3, as JSON) when
 // known, and when this machine learned it (its own clock). detail is NULL
 // while unknown: the digest changed and the detail has not arrived yet.
 // streams.known_from is the peer whose report set a stream's known
@@ -45,7 +45,7 @@ const schemaKnownFrom = `
 ALTER TABLE streams ADD COLUMN known_from TEXT NOT NULL DEFAULT '';
 `
 
-// StreamDetail is one stream of an author's detail (PROTOCOL-next 4.3):
+// StreamDetail is one stream of an author's detail (PROTOCOL 4.3):
 // its epoch, contiguous position, the floor X (no position at or below it
 // is held with text or wanted), the positions above X held without text
 // (ascending) and the subset whose text is wanted. Text is held at p iff
@@ -264,7 +264,7 @@ func (s *Store) Refusals(ctx context.Context, room string) ([]Refusal, error) {
 
 // Tx is one write transaction of the pull exchange: applying one request's
 // log entries, offer and observation, or one response's log entries, page
-// and observation, together (PROTOCOL-next 4.4).
+// and observation, together (PROTOCOL 4.4).
 type Tx struct{ tx *sql.Tx }
 
 // Exchange runs fn inside one write transaction after checking that room
@@ -373,7 +373,7 @@ func (t *Tx) ObserveLog(room, peer string, at time.Time, log PeerLog) error {
 }
 
 // ForgetLog deletes what was observed of peer's log in room, so the next
-// request sends the accepted log from the start (PROTOCOL-next 4.4).
+// request sends the accepted log from the start (PROTOCOL 4.4).
 func (t *Tx) ForgetLog(room, peer string) error {
 	_, err := t.tx.Exec(`DELETE FROM observed WHERE room = ? AND peer = ? AND author = ''`, room, peer)
 	return err

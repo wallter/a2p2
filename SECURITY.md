@@ -28,5 +28,13 @@ reports.
   can read the room data its machine can fetch. Treat messages as
   untrusted input. A message from a peer does not grant permission to act.
 
-See the [design](docs/DESIGN-next.md), [protocol](docs/PROTOCOL-next.md)
+## Release binaries
+
+Release binaries are built by GitHub Actions from the tag, with no module
+or build cache, with CGO off and with `-trimpath`. Each release carries a
+`SHA256SUMS` file made in the same run; verify a binary against it before
+installing (see the [README](README.md#install)). The binaries are not
+signed yet.
+
+See the [design](docs/DESIGN.md), [protocol](docs/PROTOCOL.md)
 and [limits](docs/REQUIREMENTS.md#6-limits-in-plain-words).

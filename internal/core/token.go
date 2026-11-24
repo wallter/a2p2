@@ -1,6 +1,6 @@
 package core
 
-// The pairing token of PROTOCOL-next section 5.1. It lives in core because
+// The pairing token of PROTOCOL section 5.1. It lives in core because
 // it is a pure format (no I/O) that the admin side, the joiner side and the
 // surfaces all read and write, like ids and records.
 
@@ -15,7 +15,7 @@ import (
 // TokenPrefix starts every token.
 const TokenPrefix = "a2p2:"
 
-// Token limits (PROTOCOL-next 5.1).
+// Token limits (PROTOCOL 5.1).
 const (
 	TokenSecretBytes = 16 // 128-bit secret
 	TokenFPBytes     = 16 // first 16 bytes of SHA-256 of the admin's key
@@ -36,7 +36,7 @@ type Token struct {
 
 // Errors of DecodeToken. None of them carries any part of the token.
 var (
-	ErrTokenPrefix  = errors.New("token: does not start with a2p2:")
+	ErrTokenPrefix  = errors.New("token: does not start with the prefix a2p2")
 	ErrTokenChars   = errors.New("token: a character is not Crockford base32")
 	ErrTokenLength  = errors.New("token: wrong length")
 	ErrTokenPadBits = errors.New("token: pad bits are not zero")
@@ -62,7 +62,7 @@ func crockValue(c byte) int {
 }
 
 // KeyFingerprint is the first 16 bytes of SHA-256 of a node id's public
-// key (PROTOCOL-next section 0). ok is false for a malformed node id.
+// key (PROTOCOL section 0). ok is false for a malformed node id.
 func KeyFingerprint(node string) (fp [TokenFPBytes]byte, ok bool) {
 	if !isNode(node) {
 		return fp, false
@@ -121,7 +121,7 @@ func decodeField(v []int) ([16]byte, error) {
 	return out, nil
 }
 
-// EncodeToken writes t as PROTOCOL-next 5.1 shows it: the prefix, 52
+// EncodeToken writes t as PROTOCOL 5.1 shows it: the prefix, 52
 // upper-case characters in groups of four, then @ and the addresses.
 func EncodeToken(t Token) (string, error) {
 	if err := checkAddrs(t.Addrs); err != nil {
@@ -189,7 +189,7 @@ func DecodeToken(s string) (Token, error) {
 }
 
 // SecretText is the secret as a join request carries it: its 26 base32
-// characters (PROTOCOL-next 5.2).
+// characters (PROTOCOL 5.2).
 func (t Token) SecretText() string { return encodeField(t.Secret) }
 
 // DecodeSecret reads a join request's secret, with DecodeToken's rules.

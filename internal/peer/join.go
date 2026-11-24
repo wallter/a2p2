@@ -1,6 +1,6 @@
 package peer
 
-// POST /p/v2/join (PROTOCOL-next 5.2): the join exchange on the peer
+// POST /p/v2/join (PROTOCOL 5.2): the join exchange on the peer
 // listener, beside /p/v2/pull. It is reached by a key the server has not
 // pinned: the listener accepts any well-formed
 // node certificate, and the node decides. The body is strict JSON, checked
@@ -39,7 +39,7 @@ type JoinHandler interface {
 }
 
 // sourceLimit counts join requests per source address over the last
-// minute (PROTOCOL-next 5.3: 10 a minute per source address). While its
+// minute (PROTOCOL 5.3: 10 a minute per source address). While its
 // table is full of addresses seen in the last minute, a new address is
 // refused rather than one of them forgotten.
 type sourceLimit struct {

@@ -46,7 +46,7 @@ func logRows(t *testing.T, n *lnode, room string) []store.LogRow {
 // after the commit leaves memory equal to the store and is not reported
 // as a failure (step 5a review).
 //
-// Requirements: DESIGN-next section 5; review blocker 2
+// Requirements: DESIGN section 5; review blocker 2
 func TestIngressFailureLeavesTheRoomAsItWasAndARetryActsAsTheFirst(t *testing.T) {
 	for _, point := range []string{"ingest:requests", "ingest:apply", "cancelled", "ingest:committed"} {
 		t.Run(point, func(t *testing.T) {
@@ -196,7 +196,7 @@ func TestConcurrentDecisionsOnOneRequestSignAtMostOnce(t *testing.T) {
 // an entry whose previous entry is another author's is invalid, and so is
 // a later child of it, whether or not the machine restarted in between.
 //
-// Requirements: DESIGN-next section 5 (replay is deterministic); members rule M11; review should-fix 1
+// Requirements: DESIGN section 5 (replay is deterministic); members rule M11; review should-fix 1
 func TestRestartJudgesDependantsOfAnInvalidEntryAsBefore(t *testing.T) {
 	a, b, room := twoAdmins(t)
 	adminB := ""
@@ -381,7 +381,7 @@ func TestNewcomersAgentsStartAtTheAdmittersPositionsWithOrWithoutHistory(t *test
 	for _, history := range []bool{false, true} {
 		t.Run(map[bool]string{false: "without", true: "with"}[history], func(t *testing.T) {
 			if history && !fromWithHistory {
-				t.Skip("internal/core refuses from together with history (PROTOCOL-next section 3, S7); " +
+				t.Skip("internal/core refuses from together with history (PROTOCOL section 3, S7); " +
 					"until it accepts both, a grant with history carries no frontier and its agents start at 0")
 			}
 			clock := lclock()
@@ -505,7 +505,7 @@ func coreID(t *testing.T, wire []byte) string {
 // records as from a removed author. A grant that would need more than 16
 // heads of one author is refused, naming the author.
 //
-// Requirements: RM1, PROTOCOL-next section 3; review notes
+// Requirements: RM1, PROTOCOL section 3; review notes
 func TestRemovedMachineMarksItsOwnRecordsAndGrantsOverTheHeadLimitAreRefused(t *testing.T) {
 	a, b, room := twoAdmins(t)
 	c := newLNode(t, "c", a.clock)
