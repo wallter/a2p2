@@ -415,7 +415,7 @@ func TestAListenerThatMayNotReadTheTextNeitherCarriesNorReceivesTheFile(t *testi
 	if _, err := w.fetch(w.Machine("R"), m, h, "S", FetchOpt{}); !errors.Is(err, ErrNotHeldFile) {
 		t.Fatalf("%v", err)
 	}
-	if w.Machine("S").st.files.want[pkey{m, h}] {
+	if w.Machine("S").st.files.wanting(pkey{m, h}) {
 		t.Fatal("S wants a file it may not read")
 	}
 }
@@ -670,22 +670,55 @@ func TestAFetchOverTheRoomsBudgetIsRefusedBeforeAnythingMoves(t *testing.T) {
 	}
 }
 
-// F7, F3: an impossible reference is refused before anything is
-// scheduled. Requirements: L1
-func TestAnImpossibleReferenceIsRefusedBeforeAnyTransfer(t *testing.T) {
-	w := room("A", "B")
+// F12, F7: a manifest that breaks a rule (here an impossible size) is
+// invalid for good, and nothing is scheduled for it. Requirements: L1
+func TestAManifestThatMatchesItsHashButIsInvalidIsInvalidForGoodAndNothingIsFetched(t *testing.T) {
+	w := room("A", "B", "C")
 	h := hashBody("x")
-	man := encodeManifest("s", []FileRef{{Name: "huge", Size: MaxFileSize + 1, Hash: h}})
+	man := encodeManifest("s", []FileRef{{Name: "huge", Size: MaxFileSize + 1, Hash: h}}) // an impossible size
 	m := must(w.send("A", "a", Msg{Body: "huge"}, hashBody(man)))
 	w.anyFiles = true
 	w.Machine("A").commitBlob(hashBody(man), man, m)
 	w.Machine("A").commitBlob(h, "x", m)
 	pull(t, w, "B", "A")
-	shownTo(t, w, "B")
-	before := len(w.Transfers())
-	if _, err := fetch(w, "B", m, h, "A"); !errors.Is(err, ErrTooLarge) || len(w.Transfers()) != before {
-		t.Fatalf("%v", err)
+	es := shownTo(t, w, "B")
+	if len(es) != 1 || es[0].FilesPending || es[0].Files != nil {
+		t.Fatalf("entry %+v", es)
 	}
+	wantState(t, w, "B", m, h, FileListInvalid)
+	if w.HoldsAnyOf("B", hashBody(man)) {
+		t.Fatal("an invalid manifest is kept")
+	}
+	before := len(w.Transfers())
+	if _, err := fetch(w, "B", m, h, "A"); err == nil || len(w.Transfers()) != before {
+		t.Fatalf("a file of an invalid manifest was fetched: %v", err)
+	}
+	pull(t, w, "B", "A")
+	pull(t, w, "B", "C")
+	if len(w.Transfers()) != before {
+		t.Fatal("an invalid manifest was fetched again")
+	}
+}
+
+// F12: a missing manifest is asked for a bounded number of times, then
+// reported unavailable until someone asks again. Requirements: L1, U4
+func TestAManifestThatDoesNotArriveIsUnavailableAfterBoundedTriesUntilAskedAgain(t *testing.T) {
+	w := room("A", "B")
+	m, h := sendFile(t, w, "A", "B", "x", "x", "xyz")
+	man := manifestHash(w, "A", m)
+	a := w.Machine("A").st.files
+	delete(a.held, man) // A lost its list
+	delete(a.disk, blobPath(man))
+	for i := 0; i < ListTries; i++ {
+		pull(t, w, "B", "A")
+	}
+	wantState(t, w, "B", m, h, FileListUnavailable)
+	pull(t, w, "B", "A")
+	if fails := w.Machine("B").st.files.lists[pkey{m, man}].fails; fails != ListTries {
+		t.Fatalf("asked again without being told to: %d", fails)
+	}
+	w.AskList("B", m)
+	wantState(t, w, "B", m, h, FileListPending)
 }
 
 // F1: a voided author's records go, and their files with them.
@@ -762,6 +795,212 @@ func TestACrashBetweenDroppingAFileAndDeletingItCompletesTheDeletionAtTheRestart
 	}
 }
 
+// F9: a want goes only to the message's author. Requirements: L1, N1, T3
+func TestAWantGoesOnlyToTheMessagesAuthorNeverToAnotherHolder(t *testing.T) {
+	w := room("A", "B", "C")
+	m, h := sendFile(t, w, "A", "", "for all", "f.txt", "ffff")
+	pull(t, w, "C", "A")
+	shownTo(t, w, "C")
+	must(fetch(w, "C", m, h, "A")) // C holds it
+	w.SetFileMode("B", FilesOff)
+	pull(t, w, "B", "A")
+	shownTo(t, w, "B")
+	outboundOnly(w, "A", "C")
+	w.Sleep("A")
+	if _, err := fetch(w, "B", m, h, "C"); !errors.Is(err, ErrNoDial) {
+		t.Fatalf("%v", err)
+	}
+	if w.Machine("B").st.files.wanting(pkey{m, h}) {
+		t.Fatal("B wants from a machine that is not the author")
+	}
+	before := len(w.Transfers())
+	pull(t, w, "C", "B")
+	if len(w.Transfers()) != before || w.HoldsAnyOf("B", h) {
+		t.Fatal("a holder that is not the author was asked to upload")
+	}
+}
+
+// F9: the receiver takes an upload only from the author, against a want
+// it issued for that version. Requirements: L1, N1
+func TestAnUploadFromAMachineThatIsNotTheAuthorIsRefused(t *testing.T) {
+	w := room("A", "B", "C")
+	outboundOnly(w, "A")
+	m, h := sendFile(t, w, "A", "", "x", "x", "xyz")
+	w.Machine("A").NoInbound = false
+	pull(t, w, "C", "A")
+	shownTo(t, w, "C")
+	must(fetch(w, "C", m, h, "A"))
+	pull(t, w, "B", "A")
+	w.Machine("A").NoInbound = true
+	shownTo(t, w, "B")
+	if _, err := fetch(w, "B", m, h, "A"); !errors.Is(err, ErrNoDial) {
+		t.Fatalf("%v", err)
+	}
+	w.upload(w.Machine("C"), w.Machine("B"), pkey{m, h})
+	if w.HoldsAnyOf("B", h) {
+		t.Fatal("B took an upload from a machine that is not the author")
+	}
+	pull(t, w, "A", "B")
+	if !w.HoldsAnyOf("B", h) {
+		t.Fatal("the author's upload was refused")
+	}
+}
+
+// F9: a want the author does not answer lapses, and the reader is told.
+// Requirements: L1, N1
+func TestAWantTheAuthorDoesNotAnswerLapsesAndTheReaderIsToldUnavailable(t *testing.T) {
+	w := room("A", "B")
+	outboundOnly(w, "A")
+	m, h := sendFile(t, w, "A", "B", "x", "x", "xyz")
+	pull(t, w, "A", "B")
+	must(w.Pull("A", "B", PullOpt{Offer: true}))
+	shownTo(t, w, "B")
+	fetch(w, "B", m, h, "A")
+	wantState(t, w, "B", m, h, FileComing)
+	w.TamperFiles(func(MachineID, string, string) string { return "xyZ" }) // every upload is wrong
+	for i := 0; i < WantTries; i++ {
+		pull(t, w, "A", "B")
+	}
+	wantState(t, w, "B", m, h, FileUnavailable)
+	w.TamperFiles(nil)
+
+	// A carry job lapses the same way; the listener then answers "gave up".
+	w2 := room("A", "S", "R")
+	outboundOnly(w2, "A", "R")
+	m2, h2 := sendFile(t, w2, "A", "R", "y", "y", "yyy")
+	pull(t, w2, "A", "S")
+	must(w2.Pull("A", "S", PullOpt{Offer: true}))
+	pull(t, w2, "R", "S")
+	shownTo(t, w2, "R")
+	if _, err := fetch(w2, "R", m2, h2, "S"); !errors.Is(err, ErrNotYet) {
+		t.Fatalf("%v", err)
+	}
+	w2.Advance(WantLife)
+	if _, err := fetch(w2, "R", m2, h2, "S"); !errors.Is(err, ErrNotHeldFile) {
+		t.Fatalf("after the job lapsed: %v", err)
+	}
+	if fi := wantState(t, w2, "R", m2, h2, FileUnavailable); fi.Holders[0].Answer != AnsGaveUp {
+		t.Fatalf("holders %+v", fi.Holders)
+	}
+}
+
+// F10: a send whose bytes are not durably stored is not published.
+// Requirements: L1, D9
+func TestACrashBeforeASendsBytesAreStoredPublishesNothing(t *testing.T) {
+	w := room("A", "B")
+	w.PutLocalFile("A", "f", "abc")
+	n := must(w.SendFiles("A", "a", Msg{Body: "x"}, "f"))
+	w.FailFiles("A", "rename")
+	if _, err := w.Decide("A", n, true); !errors.Is(err, ErrStopped) {
+		t.Fatalf("%v", err)
+	}
+	w.Crash("A")
+	if r := pull(t, w, "B", "A"); r.Stored != 0 {
+		t.Fatalf("a send without its bytes was published: %+v", r)
+	}
+	if len(w.Machine("A").st.files.held) != 0 || w.Machine("A").st.files.disk[blobPath(hashBody("abc"))] {
+		t.Fatal("bytes or rows of an unpublished send remain")
+	}
+	m := must(w.Decide("A", n, true)) // still waiting, still staged
+	pull(t, w, "B", "A")
+	shownTo(t, w, "B")
+	must(fetch(w, "B", m, hashBody("abc"), "A"))
+}
+
+// F10: a queued deletion never removes bytes a live row names.
+// Requirements: L1, D9
+func TestAQueuedDeletionNeverRemovesBytesALiveRowNames(t *testing.T) {
+	w := room("A", "B")
+	m, h := sendFile(t, w, "A", "B", "x", "x", "xyz")
+	f := w.Machine("A").st.files
+	f.queue = append(f.queue, blobPath(h)) // a deletion decided earlier, for another message
+	f.flush()
+	if !f.disk[blobPath(h)] || f.held[h] == nil {
+		t.Fatal("the queue removed bytes a live row names")
+	}
+	f.queue = append(f.queue, blobPath(h))
+	w.Crash("A")
+	if !w.Machine("A").st.files.disk[blobPath(h)] {
+		t.Fatal("the restart removed bytes a live row names")
+	}
+	pull(t, w, "B", "A")
+	shownTo(t, w, "B")
+	must(fetch(w, "B", m, h, "A"))
+}
+
+// F10: a crash while writing an agent's copy leaves no temporary file.
+// Requirements: L1, D9
+func TestACrashWhileWritingAnAgentsCopyLeavesNoTemporaryFile(t *testing.T) {
+	w := room("A", "B")
+	m, h := sendFile(t, w, "A", "B", "x", "x", "xyz")
+	pull(t, w, "B", "A")
+	shownTo(t, w, "B")
+	w.FailFiles("B", "copy")
+	if _, err := fetch(w, "B", m, h, "A"); !errors.Is(err, ErrStopped) {
+		t.Fatalf("%v", err)
+	}
+	w.Crash("B")
+	for p := range w.Machine("B").st.files.disk {
+		if p != blobPath(h) && p != blobPath(manifestHash(w, "B", m)) {
+			t.Fatalf("left on disk: %s", p)
+		}
+	}
+	must(fetch(w, "B", m, h, "A"))
+	if !w.CopyFor("B", "b", m, h) {
+		t.Fatal("no copy after the restart")
+	}
+}
+
+// F8, S3: keeping a file in a replacement fails if what it replaces
+// changed before approval, and staging goes. Requirements: L1, D9, P3
+func TestKeepingAFileFailsIfTheReplacedVersionChangesBeforeApproval(t *testing.T) {
+	w := room("A", "B")
+	m, h := sendFile(t, w, "A", "B", "v0", "a.txt", "aaa")
+	n := must(w.ReplaceWithFiles("A", "a", m, "v1", "sha256:"+h))
+	must(w.Replace("A", "a", m, "v1 without files")) // the file is no longer listed
+	if w.Staged("A") || w.Waiting(n) {
+		t.Fatal("staging outlives the version it was asked against")
+	}
+	if _, err := w.Decide("A", n, true); err == nil {
+		t.Fatal("an approval resurrected a dropped file")
+	}
+	if w.HoldsAnyOf("A", h) {
+		t.Fatal("the dropped file's bytes are back")
+	}
+	if _, err := w.ReplaceWithFiles("A", "a", m, "v2", "sha256:"+h); !errors.Is(err, ErrNotHeld) {
+		t.Fatalf("keeping bytes not held for the version replaced: %v", err)
+	}
+}
+
+// F1, S3: bytes kept while a replacement's manifest is pending never
+// outlive the old version's expiry. Requirements: L1, D7
+func TestBytesKeptForAPendingReplacementEndWithTheOldVersionsExpiry(t *testing.T) {
+	w := room("A", "B")
+	m, h := sendFile(t, w, "A", "B", "v0", "a.txt", "aaa")
+	pull(t, w, "B", "A")
+	shownTo(t, w, "B")
+	must(fetch(w, "B", m, h, "A"))
+	w.Advance(20 * Day)
+	n := must(w.ReplaceWithFiles("A", "a", m, "v1", "sha256:"+h))
+	must(w.Decide("A", n, true))
+	a := w.Machine("A")
+	v1 := a.winner(a.get(m)).rec.Manifest
+	delete(a.st.files.held, v1) // A lost the new list: B gets the header and not the list
+	delete(a.st.files.disk, blobPath(v1))
+	pull(t, w, "B", "A")
+	if _, known := w.ManifestOf("B", m); known {
+		t.Fatal("setup: B has the new list")
+	}
+	if !w.HoldsAnyOf("B", h) {
+		t.Fatal("the pending replacement dropped a file it may still list")
+	}
+	w.Sleep("A")
+	w.Advance(10*Day + Hour) // v0 is past 30 days on B; v1 is not
+	if w.HoldsAnyOf("B", h) {
+		t.Fatal("bytes kept for a pending replacement outlived the old version")
+	}
+}
+
 // F1 to F10 on random schedules. After every step: every held file
 // matches its hash and is kept for a message that lets the machine keep
 // it and, by the true grants, read it; no machine that holds the withdraw
@@ -786,7 +1025,7 @@ func TestRandomSchedulesWithFilesKeepTheAttachmentRules(t *testing.T) {
 		total.uploads += st.uploads
 		total.crashes += st.crashes
 	}
-	if total.complete < runs/2 || total.refused < runs || total.dropped < runs/4 || total.uploads < runs/4 || total.crashes < runs/8 {
+	if total.complete < runs/2 || total.refused < runs || total.dropped < runs/4 || total.uploads < runs/16 || total.crashes < runs/8 {
 		t.Fatalf("schedules exercised too little: %+v", total)
 	}
 	t.Logf("%d schedules: %+v", runs, total)
@@ -924,7 +1163,7 @@ func fileSchedule(seed int64, steps int) (fileStats, error) {
 		case 14:
 			op = "crash"
 			if m := w.machines[a]; m.Awake && !m.Gone {
-				w.FailFiles(a, []string{"rename", "commit"}[rng.Intn(2)])
+				w.FailFiles(a, []string{"rename", "commit", "copy"}[rng.Intn(3)])
 				st.crashes++
 			}
 		case 15:
@@ -956,7 +1195,7 @@ func heldCount(w *World) int {
 
 func checkFiles(w *World) error {
 	for i, tr := range w.transfers {
-		if !tr.Permitted || !tr.Keeps {
+		if !tr.Permitted || !tr.Keeps || tr.Upload && !tr.ByAuthor {
 			return fmt.Errorf("transfer %d %+v", i, tr)
 		}
 	}

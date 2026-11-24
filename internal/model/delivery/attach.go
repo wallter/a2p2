@@ -54,25 +54,37 @@ import (
 //     again (and a person confirms); nothing is carried forward silently,
 //     since a replacement shares its files with whoever may read it.
 //   - F9 Carry and want. A member that receives a permitted fetch for a
-//     file it may keep but lacks answers "not yet" and wants it (mode
-//     Carry, the default; FilesOff answers as if it held nothing; Keep
-//     wants every file). A machine that wants bytes from a peer it cannot
-//     dial says so in its answer to that peer's pull, only for messages the
-//     peer wrote or is known to hold, and the peer uploads over its own
-//     connection under F2 and F3. A receiver accepts only uploads it asked
-//     for.
-//   - F10 Durable cleanup. Bytes are written to disk before their row is
-//     committed, and deletions are queued in the transaction that decides
-//     them; a restart deletes what the queue names and anything on disk
-//     with no row.
+//     file it may keep but lacks answers "not yet" and starts one carry
+//     job for it (mode Carry, the default; FilesOff answers as if it held
+//     nothing; Keep wants every file). A machine puts a message's files in
+//     `want` only in its answer to a pull from that message's author, and
+//     only when it cannot dial the author: the author knows its own files,
+//     and nobody promises bytes it does not hold. A want is bound to the
+//     message, the winning version and the hash, reserves its size, lapses
+//     after WantLife or WantTries answers without the bytes, and the
+//     receiver takes an upload only from the author against a want it
+//     issued. A lapsed carry is answered "gave up" for WantLife.
+//   - F10 Durable storing and cleanup. Bytes are on disk before the row
+//     that makes them live; a send is written only after its bytes are;
+//     deletions are queued in the step that decides them and never remove
+//     a path a live row names; a restart finishes the queue and removes
+//     files with no row, temporary files included.
 //   - F11 Self-void. A machine that learns its own admission was voided
 //     drops its staged sends.
+//   - F12 Manifest states. A manifest that matches its hash but is not
+//     valid is invalid for good and nothing it lists is fetched; fetching
+//     a missing manifest stops after ListTries failed answers until
+//     someone asks again (AskList).
 
 // Limits of the model, as in PROTOCOL section 10.
 const (
 	MaxFileSize = 256 << 20
 	MaxManifest = 16384
 	MaxFiles    = 8
+	MaxWants    = 16  // entries in one pull answer
+	WantLife    = Day // a want, or a carry job, lapses after this
+	WantTries   = 3   // answers to the author's pulls without the bytes, then it lapses
+	ListTries   = 8   // failed answers for a missing manifest, then it is unavailable
 )
 
 // FileRef is one file of a manifest.
@@ -104,19 +116,27 @@ func encodeManifest(salt string, files []FileRef) string {
 
 func parseManifest(data string) ([]FileRef, bool) {
 	parts := strings.Split(data, "|")
-	if len(parts) < 3 || parts[0] != "a2p2-manifest" || len(data) > MaxManifest {
+	if len(parts) < 3 || len(parts) > 2+MaxFiles || parts[0] != "a2p2-manifest" || len(data) > MaxManifest {
 		return nil, false
 	}
 	var out []FileRef
+	seen := map[string]bool{}
 	for _, p := range parts[2:] {
 		f := strings.SplitN(p, ":", 3)
 		if len(f) != 3 {
 			return nil, false
 		}
 		n, err := strconv.Atoi(f[0])
-		if err != nil {
+		if err != nil || n < 1 || n > MaxFileSize || len(f[1]) != 64 || seen[f[1]] ||
+			f[2] == "" || len(f[2]) > 255 || strings.ContainsAny(f[2], "/\\") {
 			return nil, false
 		}
+		for _, c := range f[1] {
+			if !strings.ContainsRune("0123456789abcdef", c) {
+				return nil, false
+			}
+		}
+		seen[f[1]] = true
 		out = append(out, FileRef{Name: f[2], Size: n, Hash: f[1]})
 	}
 	return out, true
@@ -156,6 +176,7 @@ const (
 	AnsHas    Answer = iota + 1 // it served the bytes
 	AnsNo                       // not held, or not permitted: the same answer
 	AnsNotYet                   // it will carry them; ask again later
+	AnsGaveUp                   // it tried to carry them and its job lapsed
 )
 
 // FileObs is a dated answer from one peer about one file of one message.
@@ -166,8 +187,25 @@ type FileObs struct {
 }
 
 type stagedSend struct {
-	at   Time              // by this machine's clock
-	data map[string]string // by hash: the bytes copied when the agent asked
+	at      Time              // by this machine's clock
+	data    map[string]string // by hash: the bytes copied when the agent asked
+	replace RecordID          // for a replacement: the message
+	base    RecordID          // and its winning version when the agent asked
+	kept    []string          // hashes kept from that version ("sha256:")
+}
+
+// wantJob is one want: bytes this machine asked a message's author to
+// upload, or a carry job (F9).
+type wantJob struct {
+	from  MachineID // the message's author
+	ver   RecordID  // the winning version it was issued for
+	at    Time      // by this machine's clock
+	size  int       // reserved
+	tries int       // answers to the author's pulls without the bytes
+}
+
+type listTry struct {
+	fails int
 }
 
 // fileState is the attachment part of a machine's store, with the files
@@ -178,20 +216,25 @@ type fileState struct {
 	obs     map[pkey]map[MachineID]FileObs
 	copies  map[ckey]string // what fetch wrote for an agent
 	staged  map[int]*stagedSend
-	want    map[pkey]bool
+	want    map[pkey]wantJob
+	lapsed  map[pkey]Time // carry jobs that lapsed, answered "gave up" for WantLife
+	lists   map[pkey]listTry
+	invalid map[string]bool // manifests that match their hash and are not valid
 	mode    FileMode
 	budget  int // 0: no limit
 
 	disk  map[string]bool // paths present on disk
 	queue []string        // deletions decided and not yet done
-	fail  string          // test hook: crash at "rename" (before a row) or "commit" (before deleting)
+	fail  string          // test hook: crash at "rename" (before a row), "commit" (before deleting) or "copy" (writing a copy)
 	crash bool            // a crash was injected; Crash or Restore reconciles
+	hold  bool            // inside one transaction (Decide): deletions wait for its end
 }
 
 func newFileState() *fileState {
 	return &fileState{held: map[string]*fileHeld{}, partial: map[pkey]*partHeld{},
 		obs: map[pkey]map[MachineID]FileObs{}, copies: map[ckey]string{}, staged: map[int]*stagedSend{},
-		want: map[pkey]bool{}, disk: map[string]bool{}}
+		want: map[pkey]wantJob{}, lapsed: map[pkey]Time{}, lists: map[pkey]listTry{}, invalid: map[string]bool{},
+		disk: map[string]bool{}}
 }
 
 func (f *fileState) clone() *fileState {
@@ -224,8 +267,17 @@ func (f *fileState) clone() *fileState {
 	for k, v := range f.staged {
 		c.staged[k] = v // replaced, never modified
 	}
-	for k := range f.want {
-		c.want[k] = true
+	for k, v := range f.want {
+		c.want[k] = v
+	}
+	for k, v := range f.lapsed {
+		c.lapsed[k] = v
+	}
+	for k, v := range f.lists {
+		c.lists[k] = v
+	}
+	for k := range f.invalid {
+		c.invalid[k] = true
 	}
 	for k := range f.disk {
 		c.disk[k] = true
@@ -236,13 +288,14 @@ func (f *fileState) clone() *fileState {
 
 func (f *fileState) empty() bool {
 	return len(f.held) == 0 && len(f.partial) == 0 && len(f.copies) == 0 && len(f.staged) == 0 &&
-		len(f.want) == 0 && len(f.disk) == 0
+		len(f.want) == 0 && len(f.disk) == 0 && len(f.lapsed) == 0 && len(f.lists) == 0
 }
 
 func blobPath(h string) string         { return "blob/" + h }
 func partPath(k pkey) string           { return "part/" + string(k.msg) + "/" + k.hash }
 func copyPath(k ckey) string           { return "copy/" + k.agent + "/" + string(k.msg) + "/" + k.hash }
 func stagePath(n int, h string) string { return fmt.Sprintf("stage/%d/%s", n, h) }
+func tmpPath(p string) string          { return "tmp/" + p }
 
 // rowPaths is the disk the rows describe.
 func (f *fileState) rowPaths() map[string]bool {
@@ -281,23 +334,34 @@ func (f *fileState) used() int {
 			n += len(d)
 		}
 	}
+	for k, j := range f.want {
+		if f.partial[k] == nil {
+			n += j.size // reserved before the first byte
+		}
+	}
 	return n
 }
+
+func (f *fileState) wanting(k pkey) bool   { _, ok := f.want[k]; return ok }
+func (f *fileState) hasLapsed(k pkey) bool { _, ok := f.lapsed[k]; return ok }
 
 func (f *fileState) fits(n int) bool { return f.budget == 0 || f.used()+n <= f.budget }
 
 // flush does the deletions the queue names, unless a crash is injected
 // between the commit and the deletion (F10).
 func (f *fileState) flush() {
-	if f.crash {
+	if f.crash || f.hold {
 		return // stopped: the restart finishes the queue
 	}
 	if f.fail == "commit" && len(f.queue) > 0 {
 		f.fail, f.crash = "", true
 		return
 	}
+	rows := f.rowPaths()
 	for _, p := range f.queue {
-		delete(f.disk, p)
+		if !rows[p] { // never a path a live row names
+			delete(f.disk, p)
+		}
 	}
 	f.queue = nil
 }
@@ -316,11 +380,13 @@ func (f *fileState) unqueue(p string) {
 // reconcile is what a start does (F10): finish the queue, then delete
 // every file on disk that no row names.
 func (f *fileState) reconcile() {
+	rows := f.rowPaths()
 	for _, p := range f.queue {
-		delete(f.disk, p)
+		if !rows[p] {
+			delete(f.disk, p)
+		}
 	}
 	f.queue = nil
-	rows := f.rowPaths()
 	for p := range f.disk {
 		if !rows[p] {
 			delete(f.disk, p)
@@ -339,6 +405,7 @@ var (
 	ErrNoSpace     = errors.New("the room's file budget on this machine would be exceeded")
 	ErrTooLarge    = errors.New("the reference is over the size limit")
 	ErrNoProposal  = errors.New("no such request waiting for a person")
+	ErrStopped     = errors.New("the machine stopped (an injected crash); nothing was written")
 )
 
 // winner is the version of message h whose text wins by header: the
@@ -374,8 +441,7 @@ func (m *Machine) manifestOf(v *held) (files []FileRef, known bool) {
 	if x == nil {
 		return nil, false
 	}
-	files, ok := parseManifest(x.data)
-	return files, ok
+	return parseManifest(x.data)
 }
 
 // referenced is F1: whether this machine may keep hash (a manifest or a
@@ -388,7 +454,7 @@ func (m *Machine) referenced(msg RecordID, hash string, now Time) (*held, FileRe
 	if ok || v == nil || !m.keepable(v, now) || v.rec.Manifest == "" {
 		return v, ref, ok
 	}
-	if _, known := m.manifestOf(v); known {
+	if _, known := m.manifestOf(v); known || !m.earlierLists(msg, v, hash, now) {
 		return v, ref, false
 	}
 	f := m.st.files
@@ -405,6 +471,34 @@ func (m *Machine) referenced(msg RecordID, hash string, now Time) (*held, FileRe
 		}
 	}
 	return v, ref, false
+}
+
+// earlierLists says whether a version of msg other than v, whose text
+// this machine may still keep, lists hash in a manifest held here: the
+// bound on keeping bytes while a replacement's manifest is pending (S3).
+func (m *Machine) earlierLists(msg RecordID, v *held, hash string, now Time) bool {
+	h := m.get(msg)
+	vers := []*held{h}
+	for _, id := range m.st.replaced[msg] {
+		if r := m.get(id); r != nil && r.rec.Author == h.rec.Author && r.dropped != Withdrawn {
+			vers = append(vers, r)
+		}
+	}
+	for _, e := range vers {
+		if e == v || !m.keepable(e, now) || e.rec.Manifest == "" {
+			continue
+		}
+		if e.rec.Manifest == hash {
+			return true // the earlier list itself, needed to tell what it lists
+		}
+		files, _ := m.manifestOf(e)
+		for _, f := range files {
+			if f.Hash == hash {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // listed is whether the winning version of msg commits to hash as its
@@ -439,7 +533,7 @@ func (m *Machine) filesOf(id RecordID) (files []FileRef, pending bool) {
 		return nil, false
 	}
 	files, known := m.manifestOf(h)
-	return append([]FileRef(nil), files...), !known
+	return append([]FileRef(nil), files...), !known && !m.st.files.invalid[h.rec.Manifest]
 }
 
 // dropFiles applies F1 and the staging expiry of F6, then deletes from
@@ -474,9 +568,24 @@ func (m *Machine) dropFiles(now Time) {
 			f.queue = append(f.queue, copyPath(k))
 		}
 	}
-	for k := range f.want {
-		if _, _, ok := m.referenced(k.msg, k.hash, now); !ok {
+	for k, j := range f.want {
+		v, _, ok := m.listed(k.msg, k.hash, now)
+		switch {
+		case !ok || v.rec.ID != j.ver:
+			delete(f.want, k) // the version it was for is no longer the one to keep
+		case m.clock(now) >= j.at+WantLife || j.tries >= WantTries:
 			delete(f.want, k)
+			f.lapsed[k] = m.clock(now)
+		}
+	}
+	for k, at := range f.lapsed {
+		if _, _, ok := m.listed(k.msg, k.hash, now); !ok || m.clock(now) >= at+WantLife {
+			delete(f.lapsed, k)
+		}
+	}
+	for k := range f.lists {
+		if _, _, ok := m.listed(k.msg, k.hash, now); !ok {
+			delete(f.lists, k)
 		}
 	}
 	for k := range f.obs {
@@ -485,12 +594,33 @@ func (m *Machine) dropFiles(now Time) {
 		}
 	}
 	for n, s := range f.staged {
-		if m.clock(now) >= s.at+Day {
+		if m.clock(now) >= s.at+Day || s.replace != "" && !m.stillReplaceable(s, now) {
 			m.dropStaged(n)
 		}
 	}
 	sort.Strings(f.queue)
 	f.flush()
+}
+
+// stillReplaceable is S3: the version a staged replacement was asked
+// against is still the winning one, readable here, and lists every file
+// it keeps, held here for the message.
+func (m *Machine) stillReplaceable(s *stagedSend, now Time) bool {
+	h := m.get(s.replace)
+	if h == nil || h.dropped == Withdrawn {
+		return false
+	}
+	v := m.winner(h)
+	if v.rec.ID != s.base || !m.keepable(v, now) {
+		return false
+	}
+	for _, k := range s.kept {
+		x := m.st.files.held[k]
+		if _, _, ok := m.listed(s.replace, k, now); !ok || x == nil || !x.serve[s.replace] {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *Machine) dropStaged(n int) {
@@ -508,6 +638,16 @@ func (m *Machine) dropStaged(n int) {
 // commitBlob stores verified bytes for msg: on disk first, then the row
 // (F10); a crash injected between leaves a file no row names.
 func (m *Machine) commitBlob(hash, data string, msg RecordID) bool {
+	if !m.writeBlob(hash) {
+		return false
+	}
+	m.rowBlob(hash, data, msg)
+	return true
+}
+
+// writeBlob puts bytes on disk, synced with their directory: the first
+// half of storing them. A crash injected here stops the machine.
+func (m *Machine) writeBlob(hash string) bool {
 	f := m.st.files
 	if f.crash {
 		return false
@@ -518,6 +658,12 @@ func (m *Machine) commitBlob(hash, data string, msg RecordID) bool {
 		f.fail, f.crash = "", true
 		return false
 	}
+	return true
+}
+
+// rowBlob is the row that makes bytes on disk live for msg.
+func (m *Machine) rowBlob(hash, data string, msg RecordID) {
+	f := m.st.files
 	x := f.held[hash]
 	if x == nil {
 		x = &fileHeld{data: data, serve: map[RecordID]bool{}, local: map[RecordID]bool{}}
@@ -531,7 +677,7 @@ func (m *Machine) commitBlob(hash, data string, msg RecordID) bool {
 		f.queue = append(f.queue, partPath(k))
 	}
 	delete(f.want, k)
-	return true
+	delete(f.lapsed, k)
 }
 
 func (m *Machine) observeFile(k pkey, peer MachineID, a Answer, now Time) {
@@ -560,31 +706,44 @@ func (s *Machine) mayServe(p MachineID, msg RecordID, hash string, now Time) (st
 }
 
 // carry is F9 on server s for a permitted request from p that s cannot
-// serve: whether to answer "not yet", having wanted what it needs (the
-// manifest first, if that is what it lacks).
-func (s *Machine) carry(p MachineID, msg RecordID, hash string, now Time) bool {
+// serve: the answer, having started one carry job for what it needs (the
+// manifest first, if that is what it lacks). The job is a want for the
+// author's next pull, so it is answered only by the author.
+func (s *Machine) carry(p MachineID, msg RecordID, hash string, now Time) Answer {
 	f := s.st.files
 	if f.mode == FilesOff || !s.st.view.now[p] {
-		return false
+		return AnsNo
 	}
 	h := s.get(msg)
 	if h == nil || h.rec.Kind != Message || h.dropped == Withdrawn {
-		return false
+		return AnsNo
 	}
 	v := s.winner(h)
 	if !s.keepable(v, now) || v.rec.Manifest == "" || !mayRead(s.st.view.adm[p], v.rec) {
-		return false
+		return AnsNo
 	}
 	if _, known := s.manifestOf(v); !known {
-		f.want[pkey{msg, v.rec.Manifest}] = true // the list first; the file once a request names it again
-		return true
+		if f.invalid[v.rec.Manifest] {
+			return AnsNo
+		}
+		return AnsNotYet // the list comes on its own (F12); the file once a request names it again
 	}
 	_, ref, ok := s.listed(msg, hash, now)
-	if !ok || hash == v.rec.Manifest || !f.fits(ref.Size) || ref.Size > MaxFileSize {
-		return false
+	k := pkey{msg, hash}
+	if !ok || hash == v.rec.Manifest || ref.Size > MaxFileSize {
+		return AnsNo
 	}
-	f.want[pkey{msg, hash}] = true
-	return true
+	if _, ok := f.lapsed[k]; ok {
+		return AnsGaveUp
+	}
+	if _, dup := f.want[k]; dup {
+		return AnsNotYet
+	}
+	if !f.fits(ref.Size) {
+		return AnsNo
+	}
+	f.want[k] = wantJob{from: h.rec.Author, ver: v.rec.ID, at: s.clock(now), size: ref.Size}
+	return AnsNotYet
 }
 
 // Transfer is one movement of bytes, recorded with what the sender's view
@@ -595,6 +754,7 @@ type Transfer struct {
 	Hash      string
 	Bytes     int
 	Upload    bool
+	ByAuthor  bool // the sender wrote the message
 	Permitted bool // the sender saw To as a member, and the true grants let To read the version
 	Keeps     bool // the receiver may keep it (F1)
 }
@@ -603,7 +763,7 @@ func (w *World) noteTransfer(from, to *Machine, k pkey, n int, upload bool) {
 	v, _, _ := from.listed(k.msg, k.hash, w.Now)
 	_, _, keeps := to.referenced(k.msg, k.hash, w.Now)
 	w.transfers = append(w.transfers, Transfer{From: from.ID, To: to.ID, Msg: k.msg, Hash: k.hash, Bytes: n,
-		Upload: upload, Keeps: keeps,
+		Upload: upload, Keeps: keeps, ByAuthor: v != nil && v.rec.Author == from.ID,
 		Permitted: from.st.view.now[to.ID] && v != nil && mayRead(w.admission[to.ID], v.rec) && !w.voided(to.ID)})
 }
 
@@ -647,6 +807,16 @@ func (w *World) receive(m, from *Machine, k pkey, ref FileRef, data string, max 
 		return FetchResult{Got: len(part)}, nil
 	}
 	if hashBody(got) != k.hash {
+		if f.partial[k] != nil {
+			delete(f.partial, k)
+			f.queue = append(f.queue, partPath(k))
+			f.flush()
+		}
+		return FetchResult{Got: len(part)}, ErrBadFile
+	}
+	if _, valid := parseManifest(got); isManifest && !valid {
+		f.invalid[k.hash] = true // its hash is signed: no other holder can have other bytes (F12)
+		delete(f.want, k)
 		if f.partial[k] != nil {
 			delete(f.partial, k)
 			f.queue = append(f.queue, partPath(k))
@@ -707,7 +877,14 @@ func (w *World) propose(id MachineID, agent string, msg Msg, ref RecordID, paths
 		return 0, ErrNotAllow
 	}
 	p := &proposal{machine: id, agent: agent, msg: msg, replace: ref}
-	st := &stagedSend{at: m.clock(w.Now), data: map[string]string{}}
+	st := &stagedSend{at: m.clock(w.Now), data: map[string]string{}, replace: ref}
+	if ref != "" {
+		t := m.get(ref)
+		if t == nil || t.rec.Author != id {
+			return 0, ErrNotHeld
+		}
+		st.base = m.winner(t).rec.ID
+	}
 	total := 0
 	for _, path := range paths {
 		var data, name string
@@ -722,6 +899,7 @@ func (w *World) propose(id MachineID, agent string, msg Msg, ref RecordID, paths
 				return 0, ErrNotHeld
 			}
 			data, name = x.data, fr.Name
+			st.kept = append(st.kept, h)
 		} else {
 			d, ok := w.localFiles[id][path] // opened once; these bytes are what is staged
 			if !ok || d == "" {
@@ -786,9 +964,21 @@ func (w *World) Decide(id MachineID, n int, approve bool) (RecordID, error) {
 			return fail(3, ErrBadFile)
 		}
 	}
+	if p.replace != "" && !m.stillReplaceable(st, w.Now) {
+		return fail(3, ErrNotHeld) // S3: the version it replaces changed, or a kept file went
+	}
 	w.nextSalt++
 	man := encodeManifest(fmt.Sprintf("salt-%d", w.nextSalt), p.files)
+	// F10: the bytes are on disk before the record that makes them live; a
+	// crash here publishes nothing, and the restart removes the files.
+	for _, h := range append([]string{hashBody(man)}, keysOf(st.data)...) {
+		if !m.writeBlob(h) {
+			return "", ErrStopped
+		}
+	}
 	var rid, msg RecordID
+	f.hold = true // the record and its rows are one transaction
+	defer func() { f.hold = false; f.flush() }()
 	if p.replace != "" {
 		rid, err = w.amend(id, p.agent, p.replace, Replace, p.msg.Body, hashBody(man))
 		msg = p.replace
@@ -801,13 +991,22 @@ func (w *World) Decide(id MachineID, n int, approve bool) (RecordID, error) {
 	}
 	w.anyFiles = true
 	p.state = 1
-	m.commitBlob(hashBody(man), man, msg)
+	m.rowBlob(hashBody(man), man, msg) // with the record, in one transaction
 	for _, fr := range p.files {
-		m.commitBlob(fr.Hash, st.data[fr.Hash], msg)
+		m.rowBlob(fr.Hash, st.data[fr.Hash], msg)
 	}
 	m.dropStaged(n)
 	m.dropFiles(w.Now) // flushes; a replacement may have dropped an earlier file
 	return rid, nil
+}
+
+func keysOf(m map[string]string) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Waiting reports whether request n still waits for a person.
@@ -874,10 +1073,20 @@ func (w *World) Fetch(id MachineID, agent string, msg RecordID, hash string, ser
 		return r, ErrFileGone
 	}
 	k := ckey{agent, msg, hash}
-	if _, done := m.st.files.copies[k]; !done {
-		m.st.files.unqueue(copyPath(k))
-		m.st.files.disk[copyPath(k)] = true
-		m.st.files.copies[k] = x.data
+	f := m.st.files
+	if _, done := f.copies[k]; !done {
+		if !f.fits(len(x.data)) {
+			return r, ErrNoSpace
+		}
+		f.disk[tmpPath(copyPath(k))] = true // written under a temporary name, then renamed
+		if f.fail == "copy" {
+			f.fail, f.crash = "", true
+			return r, ErrStopped
+		}
+		delete(f.disk, tmpPath(copyPath(k)))
+		f.unqueue(copyPath(k))
+		f.disk[copyPath(k)] = true
+		f.copies[k] = x.data
 	}
 	return r, nil
 }
@@ -910,19 +1119,21 @@ func (w *World) fetch(m *Machine, msg RecordID, hash string, server MachineID, o
 		return FetchResult{}, ErrNotAllow
 	}
 	if s.NoInbound {
-		if !m.NoInbound {
-			f.want[k] = true // the server uploads when it next pulls from here (F9)
+		v, _, _ := m.listed(msg, hash, w.Now)
+		if _, dup := f.want[k]; !dup && !m.NoInbound && v.rec.Author == server && (isManifest || f.fits(ref.Size)) {
+			// the author uploads when it next pulls from here (F9)
+			f.want[k] = wantJob{from: server, ver: v.rec.ID, at: m.clock(w.Now), size: ref.Size}
 		}
 		return FetchResult{}, ErrNoDial
 	}
 	data, ok := s.mayServe(m.ID, msg, hash, w.Now)
 	if !ok {
-		if s.carry(m.ID, msg, hash, w.Now) {
-			m.observeFile(k, server, AnsNotYet, w.Now)
+		a := s.carry(m.ID, msg, hash, w.Now)
+		m.observeFile(k, server, a, w.Now)
+		if a == AnsNotYet {
 			return FetchResult{}, ErrNotYet
 		}
-		m.observeFile(k, server, AnsNo, w.Now)
-		return FetchResult{}, ErrNotHeldFile
+		return FetchResult{}, ErrNotHeldFile // "gave up" and "not held" both end this request
 	}
 	if w.tamperFile != nil {
 		data = w.tamperFile(server, hash, data)
@@ -934,8 +1145,11 @@ func (w *World) fetch(m *Machine, msg RecordID, hash string, server MachineID, o
 // from's own connection: F2 on the sender, F3 and "asked for" on the
 // receiver.
 func (w *World) upload(from, to *Machine, k pkey) {
-	if !to.st.files.want[k] || !to.st.view.now[from.ID] {
-		return
+	j, asked := to.st.files.want[k]
+	v, _, listed := to.listed(k.msg, k.hash, w.Now)
+	if !asked || j.from != from.ID || !listed || v.rec.ID != j.ver || v.rec.Author != from.ID ||
+		to.clock(w.Now) >= j.at+WantLife || !to.st.view.now[from.ID] {
+		return // authorised before any byte is read
 	}
 	data, ok := from.mayServe(to.ID, k.msg, k.hash, w.Now)
 	if !ok {
@@ -959,6 +1173,7 @@ func (m *Machine) wants(now Time) []pkey {
 	for k := range m.st.files.want {
 		set[k] = true
 	}
+	f := m.st.files
 	for id, h := range m.st.recs {
 		if h.rec.Kind != Message || h.dropped == Withdrawn {
 			continue
@@ -969,7 +1184,9 @@ func (m *Machine) wants(now Time) []pkey {
 		}
 		files, known := m.manifestOf(v)
 		if !known {
-			set[pkey{id, v.rec.Manifest}] = true
+			if k := (pkey{id, v.rec.Manifest}); !f.invalid[k.hash] && f.lists[k].fails < ListTries {
+				set[k] = true
+			}
 			continue
 		}
 		if m.st.files.mode == Keep {
@@ -1004,37 +1221,81 @@ func (m *Machine) isManifestKey(k pkey) bool {
 }
 
 // exchangeFiles runs after every pull from p to s that delivered its
-// answer: p fetches over its connection what it wants and s holds, and s's
-// answer names what s wants that p wrote or is known to hold, which p
-// uploads (F9). Manifests go first, so a file can be checked against its
-// list.
+// answer: p fetches over its connection what it wants and s holds; and
+// when s cannot dial p, s's answer carries a want (at most MaxWants,
+// deduplicated) for files of messages p wrote, which p uploads (F9).
+// Manifests go first, so a file can be checked against its list.
 func (w *World) exchangeFiles(p, s *Machine) {
 	if !w.anyFiles {
 		return
 	}
 	for pass := 0; pass < 2; pass++ { // the second pass asks for files of lists the first one got
 		for _, k := range p.wants(w.Now) {
-			if _, err := w.fetch(p, k.msg, k.hash, s.ID, FetchOpt{}); err == nil {
-				if x := p.st.files.held[k.hash]; x != nil {
-					delete(p.st.files.want, k)
+			_, err := w.fetch(p, k.msg, k.hash, s.ID, FetchOpt{})
+			if x := p.st.files.held[k.hash]; x != nil && x.serve[k.msg] {
+				delete(p.st.files.want, k)
+				delete(p.st.files.lists, k)
+			} else if err != nil && pass == 0 && p.isManifestKey(k) && !errors.Is(err, ErrNoDial) {
+				t := p.st.files.lists[k]
+				t.fails++
+				p.st.files.lists[k] = t
+			}
+		}
+		if !p.NoInbound {
+			continue // s can dial p: it fetches when it pulls
+		}
+		n := 0
+		for _, k := range s.wants(w.Now) {
+			h := s.get(k.msg)
+			if h == nil || h.rec.Author != p.ID || n == MaxWants {
+				continue // a want goes only to the message's author
+			}
+			n++
+			manifest := s.isManifestKey(k)
+			if _, issued := s.st.files.want[k]; !issued {
+				j := wantJob{from: p.ID, ver: s.winner(h).rec.ID, at: s.clock(w.Now)}
+				if !manifest {
+					_, ref, _ := s.listed(k.msg, k.hash, w.Now)
+					if !s.st.files.fits(ref.Size) {
+						continue
+					}
+					j.size = ref.Size // Keep: a want issued now, reserved
+				}
+				s.st.files.want[k] = j
+			}
+			w.upload(p, s, k)
+			switch x := s.st.files.held[k.hash]; {
+			case x != nil && x.serve[k.msg]:
+				delete(s.st.files.want, k)
+				delete(s.st.files.lists, k)
+			case manifest:
+				delete(s.st.files.want, k) // a manifest's want lives for one answer; F12 counts the tries
+				if pass == 0 {
+					t := s.st.files.lists[k]
+					t.fails++
+					s.st.files.lists[k] = t
+				}
+			case pass == 0:
+				if j, ok := s.st.files.want[k]; ok {
+					j.tries++
+					s.st.files.want[k] = j
 				}
 			}
 		}
-		for _, k := range s.wants(w.Now) {
-			h := p.get(k.msg)
-			wrote := h != nil && h.rec.Author == p.ID
-			if !wrote && s.st.files.obs[k][p.ID].Answer != AnsHas {
-				continue
-			}
-			s.st.files.want[k] = true
-			w.upload(p, s, k)
-			if x := s.st.files.held[k.hash]; x != nil && x.serve[k.msg] {
-				delete(s.st.files.want, k)
-			}
-		}
 	}
+	p.dropFiles(w.Now)
+	s.dropFiles(w.Now)
 	p.st.files.flush()
 	s.st.files.flush()
+}
+
+// AskList is an agent or a person on machine id asking again for the
+// file list of message msg after it was reported unavailable (F12).
+func (w *World) AskList(id MachineID, msg RecordID) {
+	m := w.machines[id]
+	if h := m.get(msg); h != nil {
+		delete(m.st.files.lists, pkey{msg, m.winner(h).rec.Manifest})
+	}
 }
 
 // SetFileBudget sets machine id's budget for file bytes (0: none).
@@ -1052,18 +1313,20 @@ func (w *World) FailFiles(id MachineID, point string) { w.machines[id].st.files.
 type FileState uint8
 
 const (
-	FileGone        FileState = iota + 1 // no version this machine may keep lists it: see Why
-	FileListPending                      // the version has files, and their list has not arrived
-	FileHere                             // verified bytes are here
-	FilePartial                          // part of it is here
-	FileComing                           // a member said "not yet", or this machine asked a peer it cannot dial
-	FileNotAsked                         // nobody has been asked yet
-	FileFetchable                        // a current member answered that it held it
-	FileUnavailable                      // every member asked said not held
+	FileGone            FileState = iota + 1 // no version this machine may keep lists it: see Why
+	FileListPending                          // the version has files, and their list has not arrived
+	FileHere                                 // verified bytes are here
+	FilePartial                              // part of it is here
+	FileComing                               // a member said "not yet", or this machine asked a peer it cannot dial
+	FileNotAsked                             // nobody has been asked yet
+	FileFetchable                            // a current member answered that it held it
+	FileUnavailable                          // every member asked said not held or gave up, or this machine's want lapsed
+	FileListInvalid                          // the list matched its hash and is not valid: nothing is fetched
+	FileListUnavailable                      // the list did not arrive after ListTries answers; AskList tries again
 )
 
 func (s FileState) String() string {
-	return [...]string{"?", "gone", "list-pending", "here", "partial", "coming", "not-asked", "fetchable", "unavailable"}[s]
+	return [...]string{"?", "gone", "list-pending", "here", "partial", "coming", "not-asked", "fetchable", "unavailable", "list-invalid", "list-unavailable"}[s]
 }
 
 // FileInfo is FileStatus's answer.
@@ -1105,7 +1368,15 @@ func (w *World) FileStatus(id MachineID, msg RecordID, hash string) FileInfo {
 			}
 		default:
 			if _, known := m.manifestOf(v); !known {
-				info.State = FileListPending
+				mk := pkey{msg, v.rec.Manifest}
+				switch {
+				case m.st.files.invalid[mk.hash]:
+					info.State = FileListInvalid
+				case m.st.files.lists[mk].fails >= ListTries:
+					info.State = FileListUnavailable
+				default:
+					info.State = FileListPending
+				}
 			} else {
 				info.Why = Live // a replacement does not list it
 			}
@@ -1114,8 +1385,10 @@ func (w *World) FileStatus(id MachineID, msg RecordID, hash string) FileInfo {
 		info.State = FileHere
 	case m.st.files.partial[k] != nil:
 		info.State = FilePartial
-	case m.st.files.want[k]:
+	case m.st.files.wanting(k):
 		info.State = FileComing
+	case m.st.files.hasLapsed(k):
+		info.State = FileUnavailable
 	default:
 		info.State = FileNotAsked
 		for _, o := range info.Holders {

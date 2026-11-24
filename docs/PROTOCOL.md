@@ -997,7 +997,7 @@ id or code, and a one-line note.
 ## 10. Attachments (0.2 draft)
 
 Not built. Formats for [DESIGN section 11](DESIGN.md#11-attachments-02-draft)
-and rules [F1] to [F11] of the delivery model. `v` stays 2. Additions: one
+and rules [F1] to [F12] of the delivery model. `v` stays 2. Additions: one
 header field (10.1), the manifest (10.2), the file route with `GET` and
 `PUT` (10.3, 10.5), and one top-level field in the pull response (10.4).
 
@@ -1033,12 +1033,19 @@ Strict JSON (section 1's rules), at most 16,384 bytes:
 | `sha256` | 64 lowercase hex; unique in the array |
 | `type` | optional, 1–100 bytes `token/token` lowercase ASCII; a hint used for nothing |
 
-1 to 8 files. Unknown keys are ignored. A manifest whose SHA-256 is not the
-header's, or that breaks a rule, is discarded and the peer counted
-(`bad_file`); the next holder is tried. The manifest is fetched on the file
+1 to 8 files. Unknown keys are ignored. The manifest is fetched on the file
 route (10.3) with its own SHA-256 as the file id, by every machine that may
-read the text, after the pull that brought the header. Until it is
-verified the entry shows `files_pending: true` and no file list.
+read the text, after the pull that brought the header. Its states [F12]:
+
+| State | When | Entry |
+|---|---|---|
+| pending | not yet verified | `files_pending: true`, no list |
+| here | its SHA-256 is the header's and it follows every rule above | `files` |
+| invalid | its SHA-256 is the header's and it breaks a rule: for good, since the header's hash admits no other bytes; nothing it lists is fetched | `files_note: "invalid file list"` |
+| unavailable | 8 failed answers, retried with backoff from 1 minute doubling to 1 hour; asked again only when a person or an agent asks (`fetch` naming the message) | `files_note: "file list unavailable"` |
+
+Bytes whose SHA-256 is not the header's are discarded and the peer counted
+(`bad_file`); the next holder is tried.
 
 ### 10.3 Fetch: `GET /p/v2/file/<room id>/<message id>/<sha256>`
 
@@ -1081,50 +1088,62 @@ starts from 0 with another holder.
 
 Holders are asked in this order: the author, members whose last answer
 was that they hold it or carry it, then other current members, each at
-most once per call. Answers are stored per message in `file_obs`.
+most once per call; a member that cannot be dialled is skipped. Answers
+are stored per message in `file_obs`. A member that may read the message
+can tell from them whether a listener carries or keeps; nobody else can.
 
 ### 10.4 Wants, in the pull response
 
-A machine that wants bytes from a peer it cannot dial adds to its answer
-to that peer's pull an optional top-level field:
+A machine adds to its answer to a pull an optional top-level field, only
+when the puller is the author of the messages named and this machine
+cannot dial it [F9]:
 
 ```json
-"want":[{"m":"<message id>","h":"<sha256>"}]
+"want":[{"m":"<message id>","v":"<winning version id>","h":"<sha256>"}]
 ```
 
-At most 16 entries, only for messages of that room the puller wrote or
-answered that it holds. A manifest comes before the files it lists. The
-puller, when it is 0.2 and the checks of 10.3 step 4 and 5 pass for the
-server as the receiver, uploads each (10.5). It treats `want` as a hint:
-an entry it may not serve is skipped silently.
+At most 16 entries, deduplicated, manifests before the files they list,
+each repeated at most once a minute; the field counts inside the answer's
+size limit (4.6, 4 MiB), so the answer is cut to fit, never the other way.
+Only the author is asked: it knows its own files, so a want discloses
+nothing, and no machine promises bytes it does not hold. A copy held only
+by another machine nobody can dial is not reachable this way.
 
-0.1.0 accepts and ignores it: its strict pull decoders take unknown
+Each want is a row (`file_wants`) bound to message, version and hash. A
+file's want reserves its size in the budget when issued; it lapses after
+24 hours or after 3 answers to the author's pulls without the bytes, and
+then frees the reservation. The author uploads each entry it still holds
+for that message and version (10.5) and skips the rest silently.
+
+0.1.0 accepts and ignores `want`: its strict pull decoders take unknown
 top-level fields in both the request and the response (run against
-`DecodePullRequest` and `DecodePullResponse` at 0.1.0), and the shape
-check looks only at the fields it decodes. A 0.1.0 server never sends
-`want`, and a 0.1.0 puller ignores it, so no version detection is needed:
-an upload goes only to a server that asked for it, which is therefore 0.2.
+`DecodePullRequest` and `DecodePullResponse` at 0.1.0). A 0.1.0 server
+never sends it, so an upload goes only to a 0.2 machine that asked.
 
 ### 10.5 Upload and carry
 
 **Upload:** `PUT /p/v2/file/<room id>/<message id>/<sha256>` from the
-puller to the server that wanted it, with `Content-Range: bytes N-M/<size>`
-(at most 8 MiB, N the receiver's `have` from its last answer, 0 at first).
-The receiver applies 10.3 in the other direction: the sender is a member
-now that may read the winning version that lists the hash, the entry is
-in its own `want` list for that sender, the declared total equals the
-manifest's size and fits the reserved budget, the range starts at what it
-holds. It answers `200 {"have":<bytes held>}`, or the same 404 for any
-refusal. The same rates, time limits and hash check apply. A machine that
-receives a `PUT` it did not ask for answers 404 and stores nothing.
+author to the machine whose answer wanted it, with `Content-Range: bytes
+N-M/<size>`: at most 8 MiB, N 0 at first and then the `have` of the last
+answer; a manifest is sent whole, at most 16,384 bytes. The receiver
+checks, from the headers and before reading the body: the TLS peer is the
+author of that message; it issued an unexpired want for that message,
+version and hash to that peer; the version is still the winning one and
+lists the hash; the declared total equals the listed size and fits the
+reservation; N is what it holds. It answers `200 {"have":<bytes held>}`,
+or the same 404 as 10.3 for any refusal, and stores nothing it did not
+ask for. The time limits and the hash check of 10.3 apply.
 
 **Carry:** at step 5 of 10.3, a machine whose room setting is `carry` or
-`keep`, that may keep the file (F1), whose budget holds its size, answers
-202 "not yet", adds the entry to its wants, and fetches or asks for it as
-above. With setting `off` it answers 404. A carried file is held like a
-fetched one and served for that message; F1 deletes it with the text.
-Setting `keep` wants every file of every message it may keep, after each
-pull, within the budget.
+`keep`, that may keep the file (F1) and whose budget holds its size,
+answers 202 "not yet" and starts one carry job: a want to the author
+(10.4) if it cannot dial it, otherwise a fetch from the author. A second
+request for the same file joins the same job. A job lapses as a want
+does; for the next 24 hours requests for that file are answered `202`
+with body `{"state":"gave_up"}`, and the reader shows `unavailable` with
+reason `not_carried`. With setting `off` it answers 404. A carried file is
+held and served like a fetched one; F1 deletes it with the text. Setting
+`keep` wants every file of every message it may keep, within the budget.
 
 **What 0.1.0 does with each new thing** (code read and throwaway tests run
 against it; not kept in the tree):
@@ -1145,7 +1164,7 @@ readable text.
 
 | Call | Request | Response |
 |---|---|---|
-| `send` (changed) | adds `"files":["<path>",…]` (1–8): an absolute path, or `"sha256:<hex>"` naming a file of the version being replaced, kept by listing it again. With `replaces`, absent means the replacement has no files | `{"request","state":"waiting","room","room_label","to"?,"replaces"?,"files":[{"name","size","sha256","type"?}]}`; nothing is written. Refused: `invalid_request` (not absolute, not a regular file once opened, unreadable), `too_large` (over 8 files, 256 MiB or a budget) |
+| `send` (changed) | adds `"files":["<path>",…]` (1–8): an absolute path, or `"sha256:<hex>"` naming verified bytes this machine holds for the version being replaced, kept by listing it again. With `replaces`, absent means the replacement has no files. Approval of a replacement checks again that the replaced version is still the winning one, readable here, and lists each kept file; otherwise the request fails and its staging is removed | `{"request","state":"waiting","room","room_label","to"?,"replaces"?,"files":[{"name","size","sha256","type"?}]}`; nothing is written. Refused: `invalid_request` (not absolute, not a regular file once opened, unreadable), `too_large` (over 8 files, 256 MiB or a budget) |
 | `fetch` (new) | `{"agent","room"?,"sha256","message"?,"wait_ms"?}` (≤ 120,000; the tool sends at most 30,000). The agent must have been shown the version that lists the file | `{"state","path"?,"size","have"?,"from"?,"reason"?,"holders"?:[{"node","at","answer"}]}`; `state` is `here` (with `path`), `partial`, `coming`, `fetching`, `unavailable`, `gone` (`reason`: `withdrawn`, `replaced`, `expired`, `before_you_joined`) or `too_large` |
 | `requests` (changed) | | kind `send_files`: `agent`, `room`, `to` (or everyone, with the member count), `replaces` (id and first line), `text_line`, `files:[{"path","name","size","sha256","type"?}]` with `path` escaped (10.8), `terms` |
 | `confirm` (changed) | as now; the approval covers `terms`: SHA-256 over `a2p2 send files 1`, room, agent, recipients, `replaces`, the text's hash and each file's path, size and SHA-256 | `approved` with `effect` the message id, after the staged digests are checked again; expires as `declined` after 24 hours |
@@ -1201,13 +1220,19 @@ or trailing dots or spaces; Windows reserved names prefixed; 200 bytes;
 `O_EXCL` through an `os.Root`; ` (2)` for a clash). A copy is deleted with
 its message if it is still at its path with the same size and hash.
 
-Order of writes: a blob, part or staged file is written and synced before
-its row commits; a copy's row commits first, marked `writing`, then the
-file is written under a temporary name and renamed, then the row is
-marked done. Every deletion is queued in `file_trash` in the transaction
-that decides it and done after commit. A start runs the queue, then
-removes every file under `blobs/` with no row and every copy still
-`writing`.
+Storing [F10]: bytes are written under a temporary name
+(`.a2p2-tmp-<random>` in the same directory), synced, renamed, and the
+directory synced, before the row that makes them live commits. A send's
+record, its `file_sets` row and its `files` and `file_for` rows commit in
+one transaction after its bytes are safe; if they are not, the send is
+not published and the request still waits. A copy's row commits first,
+marked `writing`, then the copy is written the same way and the row marked
+done. Deletion is by rows: the transaction that drops a row queues its
+path in `file_trash`; the queue runs after commit and skips, and removes
+from the queue, any path a live row names again (bytes acquired again for
+another message are never unlinked). A start runs the queue, removes every
+`.a2p2-tmp-` file, every file under `blobs/` with no row and every copy
+still `writing`.
 
 **Schema (migration 13).**
 
@@ -1219,7 +1244,8 @@ removes every file under `blobs/` with no row and every copy still
 | `file_parts` | `room`, `msg`, `sha256`, `size` (reserved), `have` | (`room`,`msg`,`sha256`) |
 | `file_for` | `room`, `sha256`, `msg`, `how` (`sent`, `received`, `local`: usable here, never served) | (`room`,`sha256`,`msg`) |
 | `file_obs` | `room`, `msg`, `sha256`, `peer`, `answer`, `at` | (`room`,`msg`,`sha256`,`peer`) |
-| `file_wants` | `room`, `msg`, `sha256`, `from` (a peer, or any), `at` | (`room`,`msg`,`sha256`) |
+| `file_wants` | `room`, `msg`, `version`, `sha256`, `author`, `size` (reserved), `at`, `tries`, `lapsed_at`; a want or a carry job (10.4, 10.5) | (`room`,`msg`,`sha256`) |
+| `file_lists` | `room`, `record`, `state` (`invalid`, `unavailable`), `fails`, `next_at` | (`room`,`record`) |
 | `file_copies` | `room`, `msg`, `sha256`, `agent`, `path`, `state` | (`room`,`path`) |
 | `file_trash` | `path`, `at` | `path` |
 | `room_files` | `room`, `mode`, `decided_at` | `room` |
@@ -1231,7 +1257,9 @@ removes every file under `blobs/` with no row and every copy still
 |---|---|
 | Names, sizes or hashes reaching a machine that may not read the text | only a salted commitment is in the header; the manifest is served under the text's permission and deleted with it (F1, F2) |
 | A member serves or uploads wrong bytes | declared total checked first; whole-file hash (F3); deleted, `bad_file`, next holder |
-| An unasked upload | 404, nothing stored (F9) |
+| An unasked upload, or one from a machine that is not the author | 404, nothing stored, decided before the body is read (F9) |
+| Wants disclosing a file to a machine that may not read it | a want goes only to the message's author (F9) |
+| Two carriers waiting on each other | a carry job wants only from the author, and lapses (F9) |
 | A huge, slow or never-ending transfer | refused over the limits before scheduling; budget reserved; 8 MiB a response; 120 s per response and 64 KiB/s; one transfer per peer per direction, 8 in all; limits separate from pulls |
 | Telling refusals apart | one 404, one body, decided from rows (10.3) |
 | Path tricks in `name` | never a path (10.8) |
@@ -1239,7 +1267,7 @@ removes every file under `blobs/` with no row and every copy still
 | A path that hides its end | shown in full, controls and bidi characters escaped |
 | A member lists a hash it may not read in its own message | served only for the message the bytes are held for (F2) |
 | A withdraw after others fetched | every member that learns deletes bytes, parts and copies; active transfers stop (F1, F2) |
-| A crash during a write or a deletion | rows after files, a trash queue, and a start-up reconcile (F10) |
+| A crash during a write or a deletion | bytes before rows, one transaction for a send, a trash queue that skips live paths, a start-up sweep (F10) |
 | An agent sends a file without the person | not through `files` (F6); as a guard rail only (DESIGN 11, limits) |
 | Archive bombs, malicious documents | out of scope: a2p2 opens nothing |
 
@@ -1269,31 +1297,51 @@ Model tests (`internal/model/delivery/attach_test.go`):
 `TestANewReferenceToAKnownHashDoesNotWidenWhoIsServed`,
 `TestARemovedMachineIsNotServedAFile`,
 `TestAFetchOverTheRoomsBudgetIsRefusedBeforeAnythingMoves`,
-`TestAnImpossibleReferenceIsRefusedBeforeAnyTransfer`,
+`TestAManifestThatMatchesItsHashButIsInvalidIsInvalidForGoodAndNothingIsFetched`,
+`TestAManifestThatDoesNotArriveIsUnavailableAfterBoundedTriesUntilAskedAgain`,
 `TestAVoidedAuthorsFilesAreDeleted`,
 `TestANarrowerGrantLearnedLaterDropsTheFilesItHides`,
 `TestACrashBetweenWritingAFileAndItsRowLeavesNothingAfterTheRestart`,
 `TestACrashBetweenDroppingAFileAndDeletingItCompletesTheDeletionAtTheRestart`,
+`TestAWantGoesOnlyToTheMessagesAuthorNeverToAnotherHolder`,
+`TestAnUploadFromAMachineThatIsNotTheAuthorIsRefused`,
+`TestAWantTheAuthorDoesNotAnswerLapsesAndTheReaderIsToldUnavailable`,
+`TestACrashBeforeASendsBytesAreStoredPublishesNothing`,
+`TestAQueuedDeletionNeverRemovesBytesALiveRowNames`,
+`TestACrashWhileWritingAnAgentsCopyLeavesNoTemporaryFile`,
+`TestKeepingAFileFailsIfTheReplacedVersionChangesBeforeApproval`,
+`TestBytesKeptForAPendingReplacementEndWithTheOldVersionsExpiry`,
 `TestRandomSchedulesWithFilesKeepTheAttachmentRules` (every transfer is
-checked against the sender's view and the true grants when it happens).
+checked against the sender's view and the true grants when it happens,
+and every upload came from the author).
 
-Code tests to add with the build, each named for its scenario: the same
-scenarios in `internal/node` over the in-memory transport, a differential
-test against the model;
-`TestARecordWithFilesIsStoredAndRelayedByteForByteByAnOldVersionNode`;
-`TestAnOldVersionPullerIgnoresWant`; `TestEveryNotHeldAnswerIsTheSameBytes`;
-`TestAnUploadOverTLSOnlyReachesTheMachineThatWantedIt`;
-`TestASlowTransferIsCut`; `TestAnOffsetPastTheSizeIsRefusedBeforeArithmetic`;
-`TestARevocationStopsATransferInProgress`;
-`TestStagingCopiesFromTheHandleItOpenedAndRefusesAFifo`;
-`TestTheRequestEscapesBidiCharactersInThePath`;
-`TestAStartRemovesFilesWithoutRowsAndFinishesTheTrash`;
-`TestAFetchedNameCannotLeaveTheRoomsDirectoryOrOverwrite`; and
-`TestToolsGolden`, `TestToolDefinitionsFitTheTokenBudget` at 3,979 bytes.
-Fault-matrix rows in TESTING.md and TRACE rows (L1 `met`; D7, D9, T3, T5,
-P3, U4, A2, N1) change when the code exists.
+Code tests to add with the build: the scenarios above in `internal/node`
+over the in-memory transport, a differential test against the model,
+`TestARecordWithFilesIsStoredAndRelayedByteForByteByAnOldVersionNode`,
+`TestAnOldVersionPullerIgnoresWant`, `TestWantsFitInsideTheAnswerSizeLimit`,
+`TestAFetchedNameCannotLeaveTheRoomsDirectoryOrOverwrite`,
+`TestToolsGolden` and `TestToolDefinitionsFitTheTokenBudget` at 3,979
+bytes. Fault-matrix rows in TESTING.md and TRACE rows (L1 `met`; D7, D9,
+T3, T5, P3, U4, A2, N1) change when the code exists.
 
-### 10.11 Decision input
+### 10.11 What the build must test
+
+These are properties of the implementation, not of the model; each is
+listed once with the test the build adds.
+
+| Property | Test |
+|---|---|
+| Every refusal on the file route is the same status and body, and takes the same time class whatever its reason | `TestEveryNotHeldAnswerIsTheSameBytesAndTimingClass` |
+| A response or upload in progress stops when the sender commits a withdraw, replacement, removal, narrower grant or void that ends it | `TestARevocationStopsATransferInProgress` |
+| Staging opens the path once, refuses a non-regular file after opening (a FIFO, a device, a directory), and copies from that handle | `TestStagingCopiesFromTheHandleItOpenedAndRefusesAFifo` |
+| The approval display shows the resolved path in full with controls and bidirectional characters escaped, and the replaced message | `TestTheRequestEscapesBidiCharactersInThePathAndNamesTheReplacedMessage` |
+| One transfer per peer per direction, 8 in all | `TestFileTransfersAreLimitedPerPeerAndInAll` |
+| 120 seconds per response and 64 KiB/s over 30 seconds | `TestASlowTransferIsCut` |
+| Offsets are parsed and checked before arithmetic | `TestAnOffsetPastTheSizeIsRefusedBeforeArithmetic` |
+| File transfers never delay pulls | `TestPullsAreAnsweredWhileFilesTransfer` |
+| Bytes and directory synced before the row; a send published only with its bytes; temporary files swept at start | `TestAStartRemovesTemporaryFilesAndFilesWithoutRows` |
+
+### 10.12 Decision input
 
 Each of these needs a DECISIONS entry when it is built.
 
@@ -1306,8 +1354,9 @@ Each of these needs a DECISIONS entry when it is built.
   because in the owner's room the author often cannot be dialled (N1).
   `HEAD` is not added: dated answers to `GET` already say who holds what.
 - **`want` in the pull response.** Needed so a machine nobody can dial
-  learns what to upload, over the connection it already makes. 0.1.0
-  ignores it, so it needs no version change.
+  learns what to upload, over the connection it already makes. Sent only
+  to the message's author, so it discloses nothing and needs no holder
+  evidence. 0.1.0 ignores it, so it needs no version change.
 - **The per-room setting `off`, `carry`, `keep`.** One setting, not a
   config key: it is per room, a person's choice changed while running, and
   shown with the room, so it is a table (`room_files`) behind one local API
@@ -1321,6 +1370,7 @@ Each of these needs a DECISIONS entry when it is built.
 - **Local API `fetch`, CLI `send --file` and `fetch`, the `Entry` kind
   `request`, and the `send_files` request kind.** Needed for a person to
   confirm and for an agent to learn the outcome without polling.
-- **Migration 13**, the tables of 10.8. Needed because file state, wants,
-  observations per message, copies and the trash queue must survive a
-  restart and be deleted in the same transaction as the text they follow.
+- **Migration 13**, the tables of 10.8. Needed because file state, wants
+  and carry jobs, manifest states, observations per message, copies and
+  the trash queue must survive a restart and be deleted in the same
+  transaction as the text they follow.

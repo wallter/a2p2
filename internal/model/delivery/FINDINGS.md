@@ -60,7 +60,7 @@
 
 ## Attachments (0.2 draft)
 
-Added 2026-11-24 for requirement L1 and revised the same day after review;
+Added 2026-11-24 for requirement L1 and revised twice the same day after review;
 not built (`attach.go`). The signed header of a message or a replacement
 with files holds only the SHA-256 of a salted manifest (`Record.Manifest`).
 The manifest (salt; name, size and hash of each file) and the bytes are
@@ -72,7 +72,7 @@ content: they travel apart, on request, under the text's permission.
   Otherwise bytes, partials and agents' copies (all scoped to the message)
   go in the step that ended the reference. While a replacement's manifest
   is on its way, what is held for the message stays, unserved, until it
-  arrives.
+  arrives, and only while an earlier version that lists it may be kept.
 - F2 Served: only to a peer the sender sees as a member now that may read
   that version's text in its view, and only bytes held for that message.
   Checked at every request and chunk, in both directions.
@@ -83,25 +83,36 @@ content: they travel apart, on request, under the text's permission.
 - F4 Asked: manifests are fetched automatically by a machine that may read
   the text; file bytes only when an agent shown that version asks, or the
   machine carries or keeps them.
-- F5 Told: here, list pending, partial, coming, not asked, fetchable,
-  unavailable (dated answers per message) or gone with the reason.
+- F5 Told: here, partial, coming, not asked, fetchable, unavailable
+  (dated answers per message, "gave up" included), list pending, list
+  unavailable, list invalid, or gone with the reason.
 - F6 Confirmed: the bytes staged when the agent asked are what is
   approved, after their digests are checked again; declined, expired
   after a day or failed, nothing is written and staging goes.
 - F7 Budget: held, partial (at its declared size), staged and copied bytes
   count; over budget or over the size limit is refused before a byte
   moves.
-- F8 Replace: a replacement lists only files its writer lists again.
-- F9 Carry and want: a member asked by a permitted peer for a file it may
-  keep but lacks answers "not yet" and wants it (Carry, the default;
-  FilesOff: not held; Keep: wants every file). A machine wants from a peer
-  it cannot dial in its answer to that peer's pull, only for messages the
-  peer wrote or said it holds; the peer uploads, and the receiver takes
-  only what it asked for.
-- F10 Durable cleanup: files before rows; deletions queued in the deciding
-  step; a restart finishes the queue and removes files with no row.
+- F8 Replace: a replacement lists only files its writer lists again, from
+  verified bytes held for the version replaced; approval checks that this
+  version still wins, is readable and lists them, and staging goes when
+  it does not.
+- F9 Carry and want: a machine wants a message's files only in its answer
+  to a pull from that message's author, when it cannot dial the author.
+  A want is bound to message, version and hash, reserves its size, and
+  lapses after WantLife or WantTries answers without the bytes; uploads
+  are taken only from the author against such a want. A member asked by
+  a permitted peer for a file it may keep but lacks answers "not yet" and
+  starts one carry job (Carry, the default; FilesOff: not held; Keep:
+  wants every file); a lapsed job is answered "gave up".
+- F10 Durable storing and cleanup: bytes before rows; a send is written
+  only after its bytes, with its rows; deletions queued in the deciding
+  step never remove a path a live row names; a restart finishes the queue
+  and removes files with no row, temporary copies included.
 - F11 Self-void: a machine that learns its own admission was voided drops
   its staged sends.
+- F12 Manifest states: one that matches its hash and breaks a rule is
+  invalid for good and nothing it lists is fetched; a missing one is asked
+  for at most ListTries times, then unavailable until AskList.
 
 Found while modelling. Round 1: with permission by hash alone, a member
 admitted without history could list a known hash in its own message and
@@ -113,19 +124,31 @@ dropping at that moment deleted a file the replacement still lists
 (`TestAReplacementListsOnlyTheFilesItsWriterListsAgain` failed); hence the
 pending clause of F1. Dropping only when a header arrived, not when a
 manifest did, kept a file a replacement no longer lists (seed 86 of the
-random test); a manifest's arrival now runs F1.
+random test); a manifest's arrival now runs F1. Round 3: the pending
+clause had to keep the earlier version's manifest too, or which file it
+listed was lost in the same step (order of a map walk); a send's record
+storing first could let the deletion queue run between the bytes and
+their rows (seed 0); `Decide` now holds deletions until its rows are in.
+Wants were first selected by "the puller said it holds", which disclosed
+a hash to a no-history former holder and let two carriers wait on each
+other; wanting only from the author removes both.
 
-Tests: 28 scenarios in `attach_test.go` and
+Tests: 37 scenarios in `attach_test.go` and
 `TestRandomSchedulesWithFilesKeepTheAttachmentRules` (400 schedules of 100
 steps, with random outbound-only machines and modes, withdrawals,
 replacements, expiry, admissions without history, removals, lost disks,
-wrong bytes and crashes injected at both points). After every step every
+wrong bytes and crashes injected at three points). After every step every
 held file matches its hash and is kept for a message that lets the machine
 keep it and, by the true grants, read it; parts and copies likewise; the
 disk is what the rows say; and every transfer so far went to a machine
 the sender saw as a member, that the true grants let read the version,
-and that could keep it. Removing the read check from serving, or the
-"asked for" check from uploads, fails named tests.
+and that could keep it, and every upload came from the author. Removing
+the read check from serving, the "asked for" check from uploads, both
+author checks on the receiver, the live-row guard of the queue, the bound
+on the pending clause, or the invalid state, fails named tests. The
+author check on emission, the receiver's two author checks and the
+approval re-check (also done when staging is purged) are each redundant
+with another check, so removing one alone fails nothing.
 
 Rejected: a new record kind, a body field, or a wire version (0.1.0 refuses
 the first two and blocks the author's stream; the third splits mixed
@@ -135,6 +158,8 @@ not read the text, and outlive a withdrawal); the file count in the header
 files forward on a replacement (it would share them with whoever may read
 the replacement without anyone choosing to); version detection for `want`
 (0.1.0 ignores it, and only a machine that asked receives an upload);
+wants to any machine that said it holds a file (disclosure, and carriers
+waiting on each other);
 `HEAD` (dated answers to fetches say who holds what); refusing a malformed
 reference on receipt (0.1.0 and 0.2 would store different records); bytes
 in the database or in pull pages; fetching every file at once (U4, disk),
@@ -225,4 +250,4 @@ requirements in a comment. Examples, and the membership tests:
 | U3, T3 (R2) | `TestNewMachineInboxStartsEmpty…`, `TestNoHistoryNewcomer…`, `TestTwoGrantsThatDiffer…`, `TestHeldResponseIsChecked…` |
 | T5 (R1, R2) | `TestMessageOfARemovedAuthor…`, `TestWithdrawWrittenBeforeRemoval…`, `TestRecordWrittenAfterRemoval…`, `TestVoidedAdmission…`, `TestStaleViewHands…`, `TestHeldResponseIsNotReleased…` |
 | N1 (R3) | `TestStaleOfferCosts…`, `TestOffersDoNotStarve…`, `TestMachineThatOnlyOpensRequests…` |
-| L1 (F1–F11, 0.2 draft) | `TestAFileIsSentOnlyAfterAPersonApproves…`, `TestInARoomWithOneListenerAFile…`, `TestANewcomerWithoutHistoryGetsNeither…`, `TestWithdrawDeletesAFile…`, `TestRandomSchedulesWithFiles…` and the rest of `attach_test.go` |
+| L1 (F1–F12, 0.2 draft) | `TestAFileIsSentOnlyAfterAPersonApproves…`, `TestInARoomWithOneListenerAFile…`, `TestANewcomerWithoutHistoryGetsNeither…`, `TestWithdrawDeletesAFile…`, `TestRandomSchedulesWithFiles…` and the rest of `attach_test.go` |
