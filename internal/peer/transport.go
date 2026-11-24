@@ -122,8 +122,12 @@ func Serve(ctx context.Context, ln net.Listener, id *Identity, h Handler) error 
 	protos := new(http.Protocols)
 	protos.SetHTTP1(true) // the join exchange: HTTP/1.1, one request per connection
 	protos.SetHTTP2(true) // the pull exchange: waiting pulls to one peer share one connection (ALPN h2)
+	var in func(from, local string)
+	if i, ok := h.(InboundHandler); ok {
+		in = i.Inbound
+	}
 	srv := &http.Server{
-		Handler:           guard(newLimiter(), mux),
+		Handler:           guard(newLimiter(), mux, in),
 		Protocols:         protos,
 		ReadHeaderTimeout: 5 * time.Second, // also bounds the TLS handshake
 		ReadTimeout:       30 * time.Second,
@@ -237,9 +241,22 @@ type statusWriter struct {
 func (s *statusWriter) WriteHeader(code int) { s.code = code; s.ResponseWriter.WriteHeader(code) }
 
 // guard rate-limits per authenticated node and logs every request (never bodies).
-func guard(lim *limiter, next http.Handler) http.Handler {
+// InboundHandler, if the handler has it, is told of every request whose
+// TLS client key is known: the key and the local address it arrived on.
+type InboundHandler interface {
+	Inbound(from, local string)
+}
+
+func guard(lim *limiter, next http.Handler, in func(from, local string)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start, from := time.Now(), requestNode(r)
+		if in != nil && from != "" {
+			local := ""
+			if a, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
+				local = a.String()
+			}
+			in(from, local)
+		}
 		sw := &statusWriter{ResponseWriter: w, code: http.StatusOK}
 		switch {
 		case from == "" && r.URL.Path == pathPullV2:

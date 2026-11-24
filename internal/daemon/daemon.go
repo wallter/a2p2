@@ -511,7 +511,7 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	}()
 	keeping := false
 	if peerLn != nil {
-		h := peerHandler{JoinServer: node.NewJoinServer(rooms), x: x, g: g, db: node.NewDialBackServer(rooms, prober)}
+		h := peerHandler{JoinServer: node.NewJoinServer(rooms), x: x, g: g, db: node.NewDialBackServer(rooms, prober), reach: reach}
 		ln := peerLn
 		peerLn = nil // Serve owns it now
 		lnCtx, lnStop := context.WithCancel(ctx)
@@ -771,9 +771,17 @@ func prune(ctx context.Context, m *node.Machine) {
 // call inside the gate.
 type peerHandler struct {
 	*node.JoinServer
-	x  *node.Exchange
-	g  *gate
-	db *node.DialBackServer
+	x     *node.Exchange
+	g     *gate
+	db    *node.DialBackServer
+	reach *node.Reacher
+}
+
+// Inbound records a connection in for "reachable by peers" (DESIGN 11).
+func (h peerHandler) Inbound(from, local string) {
+	if h.reach != nil {
+		h.reach.ConnectedIn(from, local)
+	}
 }
 
 func (h peerHandler) DialBack(ctx context.Context, from, source string, q *node.DialBackRequest) (*node.DialBackResponse, *node.PullError) {

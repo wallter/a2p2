@@ -524,16 +524,22 @@ none, `unknown` otherwise (none answered, or those that answered tried
 nothing); an `unknown` never replaces a `yes` or `no` already known.
 
 **Local API.** `status` gains `reach`: `{"state":"yes"|"no"|"unknown",
-"checked"?,"reached"?,"by"?,"not_tried"?,"saw"?,"verified"?,"not_checked"?,"why"?}`;
-`no` with `why` when networking is off, outbound only, or on and not
-listening. `net/check` (new; request `{}`) tries now every known address
+"checked"?,"reached"?,"by"?,"not_tried"?,"saw"?,"verified"?,"not_checked"?,
+"connected_in"?,"why"?}`; `no` with `why` when networking is off, outbound
+only, or on and not listening. `connected_in` is `[{"node","at","ago_s",
+"local"?}]`: each current member whose pinned connection to this
+machine's listener completed within the last 10 minutes (kept in memory
+only), most recent first, with the local address it arrived on. While it
+is non-empty `state` is `yes` and `why` says which member connected in
+and that this proves only the address it used. `net/check` (new; request `{}`) tries now every known address
 of every other member of every room (one probe per node and address, at
 most 64, 8 at a time; each a TCP connection within 3 s and a pinned
 handshake within 5 s, then closed) and, if one was reached and this
 machine listens, asks the members reached to dial back, without the
 hourly limit. It answers `{"state","listening","listen"?,"fault"?,
 "ipv4_only"?,"advertised":[…],"not_advertised"?,"members":[{"room","room_label","node",
-"name"?,"reached","addrs":[{"addr","result","ms","node"?,"detail"?}]}],
+"name"?,"reached","addrs":[{"addr","result","ms","node"?,"detail"?}],
+"connects_in"?}],
 "reach":{…},"mapping"?,"forward"?,"advice"}`. `result` is `reached`,
 `refused`, `timed_out`, `wrong_key` (the certificate offered names another
 key; the server has not proved it holds that key), `not_a2p2`,

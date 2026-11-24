@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // The outcome of trying one address.
@@ -56,6 +57,9 @@ type MemberCheck struct {
 	Name      string      `json:"name,omitempty"`
 	Reached   bool        `json:"reached"`
 	Addrs     []AddrCheck `json:"addrs"`
+	// ConnectsIn is its latest pinned connection to this machine's
+	// listener, when within InboundFor (Reach.ConnectedIn).
+	ConnectsIn *ConnectIn `json:"connects_in,omitempty"`
 }
 
 // NetCheck is the whole answer of a2p2 net check.
@@ -224,6 +228,14 @@ func (s *Surface) NetCheck(ctx context.Context) (NetCheck, error) {
 	} else {
 		nc.Reach = s.ReachNow()
 	}
+	for i := range nc.Members {
+		for _, ci := range nc.Reach.ConnectedIn {
+			if ci.Node == nc.Members[i].Node {
+				c := ci
+				nc.Members[i].ConnectsIn = &c
+			}
+		}
+	}
 	nc.Mapping = s.MappingNow()
 	nc.Forward = forwardLine(nc)
 	nc.Advice = Advice(nc)
@@ -279,12 +291,17 @@ func behindAnotherNAT(external string, saw []string) bool {
 
 // Advice is the one sentence that ends a check: what to do.
 func Advice(nc NetCheck) string {
-	nodes, reached := map[string]bool{}, map[string]bool{}
+	nodes, reached, in := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	known := false // some member has an address to try
 	for _, m := range nc.Members {
 		nodes[m.Node] = true
 		if m.Reached {
 			reached[m.Node] = true
 		}
+		if m.ConnectsIn != nil {
+			in[m.Node] = true
+		}
+		known = known || len(m.Addrs) > 0
 	}
 	// Rooms in which no member was reached.
 	var cut []string
@@ -312,6 +329,21 @@ func Advice(nc NetCheck) string {
 	case len(nodes) == 0:
 		return "No other machine is in this machine's rooms yet; to test an address before an invite, " +
 			"run a2p2 net check HOST:PORT."
+	case len(reached) == 0 && !known && nc.Listening && len(in) > 0:
+		verb := "connect"
+		if len(in) == 1 {
+			verb = "connects"
+		}
+		s := fmt.Sprintf("%d of %d members %s in to this machine", len(in), len(nodes), verb)
+		if len(in) == len(nodes) {
+			return s + "; nothing to do."
+		}
+		return s + "; the others have said nowhere they listen and have not connected in within the last " +
+			fmt.Sprintf("%d minutes (they may be asleep or offline).", int(InboundFor/time.Minute))
+	case len(reached) == 0 && !known && nc.Listening:
+		return fmt.Sprintf("No member has said where it listens, and none has connected in within the last %d "+
+			"minutes: each may connect out only and be asleep or offline; nothing to fix on this machine.",
+			int(InboundFor/time.Minute))
 	case len(reached) == 0:
 		return "No member could be reached from here: check that this network lets connections out (a firewall, " +
 			"proxy or VPN may block them) and that at least one member is running with networking on."

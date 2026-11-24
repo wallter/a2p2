@@ -48,7 +48,21 @@ type Reach struct {
 	// NotChecked says, per address family advertised, why it was not
 	// checked ("not checked: no member reachable over IPv6").
 	NotChecked []string `json:"not_checked,omitempty"`
-	Why        string   `json:"why,omitempty"`
+	// ConnectedIn is the current members whose pinned connection to this
+	// machine's listener completed within InboundFor, most recent first.
+	// It proves that each reaches the local address it arrived on, and
+	// says nothing of the other advertised addresses.
+	ConnectedIn []ConnectIn `json:"connected_in,omitempty"`
+	Why         string      `json:"why,omitempty"`
+}
+
+// ConnectIn is a member's latest pinned connection in: its key as TLS
+// proved it, when, and the local address it arrived on.
+type ConnectIn struct {
+	Node  string `json:"node"`
+	At    string `json:"at"`
+	AgoS  int64  `json:"ago_s"`
+	Local string `json:"local,omitempty"`
 }
 
 // DialBackTransport asks peer to dial back to addrs (internal/peer).
@@ -77,6 +91,9 @@ var (
 	reachRetry = 10 * time.Minute
 	// reachAsk is how many members one check asks.
 	reachAsk = 3
+	// InboundFor is how recent a member's connection in must be for
+	// "reachable by peers: yes" on that evidence alone.
+	InboundFor = 10 * time.Minute
 )
 
 // ReachOpts configure a Reacher.
@@ -108,6 +125,8 @@ type Reacher struct {
 	cur      Reach
 	verified map[string]time.Time // candidate: when a member last reached it
 	misses   map[string]int       // candidate: checks in a row that tried it and missed
+	in       map[string]ConnectIn // key: its latest connection in (memory only)
+	inAt     map[string]time.Time
 }
 
 // NewReacher asks through t.
@@ -116,20 +135,83 @@ func NewReacher(t DialBackTransport, o ReachOpts) *Reacher {
 		o.Now = time.Now
 	}
 	return &Reacher{t: t, o: o, nudge: make(chan struct{}, 1), asked: map[string]time.Time{},
-		verified: map[string]time.Time{}, misses: map[string]int{}, cur: Reach{State: ReachUnknown, Why: "not checked yet"}}
+		verified: map[string]time.Time{}, misses: map[string]int{},
+		in: map[string]ConnectIn{}, inAt: map[string]time.Time{}, cur: Reach{State: ReachUnknown, Why: "not checked yet"}}
 }
 
 // Get is the latest answer.
 func (r *Reacher) Get() Reach {
 	v := r.Verified()
+	var members []string
+	if r.o.Members != nil {
+		members = r.o.Members()
+	}
+	now := r.o.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	c := r.cur
 	c.Reached, c.By, c.Saw = slices.Clone(c.Reached), slices.Clone(c.By), slices.Clone(c.Saw)
 	c.NotTried, c.NotChecked = slices.Clone(c.NotTried), slices.Clone(c.NotChecked)
 	c.Verified = v
+	// A current member's connection in within InboundFor: a key that
+	// shares no room any more, or one that never did, counts
+	// for nothing.
+	for n, at := range r.inAt {
+		if !slices.Contains(members, n) || now.Sub(at) >= InboundFor {
+			continue
+		}
+		ci := r.in[n]
+		ci.AgoS = int64(now.Sub(at) / time.Second)
+		c.ConnectedIn = append(c.ConnectedIn, ci)
+	}
+	slices.SortFunc(c.ConnectedIn, func(a, b ConnectIn) int { return int(a.AgoS - b.AgoS) })
+	if len(c.ConnectedIn) > 0 && c.State != ReachYes {
+		ci := c.ConnectedIn[0]
+		c.State = ReachYes
+		c.Why = core.ShortNode(ci.Node) + " connected in " + agoText(ci.AgoS)
+		if len(c.ConnectedIn) > 1 {
+			c.Why += fmt.Sprintf(" (and %d more)", len(c.ConnectedIn)-1)
+		}
+		c.Why += ": a member reaches this machine at the address it used"
+		if ci.Local != "" {
+			c.Why += " (" + ci.Local + ")"
+		}
+		c.Why += "; that does not test the other addresses advertised"
+	}
 	return c
 }
+
+func agoText(s int64) string {
+	if s < 60 {
+		return fmt.Sprintf("%d s ago", s)
+	}
+	return fmt.Sprintf("%d min ago", s/60)
+}
+
+// ConnectedIn records that node completed a pinned connection to this
+// machine's listener, arriving on local. Kept in memory only; whether node
+// is a member is decided when it is read (Get).
+func (r *Reacher) ConnectedIn(node, local string) {
+	now := r.o.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.inAt[node]; !ok && len(r.inAt) >= maxInbound {
+		// Full: forget the oldest, so a flood of keys cannot grow this.
+		old, oldAt := "", now
+		for n, at := range r.inAt {
+			if at.Before(oldAt) {
+				old, oldAt = n, at
+			}
+		}
+		delete(r.inAt, old)
+		delete(r.in, old)
+	}
+	r.inAt[node] = now
+	r.in[node] = ConnectIn{Node: node, At: now.UTC().Format(timeFormat), Local: local}
+}
+
+// maxInbound bounds the connections in remembered (one per key).
+const maxInbound = 1024
 
 // order puts members with a verified address first, then the rest, each
 // group in a stable order.
