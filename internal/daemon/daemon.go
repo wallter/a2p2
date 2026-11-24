@@ -20,7 +20,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/wallter/a2p2/internal/core"
@@ -77,8 +76,8 @@ func CheckHome(home string) error {
 	if !fi.IsDir() {
 		return fmt.Errorf("%s is not a directory (symlinks are not followed)", home)
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
-		return fmt.Errorf("%s is owned by another user", home)
+	if err := checkOwner(fi, home); err != nil {
+		return err
 	}
 	if fi.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("%s is accessible to other users (mode %o); run: chmod 700 %s", home, fi.Mode().Perm(), home)
@@ -193,7 +192,7 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 		return err
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := tryLock(lock); err != nil {
 		return fmt.Errorf("another a2p2 daemon is already running for %s", home)
 	}
 	cfg, err := LoadConfig(home)
@@ -212,7 +211,7 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	if err := CheckUIAddr(uiAddr); err != nil {
 		return err
 	}
-	syscall.Umask(0o077) // everything the daemon creates is private to this user
+	umask(0o077) // everything the daemon creates is private to this user
 	id, err := peer.LoadIdentity(home)
 	if err != nil {
 		return err
@@ -275,9 +274,9 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	// file is stale and safe to remove.
 	sock := sockPath(home)
 	_ = os.Remove(sock)
-	old := syscall.Umask(0o177)
+	old := umask(0o177)
 	apiLn, err := net.Listen("unix", sock)
-	syscall.Umask(old)
+	umask(old)
 	if err != nil {
 		return fmt.Errorf("local socket: %w", err)
 	}
@@ -596,7 +595,7 @@ func Connect(ctx context.Context, home string) (*localapi.Client, error) {
 	cmd := exec.Command(exe, "daemon")
 	cmd.Env = append(os.Environ(), "A2P2_HOME="+home)
 	cmd.Stdout, cmd.Stderr = logf, logf
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // survive the caller's terminal
+	detach(cmd) // survive the caller's terminal
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start daemon: %w", err)
 	}
@@ -620,8 +619,8 @@ func WaitStopped(home string, d time.Duration) bool {
 	}
 	defer f.Close()
 	for deadline := time.Now().Add(d); ; time.Sleep(50 * time.Millisecond) {
-		if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
-			syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		if tryLock(f) == nil {
+			unlock(f)
 			return true
 		}
 		if time.Now().After(deadline) {

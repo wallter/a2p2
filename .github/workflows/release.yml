@@ -1,0 +1,39 @@
+name: release
+# Pushing a tag such as v0.3.0 builds the static binaries a2p2_<os>_<arch>
+# for linux and darwin on amd64 and arm64 with `make release`, writes
+# SHA256SUMS, and attaches them to a GitHub release made with the gh CLI.
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # create the release and upload its files; nothing else
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          # No module or build cache: a cache saved by another workflow run
+          # must not be able to change what goes into a released binary.
+          cache: false
+      - run: make check
+      - run: make release VERSION="$GITHUB_REF_NAME"
+      - name: the binary reports the tag
+        run: test "$(dist/a2p2_linux_amd64 version)" = "a2p2 $GITHUB_REF_NAME"
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=""
+          case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/a2p2_* dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+            --generate-notes --verify-tag $pre

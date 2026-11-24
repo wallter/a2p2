@@ -372,10 +372,11 @@ func TestTwoDaemonsOnLoopbackPairSendReplyAckAndTrace(t *testing.T) {
 	}
 	a, b := newMachine(t, "alpha"), newMachine(t, "beta")
 	room := call[localapi.Room](a, "room/create", localapi.RoomReq{Room: "team"}).ID
-	ann, bea := a.agent("ann"), b.agent("bea")
+	ann := a.agent("ann")
+	b.agent("bea") // bea registers before the restart, and again after it
 	// The joiner restarts between its approval and the admin's: the join resumes.
 	join(t, a, b, room, localapi.InviteReq{}, true)
-	bea = b.agent("bea")
+	bea := b.agent("bea")
 
 	m := call[localapi.SendResp](a, "send", localapi.SendReq{Agent: ann, Room: "team", Text: "build is green", To: []string{bea}})
 	es := inboxWait(b, bea)
