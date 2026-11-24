@@ -10,8 +10,10 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Added
 
-- **Windows support, built but not yet run there.** The daemon and the CLI
-  no longer refuse to start on Windows 10 (1803 or later) and 11. The
+- **Windows support.** The daemon and the CLI run on Windows 10 (1803 or
+  later) and 11. The test suite passes on a Windows Server 2025 runner
+  (amd64); the harness installers have not been tried with real
+  harnesses there, and arm64 is built but not run. The
   home is created for your user only and refused if others can open it,
   and every local API call carries a key the daemon writes into the home
   at each start (D47). Releases include `a2p2_windows_amd64.exe`

@@ -11,8 +11,8 @@ server, hosted relay or account.
 
 ## Limits of version 0.1.0
 
-- macOS and Linux. Windows: builds for Windows; not yet run there (see
-  [On Windows](#on-windows)). The design target is 64 machines per room.
+- macOS and Linux. Windows: the tests pass there, and the harness
+  installers are untried there (see [On Windows](#on-windows)). The design target is 64 machines per room.
 - New mail does not wake an idle agent. Agents check their inbox, and
   hooks can give an unread notice during a session.
 - Each machine must be able to reach another room member or be reached
@@ -77,10 +77,11 @@ awk '$2 == "a2p2_darwin_arm64"' SHA256SUMS | shasum -a 256 -c &&
 
 ### On Windows
 
-a2p2 builds for Windows; not yet run there. The code for Windows 10
-(1803 or later) and 11 on amd64 and arm64 is written and compiles, and
-its tests compile, but none has run on Windows yet, so treat it as
-untried. From version 0.2.0 each release also has
+a2p2 runs on Windows 10 (1803 or later) and 11. Its test suite passes on
+a Windows Server 2025 runner on amd64 (2026-11-24). Not tried there:
+`a2p2 install` with a real harness, the page in a Windows browser,
+another Windows user trying to reach your daemon, and arm64 (built, not
+run). From version 0.2.0 each release also has
 `a2p2_windows_amd64.exe` and `a2p2_windows_arm64.exe`, listed in
 `SHA256SUMS`; check one in PowerShell with
 `(Get-FileHash a2p2_windows_amd64.exe).Hash` against its line there.

@@ -1094,7 +1094,14 @@ After the first dispatched run (2026-11-24; 5 of 12 packages failed):
   or `all`) so a run by hand spends only the minutes asked for; pull
   requests still run only the Linux job.
 
-**Revisit if** the dispatched run shows that the socket file does not
+The third run (2026-11-24, Windows Server 2025, amd64) passed all twelve
+packages. The second had passed eleven: the twelfth failed because a
+test's recording proxy between the MCP shim and the daemon dropped the
+local key, and the daemon refused the call, as it should. Still not
+verified on Windows: an install with a real harness, the page in a
+browser, a second user trying to reach the daemon, and arm64.
+
+**Revisit if** a run shows that the socket file does not
 inherit the home's list, or if a harness documents its Windows hook
 shell, which would let paths with spaces be quoted for it.
 
