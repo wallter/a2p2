@@ -260,6 +260,11 @@ there is no server.
   the real one. Machines that did receive the real one refuse the other.
 - **What a removed machine wrote and nobody fetched is lost**, including a
   withdrawal of one of its own messages.
+- **A removed machine's later messages can still appear, marked.** If a
+  member that has not yet heard of the removal takes a message from it, that
+  message is passed on and shown as from a machine that is no longer a
+  member. Messages are discarded outright only for a machine that was never
+  validly added.
 - **If a machine's permission to read earlier history is narrowed later**,
   text its agents were already shown is dropped without a notice.
 - **"May not read earlier history" is kept by the members, not by
