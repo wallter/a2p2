@@ -716,18 +716,29 @@ Socket calls are `POST /v1/<name>`, JSON in and out; errors `{"error"}` with
 | `thread` (new) | `{"agent","id"}` | `{"entries":[Entry]}`; marks nothing |
 | `seen` (changed) | `{"agent","entries":[{"key","version"}]}` | `{"results":[{"key","ok","reason"?}]}`: each entry is confirmed only if the inbox would show exactly it to this agent now; the rest are applied. A replaced entry's key names the replace record |
 | `ack` | `{"agent","id"}` | `{"handled":"<record id>"}` |
-| `history` (changed) | `{"room","before"?,"limit"?}` | `{"entries":[Entry]}` |
-| `trace` (changed) | `{"id"}` | `{"id","room","saved","reason","copies":[{"node","at","member"}],"handled":[{"agent","at"}]}` |
-| `alerts` (new) | `{"wait_ms"?}` (≤ 120,000) | `{"alerts":[{"kind":"request"\|"fork"\|"missing","id","room","text","since"}]}` |
-| `requests` (new) | `{}` | `{"requests":[{"id","kind","room","node","name","role","history","created"}]}` |
-| `confirm` (new) | `{"id","approve":bool,"not_caught_up_ok"?:true}` | `{"id","state":"approved"\|"declined"\|"failed","reason"?}`; `reason` `not_caught_up` means this machine has not checked the room's log with another member since it started (DESIGN 3); the surface shows the warning and may repeat with `not_caught_up_ok`, which is recorded |
-| `room/invite` (changed) | `{"room","history"?,"role"?}` | `{"token","expires","room"}` |
-| `room/join` (changed) | `{"token"}` | the previewed answer of 5.3 |
-| `room/join/accept` (new) | `{"token","wait_ms"?}` | `{"state":"accepted"\|"signed"\|"refused"\|"expired"\|"removed","room"?,"reason"?}` |
-| `room/admin` (new) | `{"room","node"}` | `{"entry","state":"applied"\|"pending","reason"?}` |
+| `history` (changed) | `{"room","before"?,"limit"?}`; `before` is a message id, and paging is by (created, id), so a boundary withdrawn or expired since still works | `{"entries":[Entry]}`; marks nothing |
+| `trace` (changed) | `{"id"}` | `{"id","room","saved","reason","copies":[{"node","at","member","evidence"}],"handled":[{"agent","at"}]}`. `saved`: this machine holds the record's header; `reason`: the state of its text here. A copy's `at` is when this machine observed it, `member` is membership now, and `evidence` is `position` (the holder reported that position of the stream, section 4.3). A handled `at` is when the report was written. An unknown id is an error |
+| `unread` (changed) | `{"agent","lines"?}` | `{"count","rooms":[…],"first"?:[…]}`; marks nothing (U4) |
+| `alerts` (new) | `{"wait_ms"?}` (≤ 120,000) | `{"alerts":[{"kind":"request"\|"fork"\|"missing","id","room","text","since"}]}`; `missing`: text wanted for a day and still not here |
+| `requests` (new) | `{}` | `{"requests":[{"id","kind","action","room","room_label","node","fingerprint","name","role","history","seconding","created","deadline","text"}]}`; `kind` `network` is a recorded decision about networking |
+| `confirm` (new) | `{"id","approve":bool,"not_caught_up_ok"?:true}` | `{"id","state":"approved"\|"declined"\|"failed","reason"?,"entries"?,"effect"?}`; `reason` `not_caught_up` means this machine has not checked the room's log with another member since it started (DESIGN 3); the surface shows the warning and may repeat with `not_caught_up_ok`, which is recorded |
+| `net` (changed) | `{"state":"off"\|"outbound"\|"on","listen"?}` | `{"state","listen","request","text","applies"}`; a person's decision with the same authority as `confirm`, recorded as a decided request |
+| `status` (changed) | `{"show_notice"?}` | machine, version, `network {state, listen, request}`, rooms, agents, `waiting` (requests for a person), and once ever `notice` |
+| `room/invite` (changed) | `{"room","history"?,"role"?}` | `{"token","expires","room"}`; refused while networking is off |
+| `room/join` (changed) | `{"token"}` | the previewed answer of 5.3 plus `preview`, the preview's identifier; refused while networking is off |
+| `room/join/accept` (new) | `{"token","preview","wait_ms"?}` | `{"state":"accepted"\|"signed"\|"refused"\|"expired"\|"removed","room"?,"reason"?,"role"?,"history"?,"note"?}`; `role` and `history` are what the joiner's own log shows, `note` says if they differ from the preview |
+| `room/admin` (new) | `{"room","node"}` | `{"request","state":"waiting","text","terms"}`: raises a request; nothing is signed until `confirm` |
 | `room/remove` (changed) | `{"room","node"}` | as `room/admin` |
 | `room/leave` (new) | `{"room"}` | `{}` |
 | `room/list` (new) | `{"room"?}` | `{"rooms":[{"id","label","members":[…],"admins":[…],"pending":[…],"no_effect":[{"entry","reason"}],"forks":[…],"limits":[…]}]}` |
+
+Every machine has a room labelled `local` with itself as the only member,
+made at first start; it cannot be invited to or left. Networking has three
+states: `off` (no listener, no pulls, no join polling, no dials),
+`outbound` (everything except a listener: requirement N1) and `on`. The
+socket is open to any program running as the same user: `confirm`, `net`
+and `room/join/accept` are kept out of the agent tools and hooks and every
+use is recorded, which is a guard rail and not a lock (REQUIREMENTS 6).
 
 `Entry`: `{"key","version","kind":"message"|"withdrawn"|"replaced"|"expired"|"voided","id","room","from","from_node","author_removed","to","parent","thread","parent_state":"here"|"missing"|"expired"|"withdrawn","late","created","text","choices"}`.
 `Wait`: `{"room","author","have","known","since","reason":"text"|"link"|"gap"}`.
@@ -737,9 +748,11 @@ CLI added: `confirm [<id>] [--decline]` (no id: list), `alerts [--wait
 `room invite <room> [--history] [--member|--admin]`, `join` (token on stdin,
 shows the preview, asks on the terminal, then waits unless `--no-wait`),
 `send --reply-to --ask-handled --replaces`, `inbox --thread`, `trace`,
-`room list`. `confirm` refuses unless stdin is a terminal.
+`room list`, `net on [<addr>] [--outbound-only]`, `net off`. `confirm`,
+`net` and the approval step of `join` refuse unless stdin is a terminal
+(`join` without one prints the preview and stops).
 
-## 8. Schema (migrations 2 to 8)
+## 8. Schema (migrations 2 to 9)
 
 | Table | Columns | Keys |
 |---|---|---|
@@ -751,6 +764,7 @@ shows the preview, asks on the terminal, then waits unless `--no-wait`),
 | `observed` | `room`, `peer`, `author`, `digest`, `detail` json, `at`; the row with an empty `author` holds the peer's last log heads and extra | (`room`,`peer`,`author`) |
 | `refusals` | `room`, `peer`, `reason`, `count`, `last_at` | (`room`,`peer`,`reason`) |
 | `peer_addrs` (migration 8) | `node`, `addr`, `source` (`self`, `peer`), `seen_at`, `failed_at`, `fails`; only for members of a room this machine is in | (`node`,`addr`) |
+| index `records_history` (migration 9) | `records (room, kind, created, id)`, for `history` | |
 | `agents` | as v0.2 | `id` |
 | `cursors` | `agent`, `room`, `author`, `epoch`, `start`, `pos` | (`agent`,`room`,`author`,`epoch`) |
 | `reads` | `agent`, `room`, `key`, `version`, `msg` (indexed) | (`agent`,`room`,`key`) |

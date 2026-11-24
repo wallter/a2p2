@@ -459,3 +459,42 @@ Choices made in review (`research/decisions/step5b-review-sol.md`):
 - **Not done:** no wake-up when text expires during a hold; the answer is
   worked out again when the hold ends, at most 60 s later.
 
+## D34. The surfaces run on the new path (2026-11-24)
+
+The switch, part A: the local API, MCP tools, CLI, web page, hooks and
+daemon call the next version's code through one facade,
+`node/surface.go`. The seven tools are unchanged in number and are the
+golden file of PROTOCOL 6 (3,741 bytes compact, about 936 tokens by the
+bytes/4 proxy; a test holds them under 4,000 bytes).
+
+New, and why each is needed now:
+- **CLI commands** `confirm`, `alerts`, `room admin`, `room leave`: a
+  person must be able to approve or decline what agents and peers ask for
+  without a browser (always-on machines are often headless), to hear that
+  something waits, to replace a lost admin, and to stop carrying a room.
+- **`net on --outbound-only`** and the third networking state: requirement
+  N1 (a machine that cannot accept connections) needs pulls without a
+  listener, and "off" must mean that nothing leaves the machine.
+- **Request kind `network`**: turning networking on or off is one of the
+  decisions P3 names, so it is recorded with the others.
+- **Index `records_history`** (migration 9): `history` paged by reading
+  the whole room.
+
+Choices made in review (`research/decisions/switch-a-review-sol.md`):
+- `room/admin` and `room/remove` only raise a request; nothing is signed
+  until a person confirms.
+- Decisions (`confirm`, `net`, accepting a join) are refused by the CLI
+  unless it runs at a terminal, and are not among the agent tools or
+  hooks. Any program running as the same user can still call the socket;
+  comments and help text now say so rather than implying enforcement.
+- A request shows the full fingerprint and its terms as separate fields,
+  and the page sends back the text it showed; confirming fails if the text
+  has changed.
+- **Not done:** issuing an invite needs no confirmation (it does nothing
+  until the admin's person approves the accept). A question from
+  `ask_human` has no marker of its own in the record: the body decoder
+  refuses unknown keys and the signed formats are frozen (D27), so the
+  page treats any unread message to the person, or one with choices, as a
+  question. Subscription levels (U1 to U3) are stage 3. The page's script
+  has not been run in a browser.
+
