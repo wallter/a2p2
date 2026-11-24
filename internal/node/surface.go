@@ -794,8 +794,9 @@ func (s *Surface) rooms(ctx context.Context) ([]store.LogRoom, error) {
 }
 
 // Inbox shows agent what it has not confirmed, in room or in every room,
-// oldest first, at most limit entries, waiting up to wait for one. It marks
-// nothing: Seen confirms.
+// oldest first, at most limit entries, waiting up to wait for one. It keeps
+// a receipt of each entry it returns, which Seen requires (Machine.Showed),
+// and marks nothing seen: Seen confirms.
 func (s *Surface) Inbox(ctx context.Context, agent, room string, limit int, wait time.Duration) (InboxView, error) {
 	label, err := s.label(agent)
 	if err != nil {
@@ -824,6 +825,9 @@ func (s *Surface) Inbox(ctx context.Context, agent, room string, limit int, wait
 		if err != nil || len(v.Entries) > 0 || wait == 0 {
 			if len(v.Entries) > limit {
 				v.Entries = v.Entries[:limit]
+			}
+			if err == nil {
+				err = s.showed(ctx, label, v.Entries, true)
 			}
 			return v, err
 		}
@@ -865,6 +869,36 @@ func (s *Surface) inbox(ctx context.Context, label, room string) (InboxView, err
 	var err error
 	out.Entries, err = s.withLabels(ctx, out.Entries, nil)
 	return out, err
+}
+
+// Listed keeps a receipt for agent of entries a surface listed to it from
+// its inbox by other means than Inbox (the page's questions), so that Seen
+// accepts them.
+func (s *Surface) Listed(ctx context.Context, agent string, es []Entry) error {
+	label, err := s.label(agent)
+	if err != nil {
+		return err
+	}
+	return s.showed(ctx, label, es, true)
+}
+
+// showed records, room by room, what a read returned to agent label
+// (Machine.Showed): a full inbox listing, or another view.
+func (s *Surface) showed(ctx context.Context, label string, es []Entry, inbox bool) error {
+	byRoom := map[string][]Entry{}
+	var order []string
+	for _, e := range es {
+		if byRoom[e.Room] == nil {
+			order = append(order, e.Room)
+		}
+		byRoom[e.Room] = append(byRoom[e.Room], e)
+	}
+	for _, room := range order {
+		if err := s.m.Showed(ctx, room, label, byRoom[room], inbox); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // wakes are channels closed at the next change of room (or of any room,
@@ -959,8 +993,13 @@ func (s *Surface) Seen(ctx context.Context, agent string, reads []store.Read) ([
 }
 
 // Thread shows the thread of message id (the whole thread when id starts
-// one, else the branch under it). It marks nothing.
+// one, else the branch under it). It marks nothing seen; the agent may then
+// report a message whose text it showed handled (Machine.Showed).
 func (s *Surface) Thread(ctx context.Context, agent, id string) ([]Entry, error) {
+	return s.ThreadAfter(ctx, agent, id, "")
+}
+
+func (s *Surface) thread(ctx context.Context, agent, id string) ([]Entry, error) {
 	if _, err := s.label(agent); err != nil {
 		return nil, err
 	}
@@ -990,60 +1029,76 @@ func (s *Surface) Thread(ctx context.Context, agent, id string) ([]Entry, error)
 
 // ThreadAfter is Thread without what was read before: only the entries
 // that follow message after in the thread's order, so re-reading a thread
-// does not repeat it. An empty after is Thread. It marks nothing.
+// does not repeat it. An empty after is Thread. It marks nothing seen, as
+// Thread.
 func (s *Surface) ThreadAfter(ctx context.Context, agent, id, after string) ([]Entry, error) {
-	es, err := s.Thread(ctx, agent, id)
-	if err != nil || after == "" {
-		return es, err
+	es, err := s.thread(ctx, agent, id)
+	if err != nil {
+		return nil, err
 	}
-	after = strings.TrimPrefix(after, "x:")
-	for i, e := range es {
-		if e.ID == after {
-			return es[i+1:], nil
+	if after != "" {
+		after = strings.TrimPrefix(after, "x:")
+		i := slices.IndexFunc(es, func(e Entry) bool { return e.ID == after })
+		if i < 0 {
+			return nil, codedErr(ErrorNotFound, "message %s is not in this thread here: give the id of a message the thread view showed", after)
 		}
+		es = es[i+1:]
 	}
-	return nil, codedErr(ErrorNotFound, "message %s is not in this thread here: give the id of a message the thread view showed", after)
+	label, err := s.label(agent)
+	if err == nil {
+		err = s.showed(ctx, label, es, false)
+	}
+	return es, err
 }
 
 // History is the room's messages held here with their text, oldest first:
-// at most limit, before message before if given. Pages run by (created,
-// id) through an index; before may name a message withdrawn or expired
-// since, since its header stays. It marks nothing; text this machine may
-// not read is not held, so it is never shown.
-func (s *Surface) History(ctx context.Context, room, before string, limit int) ([]Entry, error) {
+// at most limit, before message before if given. Pages run by place
+// (created, author, seq, id; sortEntries) through an index; before may
+// name a message withdrawn or expired since, since its header stays. Text
+// this machine may not read is not held, so it is never shown. It marks
+// nothing seen. With agent, it marks the entries the agent's level kept
+// out of its inbox (Skipped), and the agent may then report a message
+// whose text it showed handled (Machine.Showed).
+func (s *Surface) History(ctx context.Context, agent, room, before string, limit int) ([]Entry, error) {
 	id, err := s.ResolveRoom(ctx, room)
 	if err != nil {
 		return nil, err
 	}
-	switch {
-	case limit < 0:
-		return nil, userErr("limit must not be negative")
-	case limit == 0:
-		limit = DefaultHistory
-	case limit > MaxHistory:
-		limit = MaxHistory
+	label := ""
+	if agent != "" {
+		if label, err = s.label(agent); err != nil {
+			return nil, err
+		}
+	}
+	if limit, err = historyLimit(limit); err != nil {
+		return nil, err
 	}
 	var out []Entry
 	err = s.m.view(ctx, id, func(v *roomView) error {
-		var at time.Time
-		after := ""
+		var g *agentState
+		if label != "" {
+			if err := v.requireAgent(label); err != nil {
+				return s.notRegistered(label, err)
+			}
+			if g, err = v.agent(label); err != nil {
+				return err
+			}
+		}
+		var at store.Place
 		if before != "" {
-			h, ok, err := v.rd.Record(id, strings.TrimPrefix(before, "x:"))
+			h, err := placeOf(v, id, before, "the room's history")
 			if err != nil {
 				return err
 			}
-			if !ok || h.Record.Fields().Kind != core.KindMessage {
-				return codedErr(ErrorNotFound, "message %q is not in the room's history here", before)
-			}
-			at, after = h.Record.Fields().Created, h.Record.ID()
+			at = store.PlaceOf(h.Record)
 		}
 		for len(out) < limit {
-			hs, err := v.rd.MessagesBefore(id, at, after, limit)
+			hs, err := v.rd.MessagesBefore(id, at, limit)
 			if err != nil {
 				return err
 			}
 			for _, h := range hs {
-				at, after = h.Record.Fields().Created, h.Record.ID()
+				at = store.PlaceOf(h.Record)
 				x := v.keep(h)
 				if v.hidden(x.author) {
 					continue
@@ -1052,9 +1107,15 @@ func (s *Surface) History(ctx context.Context, room, before string, limit int) (
 				if err != nil {
 					return err
 				}
-				if e != nil && e.Kind == EntryMessage && len(out) < limit {
-					out = append(out, *e)
+				if e == nil || e.Kind != EntryMessage || len(out) == limit {
+					continue
 				}
+				if g != nil {
+					if e.Skipped, err = v.skippedFor(g, label, x); err != nil {
+						return err
+					}
+				}
+				out = append(out, *e)
 			}
 			if len(hs) < limit {
 				break
@@ -1066,7 +1127,38 @@ func (s *Surface) History(ctx context.Context, room, before string, limit int) (
 		return nil, err
 	}
 	slices.Reverse(out)
+	if label != "" {
+		if err := s.showed(ctx, label, out, false); err != nil {
+			return nil, err
+		}
+	}
 	return s.withLabels(ctx, out, nil)
+}
+
+// historyLimit checks a page size: 0 is DefaultHistory, and at most
+// MaxHistory.
+func historyLimit(limit int) (int, error) {
+	switch {
+	case limit < 0:
+		return 0, userErr("limit must not be negative")
+	case limit == 0:
+		return DefaultHistory, nil
+	case limit > MaxHistory:
+		return MaxHistory, nil
+	}
+	return limit, nil
+}
+
+// placeOf is the message a page's before names, held in room.
+func placeOf(v *roomView, room, before, what string) (store.Held, error) {
+	h, ok, err := v.rd.Record(room, strings.TrimPrefix(before, "x:"))
+	if err != nil {
+		return store.Held{}, err
+	}
+	if !ok || h.Record.Fields().Kind != core.KindMessage {
+		return store.Held{}, codedErr(ErrorNotFound, "message %q is not in %s here", before, what)
+	}
+	return h, nil
 }
 
 // TraceView is what is known here of one message (A4).
@@ -1175,14 +1267,15 @@ type FirstLine struct {
 	Line string
 }
 
-// Unread summarises agent's unread entries without marking any seen;
-// lines asks for first lines too.
-func (s *Surface) Unread(ctx context.Context, agent string, lines bool) (UnreadView, error) {
+// Unread summarises agent's unread entries in room, or in every room when
+// room is "", without marking any seen; lines asks for first lines too,
+// at most maxFirstLines of the rooms counted.
+func (s *Surface) Unread(ctx context.Context, agent, room string, lines bool) (UnreadView, error) {
 	label, err := s.label(agent)
 	if err != nil {
 		return UnreadView{}, err
 	}
-	rs, err := s.rooms(ctx)
+	rs, err := s.levelRooms(ctx, room)
 	if err != nil {
 		return UnreadView{}, err
 	}

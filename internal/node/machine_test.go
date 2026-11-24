@@ -93,9 +93,14 @@ func (r *rig) to(agents ...string) []core.Addressee {
 	return out
 }
 
+// inbox lists agent's inbox as the inbox tool does: with a receipt of each
+// entry, which Seen requires.
 func (r *rig) inbox(agent string) []Entry {
 	r.t.Helper()
 	v, err := r.m.Inbox(context.Background(), mRoom, agent)
+	if err == nil {
+		err = r.m.Showed(context.Background(), mRoom, agent, v.Entries, true)
+	}
 	if err != nil {
 		r.t.Fatal(err)
 	}
@@ -290,8 +295,8 @@ func TestReplyGoesToTheParentsAuthorUnlessAddresseesAreNamed(t *testing.T) {
 }
 
 // [R7] Only an addressee, or anyone but the author of a room-wide post that
-// asked, may report handled, and only after confirming its text; a second
-// report returns the first.
+// asked, may report handled, and only after a read showed it the text (an
+// inbox listing is enough, D-reading); a second report returns the first.
 func TestHandledOnlyByAnAddresseeAfterItWasShownTheText(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
@@ -302,10 +307,10 @@ func TestHandledOnlyByAnAddresseeAfterItWasShownTheText(t *testing.T) {
 	if _, err := r.m.Handled(ctx, mRoom, "bob", direct); !errors.Is(err, ErrNotAllowed) {
 		t.Fatalf("before shown: %v", err)
 	}
-	shown := r.inbox("bob")
-	if _, err := r.m.Handled(ctx, mRoom, "bob", direct); !errors.Is(err, ErrNotAllowed) {
-		t.Fatalf("shown but not confirmed: %v", err)
+	if _, err := r.m.Handled(ctx, mRoom, "carol", asked); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("carol before shown: %v", err)
 	}
+	shown := r.inbox("bob")
 	r.seen("bob", shown)
 	r.read("carol")
 	h1, err := r.m.Handled(ctx, mRoom, "bob", direct)
@@ -478,8 +483,9 @@ func TestSeenOfAVersionNoLongerShownIsRefusedAndTheRestApplied(t *testing.T) {
 // Review blocker 2: Seen refuses what Inbox would not show this agent now
 // (a made-up key, another agent's message, a notice of something never
 // shown), and a refused confirmation does not let the agent report
-// handled. An entry Inbox would show is accepted even if Inbox was not
-// called (the lead's rule: no stored receipts).
+// handled. Since D-reading an entry needs a receipt: one Inbox would show
+// is refused until a listing showed it, and then only at the version
+// listed.
 func TestSeenRefusesEntriesInboxWouldNotShowAndHandledStaysTiedToShownText(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
@@ -493,8 +499,16 @@ func TestSeenRefusesEntriesInboxWouldNotShowAndHandledStaysTiedToShownText(t *te
 	if _, err := r.m.Handled(ctx, mRoom, "carol", m); !errors.Is(err, ErrNotAllowed) {
 		t.Fatalf("carol handled: %v", err)
 	}
-	res, err := r.m.Seen(ctx, mRoom, "bob", []store.Read{{Key: m, Version: "deadbeef"}, {Key: m, Version: m}})
-	if err != nil || res[0].Confirmed || res[0].Reason != SeenVersionChanged || !res[1].Confirmed {
+	res, err := r.m.Seen(ctx, mRoom, "bob", []store.Read{{Key: m, Version: m}})
+	if err != nil || res[0].Confirmed || res[0].Reason != SeenNotShown {
+		t.Fatalf("bob before a listing: %+v %v", res, err)
+	}
+	if _, err := r.m.Handled(ctx, mRoom, "bob", m); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("bob handled before a listing: %v", err)
+	}
+	r.inbox("bob")
+	res, err = r.m.Seen(ctx, mRoom, "bob", []store.Read{{Key: m, Version: "deadbeef"}, {Key: m, Version: m}})
+	if err != nil || res[0].Confirmed || res[0].Reason != SeenNotShown || !res[1].Confirmed {
 		t.Fatalf("bob: %+v %v", res, err)
 	}
 	if _, err := r.m.Handled(ctx, mRoom, "bob", m); err != nil {

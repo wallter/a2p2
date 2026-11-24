@@ -451,19 +451,15 @@ func TestAckRefusalsSayWhy(t *testing.T) {
 		{b, strings.Repeat("0", 32), "no message"},
 		{b, plain, "not addressed to you and did not ask"},
 		{a, direct, "you wrote this message"},
-		{b, direct, "read it with inbox first"},
+		{b, direct, "read it first"},
 	} {
 		s, isErr := call(t, x.cs, "ack", map[string]any{"id": x.id})
 		if !isErr || !strings.Contains(s, x.reason) {
 			t.Errorf("ack %s: %v %q, want %q", x.id, isErr, s, x.reason)
 		}
 	}
-	// Reading the thread does not count; reading the inbox does.
+	// Reading the thread showed the text: it counts (D-reading).
 	parseEntries(t, ok(t, b, "inbox", map[string]any{"thread": direct}))
-	if s, _ := call(t, b, "ack", map[string]any{"id": direct}); !strings.Contains(s, "thread or recent view does not count") {
-		t.Fatalf("after thread: %q", s)
-	}
-	ok(t, b, "inbox", nil)
 	first := parse(t, ok(t, b, "ack", map[string]any{"id": direct}))
 	var again struct {
 		Handled, Report string

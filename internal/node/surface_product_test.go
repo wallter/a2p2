@@ -26,25 +26,23 @@ func TestSurfaceAckRefusalsSayWhyAndTheRuleIsUnchanged(t *testing.T) {
 		{bob, strings.Repeat("0", 32), "no message"},
 		{bob, plain.ID, "not addressed to you and did not ask"},
 		{alice, asked.ID, "you wrote this message"},
-		{bob, direct.ID, "read it with inbox first"},
-		{bob, asked.ID, "read it with inbox first"},
+		{bob, direct.ID, "read it first"},
+		{bob, asked.ID, "read it first"},
 	} {
 		_, err := e.s.Ack(ctx, c.agent, c.id)
 		if !isUser(err) || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s acks %s: %v, want %q", c.agent, c.id, err, c.want)
 		}
 	}
+	// A thread read showed bob the text: it counts (D-reading).
 	if _, err := e.s.Thread(ctx, bob, direct.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.s.Ack(ctx, bob, direct.ID); err == nil || !strings.Contains(err.Error(), "thread or recent view does not count") {
+	h, err := e.s.Ack(ctx, bob, direct.ID)
+	if err != nil {
 		t.Fatalf("after a thread read: %v", err)
 	}
 	e.read(bob)
-	h, err := e.s.Ack(ctx, bob, direct.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := e.s.Ack(ctx, bob, asked.ID); err != nil {
 		t.Fatalf("a post that asked, once shown: %v", err)
 	}

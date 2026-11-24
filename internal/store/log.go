@@ -754,7 +754,7 @@ func (s *Store) LeaveRoom(ctx context.Context, room string, now time.Time) (int6
 			`DELETE FROM requests WHERE room = ?`,
 			`DELETE FROM observed WHERE room = ?`, `DELETE FROM refusals WHERE room = ?`,
 			`DELETE FROM room_invites WHERE room = ?`,
-			`DELETE FROM levels WHERE room = ?`, `DELETE FROM skips WHERE room = ?`,
+			`DELETE FROM levels WHERE room = ?`, `DELETE FROM skips WHERE room = ?`, `DELETE FROM shown WHERE room = ?`,
 			`UPDATE joins SET state = 'left', reason = 'the room was left here' WHERE room = ? AND state = 'accepted'`,
 		} {
 			if _, err := tx.Exec(q, room); err != nil {

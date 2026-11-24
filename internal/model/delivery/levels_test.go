@@ -22,7 +22,7 @@ func post(w *World, msg Msg) RecordID {
 
 func readAs(t *testing.T, w *World, m MachineID, agent string) []Entry {
 	t.Helper()
-	v := must(w.Inbox(m, agent))
+	v := must(w.List(m, agent))
 	if err := w.Seen(m, agent, v.Entries); err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +36,8 @@ func TestAddressedLevelShowsWhatIsAddressedAndPostsMarkedForEveryone(t *testing.
 		t.Fatal(err)
 	}
 	post(w, Msg{Body: "room-wide"})
-	post(w, Msg{Body: "marked", AskHandled: true})
+	post(w, Msg{Body: "@everyone marked"})
+	post(w, Msg{Body: "asks only", AskHandled: true})
 	post(w, Msg{Body: "to a", To: []Addr{{"A", "a"}}})
 	root := must(w.Send("A", "a", Msg{Body: "a asks"}))
 	pull(t, w, "A", "B")
@@ -44,10 +45,10 @@ func TestAddressedLevelShowsWhatIsAddressedAndPostsMarkedForEveryone(t *testing.
 	post(w, Msg{Body: "reply to a", Parent: root})
 	post(w, Msg{Body: "reply to all", Parent: root, Everyone: true})
 	pull(t, w, "A", "B")
-	wantTexts(t, readAs(t, w, "A", "a"), "shown:marked shown:to a shown:reply to a")
+	wantTexts(t, readAs(t, w, "A", "a"), "shown:@everyone marked shown:to a shown:reply to a")
 	// Another agent on the same machine is unaffected.
-	wantTexts(t, readAs(t, w, "A", "b"), "shown:a asks shown:room-wide shown:marked shown:reply to all")
-	wantTexts(t, w.Skipped("A", "a"), "shown:room-wide shown:reply to all")
+	wantTexts(t, readAs(t, w, "A", "b"), "shown:a asks shown:room-wide shown:@everyone marked shown:asks only shown:reply to all")
+	wantTexts(t, w.Skipped("A", "a"), "shown:room-wide shown:asks only shown:reply to all")
 }
 
 // Requirements: U1, U3
@@ -57,11 +58,11 @@ func TestNoneLevelShowsNothingUntilTheAgentAsks(t *testing.T) {
 		t.Fatal(err)
 	}
 	post(w, Msg{Body: "to a", To: []Addr{{"A", "a"}}})
-	post(w, Msg{Body: "marked", AskHandled: true})
+	post(w, Msg{Body: "@Everyone: marked"})
 	pull(t, w, "A", "B")
 	wantTexts(t, readAs(t, w, "A", "a"), "")
-	wantTexts(t, w.Skipped("A", "a"), "shown:to a shown:marked")
-	wantTexts(t, w.Skipped("A", "a"), "shown:to a shown:marked") // asking marks nothing
+	wantTexts(t, w.Skipped("A", "a"), "shown:to a shown:@Everyone: marked")
+	wantTexts(t, w.Skipped("A", "a"), "shown:to a shown:@Everyone: marked") // asking marks nothing
 }
 
 // Requirements: U2, U3
@@ -119,7 +120,7 @@ func TestRandomLevelChangesNeitherLoseNorRepeatAMessage(t *testing.T) {
 				case 0:
 					msg.To = []Addr{{"A", "a"}}
 				case 1:
-					msg.AskHandled = true
+					msg.Body = "@everyone m"
 				}
 				id := post(w, msg)
 				forA = append(forA, id)

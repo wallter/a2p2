@@ -205,11 +205,11 @@ func TestSurfaceSendInboxSeenReplyAckThreadHistoryTrace(t *testing.T) {
 	if err != nil || len(br) != 1 || br[0].ID != r.ID {
 		t.Fatalf("branch = %+v, %v", br, err)
 	}
-	hist, err := e.s.History(ctx, "", "", 0)
+	hist, err := e.s.History(ctx, "", "", "", 0)
 	if err != nil || len(hist) != 2 || hist[0].ID != q.ID {
 		t.Fatalf("history = %+v, %v", hist, err)
 	}
-	if older, err := e.s.History(ctx, "", r.ID, 0); err != nil || len(older) != 1 || older[0].ID != q.ID {
+	if older, err := e.s.History(ctx, "", "", r.ID, 0); err != nil || len(older) != 1 || older[0].ID != q.ID {
 		t.Fatalf("history before = %+v, %v", older, err)
 	}
 	tr, err := e.s.Trace(ctx, q.ID)
@@ -273,13 +273,13 @@ func TestSurfaceUnreadCountsAndFirstLinesNeverMarkSeen(t *testing.T) {
 	e.send(SendInput{Agent: alice, Text: "line one\nline two"})
 	e.send(SendInput{Agent: alice, Text: strings.Repeat("y", 200)})
 	for range 3 {
-		u, err := e.s.Unread(ctx, bob, true)
+		u, err := e.s.Unread(ctx, bob, "", true)
 		if err != nil || u.Count != 2 || len(u.From) != 1 || u.From[0] != alice || len(u.Rooms) != 1 || u.Rooms[0].Count != 2 ||
 			len(u.First) != 2 || u.First[0].Line != "line one" || !strings.HasSuffix(u.First[1].Line, "...") {
 			t.Fatalf("unread = %+v, %v", u, err)
 		}
 	}
-	if u, _ := e.s.Unread(ctx, bob, false); len(u.First) != 0 {
+	if u, _ := e.s.Unread(ctx, bob, "", false); len(u.First) != 0 {
 		t.Fatalf("first lines without asking: %+v", u)
 	}
 	if es := e.inbox(bob); len(es) != 2 {

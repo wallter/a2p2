@@ -268,6 +268,9 @@ func TestOverTLSAMessageReachesThreeMachinesAndItsHandledReportReturns(t *testin
 		}
 	}
 	v, err := c.m.Inbox(bg, room, c.agent)
+	if err == nil { // listed as the inbox tool lists it: with receipts
+		err = c.m.Showed(bg, room, c.agent, v.Entries, true)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

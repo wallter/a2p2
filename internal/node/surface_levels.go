@@ -8,6 +8,7 @@ package node
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/wallter/a2p2/internal/store"
 )
@@ -80,24 +81,42 @@ func (s *Surface) Levels(ctx context.Context, agent, room, level string) ([]Room
 }
 
 // Skipped returns what agent's level kept out of its inbox and it has not
-// confirmed, in room or in every room, oldest first: the newest limit of
-// them (U3). It marks nothing.
-func (s *Surface) Skipped(ctx context.Context, agent, room string, limit int) ([]Entry, error) {
+// confirmed, in room or in every room, oldest first (U3): the newest limit
+// of them, before message before if given, so that pages reach everything
+// within retention. Pages run in the order of every view (sortEntries);
+// before may name a message confirmed since, whose header stays. It marks
+// nothing seen; the agent may then report a message whose text it showed
+// handled (Machine.Showed).
+func (s *Surface) Skipped(ctx context.Context, agent, room, before string, limit int) ([]Entry, error) {
 	label, err := s.label(agent)
 	if err != nil {
 		return nil, err
 	}
-	switch {
-	case limit < 0:
-		return nil, userErr("limit must not be negative")
-	case limit == 0:
-		limit = DefaultHistory
-	case limit > MaxHistory:
-		limit = MaxHistory
+	if limit, err = historyLimit(limit); err != nil {
+		return nil, err
 	}
 	rs, err := s.levelRooms(ctx, room)
 	if err != nil {
 		return nil, err
+	}
+	var at *Entry
+	if before != "" {
+		broom, err := s.roomOf(ctx, strings.TrimPrefix(before, "x:"))
+		if err == nil {
+			err = s.m.view(ctx, broom, func(v *roomView) error {
+				h, err := placeOf(v, broom, before, "this machine's rooms")
+				if err == nil {
+					at, err = v.entry(v.keep(h), EntryMessage, h.Record.ID())
+				}
+				return err
+			})
+		}
+		if errors.Is(err, ErrNotHeld) {
+			err = codedErr(ErrorNotFound, "message %q is not held here", before)
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	var out []Entry
 	for _, r := range rs {
@@ -105,11 +124,19 @@ func (s *Surface) Skipped(ctx context.Context, agent, room string, limit int) ([
 		if err != nil {
 			return nil, s.notRegistered(label, err)
 		}
-		out = append(out, es...)
+		for _, e := range es {
+			if at == nil || entryBefore(e, *at) {
+				e.Skipped = true
+				out = append(out, e)
+			}
+		}
 	}
 	sortEntries(out)
 	if len(out) > limit {
 		out = out[len(out)-limit:]
+	}
+	if err := s.showed(ctx, label, out, false); err != nil {
+		return nil, err
 	}
 	return s.withLabels(ctx, out, nil)
 }

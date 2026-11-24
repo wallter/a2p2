@@ -80,13 +80,18 @@ type (
 		FromNode      string   `json:"from_node"`
 		AuthorRemoved bool     `json:"author_removed,omitempty"`
 		To            []string `json:"to,omitempty"`
-		Parent        string   `json:"parent,omitempty"`
-		Thread        string   `json:"thread,omitempty"`
-		ParentState   string   `json:"parent_state,omitempty"`
-		Late          bool     `json:"late,omitempty"`
-		Created       string   `json:"created"`
-		Text          string   `json:"text,omitempty"`
-		Choices       []string `json:"choices,omitempty"`
+		// AskHandled: the post asked for handled reports.
+		AskHandled  bool     `json:"ask_handled,omitempty"`
+		Parent      string   `json:"parent,omitempty"`
+		Thread      string   `json:"thread,omitempty"`
+		ParentState string   `json:"parent_state,omitempty"`
+		Late        bool     `json:"late,omitempty"`
+		Created     string   `json:"created"`
+		Text        string   `json:"text,omitempty"`
+		Choices     []string `json:"choices,omitempty"`
+		// Skipped: in a history page read by an agent, its level kept
+		// this message out of its inbox and it has not confirmed it.
+		Skipped bool `json:"skipped,omitempty"`
 	}
 	Wait struct {
 		Room   string `json:"room"`
@@ -136,9 +141,12 @@ type (
 		Handled string `json:"handled"`
 		Already bool   `json:"already,omitempty"`
 	}
-	// HistoryReq: with skipped, agent's messages its level kept out of its
-	// inbox and it has not confirmed (U3), in room or in every room when
-	// room is empty; before does not apply. It marks nothing.
+	// HistoryReq: the room's last limit messages before message before.
+	// With agent, entries its level kept out of its inbox are marked
+	// skipped, and it may report one whose text was shown handled. With
+	// skipped, only agent's messages its level kept out of its inbox and it
+	// has not confirmed (U3), in room or in every room when room is empty,
+	// paged the same way. It marks nothing seen.
 	HistoryReq struct {
 		Room    string `json:"room,omitempty"`
 		Before  string `json:"before,omitempty"`
@@ -391,6 +399,8 @@ type (
 		Cwd     string `json:"cwd"`
 		Lines   bool   `json:"lines,omitempty"`
 		Agent   string `json:"agent,omitempty"`
+		// Room: only this room (label or id).
+		Room string `json:"room,omitempty"`
 	}
 	RoomCount struct {
 		Room  string `json:"room"`
@@ -505,7 +515,8 @@ func waitOf(ms int64) (time.Duration, error) {
 func EntryOf(e node.Entry) Entry {
 	out := Entry{Key: e.Key, Version: e.Version, Kind: e.Kind, ID: e.ID, Room: e.Room, RoomLabel: e.RoomLabel,
 		From: e.From, FromNode: e.FromNode, AuthorRemoved: e.AuthorRemoved, Parent: e.Parent, Thread: e.Thread,
-		ParentState: e.ParentState, Late: e.Late, Created: Time(e.Created), Text: e.Text, Choices: e.Choices}
+		ParentState: e.ParentState, Late: e.Late, Created: Time(e.Created), Text: e.Text, Choices: e.Choices,
+		AskHandled: e.AskHandled, Skipped: e.Skipped}
 	for _, a := range e.To {
 		out.To = append(out.To, node.AgentID(a))
 	}
@@ -675,13 +686,10 @@ func Handler(s *node.Surface, info Info) http.Handler {
 	})
 	handle(mux, "history", func(ctx context.Context, r HistoryReq) (Entries, error) {
 		if r.Skipped {
-			if r.Before != "" {
-				return Entries{}, &node.UserError{Msg: "before does not go with skipped", Code: node.ErrorInvalid}
-			}
-			es, err := s.Skipped(ctx, r.Agent, r.Room, r.Limit)
+			es, err := s.Skipped(ctx, r.Agent, r.Room, r.Before, r.Limit)
 			return Entries{entriesOf(es)}, err
 		}
-		es, err := s.History(ctx, r.Room, r.Before, r.Limit)
+		es, err := s.History(ctx, r.Agent, r.Room, r.Before, r.Limit)
 		return Entries{entriesOf(es)}, err
 	})
 	handle(mux, "level", func(ctx context.Context, r LevelReq) (LevelResp, error) {
@@ -780,7 +788,7 @@ func Handler(s *node.Surface, info Info) http.Handler {
 			}
 			id = a.ID
 		}
-		u, err := s.Unread(ctx, id, r.Lines)
+		u, err := s.Unread(ctx, id, r.Room, r.Lines)
 		out := Unread{Agent: u.Agent, Count: u.Count, From: u.From}
 		for _, c := range u.Rooms {
 			out.Rooms = append(out.Rooms, RoomCount{Room: c.Room, Label: c.Label, Count: c.Count})

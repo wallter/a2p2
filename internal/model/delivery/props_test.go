@@ -474,7 +474,7 @@ func (h *harness) read(id MachineID, half bool) {
 		return
 	}
 	for _, a := range m.agents {
-		v, err := h.w.Inbox(id, a)
+		v, err := h.w.List(id, a)
 		if err != nil {
 			h.fail("inbox: %v", err)
 			return

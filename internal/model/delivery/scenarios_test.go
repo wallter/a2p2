@@ -39,7 +39,7 @@ func pull(t *testing.T, w *World, p, s MachineID) PullResult {
 // read shows the machine's agent its inbox and confirms all of it.
 func read(t *testing.T, w *World, m MachineID) []Entry {
 	t.Helper()
-	v := must(w.Inbox(m, ag(m)))
+	v := must(w.List(m, ag(m)))
 	if err := w.Seen(m, ag(m), v.Entries); err != nil {
 		t.Fatal(err)
 	}

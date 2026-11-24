@@ -314,6 +314,7 @@ function entryMeta(m) {
   if (m.parent) meta.append(el("span", "", "reply to " + fp(m.parent) + (m.parent_state && m.parent_state !== "here" ? " (" + m.parent_state + ")" : "")));
   if (m.author_removed) meta.append(el("span", "mark", "removed machine"));
   if (m.late) meta.append(el("span", "mark", "late"));
+  if (m.ask_handled) meta.append(el("span", "mark", "asks for handled reports"));
   return meta;
 }
 // Notices stay in S.notes until the room is left, so they remain visible

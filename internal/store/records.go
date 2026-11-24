@@ -721,6 +721,11 @@ func (s *Store) Seen(ctx context.Context, agent, room string, plan func(*Reader)
 				agent, room, r.Key, r.Version, r.Msg); err != nil {
 				return err
 			}
+			// The confirmation replaces the receipt it needed (shown.go).
+			if _, err := tx.Exec(`DELETE FROM shown WHERE agent = ? AND room = ? AND key = ?`,
+				agent, room, r.Key); err != nil {
+				return err
+			}
 		}
 		if err := hook("seen:reads"); err != nil {
 			return err

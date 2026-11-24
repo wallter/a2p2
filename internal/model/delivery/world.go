@@ -360,7 +360,9 @@ func canHandle(msg *Record, m MachineID, agent string) bool {
 }
 
 // Handle records that agent dealt with message ref. It travels like any
-// record. Reporting twice is a no-op.
+// record. Reporting twice is a no-op. The agent must have been shown the
+// text: confirmed from its inbox (Seen), or returned by another read
+// (Showed).
 func (w *World) Handle(id MachineID, agent string, ref RecordID) (RecordID, error) {
 	m, err := w.awake(id)
 	if err != nil {
@@ -378,7 +380,7 @@ func (w *World) Handle(id MachineID, agent string, ref RecordID) (RecordID, erro
 			return r.ID, nil
 		}
 	}
-	if g := m.st.agents[agent]; g == nil || !g.seen[string(ref)] {
+	if g := m.st.agents[agent]; g == nil || !g.seen[string(ref)] && !g.shown[ref] {
 		return "", ErrNotAllow // only an agent that was shown the text may report it
 	}
 	return w.write(m, &Record{Kind: Handled, Agent: agent, Ref: ref}, "").ID, nil

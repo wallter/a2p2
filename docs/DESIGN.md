@@ -227,8 +227,9 @@ deletes withdrawn text when it stores the withdraw [R6].
 
 The inbox is the model's walk from each agent's cursors [R7]: winning text,
 `expired`, withdraw and replace notices, `late`, and what it waits for. Only
-Seen moves a cursor, confirming exactly the keys and versions the inbox
-returned; the hook prints counts only and never message text. Claude Code,
+Seen moves a cursor, confirming exactly the keys and versions a full inbox
+read listed (its receipts, below); the hook prints counts only and never
+message text. Claude Code,
 Codex and Antigravity get the MCP server and a hook; OpenCode and Hermes
 Agent get the MCP server only, and Pi, which has no MCP, a skill that
 points its model at the CLI ([harness notes](HARNESSES.md)). Install
@@ -237,9 +238,10 @@ uninstall puts it back; without a record uninstall removes nothing
 (D44). Replies carry
 `parent_state`. The thread view lists held messages of a thread, or with
 `after` only those that follow a given message of it; the branch view
-follows `parent` down and misses replies below one not held (G3). The
-inbox tool's `recent` (1 to 50) reads a room's last messages through
-`history`. None of these three marks anything. A reply goes to its
+follows `parent` down from the message, held or not, and misses replies
+below a reply not held (G3). The inbox tool's `recent` (1 to 50) reads a
+room's last messages through `history`. None of these three marks anything
+seen. A reply goes to its
 parent's author unless the sender names addressees (D10).
 
 **Not modelled: the reply tool's addressees.** Without `to`, the `reply`
@@ -256,11 +258,15 @@ levels existed), `addressed` (messages whose `to` names it, and room-wide
 posts marked for everyone) or `none` (no message reaches its inbox). The
 level is local reading state, like cursors: it lives in the agent's own
 machine's `levels` table, changes no record, entry or pull, and no other
-machine learns it. A room-wide post is marked for everyone when it carries
-`ask_handled`: the signed formats are frozen (D27) and refuse unknown
-fields, and an ordinary room-wide post and one sent to `everyone` are the
-same bytes (`to` omitted), so `ask_handled` is the one existing field that
-tells them apart. Machines that do not know levels show such a post to
+machine learns it. "Marked for everyone" means the message's text begins
+with `@everyone`: ASCII, any case, followed by whitespace, punctuation or
+the end of the text (`core.MarkedForEveryone`). The signed formats are
+frozen (D27), and an ordinary room-wide post and one sent to `everyone`
+are the same bytes, so the mark is in the text, where the writer controls
+it and every reader sees it. `ask_handled` asks for handled reports and
+nothing else; it no longer decides a level. While a message's text is
+missing, the mark is unknown: the inbox walk waits for the text rather than
+classify the message. Machines that do not know levels show such a post to
 everyone, as before. Replies count as addressed when they name the agent,
 which the reply tool does for the parent's author and the thread's posters.
 Notices about messages the agent was already shown (withdrawn, replaced,
@@ -268,27 +274,59 @@ voided) are never filtered (D9). The rule is in the delivery model
 (`internal/model/delivery/levels.go`) and the differential tests compare
 the code with it under random level changes.
 
+**Receipts.** A full inbox read writes, in the same transaction that lists
+the entries, a receipt per entry: the agent, the room, the entry's key and
+the version listed (table `shown`). `Seen` confirms only an entry with a
+receipt whose version is the one given, and deletes the receipt; anything
+else is refused as `not_shown`, so an id from `peek`, `recent`, `skipped`
+or a thread can never be marked seen. A receipt outlives a level change:
+a message the inbox listed is never kept out or written to `skips`, so it
+can still be confirmed and its later notices (replaced, withdrawn) still
+arrive. Leaving a room deletes its receipts.
+
 A level change runs in one transaction: every message held then that the
 old level kept out and the new one lets in, and that the agent has not
 confirmed, is written to `skips`, so raising a level never floods the live
 inbox with the past; the inbox continues from now. What the level kept out
 (now, or by a skip) and the agent has not confirmed, after where its time
 began, is read apart from the inbox with the inbox tool's `skipped` or
-`a2p2 history --skipped`, and marks nothing; a skipped message is not
-shown, so it cannot be reported handled until it is. The inbox tool sets
+`a2p2 history --skipped`, and marks nothing. It lists a message whose text
+expired while it was kept out as expired. It pages from the newest back
+with `before` (a message id), like history. Each entry of `recent` (the
+room's last N, whatever the level) says `skipped` when the reader's level
+kept it out. The inbox tool sets
 the level with `level` (for `room`, or every room), `whoami` shows each
 room's level and unread count, and `peek` gives counts and first lines
-without marking anything. The person (`human`) has no level: what is
+without marking anything; `peek` for one room resolves the room as every
+other read does and takes the first lines from that room only. The person (`human`) has no level: what is
 addressed to the person, and requests for a person, are never filtered, and
 the page reads every room in full and shows each local agent's level.
 
-**Handled reports.** Only an agent the inbox has shown the text can report
-it handled [R7]. `reply` sends the report after the reply; a later `ack`
+**Handled reports.** Only an agent shown the text can report it handled
+[R7]. Every read that shows an agent a message's text counts: `inbox`, a
+thread or branch view, `recent` and `skipped`. Those other views record
+that in `shown` as a text mark (key `s:` and the message id), which moves
+no cursor and marks nothing seen; only an agent the addressee rule allows
+gets one. `reply` sends the report after the reply; a later `ack`
 of the same message, or a second `ack`, succeeds without a second report
 and names the first. An `ack` that is not allowed is refused with the
 reason: no such message, not addressed and no `ask_handled`, the agent's
-own message, or not yet shown by `inbox` (a thread view or `recent` does
-not count). The reply and ack tools name the message `id`.
+own message, or not yet shown its text by any read. The reply and ack
+tools name the message `id`. Entries say `ask_handled` when a room-wide
+post asks for handled reports.
+
+**Reading order.** Every view (inbox, history, `recent`, `skipped`,
+thread and branch) orders messages by place: `created`, then the author
+machine, then the position in its stream, then the id. One author's
+messages of one millisecond therefore come in the order written, and a page
+boundary (`before`) is a place, so paging neither repeats nor drops a
+message written in the same millisecond as the boundary. The store keeps
+an index in that order (`records_reading`).
+
+**Branch view under an unheld message.** The replies to a message name it,
+so the branch under a message this machine does not hold, or holds only as
+a header, still lists them, their parent marked missing (D10). A reply
+below a reply that is not held is still not reached: gap G3.
 
 Reasons shown (A4) in `a2p2 trace`, the page and tool results: *missing*
 (being fetched, expired, withdrawn, before admission); *refused* (does not
@@ -299,8 +337,8 @@ refusal of the local API and the tools is a sentence, one of a few stable
 codes and whether repeating the call later may succeed (PROTOCOL 7).
 
 MCP tools stay seven (PROTOCOL 6): `send` with `reply_to`, `ask_handled`
-and `replaces`; `inbox` with `thread`, `after`, `recent`, `level`,
-`peek`, `skipped` and `wait_seconds`; `reply` and `ack` taking `id`; `peers` showing each room's
+and `replaces`; `inbox` with `thread`, `after`, `before`, `recent`,
+`level`, `peek`, `skipped` and `wait_seconds`; `reply` and `ack` taking `id`; `peers` showing each room's
 machines and the agents seen writing there; `ask_human` sending to `human`.
 Each tool carries annotations: `whoami` and `peers` are read-only; `send`
 is destructive, since `replaces` rewrites or withdraws a message; `ack` is
@@ -310,7 +348,7 @@ marks nothing seen. Results are compact JSON with `<`, `>` and `&` as
 written. Copy and handled reports stay in `a2p2 trace` and the page.
 
 A2 is checked by a proxy, compact definition bytes divided by four and
-rounded up: 3,991 bytes, 998 of the 1,000 allowed. `TestToolsGolden` checks
+rounded up: 3,984 bytes, 996 of the 1,000 allowed. `TestToolsGolden` checks
 the definitions match the protocol, and `TestToolDefinitionsFitTheTokenBudget`
 enforces the 4,000-byte limit. The count by each model family's own
 tokenizer has not been measured.

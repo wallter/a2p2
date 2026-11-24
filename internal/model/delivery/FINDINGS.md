@@ -28,22 +28,33 @@
    addressees. Inbox: expired
    before shown: "expired"; withdrawn: nothing; missing: wait. Notices go
    only to agents who saw the original. Late: the agent confirmed a record
-   of its author that this one does not follow. Only Seen moves the cursor;
-   only an agent shown the text may report handled.
+   of its author that this one does not follow. Only Seen moves the cursor,
+   and only for an entry a full inbox read listed (its receipt: key and
+   version), so peek, recent, skipped and thread never satisfy it. Only an
+   agent shown the text may report handled; any read that showed the text
+   counts (inbox, thread or branch, recent, skipped), within the addressee
+   rule, and moves no cursor. Every view orders messages by created, then
+   author, then position. The branch under a message not held, or held as
+   a header, lists the replies naming it, the parent marked missing (D10).
 8. A newcomer reads from the admitter's positions; without history, earlier
    records come as headers only.
 
-## Reading levels (added 2026-11-24, D-levels)
+## Reading levels (added 2026-11-24, D-levels; revised by D-reading)
 
 9. Each agent has a level per room, kept on its own machine: `all`
    (default, the rules above unchanged), `addressed` (messages whose `to`
-   names it, and room-wide posts with `ask_handled`) or `none` (no
-   message). A message the level keeps out is passed like one not meant
-   for the agent; notices about messages it was shown are not filtered.
+   names it, and room-wide posts whose text begins with `@everyone`:
+   ASCII, any case, then whitespace, punctuation or the end) or `none` (no
+   message). `ask_handled` does not affect levels. While the text is
+   missing the mark is unknown and the walk waits. A message the level
+   keeps out is passed like one not meant for the agent, unless a full
+   inbox read listed it (a receipt): that one is never kept out or
+   skipped. Notices about messages it was shown are not filtered.
    A level change marks skipped every held message, after the agent's
-   start and not confirmed, that the old level kept out and the new one
-   lets in; skipped messages stay out of the inbox. `Skipped` lists what
-   the level keeps out (now or by a skip) with text here, marking nothing.
+   start and not confirmed or listed, that the old level kept out and the
+   new one lets in; skipped messages stay out of the inbox. `Skipped`
+   lists what the level keeps out (now or by a skip), with text here or
+   expired, marking nothing.
    `TestRandomLevelChangesNeitherLoseNorRepeatAMessage`: every message for
    the agent is shown once or listed skipped, never both.
 
@@ -92,7 +103,8 @@ Design work: summaries as changes; retire stream state after 30 days.
 
 - G1: A never meets C and cannot report C's copy.
 - G2: a no-history newcomer gets room-wide posts its admitter had not seen.
-- G3: the branch view misses replies below an unheld reply.
+- G3: the branch view misses replies below an unheld reply. (Replies
+  directly under an unheld message are listed: they name it.)
 - G4: a member omitting a stream's tail, and lying, goes unseen.
 - G5: dated copy reports outlive a holder restored to before the copy.
 - G6: anything a removed machine wrote that no member fetched in time (a

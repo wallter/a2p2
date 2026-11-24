@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -430,6 +431,80 @@ func TestTheIconRequestIsAnsweredEmpty(t *testing.T) {
 	code, body := e.do(t, "GET", "/favicon.ico", nil, nil)
 	if code != http.StatusNoContent || len(body) != 0 {
 		t.Fatalf("favicon: %d %q", code, body)
+	}
+}
+
+// Requirements: U1, U2. The page's level line for an agent, rendered from
+// the page's own state endpoint: the raw /api/state JSON is read with the
+// fields and the rule of app.js (which the test checks it still uses), for
+// one agent with opposite levels in two rooms, before and after one
+// changes.
+func TestPageRendersOneAgentsOppositeLevelsInTwoRoomsFromItsState(t *testing.T) {
+	e := setup(t)
+	bob := e.agent(t, "bob")
+	if _, err := e.s.CreateRoom(e.ctx, "team"); err != nil {
+		t.Fatal(err)
+	}
+	js, err := assets.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, use := range []string{"S.st = d.status", "(S.st.levels || []).filter((l) => l.agent === a.id)",
+		`roomLabel(l.room) + ": " + l.level`, `"; other rooms: all" : "all in every room"`, "(S.st.rooms || []).find((r) => r.id === id)"} {
+		if !strings.Contains(string(js), use) {
+			t.Fatalf("app.js no longer renders levels with %q: update this test", use)
+		}
+	}
+	render := func() string {
+		t.Helper()
+		_, b := e.do(t, "GET", "/api/state", nil, nil)
+		var d struct {
+			Status struct {
+				Human  string `json:"human"`
+				Rooms  []struct{ ID, Label string }
+				Agents []struct{ ID string }
+				Levels []struct{ Agent, Room, Level string }
+			} `json:"status"`
+		}
+		if err := json.Unmarshal(b, &d); err != nil {
+			t.Fatal(err)
+		}
+		label := func(id string) string {
+			for _, r := range d.Status.Rooms {
+				if r.ID == id {
+					return r.Label
+				}
+			}
+			return id
+		}
+		var words []string
+		for _, l := range d.Status.Levels {
+			if l.Agent == bob {
+				words = append(words, label(l.Room)+": "+l.Level)
+			}
+		}
+		if len(words) == 0 {
+			return "level all in every room"
+		}
+		// The page keeps the state's order, which follows room ids; sort
+		// so the expected line does not depend on random ids.
+		sort.Strings(words)
+		return "level " + strings.Join(words, ", ") + "; other rooms: all"
+	}
+	if _, err := e.s.Levels(e.ctx, bob, "local", store.LevelNone); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.s.Levels(e.ctx, bob, "team", store.LevelAddressed); err != nil {
+		t.Fatal(err)
+	}
+	if got := render(); got != "level local: none, team: addressed; other rooms: all" {
+		t.Fatalf("page shows %q", got)
+	}
+	if _, err := e.s.Levels(e.ctx, bob, "local", store.LevelAll); err != nil {
+		t.Fatal(err)
+	}
+	if got := render(); got != "level team: addressed; other rooms: all" {
+		t.Fatalf("after one change the page shows %q", got)
 	}
 }
 

@@ -176,6 +176,9 @@ func (sv *server) state(r *http.Request) (any, error) {
 		return nil, err
 	}
 	questions, err := sv.s.Questions(ctx)
+	if err == nil { // shown to the person: the page may confirm them
+		err = sv.s.Listed(ctx, sv.s.HumanID(), questions)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +212,7 @@ func (sv *server) noticeShown(r *http.Request) (any, error) {
 func (sv *server) history(r *http.Request) (any, error) {
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	return entries(sv.s.History(r.Context(), q.Get("room"), q.Get("before"), limit))
+	return entries(sv.s.History(r.Context(), sv.s.HumanID(), q.Get("room"), q.Get("before"), limit))
 }
 
 func (sv *server) thread(r *http.Request) (any, error) {

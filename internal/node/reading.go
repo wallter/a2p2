@@ -63,9 +63,11 @@ type Entry struct {
 	// machine's view [RM1]. Always false in a room without a log.
 	AuthorRemoved bool
 	To            []core.Addressee
-	Parent        string
-	Thread        string
-	ParentState   string // empty when there is no parent
+	// AskHandled: the message asked for handled reports.
+	AskHandled  bool
+	Parent      string
+	Thread      string
+	ParentState string // empty when there is no parent
 	// Late: the agent already confirmed a record of this author that this
 	// one does not follow in the author's history (a restored author that
 	// wrote before catching up).
@@ -73,6 +75,9 @@ type Entry struct {
 	Created time.Time
 	Text    string
 	Choices []string
+	// Skipped: in a history page read by an agent, the agent's level kept
+	// this message out of its inbox and it has not confirmed it.
+	Skipped bool
 	Epoch   string
 	Seq     int64
 }
@@ -104,7 +109,7 @@ type InboxView struct {
 
 // Why Seen refused one confirmation.
 const (
-	SeenNotShown       = "not_shown"       // Inbox would not show this key to the agent now
+	SeenNotShown       = "not_shown"       // no inbox listing showed this key and version, or Inbox would not show it now
 	SeenVersionChanged = "version_changed" // it would, with other text: confirm what Inbox shows now
 )
 
@@ -135,9 +140,11 @@ func (m *Machine) Inbox(ctx context.Context, room, agent string) (InboxView, err
 	return out, err
 }
 
-// Seen confirms entries for agent [R7]. A confirmation counts only if its
-// key and version are exactly an entry Inbox would show the agent now,
-// worked out in the same transaction; the others are refused one by one,
+// Seen confirms entries for agent [R7]. A confirmation counts only if a
+// full inbox listing showed the agent that key at that version (a receipt,
+// Showed) and its key and version are exactly an entry Inbox would show
+// the agent now, worked out in the same transaction (a listed message is
+// never kept out by a level changed since); the others are refused one by one,
 // with a reason, and the rest applied. Then the agent's cursors move past
 // everything confirmed or not meant for it. Seen is the only thing that
 // marks anything seen.
@@ -179,8 +186,9 @@ func (m *Machine) Seen(ctx context.Context, room, agent string, reads []store.Re
 		for i, r := range reads {
 			results[i] = SeenResult{Key: r.Key, Version: r.Version}
 			e, ok := byKey[r.Key]
+			listed, receipt := g.receipts[r.Key]
 			switch {
-			case !ok:
+			case !ok || !receipt || listed != r.Version:
 				results[i].Reason = SeenNotShown
 				continue
 			case e.Version != r.Version:
@@ -221,6 +229,35 @@ func (m *Machine) Seen(ctx context.Context, room, agent string, reads []store.Re
 	return results, err
 }
 
+// Showed records what a read returned to agent in room, in one
+// transaction (store/shown.go). For a full inbox listing (inbox true) it
+// keeps a receipt of every entry, key and version, which Seen requires.
+// For a thread, branch, recent or skipped view it marks the messages whose
+// text was shown and that the agent may report handled. Either lets the
+// agent report a message whose text it was shown handled. It moves no
+// cursor and marks nothing seen.
+func (m *Machine) Showed(ctx context.Context, room, agent string, es []Entry, inbox bool) error {
+	var rows []store.Shown
+	for _, e := range es {
+		switch {
+		case inbox:
+			rows = append(rows, store.Shown{Key: e.Key, Version: e.Version, Msg: e.ID})
+		case e.Kind == EntryMessage && e.Version != "" && mayHandle(e, m.ID, agent):
+			rows = append(rows, store.Shown{Key: store.TextMarkKey(e.ID), Version: e.Version, Msg: e.ID})
+		}
+	}
+	return m.st.Show(ctx, agent, room, rows)
+}
+
+// mayHandle is store.CanHandle over an entry: agent is an addressee, or
+// the entry is a room-wide post by another that asked for handled reports.
+func mayHandle(e Entry, self, agent string) bool {
+	if len(e.To) == 0 {
+		return e.AskHandled && !(e.FromNode == self && e.From == core.AgentID(agent, self))
+	}
+	return slices.Contains(e.To, core.Addressee{Node: self, Agent: agent})
+}
+
 // Thread returns the messages of the thread started by root, root
 // included, oldest first: root, if held, must be a message, and a reply
 // counts unless its parent or thread is known not to check out (one whose
@@ -258,39 +295,49 @@ func (m *Machine) Thread(ctx context.Context, room, root string) ([]Entry, error
 }
 
 // Branch returns the message under and the replies below it, to any depth,
-// following only replies whose parent and thread check out: a reply whose
-// parent is not held appears only in Thread (gap G3). under must be a
-// message held here. It marks nothing.
+// following only replies whose parent and thread check out. When under is
+// not held, the replies naming it are still listed, its parent marked
+// missing (D10). A reply below a reply this machine does not hold is not
+// reached, and appears only in Thread (gap G3). It marks nothing.
 func (m *Machine) Branch(ctx context.Context, room, under string) ([]Entry, error) {
 	var out []Entry
 	err := m.view(ctx, room, func(v *roomView) error {
 		u, err := v.get(under)
-		if err != nil || u == nil || u.f.Kind != core.KindMessage {
+		if err != nil || u != nil && u.f.Kind != core.KindMessage {
 			return err
 		}
-		queue := []*rec{u}
+		// Not held: its replies still name it, so they are listed with the
+		// parent marked missing (D10); they wait as unresolved.
+		queue := []string{under}
 		done := map[string]bool{}
 		for len(queue) > 0 {
-			x := queue[0]
+			id := queue[0]
 			queue = queue[1:]
-			if done[x.id] {
+			if done[id] {
 				continue
 			}
-			done[x.id] = true
-			e, err := v.threadEntry(x)
+			done[id] = true
+			x, err := v.get(id)
 			if err != nil {
 				return err
 			}
-			if e != nil {
-				out = append(out, *e)
+			if x != nil {
+				e, err := v.threadEntry(x)
+				if err != nil {
+					return err
+				}
+				if e != nil {
+					out = append(out, *e)
+				}
 			}
-			kids, err := v.rd.ByParent(room, x.id)
+			kids, err := v.rd.ByParent(room, id)
 			if err != nil {
 				return err
 			}
 			for _, k := range kids {
-				if x := v.keep(k); k.Effect == store.EffectOK && !v.hidden(x.author) {
-					queue = append(queue, x)
+				ok := k.Effect == store.EffectOK || k.Effect == store.EffectUnresolved && x == nil
+				if c := v.keep(k); ok && !v.hidden(c.author) {
+					queue = append(queue, c.id)
 				}
 			}
 		}
@@ -300,13 +347,26 @@ func (m *Machine) Branch(ctx context.Context, room, under string) ([]Entry, erro
 	return out, err
 }
 
+// sortEntries orders a view for a reader (the model's sortEntries): by
+// created time; entries of one time by author, so that an author's own are
+// in the order written (their position) and the order is the same on every
+// read and every machine; then by id, which only orders one author's
+// entries of one time at one position in two streams (after a restore).
+// Every field compared is signed. It is store.MessagesBefore's order.
 func sortEntries(es []Entry) {
-	sort.SliceStable(es, func(i, j int) bool {
-		if !es[i].Created.Equal(es[j].Created) {
-			return es[i].Created.Before(es[j].Created)
-		}
-		return es[i].Record < es[j].Record
-	})
+	sort.SliceStable(es, func(i, j int) bool { return entryBefore(es[i], es[j]) })
+}
+
+func entryBefore(a, b Entry) bool {
+	switch {
+	case !a.Created.Equal(b.Created):
+		return a.Created.Before(b.Created)
+	case a.FromNode != b.FromNode:
+		return a.FromNode < b.FromNode
+	case a.Seq != b.Seq:
+		return a.Seq < b.Seq
+	}
+	return a.Record < b.Record
 }
 
 // ---- the room as one transaction sees it ----
@@ -673,6 +733,9 @@ type agentState struct {
 	// messages a level change marked skipped (levels.go).
 	level string
 	skip  map[string]bool
+	// receipts: what full inbox listings showed the agent and it has not
+	// confirmed, key -> version (store/shown.go).
+	receipts map[string]string
 }
 
 func copyCursor(c map[streamKey]int64) map[streamKey]int64 {
@@ -709,6 +772,9 @@ func (v *roomView) agent(agent string) (*agentState, error) {
 		return nil, err
 	}
 	if g.skip, err = v.rd.Skips(agent, v.room); err != nil {
+		return nil, err
+	}
+	if g.receipts, err = v.rd.Receipts(agent, v.room); err != nil {
 		return nil, err
 	}
 	return g, nil
@@ -852,7 +918,7 @@ func (v *roomView) entry(h *rec, kind, key string) (*Entry, error) {
 		msg = t
 	}
 	if msg != nil {
-		e.To = msg.f.To
+		e.To, e.AskHandled = msg.f.To, msg.f.AskHandled
 		// A reply whose parent fails its check is shown without a parent
 		// (PROTOCOL section 2).
 		if msg.h.Effect != store.EffectBadReference {

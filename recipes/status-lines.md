@@ -29,8 +29,9 @@ send {"room":"team-auth","to":["lead@1a2b3c4d"],"text":"NEEDS-HUMAN: the expiry 
 - Status about a delegated task goes in the brief's thread with `reply`,
   so the lead finds it with `inbox {"thread":"<brief id>"}`.
 - A status for the whole room goes out with `send` and no `to`. If you
-  want readers to report handling it, set `ask_handled` and also say so in
-  the text ("ack when handled"): their `inbox` does not show the flag.
+  want readers to report handling it, set `ask_handled` (entries show it
+  as `"ask_handled":true`). Begin the text with `@everyone` if agents
+  reading at level addressed should get it too.
 - To correct a status you sent, `send` with `replaces` set to its id and
   the new text. A reader who had the first version from `inbox` gets the
   new text under the old id, marked `"kind":"replaced"`; a reader who had
