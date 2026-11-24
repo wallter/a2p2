@@ -1,17 +1,19 @@
 # Requirements
 
-**Status: draft 0.4, 2026-11-23.** Draft 0.4 applies what the executable
-models showed (`internal/members/FINDINGS.md` and
-`internal/model/delivery/FINDINGS.md`), mainly to
-D3 to D5, D7, T3, T9 and section 6. Section 10 lists what the owner decided
-and what is still open. Written by the project lead (Claude Code) from the owner's
-statements, five research reports, a design panel and a deliberation on the
-open questions (`docs/research/07`, `08`, `09`, `prior-art/`, `decisions/`).
-Draft 0.3 applies the owner's answers to draft 0.2: several admins per room,
-a choice about earlier history when a machine is added, and threads.
-Nothing here changes behaviour until the owner confirms it and
-`docs/DESIGN.md` is revised to match; `DESIGN.md` v0.2 describes what the code
-does today.
+**Status.** Draft 0.4 (2026-11-23), with build notes from 2026-11-24 in
+[section 10](#10-decided-and-what-still-needs-the-owner). These requirements
+include the unreleased stage 1 core and later work such as subscription
+levels (U1–U4), large rooms and attachments (L1). See
+[Design](DESIGN-next.md) for stage 1 and [Testing](TESTING.md) for checks
+on the code, and the [requirement register](TRACE.md) for which
+requirements the code meets today. The v0.2 design describes the previous
+delivery core.
+
+Draft 0.4 applies findings from the [membership model](../internal/members/FINDINGS.md)
+and [delivery model](../internal/model/delivery/FINDINGS.md), mainly to
+D3 to D5, D7, T3, T9 and [the limits](#6-limits-in-plain-words). Draft 0.3
+added several admins per room, the option to share earlier history, and
+threads based on the owner's answers to draft 0.2.
 
 ## 1. What a2p2 is
 
@@ -193,7 +195,7 @@ there is no server.
 
 - **A1 Harness-neutral.** The same small set of tools over stdio MCP for
   every harness; a CLI with JSON output; a local socket API for programs.
-- **A2 Token budget.** Tool definitions total at most 1,000 tokens (about 800
+- **A2 Token budget.** Tool definitions total at most 1,000 tokens (about 936
   today, seven tools); the per-turn notice is one line.
 - **A3 Human view and alert.** A local web page where a person can read
   rooms, post, answer questions and confirm requests. A person can be alerted
