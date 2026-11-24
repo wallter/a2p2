@@ -11,7 +11,11 @@ re-appointed admin could empty the room
 (`docs/research/decisions/model-members-review-claude46.md`).
 
 1. A room starts with one create entry. Its author is the first admin and has
-   no other lasting power.
+   no other lasting power. A machine is pinned to its room's create and
+   refuses any other; `ResolveRoom(root, entries)` gives every other create,
+   and what depends on it, no effect with a reason instead of an empty room
+   (`TestSecondCreateIsRefusedAndDoesNotEmptyTheRoom`). `Resolve` without a
+   root still finds no room in a set with several creates.
 2. Every entry is judged against what its author had seen. The author must
    have been an admin there, and the change must make sense there.
 3. One admin alone can add a machine or remove a non-admin.
@@ -37,8 +41,11 @@ re-appointed admin could empty the room
    no cut-off field.
 10. A grant counts only if its author's admin role came from grants that
     counted. Removals by such an author still count.
-11. The local layer keeps the first of two entries one key signed at one
-    position. It refuses the second and everything that depends on it, and
+11. The local layer checks an entry's chain (its previous entry is its
+    author's, one position back) before reserving its position, so a
+    malformed entry reserves nothing, is not passed on and is never fork
+    evidence (`TestMalformedChainEntryReservesNoPosition`). It keeps the
+    first of two valid entries one key signed at one position. It refuses the second and everything that depends on it, and
     keeps and passes on both as evidence. Once the forking key has been
     removed as an admin, a machine accepts both branches and rule 9 decides.
     A settled fork stays settled: what that key signs after being re-admitted
@@ -51,7 +58,9 @@ re-appointed admin could empty the room
     branch stands (`TestSettlingRemovalNamesOnlyAcceptedEntries`). A
     removal that names one branch of another open fork waits on machines
     holding that fork's other branch until it settles
-    (`TestSettlingRemovalThatNamesAnotherOpenForkWaitsForIt`).
+    (`TestSettlingRemovalThatNamesAnotherOpenForkWaitsForIt`). A machine
+    offers accepted entries in causal order, so replaying them into a fresh
+    machine holds nothing (`TestOfferReplaysIntoAFreshMachineWithNothingHeld`).
 12. Fork evidence is a vote. Two different entries one key signed at one
     position, at least one while it was an admin, count as that key's vote
     for its own removal as an admin, in the period the fork was signed. The
@@ -78,16 +87,16 @@ re-appointed admin could empty the room
 
 ## What holds
 
-Deep run (`A2P2_MODEL_DEEP=1`), passed in 26.5 minutes:
+Deep run (`A2P2_MODEL_DEEP=1`), passed in 28.4 minutes (attackers may also sign a second create):
 
 | Search | Size | Holds |
 |---|---|---|
 | Honest histories, up to 5 entries after create | 109,198 | P1, P2, P4, P5, P6, P7, Admitted |
-| One-key attacks on those, depth 2 | 44,049,546 | P3 |
-| Larger rooms, depth 2 | 35,136 | P3 |
-| One-key attacks with forks: every room 1 deep, rooms up to 2 entries 2 deep | 2,238,099 (1,573,476 with a fork) | P1, P3, settlement |
-| The same from four seeded rooms of four and five admins, 1 deep | 2,795 (2,183 with a fork) | P1, P3, settlement |
-| Seven seeded rooms (71,461 histories): 1 deep from every continuation, 2 deep from the seed | 12,418,131 attack sets | P1 to P7, Admitted on the histories |
+| One-key attacks on those, depth 2 | 46,002,156 | P3 |
+| Larger rooms, depth 2 | 36,334 | P3 |
+| One-key attacks with forks: every room 1 deep, rooms up to 2 entries 2 deep | 2,249,595 (1,584,972 with a fork) | P1, P3, settlement |
+| The same from four seeded rooms of four and five admins, 1 deep | 2,802 (2,190 with a fork) | P1, P3, settlement |
+| Seven seeded rooms (71,461 histories): 1 deep from every continuation, 2 deep from the seed | 12,468,259 attack sets | P1 to P7, Admitted on the histories |
 
 Covered before being stopped, with the same rules: fork attacks two deep
 from rooms up to 3 entries after create (3,759,132 sets, 2,980,614 with a

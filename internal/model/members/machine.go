@@ -1,6 +1,9 @@
 package members
 
-import "strconv"
+import (
+	"sort"
+	"strconv"
+)
 
 // Machine is the small local layer that decides what one machine accepts
 // into its set of entries. Unlike Resolve it may depend on arrival order:
@@ -22,6 +25,8 @@ import "strconv"
 // the evidence travels.
 type Machine struct {
 	Rules    Rules
+	root     Entry
+	Invalid  map[string]string // entries refused for their form, with reasons
 	set      map[string]Entry
 	pos      map[string]string
 	held     map[string]Entry
@@ -31,9 +36,12 @@ type Machine struct {
 	open     [][2]string // evidence not yet settled
 }
 
-// NewMachine returns an empty machine that resolves with rules r.
-func NewMachine(r Rules) *Machine {
-	return &Machine{Rules: r, set: map[string]Entry{}, pos: map[string]string{}, held: map[string]Entry{}, refused: map[string]Entry{}}
+// NewMachine returns a machine for the room whose create entry is root,
+// resolving with rules r.
+func NewMachine(r Rules, root Entry) *Machine {
+	m := &Machine{Rules: r, root: root, Invalid: map[string]string{}, set: map[string]Entry{}, pos: map[string]string{}, held: map[string]Entry{}, refused: map[string]Entry{}}
+	m.Receive(root)
+	return m
 }
 
 // Receive offers entries to the machine.
@@ -42,7 +50,18 @@ func (m *Machine) Receive(es ...Entry) {
 		_, a := m.set[e.ID]
 		_, b := m.held[e.ID]
 		_, c := m.refused[e.ID]
-		if a || b || c || e.ID != e.hash() || malformed(e) {
+		if a || b || c || m.Invalid[e.ID] != "" {
+			continue
+		}
+		switch {
+		case e.ID != e.hash():
+			m.Invalid[e.ID] = ReasonBadID
+			continue
+		case malformed(e):
+			m.Invalid[e.ID] = ReasonMalformed
+			continue
+		case e.Kind == Create && e.ID != m.root.ID:
+			m.Invalid[e.ID] = ReasonOtherCreate
 			continue
 		}
 		m.held[e.ID] = e
@@ -58,17 +77,29 @@ func (m *Machine) Receive(es ...Entry) {
 			if !ok {
 				continue
 			}
-			ready, refused := true, false
+			ready, refused, invalid := true, false, ""
 			for _, p := range e.Parents {
 				if _, ok := m.refused[p]; ok {
 					refused = true
+				}
+				if m.Invalid[p] != "" {
+					invalid = ReasonInvalidParent
 				}
 				if _, ok := m.set[p]; !ok {
 					ready = false
 				}
 			}
+			if ready && invalid == "" && e.Prev != "" {
+				// The chain is checked before the position is reserved, so
+				// a malformed entry reserves nothing and is never evidence.
+				if p := m.set[e.Prev]; p.Author != e.Author || p.Seq != e.Seq-1 {
+					invalid = ReasonBadChain
+				}
+			}
 			k := e.Author + "\x00" + strconv.Itoa(e.Seq)
 			switch {
+			case invalid != "":
+				m.Invalid[id] = invalid
 			case refused:
 				m.refused[id] = e
 			case !ready:
@@ -135,6 +166,12 @@ func (m *Machine) settle() bool {
 			if blocked[id] || !ready {
 				continue
 			}
+			if p, ok := m.set[e.Prev]; e.Prev != "" && (!ok || p.Author != e.Author || p.Seq != e.Seq-1) {
+				m.Invalid[id] = ReasonBadChain
+				delete(m.refused, id)
+				changed = true
+				continue
+			}
 			m.set[id] = e
 			delete(m.refused, id)
 			changed, accepted = true, true
@@ -168,7 +205,7 @@ func (m *Machine) openForks() ([][2]string, map[string]bool) {
 	for _, e := range all {
 		cand = append(cand, e)
 	}
-	st := m.Rules.Resolve(cand)
+	st := m.Rules.ResolveRoom(m.root.ID, cand)
 	var still [][2]string
 	blocked := map[string]bool{}
 	for _, pair := range m.open {
@@ -201,17 +238,37 @@ func removedAsAdmin(st State, es map[string]Entry, k string) bool {
 	return false
 }
 
-// Entries returns the entries this machine has accepted.
+// Entries returns the entries this machine has accepted, in causal order
+// (every entry after the entries it had seen; ties by id), so replaying
+// them into a fresh machine accepts each one as it arrives.
 func (m *Machine) Entries() []Entry {
+	depth := map[string]int{}
+	var d func(id string) int
+	d = func(id string) int {
+		if v, ok := depth[id]; ok {
+			return v
+		}
+		v := 0
+		for _, p := range m.set[id].Parents {
+			if x := d(p) + 1; x > v {
+				v = x
+			}
+		}
+		depth[id] = v
+		return v
+	}
 	out := make([]Entry, 0, len(m.set))
 	for _, id := range sortedKeys(m.set) {
+		d(id)
 		out = append(out, m.set[id])
 	}
+	sort.SliceStable(out, func(i, j int) bool { return depth[out[i].ID] < depth[out[j].ID] })
 	return out
 }
 
-// Offer returns everything the machine passes on: accepted, held and
-// refused entries.
+// Offer returns everything the machine passes on: accepted entries in
+// causal order (as Entries), then held and refused entries by id. Entries
+// refused for their form are not passed on.
 func (m *Machine) Offer() []Entry {
 	out := m.Entries()
 	for _, src := range []map[string]Entry{m.held, m.refused} {
@@ -223,4 +280,4 @@ func (m *Machine) Offer() []Entry {
 }
 
 // State resolves the machine's accepted set.
-func (m *Machine) State() State { return m.Rules.Resolve(m.Entries()) }
+func (m *Machine) State() State { return m.Rules.ResolveRoom(m.root.ID, m.Entries()) }

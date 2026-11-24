@@ -14,8 +14,17 @@ func (r *room) fork(author string, seq int, prev string, kind Kind, target strin
 	return e.ID
 }
 
+// machineWith returns a machine for the room of the create entry in es
+// (the test room's create if es has none), having received es.
 func machineWith(es []Entry) *Machine {
-	m := NewMachine(Final)
+	root := New(Entry{Author: "A", Seq: 1, Kind: Create})
+	for _, e := range es {
+		if e.Kind == Create {
+			root = e
+			break
+		}
+	}
+	m := NewMachine(Final, root)
 	m.Receive(es...)
 	return m
 }

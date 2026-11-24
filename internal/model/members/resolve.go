@@ -21,6 +21,7 @@ const (
 	ReasonMalformed     = "it is malformed"
 	ReasonMissingParent = "an entry it says it had seen is missing"
 	ReasonBadChain      = "its previous entry is not its author's previous entry"
+	ReasonOtherCreate   = "a create entry other than the room's own"
 	ReasonInvalidParent = "an entry it had seen is itself invalid"
 	ReasonNoRoot        = "the set does not contain exactly one create entry"
 	ReasonNotAdmin      = "its author was not an admin in what it had seen"
@@ -82,14 +83,26 @@ var (
 func Resolve(entries []Entry) State { return Final.Resolve(entries) }
 
 // Resolve computes the state of a room from a set of entries.
-func (r Rules) Resolve(entries []Entry) State { return r.resolveShared(entries, map[string]*State{}) }
+// The room's create is the set's only create entry; a set with several
+// has no room (ReasonNoRoot): use ResolveRoom, which names it.
+func (r Rules) Resolve(entries []Entry) State {
+	return r.resolveShared(entries, map[string]*State{}, "")
+}
+
+// ResolveRoom computes the state of the room whose create entry is root.
+// Every other create entry has no effect (ReasonOtherCreate), and neither
+// has anything that depends on one. This is what a machine uses: it is
+// pinned to its room's create.
+func (r Rules) ResolveRoom(root string, entries []Entry) State {
+	return r.resolveShared(entries, map[string]*State{}, root)
+}
 
 // resolveShared is Resolve with a cache of the states of causally closed
 // subsets. The state of such a subset depends only on its own entries, so
 // the exhaustive tests share one cache across calls to save time.
-func (r Rules) resolveShared(entries []Entry, memo map[string]*State) State {
+func (r Rules) resolveShared(entries []Entry, memo map[string]*State, root string) State {
 	effects := map[string]Effect{}
-	valid := validate(entries, effects)
+	valid := validate(entries, effects, root)
 	rs := &resolver{rules: r, e: valid, anc: map[string]map[string]bool{}, memo: memo}
 	for id := range valid {
 		rs.ancestors(id)
@@ -105,7 +118,7 @@ func (r Rules) resolveShared(entries []Entry, memo map[string]*State) State {
 
 // validate checks each entry's form and chain and keeps the valid ones.
 // Every entry it drops gets a reason.
-func validate(entries []Entry, eff map[string]Effect) map[string]Entry {
+func validate(entries []Entry, eff map[string]Effect, root string) map[string]Entry {
 	byID := map[string]Entry{}
 	for _, e := range entries {
 		switch {
@@ -113,6 +126,8 @@ func validate(entries []Entry, eff map[string]Effect) map[string]Entry {
 			eff[e.ID] = Effect{Reason: ReasonBadID}
 		case malformed(e):
 			eff[e.ID] = Effect{Reason: ReasonMalformed}
+		case root != "" && e.Kind == Create && e.ID != root:
+			eff[e.ID] = Effect{Reason: ReasonOtherCreate}
 		default:
 			byID[e.ID] = e
 		}
