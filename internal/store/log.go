@@ -90,6 +90,9 @@ type LogRow struct {
 	Reason string
 	Batch  int64
 	Pos    int
+	// Arrival is the entry's position in its room, allocated once when it
+	// is stored and never reused (the join exchange pages by it).
+	Arrival int64
 }
 
 // RoomMember is one row of the member cache.
@@ -124,6 +127,9 @@ type Request struct {
 	// Admins is the number of admins the room had when a request that
 	// makes an admin was raised here (0: not recorded).
 	Admins int
+	// Deadline, for a request an invite raised, is the invite's expiry
+	// (filled by the node; not stored with the request).
+	Deadline time.Time
 }
 
 // LogRoom is a room as the log path sees it.
@@ -188,6 +194,9 @@ type LogBatch struct {
 	// over the same transaction.
 	Access func(*Reader) (Access, error)
 	Now    time.Time
+	// Clock, if set, is read inside the transaction and replaces Now, so
+	// an approval is judged against its invite's expiry when it is written.
+	Clock func() time.Time
 }
 
 func roomGen(tx *sql.Tx, room string) (gen int64, left bool, err error) {
@@ -223,39 +232,60 @@ func checkGen(tx *sql.Tx, room string, want int64) error {
 // the log's first row; members is the member cache.
 func (s *Store) CreateLogRoom(ctx context.Context, id, label string, root LogRow, members []RoomMember, now time.Time) (int64, error) {
 	var gen int64
-	err := s.tx(ctx, func(tx *sql.Tx) error {
-		g, left, err := roomGen(tx, id)
-		switch {
-		case errors.Is(err, ErrNotFound):
-			gen = 1
-			if _, err := tx.Exec(`INSERT INTO rooms (id, label, owner, version, created_at, create_id, gen, joined_at)
-				VALUES (?,?,'',0,?,?,1,?)`, id, label, ms(now), root.ID, ms(now)); err != nil {
-				return err
-			}
-		case err != nil:
-			return err
-		case !left:
-			return errors.New("room is held already")
-		default:
-			gen = g + 1
-			if _, err := tx.Exec(`UPDATE rooms SET label = ?, create_id = ?, gen = ?, joined_at = ?, left_at = 0
-				WHERE id = ?`, label, root.ID, gen, ms(now), id); err != nil {
-				return err
-			}
-		}
-		root.State, root.Reason, root.Batch, root.Pos = LogAccepted, "", 0, 0
-		if err := insertLog(tx, id, root); err != nil {
-			return err
-		}
-		return replaceMembers(tx, id, members)
+	err := s.tx(ctx, func(tx *sql.Tx) (err error) {
+		gen, err = createLogRoom(tx, id, label, root, members, now)
+		return err
 	})
 	return gen, err
 }
 
-func insertLog(tx *sql.Tx, room string, r LogRow) error {
-	_, err := tx.Exec(`INSERT INTO log (room, id, author, seq, bytes, sig, state, reason, batch, batch_pos)
-		VALUES (?,?,?,?,?,?,?,?,?,?)`, room, r.ID, r.Author, r.Seq, r.Header, r.Sig, r.State, r.Reason, r.Batch, r.Pos)
-	return err
+func createLogRoom(tx *sql.Tx, id, label string, root LogRow, members []RoomMember, now time.Time) (int64, error) {
+	var gen int64
+	g, left, err := roomGen(tx, id)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		gen = 1
+		if _, err := tx.Exec(`INSERT INTO rooms (id, label, owner, version, created_at, create_id, gen, joined_at)
+			VALUES (?,?,'',0,?,?,1,?)`, id, label, ms(now), root.ID, ms(now)); err != nil {
+			return 0, err
+		}
+	case err != nil:
+		return 0, err
+	case !left:
+		return 0, errors.New("room is held already")
+	default:
+		gen = g + 1
+		if _, err := tx.Exec(`UPDATE rooms SET label = ?, create_id = ?, gen = ?, joined_at = ?, left_at = 0
+			WHERE id = ?`, label, root.ID, gen, ms(now), id); err != nil {
+			return 0, err
+		}
+	}
+	root.State, root.Reason, root.Batch, root.Pos = LogAccepted, "", 0, 0
+	if _, err := insertLog(tx, id, root); err != nil {
+		return 0, err
+	}
+	return gen, replaceMembers(tx, id, members)
+}
+
+// insertLog stores r with the room's next arrival position, and returns it.
+func insertLog(tx *sql.Tx, room string, r LogRow) (int64, error) {
+	var arrival int64
+	if err := tx.QueryRow(`UPDATE rooms SET arrivals = arrivals + 1 WHERE id = ? RETURNING arrivals`, room).Scan(&arrival); err != nil {
+		return 0, err
+	}
+	_, err := tx.Exec(`INSERT INTO log (room, id, author, seq, bytes, sig, state, reason, batch, batch_pos, arrival)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`, room, r.ID, r.Author, r.Seq, r.Header, r.Sig, r.State, r.Reason, r.Batch, r.Pos, arrival)
+	return arrival, err
+}
+
+// LogArrival is the arrival position of entry id in room.
+func (s *Store) LogArrival(ctx context.Context, room, id string) (int64, error) {
+	var a int64
+	err := s.db.QueryRowContext(ctx, `SELECT arrival FROM log WHERE room = ? AND id = ?`, room, id).Scan(&a)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return a, err
 }
 
 // ApplyLog stores one arrival batch with the dispositions the membership
@@ -273,6 +303,9 @@ func (s *Store) ApplyLog(ctx context.Context, b LogBatch) (int64, error) {
 func applyLog(tx *sql.Tx, b LogBatch) (int64, error) {
 	var batch int64
 	err := func() error {
+		if b.Clock != nil {
+			b.Now = b.Clock()
+		}
 		if err := checkGen(tx, b.Room, b.Gen); err != nil {
 			return err
 		}
@@ -281,9 +314,11 @@ func applyLog(tx *sql.Tx, b LogBatch) (int64, error) {
 		}
 		for i, r := range b.New {
 			r.Batch, r.Pos = batch, i+1
-			if err := insertLog(tx, b.Room, r); err != nil {
+			a, err := insertLog(tx, b.Room, r)
+			if err != nil {
 				return err
 			}
+			b.New[i].Arrival = a // seen by the caller once this commits
 		}
 		if err := hook("log:new"); err != nil {
 			return err
@@ -541,7 +576,7 @@ func (s *Store) LogRoom(ctx context.Context, id string) (LogRoom, error) {
 // batches in this order into a fresh membership machine gives the state
 // it had.
 func (s *Store) Log(ctx context.Context, room string) ([]LogRow, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, author, seq, bytes, sig, state, reason, batch, batch_pos
+	rows, err := s.db.QueryContext(ctx, `SELECT id, author, seq, bytes, sig, state, reason, batch, batch_pos, arrival
 		FROM log WHERE room = ? ORDER BY batch, batch_pos`, room)
 	if err != nil {
 		return nil, err
@@ -550,7 +585,7 @@ func (s *Store) Log(ctx context.Context, room string) ([]LogRow, error) {
 	var out []LogRow
 	for rows.Next() {
 		var r LogRow
-		if err := rows.Scan(&r.ID, &r.Author, &r.Seq, &r.Header, &r.Sig, &r.State, &r.Reason, &r.Batch, &r.Pos); err != nil {
+		if err := rows.Scan(&r.ID, &r.Author, &r.Seq, &r.Header, &r.Sig, &r.State, &r.Reason, &r.Batch, &r.Pos, &r.Arrival); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

@@ -369,7 +369,7 @@ func (h *harness) addSim(n delivery.MachineID, agents []string) *sim {
 func (h *harness) change(c Change) {
 	h.t.Helper()
 	r := h.sims[h.px.admin].r
-	q, err := r.Propose(context.Background(), diffRoom, c)
+	q, err := r.proposeAny(context.Background(), diffRoom, c) // admits without the join exchange: test only
 	if err != nil {
 		h.fail("propose %+v: %v", c, err)
 	}

@@ -480,7 +480,7 @@ func guard(lim *limiter, next http.Handler) http.Handler {
 		switch {
 		case from == "": // unreachable with RequireAnyClientCert; refuse rather than trust
 			http.Error(sw, "no client identity", http.StatusForbidden)
-		case !lim.allow(from):
+		case r.URL.Path != pathJoinV2 && !lim.allow(from): // the join route limits by source address instead
 			http.Error(sw, "slow down", http.StatusTooManyRequests)
 		default:
 			next.ServeHTTP(sw, r)

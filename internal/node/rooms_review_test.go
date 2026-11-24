@@ -440,7 +440,7 @@ func TestBoundsAndBatchesThatChangeNothing(t *testing.T) {
 	for i := 0; i < MaxPendingRequests; i++ {
 		a.propose(other, Change{Kind: core.EntryAdd, Target: target(i), Name: "x"})
 	}
-	if _, err := a.r.Propose(context.Background(), other, Change{Kind: core.EntryAdd, Target: target(999), Name: "x"}); err == nil ||
+	if _, err := a.r.proposeAny(context.Background(), other, Change{Kind: core.EntryAdd, Target: target(999), Name: "x"}); err == nil ||
 		!strings.Contains(err.Error(), ReasonTooMany) {
 		t.Fatalf("over the request cap: %v", err)
 	}

@@ -56,6 +56,20 @@ CREATE TABLE joins (
 CREATE INDEX joins_room ON joins (room, state);
 `
 
+// schemaJoinPaging is migration 7: every stored log entry gets a position
+// in its room allocated once and never reused (arrival, from the room's
+// counter arrivals), which the join exchange pages by; a join records the
+// generation its own pin gave the room.
+const schemaJoinPaging = `
+ALTER TABLE log ADD COLUMN arrival INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE rooms ADD COLUMN arrivals INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE joins ADD COLUMN pinned_gen INTEGER NOT NULL DEFAULT 0;
+UPDATE log SET arrival = (SELECT count(*) FROM log l WHERE l.room = log.room
+  AND (l.batch < log.batch OR (l.batch = log.batch AND l.batch_pos <= log.batch_pos)));
+UPDATE rooms SET arrivals = (SELECT coalesce(max(arrival), 0) FROM log WHERE log.room = rooms.id);
+CREATE INDEX log_arrival_position ON log (room, arrival);
+`
+
 // Stored states of an invite (PROTOCOL-next 5.3). An invite starts issued
 // (no open yet); signed and refused by a person are read from its request.
 const (
@@ -251,16 +265,17 @@ func (s *Store) OpenInvite(ctx context.Context, hash, key, name string, addrs []
 // previewed, unexpired invite bound to key, whose last preview showed
 // terms now, moves to accepted and the request q for a person is created.
 // ErrInviteState: it is not previewed (accepted or decided meanwhile);
-// ErrInviteTerms: the terms changed since the preview; ErrInviteExpired.
+// ErrInviteTerms: the terms changed since the preview; ErrInviteExpired,
+// judged by clock, read inside the transaction.
 // The room must be held.
-func (s *Store) AcceptInvite(ctx context.Context, hash, key, name string, addrs []string, now Terms, q Request, at time.Time) error {
+func (s *Store) AcceptInvite(ctx context.Context, hash, key, name string, addrs []string, now Terms, q Request, clock func() time.Time) error {
 	expired := false
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		inv, err := getInvite(tx, `i.secret_hash = ?`, hash)
 		if err != nil {
 			return err
 		}
-		if done, err := expireRow(tx, inv, at); err != nil || done {
+		if done, err := expireRow(tx, inv, clock()); err != nil || done {
 			expired = done
 			return err // the expiry is kept
 		}
@@ -390,11 +405,14 @@ type Join struct {
 	Admin    string // the admin's full node id, checked against the token
 	Addrs    []string
 	Gen      int64 // the room's local generation when previewed; 0 if never held
-	Expires  time.Time
-	State    string
-	Reason   string
-	Created  time.Time
-	Updated  time.Time
+	// PinnedGen is the generation this join's own pin gave the room (0:
+	// not pinned by it).
+	PinnedGen int64
+	Expires   time.Time
+	State     string
+	Reason    string
+	Created   time.Time
+	Updated   time.Time
 }
 
 // Terms are the terms the join was approved on.
@@ -443,14 +461,14 @@ func (s *Store) EndJoin(ctx context.Context, invite, state, reason string, now t
 }
 
 const joinCols = `invite, room, label, create_id, role, history, member, admin, addrs, gen, expires_at,
-	state, reason, created_at, updated_at`
+	state, reason, created_at, updated_at, pinned_gen`
 
 func scanJoin(sc interface{ Scan(...any) error }) (Join, error) {
 	var j Join
 	var addrs string
 	var exp, created, updated int64
 	err := sc.Scan(&j.Invite, &j.Room, &j.Label, &j.CreateID, &j.Role, &j.History, &j.Member, &j.Admin, &addrs, &j.Gen,
-		&exp, &j.State, &j.Reason, &created, &updated)
+		&exp, &j.State, &j.Reason, &created, &updated, &j.PinnedGen)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Join{}, ErrNotFound
 	}
@@ -482,6 +500,43 @@ func (s *Store) Joins(ctx context.Context, state string) ([]Join, error) {
 		out = append(out, j)
 	}
 	return out, rows.Err()
+}
+
+// JoinLogRoom pins a room for the join recorded under invite, in one
+// transaction: the join must still be accepted and name the room, and the
+// room's generation must still be gen, the one recorded when the preview
+// was approved (0: never held; otherwise left at gen). It then does what
+// CreateLogRoom does, records the new generation on the join, and returns
+// it. ErrStaleGeneration: the join ended, or the room was held, left or
+// joined again since.
+func (s *Store) JoinLogRoom(ctx context.Context, invite string, gen int64, label string, root LogRow, members []RoomMember, now time.Time) (int64, error) {
+	var got int64
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		j, err := getJoin(tx, invite)
+		if errors.Is(err, ErrNotFound) || err == nil && (j.State != JoinAccepted || j.PinnedGen != 0) {
+			return ErrStaleGeneration
+		} else if err != nil {
+			return err
+		}
+		g, left, err := roomGen(tx, j.Room)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			g = 0
+		case err != nil:
+			return err
+		case !left:
+			return ErrStaleGeneration
+		}
+		if g != gen {
+			return ErrStaleGeneration
+		}
+		if got, err = createLogRoom(tx, j.Room, label, root, members, now); err != nil {
+			return err
+		}
+		_, err = tx.Exec(`UPDATE joins SET pinned_gen = ?, updated_at = ? WHERE invite = ?`, got, ms(now), invite)
+		return err
+	})
+	return got, err
 }
 
 // RoomGen is a room's local generation (0 if never held here) and whether

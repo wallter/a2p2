@@ -121,6 +121,7 @@ const (
 	ReasonActionMoved = "the room changed: signing now would "
 	ReasonTooMany     = "too many requests are waiting in this room"
 	errNotPendingText = "request is not pending"
+	ReasonNeedsInvite = "a machine joins only through an invite it previewed and accepted; make an invite"
 	ReasonTermsMoved  = "the machine's role or history permission changed since it was shown; make a new invite"
 	ReasonQuorumMoved = "the number of admins changed since the request was made, so the entries it needs differ; make a new request"
 	ReasonNoGrant     = "the machine is still a member: approving lets it fetch the room's log and signs nothing"
@@ -129,7 +130,22 @@ const (
 
 // Propose records a request for a change to room's member list, for a
 // person to confirm. It is refused at once if it could not apply now.
+//
+// Propose never admits: an add, or an admin entry, for a machine that is
+// not a member is refused (ReasonNeedsInvite). A machine is admitted only
+// through the invite path, where it previewed the terms and its person
+// accepted them (JoinServer.accept).
 func (r *Rooms) Propose(ctx context.Context, room string, c Change) (store.Request, error) {
+	return r.propose(ctx, room, c, false)
+}
+
+// proposeAny is Propose without the invite rule, for tests that admit
+// machines without running the join exchange. Nothing else calls it.
+func (r *Rooms) proposeAny(ctx context.Context, room string, c Change) (store.Request, error) {
+	return r.propose(ctx, room, c, true)
+}
+
+func (r *Rooms) propose(ctx context.Context, room string, c Change, admit bool) (store.Request, error) {
 	c, err := checkChange(c)
 	if err != nil {
 		return store.Request{}, err
@@ -139,6 +155,9 @@ func (r *Rooms) Propose(ctx context.Context, room string, c Change) (store.Reque
 	rl, err := r.room(room)
 	if err != nil {
 		return store.Request{}, err
+	}
+	if !admit && c.Kind != core.EntryRemove && !slices.Contains(rl.st.Members, c.Target) {
+		return store.Request{}, &UserError{ReasonNeedsInvite}
 	}
 	q, err := r.prepare(ctx, rl, c)
 	if err != nil {
@@ -215,7 +234,25 @@ func (r *Rooms) Requests(ctx context.Context) ([]store.Request, error) {
 	if _, err := r.m.st.ExpireInvites(ctx, r.m.now()); err != nil {
 		return nil, err
 	}
-	return r.m.st.Requests(ctx, "", store.RequestPending)
+	qs, err := r.m.st.Requests(ctx, "", store.RequestPending)
+	if err != nil {
+		return nil, err
+	}
+	return r.withDeadlines(ctx, qs)
+}
+
+// withDeadlines fills the deadline of each request an invite raised.
+func (r *Rooms) withDeadlines(ctx context.Context, qs []store.Request) ([]store.Request, error) {
+	for i, q := range qs {
+		inv, err := r.m.st.InviteByRequest(ctx, q.ID)
+		switch {
+		case err == nil:
+			qs[i].Deadline = inv.Expires
+		case !errors.Is(err, store.ErrNotFound):
+			return nil, err
+		}
+	}
+	return qs, nil
 }
 
 // Confirm is the person's decision on request id (P3). Declining records
@@ -235,6 +272,10 @@ func (r *Rooms) Confirm(ctx context.Context, id string, approve bool) (Confirmat
 	}
 	if err != nil {
 		return Confirmation{}, err
+	}
+	if q.State == store.RequestFailed {
+		// Already failed (its invite expired, or revalidation): what was recorded.
+		return Confirmation{ID: id, State: q.State, Reason: q.Reason}, nil
 	}
 	if q.State != store.RequestPending {
 		return Confirmation{}, &UserError{errNotPendingText}
@@ -271,7 +312,7 @@ func (r *Rooms) Confirm(ctx context.Context, id string, approve bool) (Confirmat
 	}
 	if q.Action == ActionRejoin {
 		// Nothing to sign: the approval alone is stored.
-		_, err := r.m.st.ApplyLog(ctx, store.LogBatch{Room: rl.id, Gen: rl.gen, Complete: id, Now: r.m.now()})
+		_, err := r.m.st.ApplyLog(ctx, store.LogBatch{Room: rl.id, Gen: rl.gen, Complete: id, Now: r.m.now(), Clock: r.m.now})
 		if errors.Is(err, store.ErrInviteExpired) {
 			if _, err := r.m.st.ExpireInvites(ctx, r.m.now()); err != nil {
 				return Confirmation{}, err

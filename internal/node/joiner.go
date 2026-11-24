@@ -13,13 +13,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/wallter/a2p2/internal/core"
-	"github.com/wallter/a2p2/internal/members"
 	"github.com/wallter/a2p2/internal/store"
 )
 
@@ -29,17 +29,19 @@ var ErrWrongKey = &UserError{CodeWrongKey + ": the machine at the invite's addre
 
 // Errors of the joiner that a person is shown.
 var (
-	ErrInviteUsed   = &UserError{"this invite was used on this machine already; ask for a new one"}
-	ErrNoPreview    = &UserError{"preview the invite first"}
-	ErrRoomChanged  = &UserError{"the room was left or joined here since the preview; preview the invite again"}
-	ErrTermsChanged = &UserError{"the admin machine now shows different terms from those approved here; ask for a new invite"}
-	ErrNoRecord     = &UserError{"the invite was accepted before, but this machine has no record of approving it; ask for a new invite"}
+	ErrInviteUsed     = &UserError{"this invite was used on this machine already; ask for a new one"}
+	ErrNoPreview      = &UserError{"preview the invite first"}
+	ErrRoomChanged    = &UserError{"the room was left or joined here since the preview; preview the invite again"}
+	ErrTermsChanged   = &UserError{"the admin machine now shows different terms from those approved here; ask for a new invite"}
+	ErrNoRecord       = &UserError{"the invite was accepted before, but this machine has no record of approving it; ask for a new invite"}
+	ErrPreviewChanged = &UserError{"the invite was previewed again since the preview you approved; approve the latest preview"}
 )
 
 // Reasons a join ends without the room, besides the server's codes.
 const (
-	ReasonJoinNotMember = "the room's log was received, but it does not show this machine as a member on the terms approved"
-	ReasonJoinConflict  = "this machine holds room log entries that conflict with the admin machine's log"
+	ReasonJoinNotMember = "the room's log was received, but it does not show this machine as a member"
+	ReasonJoinMissing   = "the room's log was received, but an entry the admin machine accepted was not accepted here"
+	ReasonJoinNoCreate  = "the admin machine's signed log does not start with the room's create entry"
 	ReasonJoinLeft      = "the room was left or joined again here during the join"
 	ReasonNotAccepted   = "the accept did not reach the admin machine: preview and accept the invite again"
 )
@@ -100,6 +102,9 @@ type Preview struct {
 	Member  bool
 	Admin   string // the admin's node id, checked against the token
 	Expires time.Time
+	// ID identifies everything above but State (previewID): JoinAccept
+	// takes it, so what is accepted is exactly what the person approved.
+	ID string
 }
 
 func (p Preview) terms() store.Terms {
@@ -109,11 +114,16 @@ func (p Preview) terms() store.Terms {
 // JoinOutcome is how a join stands: accepted (waiting for a person on the
 // admin machine), previewed (the accept never arrived: Reason says so),
 // signed (the room is held here), refused (Reason is the code or what
-// failed here), expired or removed.
+// failed here), expired or removed. A signed join reports the role and
+// history permission this machine's own copy of the log gives it; Note
+// says so when they differ from the preview (a change that landed since).
 type JoinOutcome struct {
-	State  string
-	Room   string
-	Reason string
+	State   string
+	Room    string
+	Reason  string
+	Role    string
+	History bool
+	Note    string
 }
 
 // NewJoiner joins rooms over t.
@@ -208,8 +218,9 @@ func (j *Joiner) JoinPreview(ctx context.Context, token string) (Preview, error)
 	case recorded && p.State == JoinStatePreviewed && !sameTerms(rec, p):
 		return Preview{}, ErrTermsChanged
 	case recorded && p.State != JoinStatePreviewed:
-		return Preview{State: JoinStateAccepted, Room: rec.Room, Label: rec.Label, Create: rec.CreateID, Role: rec.Role,
-			History: rec.History, Member: rec.Member, Admin: rec.Admin, Expires: rec.Expires}, nil
+		p := recordPreview(rec)
+		p.State = JoinStateAccepted
+		return p, nil
 	case p.State != JoinStatePreviewed:
 		return Preview{}, ErrNoRecord
 	}
@@ -218,7 +229,7 @@ func (j *Joiner) JoinPreview(ctx context.Context, token string) (Preview, error)
 		return Preview{}, err
 	}
 	if recorded {
-		gen = rec.Gen
+		gen, p = rec.Gen, recordPreview(rec)
 	}
 	j.mu.Lock()
 	j.previews[h] = &previewed{tok: tok, preview: p, gen: gen}
@@ -226,8 +237,14 @@ func (j *Joiner) JoinPreview(ctx context.Context, token string) (Preview, error)
 	return p, nil
 }
 
-func sameTerms(rec store.Join, p Preview) bool {
-	return rec.Room == p.Room && rec.CreateID == p.Create && rec.Admin == p.Admin && rec.Terms() == p.terms()
+func sameTerms(rec store.Join, p Preview) bool { return recordPreview(rec).ID == p.ID }
+
+// recordPreview is the preview a recorded join was approved on.
+func recordPreview(rec store.Join) Preview {
+	p := Preview{State: JoinStatePreviewed, Room: rec.Room, Label: rec.Label, Create: rec.CreateID, Role: rec.Role,
+		History: rec.History, Member: rec.Member, Admin: rec.Admin, Expires: rec.Expires}
+	p.ID = previewID(p)
+	return p
 }
 
 // answerPreview reads an open's answer.
@@ -247,22 +264,28 @@ func answerPreview(rp JoinReply, a JoinAnswer, server string) (Preview, error) {
 	if err != nil || a.Admin != server || a.Role != RoleMember && a.Role != RoleAdmin {
 		return Preview{}, errors.New("join: the preview is malformed or names another admin")
 	}
-	return Preview{State: JoinStatePreviewed, Room: a.Room.ID, Label: a.Room.Label, Create: a.Room.Create,
-		Role: a.Role, History: a.History, Member: a.Member, Admin: a.Admin, Expires: exp}, nil
+	p := Preview{State: JoinStatePreviewed, Room: a.Room.ID, Label: a.Room.Label, Create: a.Room.Create,
+		Role: a.Role, History: a.History, Member: a.Member, Admin: a.Admin, Expires: exp}
+	p.ID = previewID(p)
+	return p, nil
 }
 
 func validJoinRoom(r *JoinRoom) bool {
 	return r != nil && core.ValidRoom(r.ID) && len(r.Create) == 32 && isLowerHex(r.Create)
 }
 
-// JoinAccept accepts the invite in token, which JoinPreview showed to a
-// person here who confirmed it; the local surface calls it only after that
-// confirmation. It first records the approved preview, then sends the
-// accept; the admin machine then raises a request for its person.
-// JoinAccept polls for up to wait (PROTOCOL-next 5.3) and returns how the
-// join stands; a join still accepted keeps being followed by Resume. If
-// the accept's answer is lost, calling JoinAccept again is safe.
-func (j *Joiner) JoinAccept(ctx context.Context, token string, wait time.Duration) (JoinOutcome, error) {
+// JoinAccept accepts the invite in token on the preview preview (its ID),
+// which JoinPreview showed to a person here who confirmed it; the local
+// surface calls it only after that confirmation. It fails with
+// ErrPreviewChanged unless that preview is the one stored here: the
+// latest preview, or the one an earlier accept recorded, which nothing
+// replaces. It first records the approved preview, then sends the accept
+// carrying its identifier; the admin machine then raises a request for
+// its person. JoinAccept polls for up to wait (PROTOCOL-next 5.3) and
+// returns how the join stands; a join still accepted keeps being followed
+// by Resume. If the accept's answer is lost, calling JoinAccept again is
+// safe.
+func (j *Joiner) JoinAccept(ctx context.Context, token, preview string, wait time.Duration) (JoinOutcome, error) {
 	tok, err := core.DecodeToken(token)
 	if err != nil {
 		return JoinOutcome{}, userErr("bad invite token: %v", err)
@@ -283,10 +306,12 @@ func (j *Joiner) JoinAccept(ctx context.Context, token string, wait time.Duratio
 		case rec.State != store.JoinAccepted:
 			return JoinOutcome{}, ErrInviteUsed
 		}
-		pv = &previewed{tok: tok, gen: rec.Gen, preview: Preview{State: JoinStatePreviewed, Room: rec.Room, Label: rec.Label,
-			Create: rec.CreateID, Role: rec.Role, History: rec.History, Member: rec.Member, Admin: rec.Admin, Expires: rec.Expires}}
+		pv = &previewed{tok: tok, gen: rec.Gen, preview: recordPreview(rec)}
 	}
 	p := pv.preview
+	if p.ID != preview {
+		return JoinOutcome{}, ErrPreviewChanged
+	}
 	if gen, _, err := j.r.m.st.RoomGen(ctx, p.Room); err != nil {
 		return JoinOutcome{}, err
 	} else if gen != pv.gen {
@@ -310,7 +335,7 @@ func (j *Joiner) JoinAccept(ctx context.Context, token string, wait time.Duratio
 		}
 		return nil
 	}
-	rp, a, err := j.call(ctx, tok.Addrs, check, JoinRequest{Op: JoinAccept, Secret: tok.SecretText()})
+	rp, a, err := j.call(ctx, tok.Addrs, check, JoinRequest{Op: JoinAccept, Secret: tok.SecretText(), Terms: p.ID})
 	if err != nil {
 		return JoinOutcome{}, err // the record stays; JoinAccept again, or Resume, finds out
 	}
@@ -388,12 +413,30 @@ func (j *Joiner) follow(ctx context.Context, jn store.Join, wait time.Duration) 
 		return nil
 	}
 	pg := &paging{}
-	for {
-		if cur, err := j.r.m.st.GetJoin(ctx, jn.Invite); err != nil || cur.State != store.JoinAccepted {
-			if err != nil && !errors.Is(err, store.ErrNotFound) {
+	ended := func() (bool, error) {
+		cur, err := j.r.m.st.GetJoin(ctx, jn.Invite)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return false, err
+		}
+		if err == nil {
+			jn.PinnedGen = cur.PinnedGen
+		}
+		return err != nil || cur.State != store.JoinAccepted, nil
+	}
+	left := JoinOutcome{State: JoinStateRefused, Room: jn.Room, Reason: ReasonJoinLeft}
+	fail := func(reason string) (JoinOutcome, error) {
+		o, err := j.end(ctx, jn, JoinOutcome{State: JoinStateRefused, Room: jn.Room, Reason: reason})
+		if err == nil && pg.pinned {
+			// Nothing stays installed by a join that failed.
+			if err := j.r.Leave(ctx, jn.Room); err != nil && !errors.Is(err, ErrNoRoom) {
 				return JoinOutcome{}, err
 			}
-			return JoinOutcome{State: JoinStateRefused, Room: jn.Room, Reason: ReasonJoinLeft}, nil
+		}
+		return o, err
+	}
+	for {
+		if done, err := ended(); err != nil || done {
+			return left, err
 		}
 		rp, a, err := j.call(ctx, jn.Addrs, check, JoinRequest{Op: JoinPoll, Invite: jn.Invite, After: pg.after})
 		var pause time.Duration
@@ -422,23 +465,33 @@ func (j *Joiner) follow(ctx context.Context, jn store.Join, wait time.Duration) 
 			}
 			pause = delay
 		case rp.Status == http.StatusOK && a.State == JoinStateSigned:
-			if reason, err := j.apply(ctx, jn, pg, a); err != nil || reason != "" {
-				if err != nil {
-					return JoinOutcome{}, err
-				}
-				return j.end(ctx, jn, JoinOutcome{State: JoinStateRefused, Room: jn.Room, Reason: reason})
-			}
-			if a.More {
+			reason, err := j.apply(ctx, jn, pg, a)
+			switch {
+			case err != nil:
+				return JoinOutcome{}, err
+			case reason == ReasonJoinLeft:
+				return left, nil
+			case reason != "":
+				return fail(reason)
+			case a.More:
 				continue
 			}
-			if reason := j.verify(jn, pg); reason != "" {
-				return j.end(ctx, jn, JoinOutcome{State: JoinStateRefused, Room: jn.Room, Reason: reason})
+			o, reason := j.verify(jn, pg, a.Heads)
+			switch {
+			case reason == ReasonJoinLeft:
+				return left, nil
+			case reason != "":
+				return fail(reason)
 			}
-			return j.end(ctx, jn, JoinOutcome{State: JoinStateSigned, Room: jn.Room})
+			return j.end(ctx, jn, o)
 		default:
 			pause = delay
 		}
 		if j.r.m.now().Add(pause).After(deadline) {
+			// A poll that came back after the room was left: ended, not pending.
+			if done, err := ended(); err != nil || done {
+				return left, err
+			}
 			return JoinOutcome{State: JoinStateAccepted, Room: jn.Room}, nil
 		}
 		if err := j.o.Sleep(ctx, pause); err != nil {
@@ -452,20 +505,21 @@ func (j *Joiner) follow(ctx context.Context, jn store.Join, wait time.Duration) 
 
 // paging is one run of reading a signed log.
 type paging struct {
-	after int64
-	gen   int64           // the generation the room is held at, once pinned or found
-	sent  map[string]bool // every entry the admin machine sent
-	bad   string          // what failed in a page
+	after  int64 // the last page's next
+	gen    int64 // the generation the room is held at, once pinned or found
+	pinned bool  // this run's pin made it
 }
 
-// apply takes one signed page. The first time, it checks that the room
-// here is as it was when the preview was approved: never held (or left)
-// at the generation recorded, so it pins the room by the create entry id
-// the preview showed, after checking the entry's room; or held at that
-// generation with that create entry (a machine restored from a copy), so
-// the entries go into what it holds. It then gives the entries to Receive
-// as one batch under that generation and checks what Receive did. It
-// returns what failed, or "".
+// apply takes one signed page. The first time, it finds the generation to
+// apply under: the one this join's own pin recorded (a run that pinned and
+// was interrupted); or the room held at the generation recorded with the
+// preview, with that create entry (a machine restored from a copy, or one
+// still holding it); or else it pins the room by the create entry id the
+// preview showed, after checking the entry, in one write that checks the
+// join is still accepted and the generation still the one recorded, and
+// takes the generation from that write. It then gives the entries to
+// Receive as one batch under that generation. It returns what failed, or
+// "".
 func (j *Joiner) apply(ctx context.Context, jn store.Join, pg *paging, a JoinAnswer) (string, error) {
 	if !validJoinRoom(a.Room) || a.Room.ID != jn.Room || a.Room.Create != jn.CreateID {
 		return "the admin machine's signed answer names another room", nil
@@ -473,9 +527,6 @@ func (j *Joiner) apply(ctx context.Context, jn store.Join, pg *paging, a JoinAns
 	wires := make([][]byte, len(a.Entries))
 	for i, e := range a.Entries {
 		wires[i] = e
-	}
-	if pg.sent == nil {
-		pg.sent = map[string]bool{}
 	}
 	if pg.gen == 0 {
 		gen, held, err := j.r.m.st.RoomGen(ctx, jn.Room)
@@ -487,74 +538,83 @@ func (j *Joiner) apply(ctx context.Context, jn store.Join, pg *paging, a JoinAns
 		sameRoom := rl != nil && rl.createID == jn.CreateID
 		j.r.mu.Unlock()
 		switch {
-		// Held at the generation previewed (a member restored from a
-		// copy), or at the next one, which only this join's own pin makes:
-		// a leave moves the generation on and marks this join left.
-		case held && sameRoom && (gen == jn.Gen || gen == jn.Gen+1):
+		case jn.PinnedGen != 0:
+			pg.gen = jn.PinnedGen // Receive refuses it if the room was left since
+		case held && sameRoom && gen == jn.Gen:
 			pg.gen = gen
-		case held || gen != jn.Gen:
+		case held:
 			return ReasonJoinLeft, nil
 		default:
 			if pg.after != 0 || len(wires) == 0 {
-				return "the admin machine's signed log does not start with the room's create entry", nil
+				return ReasonJoinNoCreate, nil
 			}
 			e, err := core.ParseEntry(wires[0])
 			if err != nil || e.ID() != jn.CreateID || e.Fields().Room != jn.Room || e.Fields().Kind != core.EntryCreate {
-				return "the admin machine's signed log does not start with the room's create entry", nil
+				return ReasonJoinNoCreate, nil
 			}
-			if _, err := j.r.PinRoom(ctx, wires[0]); err != nil {
+			if err := hookAt("join:pin"); err != nil {
 				return "", err
 			}
-			if pg.gen, err = j.r.Gen(jn.Room); err != nil {
+			gen, err := j.r.pinJoin(ctx, wires[0], jn.Invite, jn.Gen)
+			if errors.Is(err, store.ErrStaleGeneration) {
+				return ReasonJoinLeft, nil
+			}
+			if err != nil {
 				return "", err
 			}
+			pg.gen, pg.pinned = gen, true
 		}
 	}
-	res, err := j.r.Receive(ctx, jn.Room, pg.gen, wires...)
+	_, err := j.r.Receive(ctx, jn.Room, pg.gen, wires...)
 	if errors.Is(err, ErrStaleGeneration) || errors.Is(err, ErrNoRoom) {
 		return ReasonJoinLeft, nil
 	}
 	if err != nil {
 		return "", err
 	}
-	for _, x := range res {
-		if x.ID != "" {
-			pg.sent[x.ID] = true
-		}
-		if x.Disposition == members.Dropped {
-			return "an entry of the room's log could not be kept here: " + x.Reason, nil
-		}
+	if len(a.Entries) > 0 {
+		pg.after = a.Next
 	}
-	pg.after += int64(len(a.Entries))
 	return "", nil
 }
 
-// verify, after the last page: everything accepted here came from the
-// admin machine (a restored copy holds no conflicting branch), and this
-// machine is a member of the pinned room on the terms approved.
-func (j *Joiner) verify(jn store.Join, pg *paging) string {
+// verify, after the last page. The log is the truth: this machine must
+// have accepted every head the admin machine advertised (otherwise an
+// entry it accepted was refused or never arrived here) and be a member of
+// the pinned room in its own state. The outcome then reports the role and
+// history permission that state gives, with a note if they differ from
+// the preview.
+func (j *Joiner) verify(jn store.Join, pg *paging, heads []string) (JoinOutcome, string) {
 	j.r.mu.Lock()
 	defer j.r.mu.Unlock()
 	rl := j.r.rooms[jn.Room]
 	if rl == nil || rl.gen != pg.gen {
-		return ReasonJoinLeft
+		return JoinOutcome{}, ReasonJoinLeft
 	}
-	for id, row := range rl.state {
-		if row.State == store.LogAccepted && !pg.sent[id] {
-			return ReasonJoinConflict
+	for _, h := range heads {
+		if rl.state[h].State != store.LogAccepted {
+			return JoinOutcome{}, ReasonJoinMissing
 		}
 	}
 	self := j.r.m.ID
 	st := rl.st
-	switch {
-	case !slices.Contains(st.Members, self):
-		return ReasonJoinNotMember
-	case st.Permissions[self].All != jn.History:
-		return ReasonJoinNotMember
-	case jn.Role == RoleMember && slices.Contains(st.Admins, self):
-		return ReasonJoinNotMember
-	case jn.Member && jn.Role == RoleAdmin && !slices.Contains(st.Admins, self):
-		return ReasonJoinNotMember
+	if !slices.Contains(st.Members, self) {
+		return JoinOutcome{}, ReasonJoinNotMember
 	}
-	return ""
+	o := JoinOutcome{State: JoinStateSigned, Room: jn.Room, Role: RoleMember, History: st.Permissions[self].All}
+	if slices.Contains(st.Admins, self) {
+		o.Role = RoleAdmin
+	}
+	if o.Role != jn.Role || o.History != jn.History {
+		o.Note = fmt.Sprintf("the room's log gives this machine the role %s and %s, not what the preview showed (%s, %s): "+
+			"a change was made since", o.Role, historyText(o.History), jn.Role, historyText(jn.History))
+	}
+	return o, ""
+}
+
+func historyText(h bool) string {
+	if h {
+		return "earlier history"
+	}
+	return "no earlier history"
 }

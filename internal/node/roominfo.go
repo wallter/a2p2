@@ -110,6 +110,9 @@ func (r *Rooms) Info(ctx context.Context, room string) (RoomInfo, error) {
 		case err != nil && !errors.Is(err, store.ErrNotFound):
 			return RoomInfo{}, err
 		}
+		if err == nil {
+			q.Deadline = inv.Expires
+		}
 		info.Requests = append(info.Requests, q)
 	}
 	return info, nil
