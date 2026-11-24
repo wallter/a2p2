@@ -2,11 +2,15 @@
 # Make this container's blackhole routes match /chaos/blackhole, one IPv4
 # address per line, written by the driver: packets to those addresses are
 # dropped here. Both sides of a partition drop the other's addresses.
-ip route | grep '^blackhole' | while read -r _ addr _; do
-	ip route del blackhole "$addr"
+# Exits non-zero if any route could not be removed or added; the driver
+# also reads the routes back before it counts a partition as applied.
+fail=0
+for addr in $(ip route | awk '$1 == "blackhole" { print $2 }'); do
+	ip route del blackhole "$addr" || fail=1
 done
-[ -f /chaos/blackhole ] || exit 0
-while read -r addr; do
-	[ -n "$addr" ] && ip route add blackhole "$addr"
-done </chaos/blackhole
-exit 0
+if [ -f /chaos/blackhole ]; then
+	for addr in $(cat /chaos/blackhole); do
+		ip route add blackhole "$addr" || fail=1
+	done
+fi
+exit $fail
