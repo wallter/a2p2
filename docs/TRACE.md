@@ -65,7 +65,7 @@ page's script in a browser, and the real-harness end-to-end runs
 | I4 | partly | 1 | One static binary (built with CGO off; `make windows` also builds and vets it for Windows in CI) and one local database; two direct dependencies. `scripts/licences.sh` (`make licences`, part of `make check` and CI) fails on a direct dependency that is not on its allow-list and prints where each licence file is; it does not read the licences, and no test checks that the binary is static. |
 | I5 | partly | 2 | The release workflow builds the binaries for a tag and publishes `SHA256SUMS` with them, but no release has been made, so it has not run. The database is versioned (`TestDatabaseAtVersionTwoUpgradesToTheLogSchema`) but nothing tests nodes on adjacent versions. |
 | I6 | untested | 1 | True from reading the code; no test. |
-| L1 | not yet | 5 | Not built. |
+| L1 | not yet | 5 | Not built. The 0.2 draft design is DESIGN section 11 and PROTOCOL section 10. Model: `TestAFileIsSentOnlyAfterAPersonApprovesTheBytesStagedWhenTheAgentAsked`, `TestAReaderFetchesOnlyWhenItsAgentAsksAndGetsVerifiedBytes`, `TestAMemberServingWrongBytesIsRefusedAndAnHonestHolderStillServes`, `TestANewReferenceToAKnownHashDoesNotWidenWhoIsServed`, `TestWithdrawDeletesAFileAndAnyPartOfItOnEveryMachineThatLearnsOfIt`, `TestRandomSchedulesWithFilesKeepTheAttachmentRules` and the rest of `internal/model/delivery/attach_test.go` |
 
 Principles P1–P6 and the limits in section 6 are not rows. Each limit in
 section 6 becomes a scenario in step 0 that shows the limit behaving as

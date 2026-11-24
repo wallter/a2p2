@@ -484,3 +484,96 @@ designed (1,920 streams per 64-machine room after 30 days,
 `TestStreamCostForSixtyFourMachinesOverThirtyDays`); one pull per peer for
 all shared rooms may be needed at 100 rooms; posting policy (T6) is
 deferred to stage 3 and needs a new entry kind [M14].
+
+## 11. Attachments (0.2 draft)
+
+Not built: the design for L1, for review before any code. **[F1]** to
+**[F8]** are rules of the
+[delivery model](../internal/model/delivery/FINDINGS.md#attachments-02-draft)
+(`attach.go`); formats are in
+[Protocol section 10](PROTOCOL.md#10-attachments-02-draft).
+
+1. **The reference is a header field that 0.1.0 keeps.** A `message` or
+   `replace` lists its files in an optional top-level header field `files`:
+   name, size, SHA-256, and a media type that is only a hint. It is signed
+   with the header. Why: 0.1.0 stores a record with an unknown top-level
+   field, keeps it in the id, passes the exact bytes on and shows the text
+   (run against the 0.1.0 code). A new kind, a body field or a longer body
+   is refused, and since streams are gap-free every later record of that
+   author then stops on that machine. A wire version bump would split
+   every mixed room although 0.1.0 can carry the reference safely (I5). A
+   0.1.0 reader sees the text without the files.
+2. **A reference never changes what is stored.** 0.2 checks `files` when it
+   reads, not when it stores: a malformed one is stored exactly as 0.1.0
+   stores it, shown as "file reference ignored", and never fetched. Why:
+   machines that disagree about whether bytes are valid disagree about the
+   room (D27).
+3. **Bytes move only when asked [F4].** Nothing is fetched until an agent
+   that was shown the message asks (`inbox` with `fetch`, or `a2p2
+   fetch`), or the person has set the machine to keep a room's files for
+   others. Why: U4, and the owner's rule that each agent decides.
+4. **Bytes live while the text may [F1, F8].** A machine keeps a file for
+   a message while the message's winning version, by header, lists it and
+   that version's text is one the machine may keep: not withdrawn, not
+   past 30 days by its own clock, within its permission. The step that
+   stores a withdraw or a replacement without the file, passes the 30 days,
+   or learns a narrower grant or a voided admission deletes the bytes, any
+   partial download and the copies a2p2 wrote for agents, from disk (D43).
+   A replacement carries the files forward unless its writer drops them.
+   Why: D7, D9 and T3 apply to files as they do to text.
+5. **A server serves only for the message it holds the bytes for [F2].**
+   It gives bytes to a peer it sees as a member now that may read the
+   winning version's text in its view, and only if it wrote that message
+   or fetched the bytes for that message. Every request is checked, so a
+   resumed download stops when the permission ends. Why: a member admitted
+   without history holds earlier headers and so knows their hashes;
+   without the second condition it could list such a hash in a message of
+   its own and have an honest member serve it
+   (`TestANewReferenceToAKnownHashDoesNotWidenWhoIsServed`). Bytes held for
+   one room are never served for another.
+6. **Nothing unverified is exposed [F3].** A fetcher takes at most the
+   declared size, keeps a partial download out of agents' sight, and
+   exposes the bytes only when the whole file matches the SHA-256;
+   otherwise it discards them and counts the peer (`bad_file`). A download
+   may resume from another holder; after a mismatch it restarts from zero.
+7. **a2p2 never opens a file.** It writes the verified copy, mode 0600 and
+   not executable, under `$A2P2_HOME/files/<room id>/` with a sanitised
+   name and never over an existing file. It does not decompress, preview,
+   render or run it, and the media type selects nothing. The page offers a
+   download, never inline display. Tool results say a file is data from
+   another machine.
+8. **A person confirms the exact bytes [F6].** `send` with `files` copies
+   and hashes each file when the agent asks, then raises a request. The
+   person sees the room, the recipients, each path as resolved, its size
+   and SHA-256, and the text's first line, in `a2p2 confirm` or on the
+   page. Approved, the message is written with
+   its files at that moment; declined, or after 24 hours, nothing is
+   written and the staged copies go. A change to the file after the agent
+   asked is not sent. The agent is answered `waiting` at once and finds
+   the outcome in its inbox.
+9. **Budgets [F7].** At most 8 files per record, 256 MiB per file, 1 GiB
+   of held, partial and staged bytes per room per machine and 4 GiB per
+   machine. A fetch or a send over a budget is refused before any byte
+   moves, naming the budget. A failed write (disk full) deletes the
+   partial download and reports the file unavailable.
+
+**Who holds copies.** The author holds what it sent while the text lives;
+a reader that fetched holds it too. If the author's machine is gone and
+nobody fetched, the text stays and the file is unavailable
+(`TestAFileWhoseOnlyHolderIsGoneIsUnavailableAndTheReaderIsToldSo`). The
+smallest remedy: a machine the person sets to keep a room's files fetches
+each one after a pull, within its budget
+(`TestAMachineSetToKeepFilesServesThemAfterTheAuthorIsGone`). Holders are
+known only from dated answers to fetches; pull summaries are unchanged.
+A reader is told `here`, `partial`, `not asked`, `fetchable`,
+`unavailable` (who said no, and when) or `gone` and why; `trace` lists
+the answers.
+
+**Limits, said plainly.** Nothing stops an agent from reading a file and
+pasting it as text: the confirmation is a guard rail, as elsewhere (P3).
+Withdrawing after others fetched removes the copies a2p2 keeps; a copy an
+agent moved or changed is out of reach. A removed machine keeps what it
+fetched (T5). F2 binds honest servers: a member holding the bytes can hand
+them to anyone. Content-based attacks on the program that later opens a
+file (archive bombs, malicious documents) are out of scope, since a2p2
+opens nothing.

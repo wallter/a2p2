@@ -58,6 +58,60 @@
    `TestRandomLevelChangesNeitherLoseNorRepeatAMessage`: every message for
    the agent is shown once or listed skipped, never both.
 
+## Attachments (0.2 draft)
+
+Added 2026-11-24 for requirement L1; not built (`attach.go`). A message or
+a replacement lists files (name, size, hash) in its signed header; the
+bytes travel apart, on request.
+
+- F1 Referenced: a machine keeps a file's bytes for a message only while
+  the message's winning version by header lists it and that version's
+  text is one the machine may keep (not withdrawn, not expired by its own
+  clock, within its permission). Otherwise the bytes and any partial
+  download go in the step that ended the reference.
+- F2 Served: only to a peer the server sees as a member now that may read
+  that version's text in its view, and only bytes the server holds for
+  that message (it wrote it, or fetched them for it). Checked at every
+  request.
+- F3 Verified: never more than the declared size; a partial download is
+  hidden; the whole must match the hash or is discarded. A download may
+  resume from another holder.
+- F4 Lazy: only an agent shown the message fetches, or a machine its
+  person set to keep the room's files (Replicate).
+- F5 Told: here, partial, not asked, fetchable, unavailable (dated
+  answers) or gone with the reason.
+- F6 Confirmed: the bytes staged when the agent asked are what the person
+  approves and what is sent; declined, nothing is written.
+- F7 Budget: a fetch over the room's budget is refused before any byte
+  moves.
+- F8 Replace: a replacement carries the files forward unless its writer
+  drops them; a file no version lists goes.
+
+Found while modelling: a member admitted without history holds earlier
+headers, so it knows their hashes; with permission checked against any
+message naming the hash, it could list one in a message of its own and an
+honest member would serve it. F2's "held for that message" closes it
+(`TestANewReferenceToAKnownHashDoesNotWidenWhoIsServed`).
+
+Tests: the 16 scenarios in `attach_test.go` and
+`TestRandomSchedulesWithFilesKeepTheAttachmentRules` (400 schedules of 100
+steps with withdrawals, replacements, expiry, admissions without history,
+removals, lost disks and a member serving wrong bytes; after every step
+every held file matches its hash and is kept for a message that lets the
+machine keep it and, by the true grants, read it). Removing the drop on
+storing a record, or either half of the server's check, fails named
+tests.
+
+Rejected: a new record kind, a body field, or a wire version for the
+reference (0.1.0 refuses the first two and blocks the author's stream;
+the third splits mixed rooms); refusing a malformed reference on receipt
+(0.1.0 and 0.2 would then store different records); bytes in the
+database or in pull pages (the database and the 4 MiB page budget are for
+text); fetching every file at once (U4, disk); permission by hash alone
+(the leak above); a separate retention for bytes (D7 and D9 would then
+differ for text and files); chunk hashes in the header (header bytes; the
+whole-file check bounds a liar's cost at the file's size).
+
 ## Membership
 
 Machines apply changes (grant, remove, void) when told, in order; a grant
@@ -129,7 +183,8 @@ Section 6 "two copies" is a status line. T3 leaks (G2). D10 branches need
 ancestor ids. T5 holds per member, as written. N1 holds with offers.
 
 Record fields: author, epoch, seq, prev, links, version, kind, agent, to,
-ask-handled, ref, parent, thread, created, body hash, signature, room.
+ask-handled, ref, parent, thread, created, body hash, signature, room;
+in the 0.2 draft, files (L1).
 
 ## Requirement to test
 
@@ -142,3 +197,4 @@ requirements in a comment. Examples, and the membership tests:
 | U3, T3 (R2) | `TestNewMachineInboxStartsEmpty…`, `TestNoHistoryNewcomer…`, `TestTwoGrantsThatDiffer…`, `TestHeldResponseIsChecked…` |
 | T5 (R1, R2) | `TestMessageOfARemovedAuthor…`, `TestWithdrawWrittenBeforeRemoval…`, `TestRecordWrittenAfterRemoval…`, `TestVoidedAdmission…`, `TestStaleViewHands…`, `TestHeldResponseIsNotReleased…` |
 | N1 (R3) | `TestStaleOfferCosts…`, `TestOffersDoNotStarve…`, `TestMachineThatOnlyOpensRequests…` |
+| L1 (F1–F8, 0.2 draft) | `TestAFileIsSentOnlyAfterAPersonApproves…`, `TestANewReferenceToAKnownHash…`, `TestWithdrawDeletesAFile…`, `TestRandomSchedulesWithFiles…` and the rest of `attach_test.go` |
