@@ -532,6 +532,23 @@ decision) and then hourly; `status` and the page show "reachable by
 peers: yes, no or unknown" with when it was checked. The rules are in `node.DialBackServer`
 and `node.Reacher`; the dialling is `peer.Prober`.
 
+**Members that connect in.** In the common setup (one machine listens,
+laptops connect out only) no member can be dialled, so no dial-back can
+run, yet the listener has direct evidence: a member completed a pinned
+connection to it. The daemon keeps in memory, per key TLS proved, the
+last such connection and the local address it arrived on (nothing on
+disk, no new message). While a current member of a shared room connected
+in within the last 10 minutes, "reachable by peers" is `yes`, saying so
+("bfb81469 connected in 5 s ago"), unlike a dial-back's "reached
+ADDRESS". That proves the member reaches the local address it used and
+says nothing about the other addresses advertised; a dial-back result,
+where one exists, is still shown. A key in no shared room, or one
+removed since, counts for nothing. `net check` shows such a member as
+"connects in (last 5 s ago)" rather than as a problem, counts it in its
+advice ("1 of 1 members connects in to this machine; nothing to do"),
+and tells a person to check outgoing connections only when a member has
+a known address and none could be reached.
+
 **More machines reachable without a third party.** N1 lets a machine that
 cannot accept connections take part through a member that can. Two
 machines behind ordinary home routers have no such member. Four things

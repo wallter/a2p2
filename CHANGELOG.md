@@ -18,7 +18,10 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 - **Reachability in `status` and the page:** "reachable by peers: yes, no
   or unknown", checked by asking members to connect back (a new peer
   request, `/p/v2/dialback`; older machines answer that they do not know
-  it, and nothing else changes).
+  it, and nothing else changes). A listener whose members only connect
+  out is shown as reachable while a member has connected in within the
+  last 10 minutes ("bfb81469 connected in 5 s ago"), and `net check`
+  counts such members instead of advising you to check your network.
 - **IPv6:** after a new `a2p2 net on`, a listener on `0.0.0.0` or `::`
   takes IPv4 and IPv6, and global IPv6 addresses are advertised (stable
   before temporary, never link-local). A networking decision made with an

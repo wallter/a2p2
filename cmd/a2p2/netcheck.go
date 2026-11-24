@@ -182,6 +182,13 @@ func mappingText(m *node.PortMapping) string {
 	return s + left
 }
 
+func inAgo(s int64) string {
+	if s < 60 {
+		return fmt.Sprintf("%d s ago", s)
+	}
+	return fmt.Sprintf("%d min ago", s/60)
+}
+
 // printNetCheck prints the daemon's check in plain words.
 func printNetCheck(nc node.NetCheck) {
 	switch {
@@ -212,8 +219,13 @@ func printNetCheck(nc node.NetCheck) {
 				who = m.Name + " (" + who + ")"
 			}
 			fmt.Printf("  %s / %s\n", m.RoomLabel, who)
-			if len(m.Addrs) == 0 {
+			switch {
+			case len(m.Addrs) == 0 && m.ConnectsIn != nil:
+				fmt.Println("    connects in (last " + inAgo(m.ConnectsIn.AgoS) + ")")
+			case len(m.Addrs) == 0:
 				fmt.Println("    no address known: it has not said where it listens (it may connect out only)")
+			case m.ConnectsIn != nil:
+				fmt.Println("    also connects in (last " + inAgo(m.ConnectsIn.AgoS) + ")")
 			}
 			for _, a := range m.Addrs {
 				fmt.Println("  " + addrLine(a))
@@ -238,6 +250,9 @@ func printNetCheck(nc node.NetCheck) {
 		fmt.Println("not tried by members:", strings.Join(nc.Reach.NotTried, ", "), "("+node.NotTriedText+")")
 	}
 	for _, n := range nc.Reach.NotChecked {
+		if len(nc.Reach.ConnectedIn) > 0 {
+			n = "dial-back " + n // the connection in answers the question; the dial-back did not run
+		}
 		fmt.Println(n)
 	}
 	for _, a := range nc.NotAdvertised {
