@@ -318,6 +318,14 @@ normalised.
 Steps, each ending with `make check` passing and `TRACE.md` rows updated in
 the step that moves or deletes a test they name:
 
+**Order as built (changed by the lead, 2026-11-24).** Steps 1, 2 and the
+storage and local-path half of step 3 are done, each beside the v0.2 code.
+To avoid a period in which rooms with other machines do not work, the room
+log, join and requests (step 4) and pull (step 5) are also built beside the
+old code, with their own tests. The surfaces are then converted and the
+v0.2 delivery code deleted in one switch (the other half of step 3, with
+step 6), followed by step 7. The list below is the original order.
+
 1. `core`: records and entries beside the envelope; decoder; golden vectors; fuzz target.
 2. `internal/members` promoted with the adapter, the pinned create entry,
    chain checks before fork bookkeeping, and per-member current grants, with tests.
