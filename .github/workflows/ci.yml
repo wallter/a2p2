@@ -3,8 +3,9 @@ name: ci
 # before a release, including the Linux suite in a container
 # (`make prerelease`). Here: one Linux job for pull requests that touch
 # code, and on request. Nothing runs on a push to main; macOS is covered
-# by local development and the release checklist. A Windows job runs only
-# on request (workflow_dispatch).
+# by local development and the release checklist. A run by hand (Actions,
+# ci, Run workflow) chooses what to run with `what`: linux (the default),
+# windows, or all.
 on:
   pull_request:
     paths:
@@ -15,7 +16,14 @@ on:
       - 'scripts/**'
       - '.github/workflows/**'
       - 'internal/**/testdata/**'
+      - '.gitattributes'
   workflow_dispatch:
+    inputs:
+      what:
+        description: 'Which jobs to run'
+        type: choice
+        options: [linux, windows, all]
+        default: linux
 permissions:
   contents: read
 concurrency:
@@ -23,6 +31,8 @@ concurrency:
   cancel-in-progress: true
 jobs:
   check:
+    # Pull requests, and a run by hand that asks for linux or all.
+    if: github.event_name == 'pull_request' || inputs.what != 'windows'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -35,30 +45,38 @@ jobs:
       - run: make check
       # staticcheck at a pinned version, downloaded by `go run`.
       - run: make lint
-  # Windows, only when a person runs this workflow by hand (Actions, ci, Run
-  # workflow): never on a pull request. The log prints every test only when
-  # a package fails, and lists the tests skipped on Windows.
+  # Windows: only a run by hand that asks for windows or all, never a pull
+  # request. The log prints a package's tests only when it fails, and lists
+  # the tests skipped on Windows. The deep differential schedules of
+  # internal/node (minutes each, and about the delivery rules, not the
+  # operating system) are left out here with -skip; they run on Linux and
+  # macOS.
   windows:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && (inputs.what == 'windows' || inputs.what == 'all')
     runs-on: windows-latest
     timeout-minutes: 40
     defaults:
       run:
         shell: bash
+    env:
+      DEEP: 'AgreesWithTheDeliveryModelOn(EveryShortSchedule|RandomSchedules)$'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
       - name: the system
-        run: cmd //c ver && go version && go env GOOS GOARCH TEMP && sc query afunix || true
+        run: cmd //c ver && go version && go env GOOS GOARCH TEMP && whoami && (sc query afunix || true)
+      - name: line endings are as committed
+        run: git ls-files --eol | grep -v 'w/lf\|w/-text\|w/none' || echo "every text file is LF in the working tree"
       - run: go build ./...
       - run: go vet ./...
       - name: go test ./... (verbose output only for failing packages)
         run: |
+          echo "left out on Windows (-skip): $DEEP"
           fail=0
           for p in $(go list ./...); do
-            if go test -count=1 -timeout 20m -v "$p" > out.txt 2>&1; then
+            if go test -count=1 -timeout 25m -skip "$DEEP" -v "$p" > out.txt 2>&1; then
               echo "ok   $p"
             else
               fail=1

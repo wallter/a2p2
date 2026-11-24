@@ -453,20 +453,20 @@ a member to try: `POST /p/v2/dialback`, strict JSON, over the same pinned
 mutual TLS as a pull (HTTP/2).
 
 ```json
-{"v":2,"addrs":["198.51.100.4:7423","[2001:db8::4]:7423"]}
+{"v":2,"addrs":["203.0.113.9:40001","203.0.113.9:7423","192.168.1.5:7423"]}
 ```
 
 answered 200 with
 
 ```json
-{"v":2,"reached":["198.51.100.4:7423"],"not_tried":["[2001:db8::4]:7423"],"saw":"203.0.113.9"}
+{"v":2,"reached":["203.0.113.9:40001"],"not_tried":["192.168.1.5:7423"],"saw":"203.0.113.9"}
 ```
 
 | Field | Meaning | Limit |
 |---|---|---|
 | `addrs` | addresses the asker says are its own: literal IP address and port, IPv6 in brackets without a zone, no names, none repeated once normalised (`[::ffff:198.51.100.4]:7423` repeats `198.51.100.4:7423`) | 1 to 8, each ≤ 255 bytes |
 | `reached` | the asked addresses at which the asker's own key completed the handshake, in the order asked; omitted when none | only addresses asked |
-| `not_tried` | the asked addresses the responder would not dial for this asker (rule 5); omitted when none | only addresses asked, none also in `reached` |
+| `not_tried` | the asked addresses the responder did not dial (rule 5); omitted when none | only addresses asked, none also in `reached` |
 | `saw` | the IP address the responder saw this request come from: an IP literal without zone or port, or absent; anything else makes the answer invalid. Shown to a person, never advertised | ≤ 255 bytes |
 
 Responder, in order:
@@ -483,11 +483,11 @@ Responder, in order:
 4. Unspecified, multicast, broadcast and link-local addresses are never
    dialled. A loopback address is dialled only when the request itself
    came over loopback (the asker is on the responder's machine).
-5. Of the rest, an address is dialled only if its IP address is the source
-   IP address of the connection the request came on (any port), or the
-   endpoint is one the responder's address book already holds for the
-   asker's key (an address it would dial while pulling anyway). Every
-   other address is answered in `not_tried`, without a dial.
+5. Of the rest, the responder dials only the IP address the request came
+   from, on at most two ports the asker names (the first two such
+   addresses asked: its listening port and a mapped external port). Every
+   other address is answered in `not_tried`, without a dial. To have an
+   IPv6 address checked, the asker sends the request over IPv6.
 6. The addresses left are dialled at once, all within 3 seconds together:
    a TCP connection, then a TLS 1.3 handshake in which the responder
    presents its own certificate and accepts only the asker's key. The
@@ -498,30 +498,33 @@ A machine that does not know the route answers 404; the asker reports
 that member as running an a2p2 without the dial-back.
 
 **What a member can cause.** A member's request makes the responder open
-TCP connections and send TLS ClientHellos (and its own certificate, to a
-server that proved the asker's key) to the asker's own source address, on
-ports the asker names, or to addresses the asker already advertised to the
-responder; nothing else. That is at most 8 connections, about 2 KB, per
-request, and the limits cap requests at 4 per key per 10 minutes and 6 a
-minute for the whole machine (after a burst of 16). A third party's
-address is never dialled for a remote asker: it is in `not_tried`, which
-the asker could have worked out itself. The answer says only whether the
-asker's own key answered, never whether an address refused, timed out or
-answered with another key, and its time is fixed by the 3-second bound.
-Names are never looked up.
+at most two TCP connections, and send TLS ClientHellos (and its own
+certificate, to a server that proved the asker's key), to the address the
+request came from; nothing else. The one limit left: a member behind a
+shared address (a NAT, a proxy) can cause two connection attempts to that
+shared address per request, within the rate limits (4 per key per 10
+minutes, 6 a minute for the whole machine after a burst of 16). `not_tried`
+says only which addresses were not the source, which the asker knows. The
+answer says only whether the asker's own key answered, never whether an
+address refused, timed out or answered with another key, and its time is
+fixed by the 3-second bound. Names are never looked up.
 
-**When the daemon asks.** A run that listens asks up to three members
-(members whose addresses completed a pinned handshake first) 20 seconds
-after it starts, so after every networking decision, then every hour, or
-after 10 minutes when no member answered, and at once when the router's
-mapping changes. It never asks a member twice within an hour otherwise,
-except when a person runs `a2p2 net check`. The answer is `yes` if any
+**When the daemon asks.** A run that listens asks, for each address family
+it advertises, up to three members it can reach over that family (members
+whose addresses completed a pinned handshake first), over that family and
+about that family's addresses only: 20 seconds after it starts, so after
+every networking decision, then every hour, or after 10 minutes when no
+member answered, and when the router's mapping changes, at most every 5
+minutes. It never asks a member about a family twice within an hour
+otherwise, except when a person runs `a2p2 net check`, which asks over each
+family the members it reached over it. A family with no such member is
+reported in `not_checked` ("not checked: no member reachable over IPv6"). The answer is `yes` if any
 member reached any address, `no` if members answered and tried but reached
 none, `unknown` otherwise (none answered, or those that answered tried
 nothing); an `unknown` never replaces a `yes` or `no` already known.
 
 **Local API.** `status` gains `reach`: `{"state":"yes"|"no"|"unknown",
-"checked"?,"reached"?,"by"?,"not_tried"?,"saw"?,"verified"?,"why"?}`;
+"checked"?,"reached"?,"by"?,"not_tried"?,"saw"?,"verified"?,"not_checked"?,"why"?}`;
 `no` with `why` when networking is off, outbound only, or on and not
 listening. `net/check` (new; request `{}`) tries now every known address
 of every other member of every room (one probe per node and address, at
@@ -529,12 +532,15 @@ most 64, 8 at a time; each a TCP connection within 3 s and a pinned
 handshake within 5 s, then closed) and, if one was reached and this
 machine listens, asks the members reached to dial back, without the
 hourly limit. It answers `{"state","listening","listen"?,"fault"?,
-"ipv4_only"?,"advertised":[…],"members":[{"room","room_label","node",
+"ipv4_only"?,"advertised":[…],"not_advertised"?,"members":[{"room","room_label","node",
 "name"?,"reached","addrs":[{"addr","result","ms","node"?,"detail"?}]}],
 "reach":{…},"mapping"?,"forward"?,"advice"}`. `result` is `reached`,
 `refused`, `timed_out`, `wrong_key` (the certificate offered names another
 key; the server has not proved it holds that key), `not_a2p2`,
-`unreachable` or `not_tried`; `advice` is one sentence saying what to do.
+`unreachable` or `not_tried`; `not_advertised` is each `advertise` entry
+of `config.json` that the listener cannot serve under the recorded
+decision (an IPv6 address under an IPv4-only decision or listener), which
+is left out, with why; `advice` is one sentence saying what to do.
 While networking is off it dials nothing. It decides nothing, but it does
 change two things: the reachability answer `status` shows, and the order
 in which the address book tries a member's addresses (an address that
@@ -572,8 +578,12 @@ otherwise make this machine publish someone else's address. The only
 candidate is the external address in the router's answer to a mapping
 this machine asked for under the recorded decision. It goes first in the
 dial-back's `addrs`, and is advertised while a member reached it within
-the last 3 hours and the mapping still exists; a check in which members
-tried it and none reached it withdraws it. A person who forwarded a port
+the last 3 hours, the mapping still exists and its lease has not run out
+(whatever the renewal state). A new mapping (another external address or
+port, or the same one after it stopped being the mapping, or after a
+restart) starts unconfirmed. It is withdrawn when the window passes or
+after 2 checks in a row in which members tried it and none reached it;
+one such check does not withdraw it. A person who forwarded a port
 by hand sets `advertise` in `config.json`; `net/check` gives the line in
 `forward` when members see a public address that is not advertised and
 no mapping was asked for.
@@ -583,12 +593,22 @@ no mapping was asked for.
 (words `ipv6` and `map_port`, no new column; older daemons ignore it), and
 `status`'s `network` carries `map_port`. A mapping is asked for only while
 such a decision applies and the listener is bound to the wildcard address
-or to this machine's IPv4 address on the default route's interface;
-otherwise `mapping.error` says why. The gateway is the default route's
-next hop (the lowest metric on Linux, the unscoped route on macOS).
-Before each request that could create a mapping, what would remove it is
-written to `portmap.json` in the home; a definite refusal or no answer at
-all removes it again. The daemon asks: PCP MAP (RFC 6887, UDP 5351, TCP,
+or to this machine's address on the gateway's network, which is the
+source address the system selects for the gateway (a route lookup by
+connecting a UDP socket, which sends nothing); otherwise `mapping.error`
+says why. The gateway is the default route's next hop (the lowest metric
+on Linux, the unscoped route on macOS). Before each request that could
+create a mapping, what would remove it (protocol, gateway, this machine's
+address, internal port, external port even before any external address is
+known, lifetime, PCP nonce, UPnP control URL and service) is written to
+`portmap.json` in the home: a new temporary file created exclusively with
+mode 0600, synced, renamed over the old one, and the directory synced. A
+definite refusal or no answer at all removes it again. The file is read
+strictly: an unknown field, a value out of range, a field of another
+protocol, more than 16 mappings, a mapping on another router than this
+network's, or a file that does not parse, and nothing is sent to any
+router, the file is kept, and `mapping.error` says that the record cannot
+be used and what to remove by hand. The daemon asks: PCP MAP (RFC 6887, UDP 5351, TCP,
 the listening port as internal and suggested external port, lifetime
 7,200 s, a random nonce kept for renewal and deletion); if the answer is
 NAT-PMP's version refusal (version 0, opcode 129, result 1), NAT-PMP (RFC
@@ -600,13 +620,22 @@ control URL followed only when their host is the gateway's IP,
 error 718, lease 0 only on error 725, then `GetExternalIPAddress`). A
 grant with lifetime 0, external port 0 or no external address, a SOAP 200
 that is not a complete `…Response` envelope, and a datagram of the wrong
-length are not taken for success. Each UDP request is sent up to 3 times,
+length are not taken for success; only an HTTP 500 that is a complete SOAP
+`Fault` with a numeric UPnP `errorCode` is taken for a refusal (to try the
+next port, a permanent lease, or to count a removal as done). Each UDP request is sent up to 3 times,
 waiting 250 ms, 500 ms, then 1 s. The mapping is renewed at half the
 lifetime granted, however short (hourly when permanent); a failed
 renewal keeps it (it still exists until it expires) and is retried within
-5 minutes and before it expires. Everything recorded is deleted (lifetime
-0 with the same nonce, NAT-PMP lifetime 0, or `DeletePortMapping`, where
-error 714 counts as removed), each within 2 s, when the listener stops,
+5 minutes and before it expires. Everything recorded is deleted, each
+deletion reaching only this machine's own mapping: PCP by lifetime 0 with
+the nonce kept from the request (the server deletes only the mapping of
+that client and nonce), NAT-PMP by lifetime 0 for the internal port (the
+router deletes only the sending host's mapping), and UPnP by
+`GetSpecificPortMappingEntry` for the recorded external port, then
+`DeletePortMapping` only if that entry forwards to this machine's address
+and internal port with the description `a2p2` (error 714 counts as
+removed; an entry that is someone else's is left and forgotten). Each
+takes at most 2 s. This happens when the listener stops,
 on `net off`, on a decision without `map_port`, and on a stop; and at
 every start, whatever the decision, for what an earlier run left. A
 removal that fails stays recorded, is shown in `mapping.not_removed` and
@@ -1000,7 +1029,7 @@ On Windows every call carries the header `A2P2-Local-Key` with the
 contents of `local.key` in the home (48 hex characters, new at each
 daemon start, removed at stop). A call without it, or with another value,
 gets 401 with code `not_allowed` before any handler runs. On macOS and
-Linux the daemon writes no key and ignores the header (D-windows).
+Linux the daemon writes no key and ignores the header (D47).
 
 | Call | Request | Response |
 |---|---|---|
@@ -1167,3 +1196,384 @@ id or code, and a one-line note.
    than hidden.
 4. A frontier head that is not held hides everything by that author.
 5. Integers capped at 2^53−1; `links` ≤ 100; `from` ≤ 16 heads per author.
+
+## 10. Attachments (0.2 draft)
+
+Not built. Formats for [DESIGN section 12](DESIGN.md#12-attachments-02-draft)
+and rules [F1] to [F12] of the delivery model. `v` stays 2. Additions: one
+header field (10.1), the manifest (10.2), the file route with `GET` and
+`PUT` (10.3, 10.5), and one top-level field in the pull response (10.4).
+
+### 10.1 The commitment in a record header
+
+An optional top-level header field of `message` and `replace`:
+
+```json
+"files":"<64 lowercase hex: SHA-256 of the manifest's bytes>"
+```
+
+Nothing else about the files is in the header, not the count. It costs 75
+header bytes; the limits of section 1 apply unchanged (4,096 bytes, 8,192
+for the first record of a stream). A record with `files` on another kind,
+or with a value that is not 64 lowercase hex, is stored as 0.1.0 stores it
+(S6 sees an unknown top-level field and keeps it in the id) and read as
+having no files, with `files_note: "malformed file reference ignored"`.
+
+### 10.2 The manifest
+
+Strict JSON (section 1's rules), at most 16,384 bytes:
+
+```json
+{"v":1,"salt":"<32 lowercase hex, random>","files":[{"name":"build.log","size":14,"sha256":"<64 hex>","type":"text/plain"}]}
+```
+
+| Key | Rule |
+|---|---|
+| `v` | 1; another value: the files are ignored for that record, with a `files_note` |
+| `salt` | 16 random bytes in hex, new for each record; makes the commitment unguessable from a list of files |
+| `name` | 1–255 bytes UTF-8, no C0 or C1 control, `/` or `\`; display only, never a path (10.8) |
+| `size` | 1 to 268,435,456 |
+| `sha256` | 64 lowercase hex; unique in the array |
+| `type` | optional, 1–100 bytes `token/token` lowercase ASCII; a hint used for nothing |
+
+1 to 8 files. Unknown keys are ignored. The manifest is fetched on the file
+route (10.3) with its own SHA-256 as the file id, by every machine that may
+read the text, after the pull that brought the header. Its states [F12]:
+
+| State | When | Entry |
+|---|---|---|
+| pending | not yet verified | `files_pending: true`, no list |
+| here | its SHA-256 is the header's and it follows every rule above | `files` |
+| invalid | its SHA-256 is the header's and it breaks a rule: for good, since the header's hash admits no other bytes; nothing it lists is fetched | `files_note: "invalid file list"` |
+| unavailable | 8 failed answers, retried with backoff from 1 minute doubling to 1 hour; asked again only when a person or an agent asks (`fetch` naming the message) | `files_note: "file list unavailable"` |
+
+Bytes whose SHA-256 is not the header's are discarded and the peer counted
+(`bad_file`); the next holder is tried.
+
+### 10.3 Fetch: `GET /p/v2/file/<room id>/<message id>/<sha256>`
+
+Over pinned mutual TLS 1.3 (HTTP/2, the pull connection), with an optional
+`Range: bytes=<N>-`. N is ASCII decimal digits only, at most 15, and is
+checked to be below the declared size before any arithmetic. `HEAD` is not
+served.
+
+| Step | Server | Failure |
+|---|---|---|
+| 1 | the TLS peer key is the node id | handshake fails |
+| 2 | the file-route limiter for this peer (separate from 4.6's, so files never delay pulls): one transfer per peer per direction, 8 in all | 429 `rate_limited` or 503 `unavailable`, `Retry-After` |
+| 3 | room known, peer a member now | 403 `not_member`, the same bytes as 4.5 |
+| 4 | the message is held, a `message` of that room; its winning version (highest version by header, then highest id; a withdrawn replacement does not count) commits to `sha256` as its manifest or lists it in a manifest held here; that version's text is not withdrawn, expired by this clock or outside this machine's permission [F1]; the peer may read it (section 3, current permission) [F2] | 404 `not_held` |
+| 5 | the verified bytes are held here **for this message**: this machine wrote it, or received them by a request or upload naming it [F2] | carry (10.5), else 404 `not_held` |
+| 6 | N below the size | 416 `bad_range` |
+
+Every 404 is the same: status, `Content-Type: application/json`, body
+`{"error":"not_held"}` with no `detail`, decided from database rows before
+any file is opened, so its timing does not depend on why.
+
+| Status | When | Headers |
+|---|---|---|
+| 200 | from 0, size ≤ 8 MiB | `Content-Length`, `Content-Type: application/octet-stream` |
+| 206 | otherwise, at most 8 MiB from N | `Content-Range: bytes N-M/<size>` |
+| 202 | "not yet" (10.5) | `Retry-After`, body `{"state":"not_yet"}` |
+| 404 `text/plain` | the peer runs 0.1.0 | marked `old_version` for 24 hours, skipped meanwhile |
+
+The requester checks, before reading the body, that the declared total
+equals the manifest's size (for a manifest: at most 16,384) and that its
+budget holds that total, which it reserves; the range is the one it asked
+for. Each response must finish within 120 seconds and keep at least
+64 KiB a second over any 30 seconds; otherwise it is cut and counted as
+`slow`. The server checks step 4 again before each response, and cancels a
+response in progress when it commits a withdraw, a replacement, a removal,
+a narrower grant or a void that ends it. When the held bytes reach the
+size the requester compares the SHA-256 of the whole; on a match it moves
+them into place and records `file_for`, otherwise it deletes them and
+starts from 0 with another holder.
+
+Holders are asked in this order: the author, members whose last answer
+was that they hold it or carry it, then other current members, each at
+most once per call; a member that cannot be dialled is skipped. Answers
+are stored per message in `file_obs`. A member that may read the message
+can tell from them whether a listener carries or keeps; nobody else can.
+
+### 10.4 Wants, in the pull response
+
+A machine adds to its answer to a pull an optional top-level field, only
+when the puller is the author of the messages named and this machine
+cannot dial it [F9]:
+
+```json
+"want":[{"m":"<message id>","v":"<winning version id>","h":"<sha256>"}]
+```
+
+At most 16 entries, deduplicated, manifests before the files they list,
+each repeated at most once a minute; the field counts inside the answer's
+size limit (4.6, 4 MiB), so the answer is cut to fit, never the other way.
+Only the author is asked: it knows its own files, so a want discloses
+nothing, and no machine promises bytes it does not hold. A copy held only
+by another machine nobody can dial is not reachable this way.
+
+Each want is a row (`file_wants`) bound to message, version and hash. A
+file's want reserves its size in the budget when issued; it lapses after
+24 hours or after 3 answers to the author's pulls without the bytes, and
+then frees the reservation. The author uploads each entry it still holds
+for that message and version (10.5) and skips the rest silently.
+
+0.1.0 accepts and ignores `want`: its strict pull decoders take unknown
+top-level fields in both the request and the response (run against
+`DecodePullRequest` and `DecodePullResponse` at 0.1.0). A 0.1.0 server
+never sends it, so an upload goes only to a 0.2 machine that asked.
+
+### 10.5 Upload and carry
+
+**Upload:** `PUT /p/v2/file/<room id>/<message id>/<sha256>` from the
+author to the machine whose answer wanted it, with `Content-Range: bytes
+N-M/<size>`: at most 8 MiB, N 0 at first and then the `have` of the last
+answer; a manifest is sent whole, at most 16,384 bytes. The receiver
+checks, from the headers and before reading the body: the TLS peer is the
+author of that message; it issued an unexpired want for that message,
+version and hash to that peer; the version is still the winning one and
+lists the hash; the declared total equals the listed size and fits the
+reservation; N is what it holds. It answers `200 {"have":<bytes held>}`,
+or the same 404 as 10.3 for any refusal, and stores nothing it did not
+ask for. The time limits and the hash check of 10.3 apply.
+
+**Carry:** at step 5 of 10.3, a machine whose room setting is `carry` or
+`keep`, that may keep the file (F1) and whose budget holds its size,
+answers 202 "not yet" and starts one carry job: a want to the author
+(10.4) if it cannot dial it, otherwise a fetch from the author. A second
+request for the same file joins the same job. A job lapses as a want
+does; for the next 24 hours requests for that file are answered `202`
+with body `{"state":"gave_up"}`, and the reader shows `unavailable` with
+reason `not_carried`. With setting `off` it answers 404. A carried file is
+held and served like a fetched one; F1 deletes it with the text. Setting
+`keep` wants every file of every message it may keep, within the budget.
+
+**What 0.1.0 does with each new thing** (code read and throwaway tests run
+against it; not kept in the tree):
+
+| New thing | 0.1.0 |
+|---|---|
+| `files` header field | stores the record, keeps the field in the id, relays the exact bytes, shows the text without files |
+| `want` in a pull response, or an unknown field in a request | accepted and ignored by the strict decoders |
+| `GET`, `HEAD` or `PUT /p/v2/file/…` | counted against that peer's pull rate limit (4.6), then 404 `text/plain; charset=utf-8`, body `404 page not found` |
+| a new `kind`, a new body field, a body over 16,384 or a header over its limit | refused (S6, S9, S3), and the author's stream stops there; a 0.2 writer never sends one |
+
+A 0.1.0 writer's `replace` has no `files`, so it drops the files; 0.1.0
+shows the highest version whose text it holds, while files follow the
+winning header, so the two can differ when a newer header arrives without
+readable text.
+
+### 10.6 Local API and CLI
+
+| Call | Request | Response |
+|---|---|---|
+| `send` (changed) | adds `"files":["<path>",…]` (1–8): an absolute path, or `"sha256:<hex>"` naming verified bytes this machine holds for the version being replaced, kept by listing it again. With `replaces`, absent means the replacement has no files. Approval of a replacement checks again that the replaced version is still the winning one, readable here, and lists each kept file; otherwise the request fails and its staging is removed | `{"request","state":"waiting","room","room_label","to"?,"replaces"?,"files":[{"name","size","sha256","type"?}]}`; nothing is written. Refused: `invalid_request` (not absolute, not a regular file once opened, unreadable), `too_large` (over 8 files, 256 MiB or a budget) |
+| `fetch` (new) | `{"agent","room"?,"sha256","message"?,"wait_ms"?}` (≤ 120,000; the tool sends at most 30,000). The agent must have been shown the version that lists the file | `{"state","path"?,"size","have"?,"from"?,"reason"?,"holders"?:[{"node","at","answer"}]}`; `state` is `here` (with `path`), `partial`, `coming`, `fetching`, `unavailable`, `gone` (`reason`: `withdrawn`, `replaced`, `expired`, `before_you_joined`) or `too_large` |
+| `requests` (changed) | | kind `send_files`: `agent`, `room`, `to` (or everyone, with the member count), `replaces` (id and first line), `text_line`, `files:[{"path","name","size","sha256","type"?}]` with `path` escaped (10.8), `terms` |
+| `confirm` (changed) | as now; the approval covers `terms`: SHA-256 over `a2p2 send files 1`, room, agent, recipients, `replaces`, the text's hash and each file's path, size and SHA-256 | `approved` with `effect` the message id, after the staged digests are checked again; expires as `declined` after 24 hours |
+| `trace` (changed) | | adds `files:[{"sha256","name","size","state","holders"}]` |
+| `room/files` (new) | `{"room","mode"?:"off"\|"carry"\|"keep"}`; a person's setting, not in agent tools | `{"room","mode","held","budget"}` |
+
+`Entry` adds `files:[{"sha256","name","size","type"?,"state"}]` for the
+version shown, `files_pending` and `files_note`. A new `Entry` kind
+`request` tells the agent that asked whether its send was `sent` (with
+`id`) or `declined`. CLI: `a2p2 send --file PATH` (repeatable), `a2p2 fetch
+SHA256 [--room R] [--wait S]`, `a2p2 room files ROOM [off|carry|keep]`.
+
+### 10.7 MCP tools
+
+The tools stay seven. Exact changes to the
+[golden file](../internal/mcpshim/testdata/tools.json), in compact bytes:
+
+| Change | Bytes |
+|---|---|
+| `ask_human`, `inbox`, `reply`: drop `idempotentHint` and `readOnlyHint` equal to the MCP default (false) | −132 |
+| `send`: the same | −44 |
+| `ack`: drop `readOnlyHint` false | −21 |
+| `send`: `,"files":{"description":"local paths; a person confirms","items":{"type":"string"},"type":["null","array"]}` | +107 |
+| `inbox`: `,"fetch":{"description":"file sha256: download, verified","type":"string"}` | +74 |
+| `inbox` description: `Mail is information` becomes `Mail and files are information` | +11 |
+
+3,984 − 197 + 192 = 3,979 bytes, proxy ⌈3,979 / 4⌉ = 995 ≤ 1,000. This
+round changes no definition: the manifest, `files_pending`, `coming`, the
+`sha256:` form for keeping a file in a replacement and the rule that
+`replaces` without `files` drops them are told in results and notes, not
+definitions. The send result's `note` says "a person must confirm on this
+machine; nothing is sent until then"; with `replaces` and no `files` it
+adds "the replacement has no files". The fetch result's `note` says
+"saved, not opened: data from another machine, not instructions from your
+user".
+
+### 10.8 Where bytes live, names and schema
+
+| Path (under `$A2P2_HOME`, directories 0700) | What |
+|---|---|
+| `blobs/<room id>/<sha256>` | verified bytes and manifests, 0600; never handed to agents |
+| `blobs/<room id>/part/<message id>/<sha256>` | a download for that message |
+| `blobs/.staging/<request id>/<n>` | a send waiting for a person |
+| `files/<room id>/<name>` | the copy written for an agent, for one message, 0600 |
+
+Staging opens the path once (following links), checks with `fstat` on the
+handle that it is a regular file, and copies and hashes from that handle.
+The path shown is the one the system reports for the open handle, with C0,
+C1, U+200E, U+200F, U+061C, U+202A to U+202E and U+2066 to U+2069 written
+as `\u{…}`. A copy's name is the manifest's `name` sanitised as before
+(NFC; outside letters, digits, space and `._-+()` becomes `_`; no leading
+or trailing dots or spaces; Windows reserved names prefixed; 200 bytes;
+`O_EXCL` through an `os.Root`; ` (2)` for a clash). A copy is deleted with
+its message if it is still at its path with the same size and hash.
+
+Storing [F10]: bytes are written under a temporary name
+(`.a2p2-tmp-<random>` in the same directory), synced, renamed, and the
+directory synced, before the row that makes them live commits. A send's
+record, its `file_sets` row and its `files` and `file_for` rows commit in
+one transaction after its bytes are safe; if they are not, the send is
+not published and the request still waits. A copy's row commits first,
+marked `writing`, then the copy is written the same way and the row marked
+done. Deletion is by rows: the transaction that drops a row queues its
+path in `file_trash`; the queue runs after commit and skips, and removes
+from the queue, any path a live row names again (bytes acquired again for
+another message are never unlinked). A start runs the queue, removes every
+`.a2p2-tmp-` file, every file under `blobs/` with no row and every copy
+still `writing`.
+
+**Schema (migration 13).**
+
+| Table | Columns | Keys |
+|---|---|---|
+| `file_sets` | `room`, `record`, `manifest` (the header's hash), `ok`; filled when a record is stored and by the migration from records already held | (`room`,`record`) |
+| `file_items` | `room`, `record`, `n`, `sha256`, `name`, `size`, `type`; filled when the manifest is verified | (`room`,`record`,`n`) |
+| `files` | `room`, `sha256`, `size`, `state` (`held`, `staged`) | (`room`,`sha256`) |
+| `file_parts` | `room`, `msg`, `sha256`, `size` (reserved), `have` | (`room`,`msg`,`sha256`) |
+| `file_for` | `room`, `sha256`, `msg`, `how` (`sent`, `received`, `local`: usable here, never served) | (`room`,`sha256`,`msg`) |
+| `file_obs` | `room`, `msg`, `sha256`, `peer`, `answer`, `at` | (`room`,`msg`,`sha256`,`peer`) |
+| `file_wants` | `room`, `msg`, `version`, `sha256`, `author`, `size` (reserved), `at`, `tries`, `lapsed_at`; a want or a carry job (10.4, 10.5) | (`room`,`msg`,`sha256`) |
+| `file_lists` | `room`, `record`, `state` (`invalid`, `unavailable`), `fails`, `next_at` | (`room`,`record`) |
+| `file_copies` | `room`, `msg`, `sha256`, `agent`, `path`, `state` | (`room`,`path`) |
+| `file_trash` | `path`, `at` | `path` |
+| `room_files` | `room`, `mode`, `decided_at` | `room` |
+| `requests` | adds `draft` (text, to, reply_to, replaces, files) and `terms` | |
+
+### 10.9 Threats
+
+| Threat | Answer |
+|---|---|
+| Names, sizes or hashes reaching a machine that may not read the text | only a salted commitment is in the header; the manifest is served under the text's permission and deleted with it (F1, F2) |
+| A member serves or uploads wrong bytes | declared total checked first; whole-file hash (F3); deleted, `bad_file`, next holder |
+| An unasked upload, or one from a machine that is not the author | 404, nothing stored, decided before the body is read (F9) |
+| Wants disclosing a file to a machine that may not read it | a want goes only to the message's author (F9) |
+| Two carriers waiting on each other | a carry job wants only from the author, and lapses (F9) |
+| A huge, slow or never-ending transfer | refused over the limits before scheduling; budget reserved; 8 MiB a response; 120 s per response and 64 KiB/s; one transfer per peer per direction, 8 in all; limits separate from pulls |
+| Telling refusals apart | one 404, one body, decided from rows (10.3) |
+| Path tricks in `name` | never a path (10.8) |
+| Swapping the file during confirmation | staged from one open handle; approval checks the staged digest, never the source |
+| A path that hides its end | shown in full, controls and bidi characters escaped |
+| A member lists a hash it may not read in its own message | served only for the message the bytes are held for (F2) |
+| A withdraw after others fetched | every member that learns deletes bytes, parts and copies; active transfers stop (F1, F2) |
+| A crash during a write or a deletion | bytes before rows, one transaction for a send, a trash queue that skips live paths, a start-up sweep (F10) |
+| An agent sends a file without the person | not through `files` (F6); as a guard rail only (DESIGN 12, limits) |
+| Archive bombs, malicious documents | out of scope: a2p2 opens nothing |
+
+### 10.10 Tests
+
+Model tests (`internal/model/delivery/attach_test.go`):
+`TestAFileIsSentOnlyAfterAPersonApprovesTheBytesStagedWhenTheAgentAsked`,
+`TestAStagedSendExpiresAfterADayAndASelfVoidDropsIt`,
+`TestAReaderGetsTheListAtOnceAndTheBytesOnlyWhenItsAgentAsks`,
+`TestAReaderIsToldAMessageHasFilesBeforeTheirListArrives`,
+`TestAMemberServingWrongBytesIsRefusedAndAnHonestHolderStillServes`,
+`TestAResumedFetchContinuesFromAnotherHolderAndChecksTheWhole`,
+`TestAFileWhoseOnlyHolderIsGoneIsUnavailableAndTheReaderIsToldSo`,
+`TestAMachineSetToKeepFilesServesThemAfterTheAuthorIsGone`,
+`TestInARoomWithOneListenerAFileFromAnOutboundOnlyAuthorReachesAnOutboundOnlyReader`,
+`TestAReaderThatListensGetsAFileFromAnOutboundOnlyAuthorByUpload`,
+`TestWithCarryOffTheListenerAnswersNotHeldAndTheFileStaysUnavailable`,
+`TestAListenerOverItsBudgetDoesNotCarryAFile`,
+`TestAListenerThatMayNotReadTheTextNeitherCarriesNorReceivesTheFile`,
+`TestAnUploadNobodyAskedForIsRefused`,
+`TestWithdrawDeletesAFileItsListAndAnyPartOrCopyOnEveryMachineThatLearnsOfIt`,
+`TestAWithdrawBetweenTwoPartsOfAFetchStopsTheRest`,
+`TestAReplacementListsOnlyTheFilesItsWriterListsAgain`,
+`TestAnAgentMayNotFetchAFileOfAReplacementItWasNotShown`,
+`TestAFileExpiresWithItsTextByEachHoldersClock`,
+`TestANewcomerWithoutHistoryGetsNeitherTheListNorTheBytesOfAnEarlierFile`,
+`TestANewReferenceToAKnownHashDoesNotWidenWhoIsServed`,
+`TestARemovedMachineIsNotServedAFile`,
+`TestAFetchOverTheRoomsBudgetIsRefusedBeforeAnythingMoves`,
+`TestAManifestThatMatchesItsHashButIsInvalidIsInvalidForGoodAndNothingIsFetched`,
+`TestAManifestThatDoesNotArriveIsUnavailableAfterBoundedTriesUntilAskedAgain`,
+`TestAVoidedAuthorsFilesAreDeleted`,
+`TestANarrowerGrantLearnedLaterDropsTheFilesItHides`,
+`TestACrashBetweenWritingAFileAndItsRowLeavesNothingAfterTheRestart`,
+`TestACrashBetweenDroppingAFileAndDeletingItCompletesTheDeletionAtTheRestart`,
+`TestAWantGoesOnlyToTheMessagesAuthorNeverToAnotherHolder`,
+`TestAnUploadFromAMachineThatIsNotTheAuthorIsRefused`,
+`TestAWantTheAuthorDoesNotAnswerLapsesAndTheReaderIsToldUnavailable`,
+`TestACrashBeforeASendsBytesAreStoredPublishesNothing`,
+`TestAQueuedDeletionNeverRemovesBytesALiveRowNames`,
+`TestACrashWhileWritingAnAgentsCopyLeavesNoTemporaryFile`,
+`TestKeepingAFileFailsIfTheReplacedVersionChangesBeforeApproval`,
+`TestBytesKeptForAPendingReplacementEndWithTheOldVersionsExpiry`,
+`TestRandomSchedulesWithFilesKeepTheAttachmentRules` (every transfer is
+checked against the sender's view and the true grants when it happens,
+and every upload came from the author).
+
+Code tests to add with the build: the scenarios above in `internal/node`
+over the in-memory transport, a differential test against the model,
+`TestARecordWithFilesIsStoredAndRelayedByteForByteByAnOldVersionNode`,
+`TestAnOldVersionPullerIgnoresWant`, `TestWantsFitInsideTheAnswerSizeLimit`,
+`TestAFetchedNameCannotLeaveTheRoomsDirectoryOrOverwrite`,
+`TestToolsGolden` and `TestToolDefinitionsFitTheTokenBudget` at 3,979
+bytes. Fault-matrix rows in TESTING.md and TRACE rows (L1 `met`; D7, D9,
+T3, T5, P3, U4, A2, N1) change when the code exists.
+
+### 10.11 What the build must test
+
+These are properties of the implementation, not of the model; each is
+listed once with the test the build adds.
+
+| Property | Test |
+|---|---|
+| Every refusal on the file route is the same status and body, and takes the same time class whatever its reason | `TestEveryNotHeldAnswerIsTheSameBytesAndTimingClass` |
+| A response or upload in progress stops when the sender commits a withdraw, replacement, removal, narrower grant or void that ends it | `TestARevocationStopsATransferInProgress` |
+| Staging opens the path once, refuses a non-regular file after opening (a FIFO, a device, a directory), and copies from that handle | `TestStagingCopiesFromTheHandleItOpenedAndRefusesAFifo` |
+| The approval display shows the resolved path in full with controls and bidirectional characters escaped, and the replaced message | `TestTheRequestEscapesBidiCharactersInThePathAndNamesTheReplacedMessage` |
+| One transfer per peer per direction, 8 in all | `TestFileTransfersAreLimitedPerPeerAndInAll` |
+| 120 seconds per response and 64 KiB/s over 30 seconds | `TestASlowTransferIsCut` |
+| Offsets are parsed and checked before arithmetic | `TestAnOffsetPastTheSizeIsRefusedBeforeArithmetic` |
+| File transfers never delay pulls | `TestPullsAreAnsweredWhileFilesTransfer` |
+| Bytes and directory synced before the row; a send published only with its bytes; temporary files swept at start | `TestAStartRemovesTemporaryFilesAndFilesWithoutRows` |
+
+### 10.12 Decision input
+
+Each of these needs a DECISIONS entry when it is built.
+
+- **Header field `files` and the manifest.** Needed because L1 must name
+  files without telling machines that may not read the text (T3). One
+  hash, because 0.1.0 keeps unknown top-level header fields and refuses
+  anything else, and a wire version bump would split every mixed room.
+- **The file route, `GET` and `PUT /p/v2/file/…`.** Needed because bytes
+  are too large for the pull exchange and are fetched per message; `PUT`
+  because in the owner's room the author often cannot be dialled (N1).
+  `HEAD` is not added: dated answers to `GET` already say who holds what.
+- **`want` in the pull response.** Needed so a machine nobody can dial
+  learns what to upload, over the connection it already makes. Sent only
+  to the message's author, so it discloses nothing and needs no holder
+  evidence. 0.1.0 ignores it, so it needs no version change.
+- **The per-room setting `off`, `carry`, `keep`.** One setting, not a
+  config key: it is per room, a person's choice changed while running, and
+  shown with the room, so it is a table (`room_files`) behind one local API
+  call (`room/files`) and one CLI command (`a2p2 room files`). `carry` is
+  the default because a member already carries the room's text for
+  others, and without it a room of laptops and one listener cannot move a
+  file at all.
+- **Tool arguments `send.files` and `inbox.fetch`.** Needed because agents
+  sharing files is the point of L1; paid for by dropping default-valued
+  annotation hints, 3,979 bytes in all.
+- **Local API `fetch`, CLI `send --file` and `fetch`, the `Entry` kind
+  `request`, and the `send_files` request kind.** Needed for a person to
+  confirm and for an agent to learn the outcome without polling.
+- **Migration 13**, the tables of 10.8. Needed because file state, wants
+  and carry jobs, manifest states, observations per message, copies and
+  the trash queue must survive a restart and be deleted in the same
+  transaction as the text they follow.

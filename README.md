@@ -197,7 +197,10 @@ by default. The mapping is removed by `a2p2 net off` and `a2p2 stop`. If
 a2p2 crashes, a mapping lapses within two hours, except on a router that
 grants only permanent ones: that rule stays until a2p2 starts again on
 the same network, or until you delete the rule named `a2p2` on the
-router's own page. If you forwarded the port by hand instead, `a2p2 net
+router's own page. If a2p2 cannot use its record of mappings
+(`portmap.json` in the home, for example after a move to another
+network), it sends the router nothing and `a2p2 status` says what to
+remove by hand. If you forwarded the port by hand instead, `a2p2 net
 check` prints the `advertise` line to put in `config.json`. Neither helps
 behind carrier-grade NAT (a provider sharing one address among
 customers), on a router with these protocols turned off, or on most

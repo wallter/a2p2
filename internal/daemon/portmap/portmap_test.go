@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -79,7 +81,15 @@ type pcpRouter struct {
 	extPort uint16
 	result  byte
 	maps    map[string]uint16 // nonce -> external port
+	// grant, if set, is the lifetime granted in seconds; step moves the
+	// external port on every grant (a router that loses mappings);
+	// silentMap and silentDel drop requests that map or delete.
+	grant                uint32
+	step                 uint16
+	silentMap, silentDel bool
 }
+
+func (r *pcpRouter) set(f func(r *pcpRouter)) { r.mu.Lock(); defer r.mu.Unlock(); f(r) }
 
 func (r *pcpRouter) answer(q []byte) []byte {
 	if len(q) < 60 || q[0] != 2 {
@@ -95,11 +105,18 @@ func (r *pcpRouter) answer(q []byte) []byte {
 	clear(b[8:24])
 	nonce := string(q[24:36])
 	life := binary.BigEndian.Uint32(q[4:])
+	if (life == 0 && r.silentDel) || (life != 0 && r.silentMap) {
+		return nil
+	}
 	if r.result == 0 {
 		if life == 0 {
 			delete(r.maps, nonce)
 		} else {
+			r.extPort += r.step
 			r.maps[nonce] = r.extPort
+			if r.grant != 0 {
+				binary.BigEndian.PutUint32(b[4:], r.grant)
+			}
 		}
 		binary.BigEndian.PutUint16(b[42:], r.extPort)
 		ip := r.extIP.As16()
@@ -223,8 +240,9 @@ type fakeIGD struct {
 	http     *httptest.Server
 	mu       sync.Mutex
 	calls    []string
-	ports    map[string]bool
+	ports    map[string]igdEntry
 	taken    map[string]bool
+	badFault bool // faults cut short
 	location string
 	control  string
 	reply    string // the SSDP answer, with %s for the location
@@ -252,8 +270,11 @@ func (g *fakeIGD) leasesAsked() []string {
 	return slices.Clone(g.leases)
 }
 
+// igdEntry is one forward the fake gateway holds.
+type igdEntry struct{ client, port, desc string }
+
 func newFakeIGD(t *testing.T) *fakeIGD {
-	g := &fakeIGD{ports: map[string]bool{}, taken: map[string]bool{}}
+	g := &fakeIGD{ports: map[string]igdEntry{}, taken: map[string]bool{}}
 	g.http = httptest.NewServer(http.HandlerFunc(g.serve))
 	t.Cleanup(g.http.Close)
 	g.ssdp = newFakeUDP(t, func(q []byte) []byte {
@@ -304,36 +325,48 @@ func (g *fakeIGD) serve(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `<s:Envelope><s:Body><u:`+action+`Resp`)
 		return
 	}
+	fault := func(code string) {
+		w.WriteHeader(500)
+		if g.badFault {
+			fmt.Fprint(w, `<s:Envelope><s:Body><s:Fault><detail><UPnPError><errorCode>`+code)
+			return
+		}
+		fmt.Fprint(w, `<s:Envelope><s:Body><s:Fault><detail><UPnPError><errorCode>`+code+`</errorCode>`+
+			`</UPnPError></detail></s:Fault></s:Body></s:Envelope>`)
+	}
 	switch action {
 	case "AddPortMapping":
 		p := field("NewExternalPort")
 		g.leases = append(g.leases, field("NewLeaseDuration"))
 		if g.onlyPermanent && field("NewLeaseDuration") != "0" {
-			w.WriteHeader(500)
-			fmt.Fprint(w, `<s:Envelope><s:Body><s:Fault><detail><UPnPError><errorCode>725</errorCode>`+
-				`</UPnPError></detail></s:Fault></s:Body></s:Envelope>`)
+			fault("725")
 			return
 		}
 		if g.taken[p] {
-			w.WriteHeader(500)
-			fmt.Fprint(w, `<s:Envelope><s:Body><s:Fault><detail><UPnPError><errorCode>718</errorCode>`+
-				`<errorDescription>ConflictInMappingEntry</errorDescription></UPnPError></detail></s:Fault></s:Body></s:Envelope>`)
+			fault("718")
 			return
 		}
 		if field("NewInternalClient") != "127.0.0.1" || field("NewProtocol") != "TCP" {
 			w.WriteHeader(500)
 			return
 		}
-		g.ports[p] = true
+		g.ports[p] = igdEntry{client: field("NewInternalClient"), port: field("NewInternalPort"), desc: field("NewPortMappingDescription")}
 		fmt.Fprint(w, `<s:Envelope><s:Body><u:AddPortMappingResponse/></s:Body></s:Envelope>`)
+	case "GetSpecificPortMappingEntry":
+		e, ok := g.ports[field("NewExternalPort")]
+		if !ok {
+			fault("714")
+			return
+		}
+		fmt.Fprintf(w, `<s:Envelope><s:Body><u:GetSpecificPortMappingEntryResponse><NewInternalPort>%s</NewInternalPort>`+
+			`<NewInternalClient>%s</NewInternalClient><NewEnabled>1</NewEnabled><NewPortMappingDescription>%s</NewPortMappingDescription>`+
+			`<NewLeaseDuration>0</NewLeaseDuration></u:GetSpecificPortMappingEntryResponse></s:Body></s:Envelope>`, e.port, e.client, e.desc)
 	case "GetExternalIPAddress":
 		fmt.Fprint(w, `<s:Envelope><s:Body><u:GetExternalIPAddressResponse><NewExternalIPAddress>192.0.2.44</NewExternalIPAddress>`+
 			`</u:GetExternalIPAddressResponse></s:Body></s:Envelope>`)
 	case "DeletePortMapping":
-		if !g.ports[field("NewExternalPort")] {
-			w.WriteHeader(500)
-			fmt.Fprint(w, `<s:Envelope><s:Body><s:Fault><detail><UPnPError><errorCode>714</errorCode>`+
-				`</UPnPError></detail></s:Fault></s:Body></s:Envelope>`)
+		if _, ok := g.ports[field("NewExternalPort")]; !ok {
+			fault("714")
 			return
 		}
 		delete(g.ports, field("NewExternalPort"))
@@ -344,7 +377,8 @@ func (g *fakeIGD) serve(w http.ResponseWriter, r *http.Request) {
 func (g *fakeIGD) has(port string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.ports[port]
+	_, ok := g.ports[port]
+	return ok
 }
 
 // noPCP is a gateway port on which nothing answers PCP or NAT-PMP.
@@ -396,64 +430,20 @@ func TestUPnPFollowsNoURLThatIsNotTheGateway(t *testing.T) {
 	}
 }
 
-// lossy is a Mapper whose router forgets each mapping: every renewal
-// comes back on another external port, with a lifetime far under the old
-// 30-second floor.
-type lossy struct {
-	mu     sync.Mutex
-	next   uint16
-	unmaps []Mapping
+// record is the real record file in a test's directory, for this
+// test network's router (loopback).
+func record(t *testing.T) *File {
+	return &File{Path: filepath.Join(t.TempDir(), "portmap.json"), Gateway: loop}
 }
 
-func (l *lossy) Map(_ context.Context, internal uint16, life time.Duration, _ *Mapping, note Note) (Mapping, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.next++
-	m := Mapping{Protocol: UPnP, Control: "http://127.0.0.1:1/ctl", Internal: internal, Lifetime: 40 * time.Millisecond,
-		External: netip.AddrPortFrom(netip.MustParseAddr("203.0.113.7"), 40000+l.next)}
-	_ = note(m, true)
-	return m, nil
-}
-
-func (l *lossy) Unmap(_ context.Context, m Mapping) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.unmaps = append(l.unmaps, m)
-	return nil
-}
-
-func (l *lossy) removed() []Mapping {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return slices.Clone(l.unmaps)
-}
-
-// memRecord is the on-disk record, in memory; saved lets a test see what
-// was written when.
-type memRecord struct {
-	mu    sync.Mutex
-	held  []Mapping
-	saves int
-}
-
-func (r *memRecord) Load() ([]Mapping, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return slices.Clone(r.held), nil
-}
-
-func (r *memRecord) Save(m []Mapping) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.held = slices.Clone(m)
-	r.saves++
-	return nil
-}
-
-func (r *memRecord) get() []Mapping {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return slices.Clone(r.held)
+// get is what the file holds now, read back from disk.
+func get(t *testing.T, f *File) []Mapping {
+	t.Helper()
+	ms, err := f.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ms
 }
 
 func runKeeper(k *Keeper) (stop func()) {
@@ -473,18 +463,20 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 }
 
 // A router that loses the mapping gives a new port at each renewal: the
-// keeper takes it, removes the one it replaced, renews well before a
-// 40-millisecond lifetime ends, and removes the last at the end.
+// keeper takes it, removes the one it replaced, renews at half of a
+// one-second lease, and removes the last at the end.
 func TestAKeeperFollowsARouterThatLosesTheMappingAndRemovesItAtTheEnd(t *testing.T) {
 	defer func(d time.Duration) { minWait = d }(minWait)
 	minWait = time.Millisecond
-	l := &lossy{}
+	r := &pcpRouter{extIP: netip.MustParseAddr("203.0.113.7"), extPort: 40000, step: 1, grant: 1, maps: map[string]uint16{}}
+	gw := newFakeUDP(t, r.answer)
 	var mu sync.Mutex
 	var seen []string
-	k := NewKeeper(l, 7423, &memRecord{}, func(st State) {
+	rec := record(t)
+	k := NewKeeper(client(gw), 7423, rec, func(st State) {
 		mu.Lock()
 		defer mu.Unlock()
-		if st.Mapping != nil {
+		if st.Mapping != nil && (len(seen) == 0 || seen[len(seen)-1] != st.Mapping.External.String()) {
 			seen = append(seen, st.Mapping.External.String())
 		}
 	})
@@ -493,25 +485,22 @@ func TestAKeeperFollowsARouterThatLosesTheMappingAndRemovesItAtTheEnd(t *testing
 	stop()
 	mu.Lock()
 	defer mu.Unlock()
-	if seen[0] == seen[1] {
-		t.Fatalf("the new external port was not taken: %v", seen)
-	}
-	last := k.State().Mapping
-	got := l.removed()
-	if len(got) < len(seen) || last == nil || got[len(got)-1].External != last.External {
-		t.Fatalf("removed %v of %v, last %v", got, seen, last)
+	if seen[0] == seen[1] || r.held() != 0 || len(get(t, rec)) != 0 {
+		t.Fatalf("seen %v; router holds %d; record %v", seen, r.held(), get(t, rec))
 	}
 }
 
-// The record is written before the router is asked: here the router
-// itself checks that the nonce it is asked about was already recorded.
+// The record is written to disk before the router is asked: here the
+// router itself reads the file and checks that the nonce it is asked
+// about is there.
 func TestTheMappingIsRecordedBeforeTheRouterIsAsked(t *testing.T) {
-	rec := &memRecord{}
+	rec := record(t)
 	r := &pcpRouter{extIP: netip.MustParseAddr("203.0.113.7"), extPort: 40001, maps: map[string]uint16{}}
 	var unrecorded atomic.Int32
 	gw := newFakeUDP(t, func(q []byte) []byte {
 		found := false
-		for _, m := range rec.get() {
+		ms, _ := rec.Load()
+		for _, m := range ms {
 			if len(q) >= 36 && string(m.Nonce[:]) == string(q[24:36]) {
 				found = true
 			}
@@ -524,102 +513,241 @@ func TestTheMappingIsRecordedBeforeTheRouterIsAsked(t *testing.T) {
 	k := NewKeeper(client(gw), 7423, rec, nil)
 	stop := runKeeper(k)
 	waitFor(t, "the mapping", func() bool { return k.State().Mapping != nil })
-	if held := rec.get(); len(held) != 1 || held[0].External.String() != "203.0.113.7:40001" {
+	if held := get(t, rec); len(held) != 1 || held[0].External.String() != "203.0.113.7:40001" {
 		t.Fatalf("recorded %+v", held)
 	}
+	if fi, err := os.Stat(rec.Path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("record mode %v %v", fi, err)
+	}
 	stop()
-	if unrecorded.Load() != 0 || r.held() != 0 || len(rec.get()) != 0 {
-		t.Fatalf("asked before recording %d times; router holds %d; record %v", unrecorded.Load(), r.held(), rec.get())
+	if unrecorded.Load() != 0 || r.held() != 0 || len(get(t, rec)) != 0 {
+		t.Fatalf("asked before recording %d times; router holds %d; record %v", unrecorded.Load(), r.held(), get(t, rec))
+	}
+	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(rec.Path), "*")); len(left) != 0 {
+		t.Fatalf("files left %v", left)
 	}
 }
 
-// NAT-PMP maps the port, then the external address request fails: the
-// mapping exists although Map failed, so it is kept and removed.
-func TestAMappingMadeBeforeAFailedAddressLookupIsStillRemoved(t *testing.T) {
-	var maps atomic.Int32
-	inner := natpmpRouter([4]byte{198, 51, 100, 9}, 50123, &maps)
-	gw := newFakeUDP(t, func(q []byte) []byte {
-		if len(q) == 2 { // the external address: refused, network failure
-			return []byte{0, 128, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0}
+// noteTo records each request in f as a Keeper does, and nothing after:
+// the process dies once the router has answered.
+func noteTo(f *File) Note {
+	var held []Mapping
+	return func(m Mapping, asking bool) error {
+		held = slices.DeleteFunc(held, func(x Mapping) bool { return x.Key() == m.Key() })
+		if asking {
+			held = append(held, m)
 		}
-		return inner(q)
+		return f.Save(held)
+	}
+}
+
+// A crash right after the router made the mapping, for each protocol:
+// the record on disk holds only what was written before the request, and
+// the next run reads it back from the file and removes the mapping. For
+// UPnP the external port (here 7424, as 7423 was taken) is in the record
+// although no external address was learned.
+func TestACrashAfterTheRouterMadeTheMappingIsUndoneFromTheRecordFile(t *testing.T) {
+	t.Run("pcp", func(t *testing.T) {
+		r := &pcpRouter{extIP: netip.MustParseAddr("203.0.113.7"), extPort: 40001, maps: map[string]uint16{}}
+		c := client(newFakeUDP(t, r.answer))
+		rec := record(t)
+		if _, err := c.Map(context.Background(), 7423, time.Hour, nil, noteTo(rec)); err != nil || r.held() != 1 {
+			t.Fatalf("%v, router holds %d", err, r.held())
+		}
+		runKeeper(NewKeeper(c, 0, rec, nil))()
+		if r.held() != 0 || len(get(t, rec)) != 0 {
+			t.Fatalf("router holds %d (removed by the nonce kept), record %v", r.held(), get(t, rec))
+		}
 	})
-	rec := &memRecord{}
-	k := NewKeeper(client(gw), 7423, rec, nil)
-	stop := runKeeper(k)
-	waitFor(t, "the failed attempt", func() bool { return k.State().Err != "" })
-	if maps.Load() != 1 || len(rec.get()) != 1 || rec.get()[0].Protocol != NATPMP {
-		t.Fatalf("router holds %d, record %+v", maps.Load(), rec.get())
+	t.Run("nat-pmp", func(t *testing.T) {
+		var maps atomic.Int32
+		c := client(newFakeUDP(t, natpmpRouter([4]byte{198, 51, 100, 9}, 50123, &maps)))
+		rec := record(t)
+		if _, err := c.Map(context.Background(), 7423, time.Hour, nil, noteTo(rec)); err != nil || maps.Load() != 1 {
+			t.Fatalf("%v, router holds %d", err, maps.Load())
+		}
+		runKeeper(NewKeeper(c, 0, rec, nil))()
+		waitFor(t, "the deletion", func() bool { return maps.Load() == 0 })
+		if len(get(t, rec)) != 0 {
+			t.Fatalf("record %v", get(t, rec))
+		}
+	})
+	t.Run("upnp", func(t *testing.T) {
+		g := newFakeIGD(t)
+		g.mu.Lock()
+		g.taken["7423"] = true
+		g.mu.Unlock()
+		c := client(noPCP(t))
+		c.SSDP = fmt.Sprintf("127.0.0.1:%d", g.ssdp.port())
+		rec := record(t)
+		var last []byte
+		note := noteTo(rec)
+		if _, err := c.Map(context.Background(), 7423, time.Hour, nil, func(m Mapping, asking bool) error {
+			err := note(m, asking)
+			last, _ = os.ReadFile(rec.Path)
+			return err
+		}); err != nil || !g.has("7424") {
+			t.Fatalf("%v", err)
+		}
+		if !strings.Contains(string(last), `"external_port":7424`) || strings.Contains(string(last), "external_ip") {
+			t.Fatalf("record before the add %s", last)
+		}
+		runKeeper(NewKeeper(c, 0, rec, nil))()
+		if g.has("7424") || len(get(t, rec)) != 0 || !slices.Contains(g.called(), "DeletePortMapping") {
+			t.Fatalf("calls %v, record %v", g.called(), get(t, rec))
+		}
+	})
+}
+
+// A record is used whole or not at all: an unknown field, a value out of
+// range, a mapping on another router, data after the list or a file that
+// does not parse, and the keeper sends nothing, keeps the file and says
+// what to remove by hand.
+func TestARecordThatCannotBeUsedWholeSendsNothingAndIsKept(t *testing.T) {
+	ok := `{"protocol":"pcp","gateway":"127.0.0.1","internal_port":7423,"external_port":7423,"lifetime_s":0,"nonce":"010000000000000000000000"}`
+	for name, body := range map[string]string{
+		"unknown field":  `[{"protocol":"pcp","gateway":"127.0.0.1","internal_port":7423,"external_port":7423,"lifetime_s":0,"nonce":"010000000000000000000000","x":1}]`,
+		"port too large": `[{"protocol":"pcp","gateway":"127.0.0.1","internal_port":70000,"external_port":7423,"lifetime_s":0,"nonce":"010000000000000000000000"}]`,
+		"no nonce":       `[{"protocol":"pcp","gateway":"127.0.0.1","internal_port":7423,"external_port":7423,"lifetime_s":0}]`,
+		"upnp no port":   `[{"protocol":"upnp","gateway":"127.0.0.1","local":"127.0.0.1","internal_port":7423,"external_port":0,"lifetime_s":0,"control":"http://127.0.0.1:1/ctl","service":"urn:schemas-upnp-org:service:WANIPConnection:1"}]`,
+		"upnp elsewhere": `[{"protocol":"upnp","gateway":"127.0.0.1","local":"127.0.0.1","internal_port":7423,"external_port":7423,"lifetime_s":0,"control":"http://192.0.2.1:1/ctl","service":"urn:schemas-upnp-org:service:WANIPConnection:1"}]`,
+		"other router":   `[{"protocol":"pcp","gateway":"192.0.2.1","internal_port":7423,"external_port":7423,"lifetime_s":0,"nonce":"010000000000000000000000"}]`,
+		"trailing data":  `[` + ok + `] []`,
+		"not json":       `[{"protocol":`,
+	} {
+		r := &pcpRouter{extIP: netip.MustParseAddr("203.0.113.7"), extPort: 40001, maps: map[string]uint16{}}
+		gw := newFakeUDP(t, r.answer)
+		rec := record(t)
+		if err := os.WriteFile(rec.Path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rec.Load(); !errors.Is(err, ErrUnusable) {
+			t.Fatalf("%s: loaded: %v", name, err)
+		}
+		k := NewKeeper(client(gw), 7423, rec, nil)
+		stop := runKeeper(k)
+		waitFor(t, name, func() bool { return k.State().Err != "" })
+		time.Sleep(50 * time.Millisecond)
+		stop()
+		after, _ := os.ReadFile(rec.Path)
+		if st := k.State(); len(gw.requests()) != 0 || string(after) != body ||
+			!strings.Contains(st.Err, "nothing was sent to the router") || !strings.Contains(st.Err, rec.Path) {
+			t.Fatalf("%s: %d requests sent, file %q, state %+v", name, len(gw.requests()), after, st)
+		}
 	}
-	stop()
-	if maps.Load() != 0 || len(rec.get()) != 0 {
-		t.Fatalf("after the end: router holds %d, record %+v", maps.Load(), rec.get())
+	rec := record(t)
+	if err := os.WriteFile(rec.Path, []byte("["+ok+"]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ms, err := rec.Load(); err != nil || len(ms) != 1 || ms[0].Nonce != [12]byte{1} {
+		t.Fatalf("a good record: %+v %v", ms, err)
 	}
 }
 
-// flaky grants once, then fails every renewal; Unmap fails while
-// failUnmap is set.
-type flaky struct {
-	mu        sync.Mutex
-	maps      int
-	failUnmap bool
-	unmapped  []Mapping
+// A UPnP forward on the recorded port that points at another machine or
+// carries another description is not this machine's: it is left on the
+// router, and the record forgets it.
+func TestAUPnPForwardThatIsNotThisMachinesIsNotDeleted(t *testing.T) {
+	g := newFakeIGD(t)
+	c := client(noPCP(t))
+	c.SSDP = fmt.Sprintf("127.0.0.1:%d", g.ssdp.port())
+	m, err := c.Map(context.Background(), 7423, time.Hour, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range []igdEntry{{client: "127.0.0.9", port: "7423", desc: description}, {client: "127.0.0.1", port: "7423", desc: "game console"},
+		{client: "127.0.0.1", port: "22", desc: description}} {
+		g.mu.Lock()
+		g.ports["7423"] = e
+		g.mu.Unlock()
+		if err := c.Unmap(context.Background(), m); !errors.Is(err, ErrNotOurs) || !g.has("7423") {
+			t.Fatalf("%+v: %v", e, err)
+		}
+	}
+	rec := record(t)
+	if err := rec.Save([]Mapping{m}); err != nil {
+		t.Fatal(err)
+	}
+	runKeeper(NewKeeper(c, 0, rec, nil))()
+	if !g.has("7423") || len(get(t, rec)) != 0 || slices.Contains(g.called(), "DeletePortMapping") {
+		t.Fatalf("calls %v, record %v", g.called(), get(t, rec))
+	}
 }
 
-func (f *flaky) Map(_ context.Context, internal uint16, _ time.Duration, prev *Mapping, note Note) (Mapping, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.maps++
-	m := Mapping{Protocol: PCP, Gateway: loop, Internal: internal, Nonce: [12]byte{1}, Lifetime: 40 * time.Millisecond,
-		Expires: time.Now().Add(40 * time.Millisecond), External: netip.MustParseAddrPort("203.0.113.7:40001")}
-	if prev != nil {
-		m = *prev
+// A fault body that is not a complete SOAP Fault with a UPnP error code is
+// not a refusal: a cut-short 718 does not move to the next port and
+// leaves the request recorded, to be removed; a cut-short 714 on removal
+// is not taken for "already gone".
+func TestAMalformedUPnPFaultDrivesNoFallbackAndNoCleanup(t *testing.T) {
+	g := newFakeIGD(t)
+	g.mu.Lock()
+	g.taken["7423"], g.badFault = true, true
+	g.mu.Unlock()
+	c := client(noPCP(t))
+	c.SSDP = fmt.Sprintf("127.0.0.1:%d", g.ssdp.port())
+	rec := record(t)
+	_, err := c.Map(context.Background(), 7423, time.Hour, nil, noteTo(rec))
+	if err == nil || !strings.Contains(err.Error(), "not a complete UPnP fault") {
+		t.Fatalf("map: %v", err)
 	}
-	_ = note(m, true)
-	if f.maps > 1 {
-		return Mapping{}, errors.New("no answer")
+	adds := 0
+	for _, call := range g.called() {
+		if call == "AddPortMapping" {
+			adds++
+		}
 	}
-	return m, nil
+	if held := get(t, rec); adds != 1 || len(held) != 1 || held[0].External.Port() != 7423 {
+		t.Fatalf("%d adds, record %+v", adds, held)
+	}
+	g.mu.Lock()
+	g.taken, g.badFault = map[string]bool{}, false
+	g.mu.Unlock()
+	m, err := c.Map(context.Background(), 7423, time.Hour, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.mu.Lock()
+	delete(g.ports, "7423") // gone, but the router says so badly
+	g.badFault = true
+	g.mu.Unlock()
+	if err := c.Unmap(context.Background(), m); err == nil {
+		t.Fatal("a malformed 714 was taken for a removal")
+	}
 }
 
-func (f *flaky) Unmap(_ context.Context, m Mapping) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.failUnmap {
-		return errors.New("no answer")
-	}
-	f.unmapped = append(f.unmapped, m)
-	return nil
-}
-
-func (f *flaky) set(fail bool) { f.mu.Lock(); f.failUnmap = fail; f.mu.Unlock() }
-
-func (f *flaky) count() (int, int) { f.mu.Lock(); defer f.mu.Unlock(); return f.maps, len(f.unmapped) }
-
-// A failed renewal keeps the mapping held, shown and removed at the end;
-// a removal that fails is reported, kept in the record and done by the
-// next run, which here only cleans up.
+// A failed renewal keeps the mapping held and shown, but once its lease
+// has run out it is no longer live (not advertised); a removal that fails
+// is reported, kept in the record file and done by the next run, which
+// here only cleans up. Against a PCP router on loopback.
 func TestAFailedRenewalKeepsTheMappingAndAFailedRemovalIsReportedAndRetried(t *testing.T) {
-	defer func(d time.Duration) { retryAfter = d }(retryAfter)
-	retryAfter = 10 * time.Millisecond
-	f := &flaky{}
-	rec := &memRecord{}
-	k := NewKeeper(f, 7423, rec, nil)
+	defer func(d, w time.Duration) { retryAfter, minWait = d, w }(retryAfter, minWait)
+	retryAfter, minWait = 10*time.Millisecond, time.Millisecond
+	r := &pcpRouter{extIP: netip.MustParseAddr("203.0.113.7"), extPort: 40001, grant: 1, maps: map[string]uint16{}}
+	c := client(newFakeUDP(t, r.answer))
+	rec := record(t)
+	k := NewKeeper(c, 7423, rec, nil)
 	stop := runKeeper(k)
-	waitFor(t, "failed renewals", func() bool { n, _ := f.count(); return n >= 3 })
-	if st := k.State(); st.Mapping == nil || st.Err == "" {
+	waitFor(t, "the mapping", func() bool { return k.State().Mapping != nil })
+	r.set(func(r *pcpRouter) { r.silentMap = true })
+	waitFor(t, "a failed renewal", func() bool { return k.State().Err != "" })
+	st := k.State()
+	if st.Mapping == nil || !st.Mapping.Live(time.Now()) {
 		t.Fatalf("after a failed renewal %+v", st)
 	}
-	f.set(true)
+	waitFor(t, "the lease to run out", func() bool {
+		st := k.State()
+		return st.Mapping != nil && !st.Mapping.Live(time.Now())
+	})
+	r.set(func(r *pcpRouter) { r.silentDel = true })
 	stop()
-	if st := k.State(); len(st.Left) != 1 || !strings.Contains(st.Left[0], "could not remove it: no answer") || len(rec.get()) != 1 {
-		t.Fatalf("left %v, record %v", st.Left, rec.get())
+	if st := k.State(); len(st.Left) != 1 || !strings.Contains(st.Left[0], "could not remove it: no answer") || len(get(t, rec)) != 1 {
+		t.Fatalf("left %v, record %v", st.Left, get(t, rec))
 	}
-	f.set(false)
-	clean := NewKeeper(f, 0, rec, nil) // the next run, with or without --map-port
+	r.set(func(r *pcpRouter) { r.silentDel = false })
+	clean := NewKeeper(c, 0, rec, nil) // the next run, with or without --map-port
 	runKeeper(clean)()
-	if _, n := f.count(); n != 1 || len(rec.get()) != 0 || len(clean.State().Left) != 0 {
-		t.Fatalf("removed %d, record %v, left %v", n, rec.get(), clean.State().Left)
+	if r.held() != 0 || len(get(t, rec)) != 0 || len(clean.State().Left) != 0 {
+		t.Fatalf("router holds %d, record %v, left %v", r.held(), get(t, rec), clean.State().Left)
 	}
 }
 
@@ -641,13 +769,13 @@ func TestMalformedRouterAnswersAreNotTakenForAMapping(t *testing.T) {
 		}},
 		{"zero port", (&pcpRouter{extIP: netip.MustParseAddr("203.0.113.7"), extPort: 0, maps: map[string]uint16{}}).answer},
 	} {
-		rec := &memRecord{}
+		rec := record(t)
 		gw := newFakeUDP(t, tc.answer)
 		k := NewKeeper(client(gw), 7423, rec, nil)
 		stop := runKeeper(k)
 		waitFor(t, tc.name, func() bool { return k.State().Err != "" })
-		if st := k.State(); st.Mapping != nil || !strings.Contains(st.Err, "cannot be used") || len(rec.get()) != 1 {
-			t.Fatalf("%s: %+v, record %v (kept, to be removed)", tc.name, st, rec.get())
+		if st := k.State(); st.Mapping != nil || !strings.Contains(st.Err, "cannot be used") || len(get(t, rec)) != 1 {
+			t.Fatalf("%s: %+v, record %v (kept, to be removed)", tc.name, st, get(t, rec))
 		}
 		stop()
 	}

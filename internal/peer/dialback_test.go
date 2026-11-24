@@ -33,7 +33,7 @@ func dialBackPair(t *testing.T) (a, b *pm) {
 	t.Helper()
 	a, b = newPM(t, "a", true), newPM(t, "b", true)
 	group(t, a, b)
-	addr := serve(t, a.id, dbH{a.h, node.NewDialBackServer(a.r, NewProber(a.id), a.book)}, nil)
+	addr := serve(t, a.id, dbH{a.h, node.NewDialBackServer(a.r, NewProber(a.id))}, nil)
 	b.book.Keep(func(n string) bool { return n != a.node() }) // only the dial-back listener
 	b.book.Replace(a.node(), []string{addr}, time.Now())
 	return a, b
@@ -238,18 +238,30 @@ func TestOverTLSACandidateIsVerifiedOnlyWhereTheAskersKeyAnswersAndIPv6Works(t *
 	if v := r.Verified(); !slices.Equal(v, []string{second}) {
 		t.Fatalf("verified %v, want only %s", v, second)
 	}
+	// Two ports of the source address are dialled; the third is not.
+	if !slices.Equal(got.NotTried, []string{b.addr}) {
+		t.Fatalf("not tried %v, want %s past the second port", got.NotTried, b.addr)
+	}
 	if v6 == "" {
 		return
 	}
-	// b connected over IPv4: [::1] is not its source address, and a's book
-	// does not hold it yet.
-	if !slices.Equal(got.NotTried, []string{v6}) {
-		t.Fatalf("not tried %v, want %s", got.NotTried, v6)
+	// b reaches a only over IPv4: its IPv6 address is not checked, and the
+	// check says why.
+	if !slices.Contains(got.NotChecked, "not checked: no member reachable over IPv6") {
+		t.Fatalf("not checked %v", got.NotChecked)
 	}
-	a.book.Replace(b.node(), append(a.book.Addrs(b.node()), v6), time.Now())
-	r.Check(bg, []string{a.node()}, true)
-	if v := r.Verified(); !slices.Equal(v, []string{second, v6}) {
-		t.Fatalf("verified %v once a's book holds %s", v, v6)
+	l6, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(bg)
+	done := make(chan error, 1)
+	go func() { done <- Serve(ctx, l6, a.id, dbH{a.h, node.NewDialBackServer(a.r, NewProber(a.id))}) }()
+	t.Cleanup(func() { cancel(); <-done })
+	b.book.Replace(a.node(), append(b.book.Addrs(a.node()), l6.Addr().String()), time.Now())
+	got = r.Check(bg, []string{a.node()}, true)
+	if v := r.Verified(); !slices.Equal(v, []string{second, v6}) || len(got.NotChecked) != 0 {
+		t.Fatalf("verified %v, not checked %v, once asked over IPv6", v, got.NotChecked)
 	}
 }
 

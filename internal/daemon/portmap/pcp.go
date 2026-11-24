@@ -46,7 +46,7 @@ func (c *Client) mapPCP(ctx context.Context, internal uint16, lifetime time.Dura
 	} else if _, err := rand.Read(m.Nonce[:]); err != nil {
 		return Mapping{}, err
 	}
-	m.Protocol, m.Internal, m.Gateway = PCP, internal, c.Gateway
+	m.Protocol, m.Internal, m.Gateway, m.Local = PCP, internal, c.Gateway, c.Local
 	suggest := internal
 	if prev != nil && prev.External.IsValid() {
 		suggest = prev.External.Port()

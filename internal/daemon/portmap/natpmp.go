@@ -31,7 +31,7 @@ func (c *Client) mapNATPMP(ctx context.Context, internal uint16, lifetime time.D
 	if prev != nil && prev.External.IsValid() {
 		suggest = prev.External.Port()
 	}
-	handle := Mapping{Protocol: NATPMP, Gateway: c.Gateway, Internal: internal,
+	handle := Mapping{Protocol: NATPMP, Gateway: c.Gateway, Local: c.Local, Internal: internal,
 		External: netip.AddrPortFrom(netip.Addr{}, suggest)}
 	if err := note(handle, true); err != nil {
 		return Mapping{}, err
@@ -72,7 +72,7 @@ func (c *Client) natpmp(ctx context.Context, internal, suggest uint16, lifetime 
 		}
 		granted := time.Duration(binary.BigEndian.Uint32(b[12:])) * time.Second
 		port := binary.BigEndian.Uint16(b[10:])
-		out = Mapping{Protocol: NATPMP, Gateway: c.Gateway, Internal: internal, Lifetime: granted,
+		out = Mapping{Protocol: NATPMP, Gateway: c.Gateway, Local: c.Local, Internal: internal, Lifetime: granted,
 			Expires: c.now().Add(granted), External: netip.AddrPortFrom(netip.Addr{}, port)}
 		if lifetime > 0 && (granted == 0 || port == 0) {
 			return true, fmt.Errorf("%w: success with lifetime %d s, external port %d", errUnsure, granted/time.Second, port)

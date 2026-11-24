@@ -29,22 +29,30 @@ const (
 // Mapping is a TCP port the router forwards to this machine, or one it
 // may forward because it was asked: what Unmap needs to remove it. It is
 // written to disk before each request (Note), so a later run can remove
-// it.
+// it; record.go is its form on disk.
 type Mapping struct {
-	Protocol string     `json:"protocol"`
-	Gateway  netip.Addr `json:"gateway"` // the router asked
-	Internal uint16     `json:"internal"`
+	Protocol string
+	Gateway  netip.Addr // the router asked
+	Local    netip.Addr // this machine's address the router forwards to
+	Internal uint16
 	// External is the router's external address and the port it forwards
-	// (the address is unknown until the router says it).
-	External netip.AddrPort `json:"external"`
+	// (the address is unknown until the router says it; the port is
+	// known from the request).
+	External netip.AddrPort
 	// Lifetime is what the router granted (0 with UPnP: permanent);
 	// Expires when it ends.
-	Lifetime time.Duration `json:"lifetime"`
-	Expires  time.Time     `json:"expires"`
+	Lifetime time.Duration
+	Expires  time.Time
 
-	Nonce   [12]byte `json:"nonce"`             // PCP
-	Control string   `json:"control,omitempty"` // UPnP control URL
-	Service string   `json:"service,omitempty"` // UPnP service type
+	Nonce   [12]byte // PCP
+	Control string   // UPnP control URL
+	Service string   // UPnP service type
+}
+
+// Live reports whether the router may still forward m at now: a lease
+// that has run out is not, whether or not a renewal is being tried.
+func (m Mapping) Live(now time.Time) bool {
+	return m.Expires.IsZero() || now.Before(m.Expires)
 }
 
 // Key says which mappings are one on the router: PCP by nonce, NAT-PMP
@@ -172,7 +180,12 @@ func (c *Client) Map(ctx context.Context, internal uint16, lifetime time.Duratio
 }
 
 // Unmap removes m. A mapping the router no longer holds counts as
-// removed; one on another router than this client's cannot be.
+// removed; one on another router than this client's cannot be. Each
+// deletion reaches only this machine's own mapping: PCP deletes by the
+// nonce kept from the request (RFC 6887 section 15), NAT-PMP deletes only
+// the sending host's mapping of the internal port (RFC 6886 section
+// 3.4), and a UPnP forward is deleted only after the router says it
+// points at this machine's address with a2p2's description.
 func (c *Client) Unmap(ctx context.Context, m Mapping) error {
 	if m.Gateway.IsValid() && m.Gateway != c.Gateway {
 		return fmt.Errorf("it is on router %s, not on this network's router %s", m.Gateway, c.Gateway)

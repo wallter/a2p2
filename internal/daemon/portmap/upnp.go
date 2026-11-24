@@ -192,39 +192,49 @@ func (c *Client) soap(ctx context.Context, s upnpService, action string, args []
 		return nil, err
 	}
 	defer resp.Body.Close()
-	fields, complete := soapFields(io.LimitReader(resp.Body, maxDescBody), action+"Response")
+	fields, body := soapFields(io.LimitReader(resp.Body, maxDescBody))
 	if resp.StatusCode != http.StatusOK {
-		if code := fields["errorCode"]; code != "" {
+		// Only a complete SOAP Fault with a numeric UPnP error code is a
+		// refusal; anything else drives no fallback and no cleanup.
+		if code := fields["errorCode"]; body == "Fault" && resp.StatusCode == http.StatusInternalServerError && numeric(code) {
 			return fields, &upnpError{code: code, text: fields["errorDescription"]}
 		}
-		return fields, fmt.Errorf("%s: %s", action, resp.Status)
+		return fields, fmt.Errorf("%s: %s, not a complete UPnP fault", action, resp.Status)
 	}
-	if !complete {
+	if body != action+"Response" {
 		return fields, fmt.Errorf("%s: the gateway's answer is not a complete %sResponse", action, action)
 	}
 	return fields, nil
 }
 
+func numeric(s string) bool {
+	_, err := strconv.ParseUint(s, 10, 16)
+	return err == nil
+}
+
 // soapFields reads a SOAP envelope: the text of every element by local
-// name, and whether the document is well formed to its end and holds a
-// want element in an Envelope's Body.
-func soapFields(r io.Reader, want string) (map[string]string, bool) {
+// name, and the local name of the element in the Envelope's Body, or ""
+// unless the document is well formed to its end and has exactly one.
+func soapFields(r io.Reader) (map[string]string, string) {
 	fields := map[string]string{}
 	dec := xml.NewDecoder(r)
 	var stack []string
-	found := false
+	body, n := "", 0
 	for {
 		tok, err := dec.Token()
 		if err == io.EOF {
-			return fields, found && len(stack) == 0
+			if len(stack) != 0 || n != 1 {
+				return fields, ""
+			}
+			return fields, body
 		}
 		if err != nil {
-			return fields, false
+			return fields, ""
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			if t.Name.Local == want && len(stack) == 2 && stack[0] == "Envelope" && stack[1] == "Body" {
-				found = true
+			if len(stack) == 2 && stack[0] == "Envelope" && stack[1] == "Body" {
+				body, n = t.Name.Local, n+1
 			}
 			stack = append(stack, t.Name.Local)
 		case xml.CharData:
@@ -267,7 +277,7 @@ func (c *Client) mapUPnP(ctx context.Context, internal uint16, lifetime time.Dur
 	}
 	lease := lifetime
 	handle := func(port uint16) Mapping {
-		return Mapping{Protocol: UPnP, Gateway: c.Gateway, Internal: internal,
+		return Mapping{Protocol: UPnP, Gateway: c.Gateway, Local: c.Local, Internal: internal,
 			External: netip.AddrPortFrom(netip.Addr{}, port), Control: s.control, Service: s.service}
 	}
 	add := func(port uint16, lease time.Duration) error {
@@ -317,15 +327,36 @@ func (c *Client) mapUPnP(ctx context.Context, internal uint16, lifetime time.Dur
 	return m, nil
 }
 
+// ErrNotOurs: the router's forward on that port is not this machine's
+// a2p2 mapping, so it was left alone and the mapping is not there.
+var ErrNotOurs = errors.New("the router's forward on that port is not this machine's")
+
 func (c *Client) upnpDelete(ctx context.Context, m Mapping) error {
 	if !c.gatewayURL(m.Control) {
 		return errors.New("its control URL is not on this network's router")
 	}
-	_, err := c.soap(ctx, upnpService{control: m.Control, service: m.Service}, "DeletePortMapping",
-		[][2]string{{"NewRemoteHost", ""}, {"NewExternalPort", strconv.Itoa(int(m.External.Port()))},
-			{"NewProtocol", "TCP"}})
+	s := upnpService{control: m.Control, service: m.Service}
+	key := [][2]string{{"NewRemoteHost", ""}, {"NewExternalPort", strconv.Itoa(int(m.External.Port()))},
+		{"NewProtocol", "TCP"}}
 	var ue *upnpError
+	// Deleted only if the router says the forward on that port is the one
+	// this machine asked for: to its address and port, with a2p2's
+	// description.
+	f, err := c.soap(ctx, s, "GetSpecificPortMappingEntry", key)
 	if errors.As(err, &ue) && ue.code == "714" { // NoSuchEntryInArray: already gone
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	client, _ := netip.ParseAddr(f["NewInternalClient"])
+	if client.Unmap() != c.Local || f["NewInternalPort"] != strconv.Itoa(int(m.Internal)) ||
+		f["NewPortMappingDescription"] != description {
+		return fmt.Errorf("%w (it forwards to %s port %s, described %q)", ErrNotOurs,
+			f["NewInternalClient"], f["NewInternalPort"], f["NewPortMappingDescription"])
+	}
+	_, err = c.soap(ctx, s, "DeletePortMapping", key)
+	if errors.As(err, &ue) && ue.code == "714" {
 		return nil
 	}
 	return err

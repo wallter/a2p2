@@ -75,8 +75,10 @@ func dialBackRoute(h DialBackHandler) http.Handler {
 }
 
 // DialBack asks peer, at its addresses in the book's order, to dial back
-// to addrs (node.DialBackTransport). A refusal is a *node.PullError (404
-// from a machine without the dial-back).
+// to addrs (node.DialBackTransport). It goes only over an address of the
+// same family as addrs[0], since the responder checks the address the
+// request comes from. A refusal is a *node.PullError (404 from a machine
+// without the dial-back).
 func (c *PullClient) DialBack(ctx context.Context, peer string, addrs []string) (*node.DialBackResponse, error) {
 	if c.err != nil {
 		return nil, c.err
@@ -93,8 +95,12 @@ func (c *PullClient) DialBack(ctx context.Context, peer string, addrs []string) 
 	defer cancel()
 	hc := c.client(peer)
 	lastErr := errors.New("peer: no usable address")
+	fam := ""
+	if len(addrs) > 0 {
+		fam = node.AddrFamily(addrs[0])
+	}
 	for _, addr := range c.book.Addrs(peer) {
-		if !c.usable(addr) {
+		if !c.usable(addr) || node.AddrFamily(addr) != fam {
 			continue
 		}
 		u := url.URL{Scheme: "https", Host: addr, Path: pathDialBackV2}

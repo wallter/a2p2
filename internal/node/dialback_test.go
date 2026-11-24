@@ -44,8 +44,7 @@ func (f *fakeNet) tried() [][2]string {
 }
 
 // dialBackRoom is a room of a and b (c is not in it), with a answering
-// dial-backs over fn. a's book holds b at 198.51.100.2 and .3 (b listed
-// both).
+// dial-backs over fn.
 func dialBackRoom(t *testing.T) (a, b, c *lnode, fn *fakeNet, srv *DialBackServer) {
 	clock := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
 	a, b, c = newLNode(t, "a", &clock), newLNode(t, "b", &clock), newLNode(t, "c", &clock)
@@ -55,9 +54,7 @@ func dialBackRoom(t *testing.T) (a, b, c *lnode, fn *fakeNet, srv *DialBackServe
 	old := DialBackTimeout
 	DialBackTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { DialBackTimeout = old })
-	book := NewAddrBook()
-	book.Replace(b.id, []string{"198.51.100.2:7423", "198.51.100.3:7423"}, clock)
-	return a, b, c, fn, NewDialBackServer(a.r, fn, book)
+	return a, b, c, fn, NewDialBackServer(a.r, fn)
 }
 
 // memDialBack carries a dial-back as the HTTP route does: encoded,
@@ -85,18 +82,18 @@ func (m memDialBack) DialBack(ctx context.Context, peer string, addrs []string) 
 
 func TestDialBackReachesOnlyTheAskersOwnKeyAndReportsTheSourceSeen(t *testing.T) {
 	_, b, c, fn, srv := dialBackRoom(t)
-	fn.at["198.51.100.2:7423"] = b.id
-	fn.at["198.51.100.3:7423"] = c.id // another machine's listener: b listed it, but c answers
+	fn.at["203.0.113.9:7423"] = b.id
+	fn.at["203.0.113.9:7424"] = c.id // another machine behind the same address: c answers there
 	got, err := memDialBack{srv, b.id, "203.0.113.9:50123"}.DialBack(context.Background(), "",
-		[]string{"198.51.100.2:7423", "198.51.100.3:7423", "203.0.113.9:7423"})
+		[]string{"203.0.113.9:7423", "203.0.113.9:7424"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(got.Reached, []string{"198.51.100.2:7423"}) || got.Saw != "203.0.113.9" || len(got.NotTried) != 0 {
+	if !slices.Equal(got.Reached, []string{"203.0.113.9:7423"}) || got.Saw != "203.0.113.9" || len(got.NotTried) != 0 {
 		t.Fatalf("answer %+v", got)
 	}
 	tries := fn.tried()
-	if len(tries) != 3 {
+	if len(tries) != 2 {
 		t.Fatalf("tries %v", tries)
 	}
 	for _, tr := range tries {
@@ -106,12 +103,48 @@ func TestDialBackReachesOnlyTheAskersOwnKeyAndReportsTheSourceSeen(t *testing.T)
 	}
 }
 
+// The responder dials only the IP address the request came from, on at
+// most two of the ports asked; every other address, a third party's or
+// one the asker advertised, is answered as not tried, at once.
+func TestADialBackDialsOnlyTheSourceAddressOnAtMostTwoPorts(t *testing.T) {
+	_, b, _, fn, srv := dialBackRoom(t)
+	asked := []string{"192.0.2.50:22", "203.0.113.9:7423", "198.51.100.2:7423", "203.0.113.9:40001", "203.0.113.9:22"}
+	start := time.Now()
+	got, err := memDialBack{srv, b.id, "203.0.113.9:50123"}.DialBack(context.Background(), "", asked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got.NotTried, []string{"192.0.2.50:22", "198.51.100.2:7423", "203.0.113.9:22"}) || len(got.Reached) != 0 {
+		t.Fatalf("answer %+v", got)
+	}
+	var dialled []string
+	for _, tr := range fn.tried() {
+		dialled = append(dialled, tr[0])
+	}
+	slices.Sort(dialled)
+	if !slices.Equal(dialled, []string{"203.0.113.9:40001", "203.0.113.9:7423"}) {
+		t.Fatalf("dialled %v", dialled)
+	}
+	// Only other addresses: nothing dialled, and no reason to wait.
+	if got, err := (memDialBack{srv, b.id, "203.0.113.9:50123"}).DialBack(context.Background(), "",
+		[]string{"192.0.2.50:22"}); err != nil || !slices.Equal(got.NotTried, []string{"192.0.2.50:22"}) {
+		t.Fatalf("other address only: %+v %v", got, err)
+	}
+	if d := time.Since(start); d > 10*DialBackTimeout {
+		t.Fatalf("took %s", d)
+	}
+	// The same endpoint twice, once written as IPv4-mapped IPv6, is a repeat.
+	if _, perr := DecodeDialBackRequest([]byte(`{"v":2,"addrs":["198.51.100.2:7423","[::ffff:198.51.100.2]:7423"]}`)); perr == nil {
+		t.Fatal("accepted a repeat written two ways")
+	}
+}
+
 // How long the answer takes tells nothing of a third party: an answer in
 // which any address was not reached comes at the deadline, however fast
 // that address refused.
 func TestDialBackAnswersAtTheDeadlineUnlessEveryAddressWasReached(t *testing.T) {
 	_, b, _, fn, srv := dialBackRoom(t)
-	fn.at["198.51.100.2:7423"] = b.id
+	fn.at["203.0.113.9:7423"] = b.id
 	ask := func(addrs ...string) time.Duration {
 		start := time.Now()
 		if _, perr := srv.DialBack(context.Background(), b.id, "203.0.113.9:1",
@@ -120,50 +153,14 @@ func TestDialBackAnswersAtTheDeadlineUnlessEveryAddressWasReached(t *testing.T) 
 		}
 		return time.Since(start)
 	}
-	if d := ask("198.51.100.3:7423"); d < DialBackTimeout {
-		t.Fatalf("a refused third party answered in %s, before the %s deadline", d, DialBackTimeout)
+	if d := ask("203.0.113.9:7424"); d < DialBackTimeout {
+		t.Fatalf("a refused port answered in %s, before the %s deadline", d, DialBackTimeout)
 	}
-	if d := ask("198.51.100.2:7423", "198.51.100.3:7423"); d < DialBackTimeout {
+	if d := ask("203.0.113.9:7423", "203.0.113.9:7424"); d < DialBackTimeout {
 		t.Fatalf("one of two reached: answered in %s", d)
 	}
-	if d := ask("198.51.100.2:7423"); d >= DialBackTimeout {
+	if d := ask("203.0.113.9:7423"); d >= DialBackTimeout {
 		t.Fatalf("all reached, yet answered at the deadline (%s)", d)
-	}
-}
-
-// A member can make the responder dial only its own source address (any
-// port) or an address the responder already holds for its key; any other
-// endpoint, a third party's included, is answered as not tried, at once,
-// with nothing dialled.
-func TestADialBackDialsOnlyTheAskersSourceAddressOrWhatTheBookHoldsForIt(t *testing.T) {
-	_, b, _, fn, srv := dialBackRoom(t)
-	asked := []string{"192.0.2.50:22", "198.51.100.4:7423", "[2001:db8::9]:443", "198.51.100.2:7423", "203.0.113.9:9"}
-	start := time.Now()
-	got, err := memDialBack{srv, b.id, "203.0.113.9:50123"}.DialBack(context.Background(), "", asked)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(got.NotTried, asked[:3]) || len(got.Reached) != 0 {
-		t.Fatalf("answer %+v", got)
-	}
-	var dialled []string
-	for _, tr := range fn.tried() {
-		dialled = append(dialled, tr[0])
-	}
-	if !slices.Equal(dialled, []string{"198.51.100.2:7423", "203.0.113.9:9"}) && !slices.Equal(dialled, []string{"203.0.113.9:9", "198.51.100.2:7423"}) {
-		t.Fatalf("dialled %v", dialled)
-	}
-	// Only third parties: nothing dialled, and no reason to wait.
-	if got, err := (memDialBack{srv, b.id, "203.0.113.9:50123"}).DialBack(context.Background(), "",
-		[]string{"192.0.2.50:22"}); err != nil || !slices.Equal(got.NotTried, []string{"192.0.2.50:22"}) {
-		t.Fatalf("third party only: %+v %v", got, err)
-	}
-	if d := time.Since(start); d > 10*DialBackTimeout {
-		t.Fatalf("took %s", d)
-	}
-	// The same endpoint twice, once written as IPv4-mapped IPv6, is a repeat.
-	if _, perr := DecodeDialBackRequest([]byte(`{"v":2,"addrs":["198.51.100.2:7423","[::ffff:198.51.100.2]:7423"]}`)); perr == nil {
-		t.Fatal("accepted a repeat written two ways")
 	}
 }
 
@@ -269,12 +266,11 @@ func TestDialBackIsRateLimitedPerPeerAndForTheWholeMachine(t *testing.T) {
 			a.change(r.ID, Change{Kind: core.EntryAdd, Target: d.id, Name: "dee", History: true})
 		}
 	}
-	srv.book.(*AddrBook).Replace(d.id, []string{"198.51.100.2:7423"}, *a.clock)
 	defer func(v float64) { dialBackAllBurst = v }(dialBackAllBurst)
 	dialBackAllBurst = 6
 	ask := func(from string) *PullError {
 		_, perr := srv.DialBack(context.Background(), from, "203.0.113.9:1",
-			&DialBackRequest{V: PullVersion, Addrs: []string{"198.51.100.2:7423"}})
+			&DialBackRequest{V: PullVersion, Addrs: []string{"203.0.113.9:7423"}})
 		return perr
 	}
 	for i := range 4 {
@@ -315,7 +311,7 @@ func TestDialBackServesAtMostFourRequestsAtOnce(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			_, _ = srv.DialBack(context.Background(), b.id, "203.0.113.9:1",
-				&DialBackRequest{V: PullVersion, Addrs: []string{"198.51.100.2:7423"}})
+				&DialBackRequest{V: PullVersion, Addrs: []string{"203.0.113.9:7423"}})
 		}()
 	}
 	for deadline := time.Now().Add(5 * time.Second); len(fn.tried()) < dialBackConcurrent; time.Sleep(time.Millisecond) {
@@ -325,7 +321,7 @@ func TestDialBackServesAtMostFourRequestsAtOnce(t *testing.T) {
 	}
 	*a.clock = a.clock.Add(time.Hour) // tokens are not what stops the next one
 	_, perr := srv.DialBack(context.Background(), b.id, "203.0.113.9:1",
-		&DialBackRequest{V: PullVersion, Addrs: []string{"198.51.100.2:7423"}})
+		&DialBackRequest{V: PullVersion, Addrs: []string{"203.0.113.9:7423"}})
 	close(fn.block)
 	wg.Wait()
 	if perr == nil || perr.Status != 429 {

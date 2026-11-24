@@ -7,7 +7,7 @@ package daemon
 // be (addrFlags, build-tagged).
 
 import (
-	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"slices"
@@ -196,22 +196,60 @@ func gatewayLocal() (gw, local netip.Addr, err error) {
 	if err != nil {
 		return netip.Addr{}, netip.Addr{}, err
 	}
+	src, err := sourceFor(gw)
+	if err != nil {
+		return netip.Addr{}, netip.Addr{}, err
+	}
+	var nets []ifNet
 	ifaces, _ := net.Interfaces()
 	for _, ifc := range ifaces {
-		if iface != "" && ifc.Name != iface {
-			continue
-		}
 		as, _ := ifc.Addrs()
 		for _, a := range as {
-			ipn, ok := a.(*net.IPNet)
-			if !ok || ipn.IP.To4() == nil {
-				continue
-			}
-			if ipn.Contains(gw.AsSlice()) {
-				ip, _ := netip.AddrFromSlice(ipn.IP)
-				return gw, ip.Unmap(), nil
+			if ipn, ok := a.(*net.IPNet); ok {
+				if p, ok := netipPrefix(ipn); ok {
+					nets = append(nets, ifNet{iface: ifc.Name, prefix: p})
+				}
 			}
 		}
 	}
-	return netip.Addr{}, netip.Addr{}, errors.New("no address of this machine is on the default gateway's network")
+	local, err = pickLocal(gw, iface, src, nets)
+	return gw, local, err
+}
+
+// sourceFor is the source address the system selects to reach gw: a
+// route lookup by connecting a UDP socket, which sends nothing.
+func sourceFor(gw netip.Addr) (netip.Addr, error) {
+	c, err := net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(netip.AddrPortFrom(gw, 5351)))
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	defer c.Close()
+	return c.LocalAddr().(*net.UDPAddr).AddrPort().Addr().Unmap(), nil
+}
+
+// ifNet is one address of an interface, with its prefix.
+type ifNet struct {
+	iface  string
+	prefix netip.Prefix
+}
+
+func netipPrefix(ipn *net.IPNet) (netip.Prefix, bool) {
+	ip, ok := netip.AddrFromSlice(ipn.IP)
+	if !ok {
+		return netip.Prefix{}, false
+	}
+	ones, _ := ipn.Mask.Size()
+	return netip.PrefixFrom(ip.Unmap(), ones), true
+}
+
+// pickLocal is the address the router forwards to: the source the system
+// selected for gw (src), if it is an address of this machine on the
+// gateway's network (and on iface, when the route names one).
+func pickLocal(gw netip.Addr, iface string, src netip.Addr, nets []ifNet) (netip.Addr, error) {
+	for _, n := range nets {
+		if n.prefix.Addr() == src && n.prefix.Contains(gw) && (iface == "" || n.iface == iface) {
+			return src, nil
+		}
+	}
+	return netip.Addr{}, fmt.Errorf("the address this machine uses to reach the default gateway %s (%s) is not on the gateway's network", gw, src)
 }

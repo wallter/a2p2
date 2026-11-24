@@ -1,0 +1,5 @@
+# Every text file is checked out with LF line endings on every system,
+# Windows included: test data (golden vectors, the golden tool file), the
+# scripts and the Go sources are compared or run byte for byte, and Git
+# for Windows would otherwise convert them to CRLF (D47).
+* text=auto eol=lf

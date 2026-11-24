@@ -74,6 +74,8 @@ type SurfaceOpts struct {
 	Reach *Reacher
 	// Mapping, if set, is the router's port mapping now (nil: none yet).
 	Mapping func() *PortMapping
+	// NotAdvertised is the configured addresses left out, each with why.
+	NotAdvertised []string
 }
 
 // MaybeRemovedAfter is how long every other member of a room must have
@@ -100,6 +102,7 @@ type Surface struct {
 	probe   Prober
 	reach   *Reacher
 	mapping func() *PortMapping
+	notAdv  []string
 	// waiting, if set (tests), is called each time Inbox starts to wait:
 	// a readiness barrier.
 	waiting func()
@@ -111,7 +114,7 @@ type Surface struct {
 func OpenSurface(ctx context.Context, m *Machine, r *Rooms, o SurfaceOpts) (*Surface, error) {
 	s := &Surface{m: m, r: r, j: o.Joiner, book: o.Book, name: o.Name, addrs: o.Addrs, local: localRoomID(m.ID),
 		net: o.Network, fault: o.NetworkFault, onNet: o.OnNetwork, notMb: o.NotMember,
-		probe: o.Probe, reach: o.Reach, mapping: o.Mapping}
+		probe: o.Probe, reach: o.Reach, mapping: o.Mapping, notAdv: o.NotAdvertised}
 	if s.fault == nil {
 		s.fault = func() string { return "" }
 	}

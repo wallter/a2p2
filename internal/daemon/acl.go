@@ -30,7 +30,17 @@ func homeSDDL(user string) string {
 // checkSDDL refuses a security descriptor whose owner is not one of owners,
 // or whose DACL allows anyone other than user and the trusted trustees.
 // Deny entries take nothing away from this check and are ignored.
-func checkSDDL(sddl, user string, owners []string, home string) error {
+//
+// sid resolves a SID as SDDL writes it to its S-1-... form: SDDL writes
+// some accounts as two-letter constants, such as LA for the machine's
+// built-in Administrator (RID 500) and BA for the Administrators group,
+// even when one of them is the current user. Every SID is compared
+// resolved; sid nil leaves them as written (tests).
+func checkSDDL(sddl, user string, owners []string, home string, sid func(string) string) error {
+	if sid == nil {
+		sid = func(s string) string { return s }
+	}
+	canon := func(s string) string { return strings.ToUpper(sid(s)) }
 	owner, dacl, hasDACL, err := splitSDDL(sddl)
 	if err == nil && !hasDACL {
 		err = fmt.Errorf("no DACL in %q", sddl)
@@ -40,12 +50,12 @@ func checkSDDL(sddl, user string, owners []string, home string) error {
 	}
 	ok := false
 	for _, o := range owners {
-		if o != "" && strings.EqualFold(owner, o) {
+		if o != "" && canon(owner) == canon(o) {
 			ok = true
 		}
 	}
 	if !ok {
-		return fmt.Errorf("%s is owned by another user (%s)", home, owner)
+		return fmt.Errorf("%s is owned by another user (%s)", home, named(owner, sid))
 	}
 	fix := fmt.Sprintf("remove it and let a2p2 create it, or run: icacls \"%s\" /inheritance:r /grant:r \"%%USERNAME%%:(OI)(CI)F\" and remove the other entries", home)
 	if strings.HasPrefix(dacl, "NO_ACCESS_CONTROL") {
@@ -61,12 +71,20 @@ func checkSDDL(sddl, user string, owners []string, home string) error {
 			continue
 		}
 		who := f[5]
-		if strings.EqualFold(who, user) || trustedSIDs[strings.ToUpper(who)] {
+		if canon(who) == canon(user) || trustedSIDs[strings.ToUpper(who)] || trustedSIDs[canon(who)] {
 			continue
 		}
-		return fmt.Errorf("%s is accessible to other users (%s is allowed in); %s", home, who, fix)
+		return fmt.Errorf("%s is accessible to other users (%s is allowed in); %s", home, named(who, sid), fix)
 	}
 	return nil
+}
+
+// named writes an SDDL SID with its resolved form when they differ.
+func named(s string, sid func(string) string) string {
+	if r := sid(s); !strings.EqualFold(r, s) {
+		return s + " = " + r
+	}
+	return s
 }
 
 // splitSDDL returns the owner and the DACL part (after "D:") of sddl, and

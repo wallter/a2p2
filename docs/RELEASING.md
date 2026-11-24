@@ -39,7 +39,7 @@ Most testing is local, on purpose: it keeps the hosted CI small.
 | `make check` | locally, before every push | fmt, vet, the Windows build gate, licences, the requirement register, the recipes check, the race tests, the launcher's tests |
 | `make prerelease` | locally, before every tag | `make check`, `make lint`, `make vuln`, the same tests on Linux in a container (`make check-linux`), and one `make chaos` run at its default length (real daemons killed and partitioned in containers; a shorter run is reported inconclusive) |
 | `make e2e-local`, `make e2e HARNESS=...` | locally, by hand, before a minor release | real harnesses; these spend model tokens or need local models |
-| CI on GitHub | pull requests that touch code, and on request | one Linux job: `make check` and `make lint`; on request only, also a Windows job: `go build`, `go vet` and `go test` on `windows-latest`, with full output only for a failing package and every skipped test listed |
+| CI on GitHub | pull requests that touch code, and on request | one Linux job: `make check` and `make lint`. A run by hand chooses with `what`: `linux` (the default), `windows` or `all`; the Windows job runs `go build`, `go vet` and `go test` on `windows-latest` without the deep `internal/node` schedules, with full output only for a failing package and every skipped test listed |
 | Release workflow on GitHub | a pushed `v*` tag | `make check`, `make lint`, `make vuln`, the changelog section exists, build, publish |
 
 Nothing runs on GitHub for a push to `main`. macOS is covered by local
@@ -71,6 +71,6 @@ Static binaries `a2p2_<os>_<arch>` for linux and darwin on amd64 and
 arm64, and `a2p2_windows_<arch>.exe` for windows on amd64 and arm64 (from
 0.2.0), built by GitHub Actions from the tag with no build cache, CGO off
 and `-trimpath`, and `SHA256SUMS`. They are not signed yet. Before a
-release that changes Windows code, run the ci workflow by hand once and
-read its Windows job.
+release that changes Windows code, run the ci workflow by hand once with
+`what` set to `windows` and read its log.
 `go install github.com/wallter/a2p2/cmd/a2p2@vX.Y.Z` builds the same source.

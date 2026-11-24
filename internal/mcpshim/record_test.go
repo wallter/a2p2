@@ -50,7 +50,17 @@ func record(t *testing.T, real string) (*localapi.Client, *recorder) {
 			rec.notes = append(rec.notes, string(body))
 		}
 		rec.mu.Unlock()
-		res, err := up.Post("http://a2p2"+r.URL.Path, r.Header.Get("Content-Type"), bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, "http://a2p2"+r.URL.Path, bytes.NewReader(body))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		req.Header.Set("Content-Type", r.Header.Get("Content-Type"))
+		// The local key (Windows): passed on as the shim sent it.
+		if k := r.Header.Get(localapi.KeyHeader); k != "" {
+			req.Header.Set(localapi.KeyHeader, k)
+		}
+		res, err := up.Do(req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -62,7 +72,13 @@ func record(t *testing.T, real string) (*localapi.Client, *recorder) {
 	})}
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
-	return localapi.NewClient(sock), rec
+	// The real daemon's key, where it wrote one (Windows), read at each
+	// call as daemon.Client does.
+	key := func() string {
+		k, _ := os.ReadFile(filepath.Join(filepath.Dir(real), "local.key"))
+		return strings.TrimSpace(string(k))
+	}
+	return localapi.NewClient(sock).WithKey(key), rec
 }
 
 // P3: driving every tool, with good and bad arguments, makes only the

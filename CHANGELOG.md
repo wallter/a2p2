@@ -27,14 +27,19 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   NAT-PMP, then UPnP), only when a person decides it at a terminal. It is
   renewed while on, removed on `net off`, when the listener stops and on a
   clean stop, and what a crash left is removed at the next start; `status`
-  and `net check` show it and any removal that failed. The router's
-  address is advertised only while a member reaches it; what members say
-  they see is shown, never advertised. Not available on Windows.
+  and `net check` show it and any removal that failed. What a removal
+  needs is written durably before each request; a record that cannot be
+  used is kept, nothing is sent, and `status` says what to remove by
+  hand. A UPnP forward is deleted only if the router says it is this
+  machine's. The router's address is advertised only while a member
+  reaches it and its lease lasts; what members say they see is shown,
+  never advertised. A member asked to connect back dials only the address
+  the request came from, on at most two ports. Not available on Windows.
 - **Windows support, built but not yet run there.** The daemon and the CLI
   no longer refuse to start on Windows 10 (1803 or later) and 11. The
   home is created for your user only and refused if others can open it,
   and every local API call carries a key the daemon writes into the home
-  at each start (D-windows). Releases include `a2p2_windows_amd64.exe`
+  at each start (D47). Releases include `a2p2_windows_amd64.exe`
   and `a2p2_windows_arm64.exe`. On Windows, `a2p2 install` refuses a
   binary path with spaces for the harnesses whose hooks run it in a
   shell, and refuses `agy`. Nothing changes on macOS or Linux.

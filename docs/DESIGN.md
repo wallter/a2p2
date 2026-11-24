@@ -30,7 +30,7 @@ stateless MCP shim, CLI and socket offer the same operations (A1).
 Peer text is data (T8). The system provides hooks, a loopback UI and the
 `local` room. Logs omit message bodies.
 
-On Windows (D-windows) the boundary is the same rule by other means. The
+On Windows (D47) the boundary is the same rule by other means. The
 home is created with an access control list that lets only the user in,
 and an existing home that lets anyone else in, or that someone else owns,
 is refused. The socket file inherits that list. At each start the daemon
@@ -494,6 +494,10 @@ designed (1,920 streams per 64-machine room after 30 days,
 all shared rooms may be needed at 100 rooms; posting policy (T6) is
 deferred to stage 3 and needs a new entry kind [M14].
 
+Whoever can edit the home is the user: editing the recorded networking
+decision or `portmap.json` by hand can widen the listener or point a
+cleanup at a forward, and no check here is meant to stop that.
+
 ## 11. Reachability
 
 **Can this machine talk to others, and why not (`a2p2 net check`).** A
@@ -512,15 +516,20 @@ exists, from the CLI process under a throwaway key (PROTOCOL 4.7).
 reachable. A member asks a member to connect back to the addresses it
 advertises and hears which of them completed a handshake with its own key
 (PROTOCOL 4.7). The responder dials only for a current member of a shared
-room, only expecting that member's key, and only that member's own source
-address or an address it already advertised (one the responder would dial
-while pulling anyway); any other address it answers as not tried. It
-sends no request after the handshake, answers no sooner than its deadline
-unless every address dialled was reached, and limits requests per key and
-for the whole machine, so it adds no way to aim traffic at a third party. The daemon asks
-after each run starts (so after each networking decision) and then
-hourly; `status` and the page show "reachable by peers: yes, no or
-unknown" with when it was checked. The rules are in `node.DialBackServer`
+room, only expecting that member's key, and only the IP address the
+request came from, on at most two ports (the listening port and a mapped
+external port); any other address it answers as not tried. So an IPv6
+address is checked by asking over IPv6, and the daemon asks about each
+address family it advertises only members it reaches over that family;
+`net check` says "not checked: no member reachable over IPv6" when there
+is none. It sends no request after the handshake, answers no sooner than
+its deadline unless every address dialled was reached, and limits
+requests per key and for the whole machine, so it adds no way to aim
+traffic at a third party; the one limit left is that a member behind a
+shared address can cause two connection attempts to that address per
+request. The daemon asks after each run starts (so after each networking
+decision) and then hourly; `status` and the page show "reachable by
+peers: yes, no or unknown" with when it was checked. The rules are in `node.DialBackServer`
 and `node.Reacher`; the dialling is `peer.Prober`.
 
 **More machines reachable without a third party.** N1 lets a machine that
@@ -539,9 +548,11 @@ widen who can be reached, none of them a service run by anyone else.
   is one dual-stack socket, and `a2p2 net on` says so and names the IPv6
   addresses it will advertise. A decision recorded before keeps the scope
   it was taken with: an IPv4 listener and no IPv6 address, until the
-  person runs `a2p2 net on` again; `status` and `net check` say so. A
-  person who wants IPv4 only gives `listen` one IPv4 address of the
-  machine. The machine advertises its IPv4 addresses (not loopback, not
+  person runs `a2p2 net on` again; `status` and `net check` say so. An
+  `advertise` entry the listener cannot serve under that scope (an IPv6
+  address under an IPv4-only decision) is not advertised, and `net check`
+  says why. A person who wants IPv4 only gives `listen` one IPv4 address
+  of the machine. The machine advertises its IPv4 addresses (not loopback, not
   link-local) and its global IPv6 addresses, never link-local ones, and a
   temporary (privacy) address only if the interface has no stable one.
   Unique-local addresses (`fc00::/7`) are advertised after the others, and
@@ -580,16 +591,21 @@ widen who can be reached, none of them a service run by anyone else.
   lowest metric; the macOS routing table, the unscoped default route);
   with several uplinks only that route's router is asked, so a mapping on
   another uplink's router is never made. On Windows mapping reports itself
-  unavailable. A mapping is made only for a listener bound to the
-  wildcard address or to this machine's address on that route's network,
+  unavailable. This machine's address on that network is the source
+  address the system selects for the gateway (a route lookup that sends
+  nothing), not the first address in the gateway's subnet. A mapping is
+  made only for a listener bound to the wildcard address or to that
+  address,
   so the router never forwards to another service that holds the port on
   another address, and it ends with that listener, however the listener
   ends. Answers are checked before they count: the UDP source must be the
   gateway's port, a PCP answer must carry the request's nonce, a grant
   must have a lifetime, an external port and an address, an SSDP answer
-  must be a 200 for a gateway device, and a SOAP answer must be a complete
-  response; a UPnP description or control URL is followed only if its host
-  is the gateway. NAT-PMP and SSDP carry no authentication, so a machine on
+  must be a 200 for a gateway device, a SOAP answer must be a complete
+  response, and a SOAP fault counts as a refusal (one that moves to the
+  next port, asks for a permanent lease or counts a removal as done) only
+  if it is a complete fault with a UPnP error code; a UPnP description or
+  control URL is followed only if its host is the gateway. NAT-PMP and SSDP carry no authentication, so a machine on
   the same network that spoofs the gateway's address can still answer
   first; what it can obtain is a wrong mapping shown in `status`, not a
   connection to anything but this machine's listener. The mapping asks for
@@ -597,7 +613,11 @@ widen who can be reached, none of them a service run by anyone else.
   permanent UPnP lease is asked for only when the router refuses finite
   ones. The external address the router reports is the only candidate for
   advertising: it is advertised after a member reaches it, while a member
-  has reached it within three hours and while the mapping exists. If it is
+  has reached it within three hours, while the mapping exists and while
+  its lease has not run out, whether or not a renewal is being tried. A
+  new mapping, or one that comes back, starts unconfirmed; one failed check
+  does not withdraw a confirmed address, two in a row do. A mapping that
+  keeps changing asks members to check at most every five minutes. If it is
   not the address members see, the router is behind another NAT
   (carrier-grade NAT or a second router), and `net check` says the
   mapping cannot help. Mapping is a decision like turning networking on:
@@ -607,8 +627,11 @@ widen who can be reached, none of them a service run by anyone else.
   or hook can ask for it. `status` and `net check` show the protocol, the
   external address, whether a member reached it, and when it expires.
 - **Mappings are always cleaned up, or said not to be.** Before each
-  request that could create a mapping, what would remove it is written to
-  `portmap.json` in the home, and it stays there while it may exist:
+  request that could create a mapping, everything that removing it needs
+  (the external port among it, even before the router names an external
+  address) is written to `portmap.json` in the home, durably (a new private
+  file, synced, renamed, the directory synced), and it stays there while
+  it may exist:
   after a failed renewal, after a NAT-PMP or UPnP grant whose external
   address could then not be read, after an answer that cannot be used. It
   is removed when the listener stops, on `net off`, on a decision without
@@ -619,11 +642,164 @@ widen who can be reached, none of them a service run by anyone else.
   ends (at most two hours), and a permanent UPnP rule, if the router
   granted only that, until a2p2 next starts on that network and removes it,
   or until a person deletes the rule described `a2p2` on the router's own
-  page. After a move to another network a recorded mapping cannot be
-  removed from there; it is shown until a person removes it on that router
-  and deletes `portmap.json`.
+  page. The record is used whole or not at all: a field out of range or
+  unknown, a mapping on another router than this network's (after a move),
+  or a file that does not parse, and nothing is sent to any router, the
+  file is kept, and `status` says the record cannot be used and what to
+  remove by hand. A deletion reaches only this machine's own mapping: PCP
+  by the nonce kept from the request, NAT-PMP by the sending host's
+  internal port, and a UPnP forward only after the router says it points
+  at this machine's address and port with the description `a2p2`; one that
+  does not is left alone.
 
 Interfaces and gateways are read through `internal/daemon` (build-tagged
 per system); the mapping protocols are `internal/daemon/portmap` and every
 test of them runs against fake PCP, NAT-PMP and UPnP responders on
 loopback. No test or check sends anything to a real router.
+
+## 12. Attachments (0.2 draft)
+
+Not built: the design for L1, for review before any code. **[F1]** to
+**[F12]** are rules of the
+[delivery model](../internal/model/delivery/FINDINGS.md#attachments-02-draft)
+(`attach.go`); formats are in
+[Protocol section 10](PROTOCOL.md#10-attachments-02-draft).
+
+1. **The header says only that there are files.** A `message` or `replace`
+   with files has one optional top-level header field, `files`: the
+   SHA-256 of its manifest. Nothing else, not even a count. The manifest
+   (a random salt, then name, size, SHA-256 and media type of each file)
+   is content, like the text. Why: a machine admitted without history
+   holds earlier headers, and headers outlive a withdrawal, so names,
+   sizes and hashes in a header would reach machines that may not read
+   the text. The salt keeps the hash from confirming a guessed file list.
+   0.1.0 stores a record with an unknown top-level field, keeps it in the
+   id, relays the exact bytes and shows the text without files (run
+   against the 0.1.0 code). A malformed `files` is stored as 0.1.0 stores
+   it and ignored when read, so machines never disagree about the room
+   (D27).
+2. **The manifest travels like a file, at once [F4, F12].** A machine that
+   may read the text fetches the manifest (at most 16 KiB) after the pull
+   that brought the header: it is U4's cheap first step. Until it arrives a
+   reader sees "has files; list not here yet". After 8 failed answers,
+   with backoff, it is `unavailable` until a person or agent asks again. A
+   manifest that matches its hash but breaks a rule is `invalid` for good,
+   since no holder can have other bytes, and nothing it lists is fetched.
+   File bytes move only when an agent that was shown the version listing
+   them asks, or the machine carries or keeps them (item 5).
+3. **Content lives while the text may [F1, F8].** A machine keeps the
+   manifest and the files for a message while the message's winning
+   version (by header) commits to them and its text is one the machine may
+   keep: not withdrawn, not past 30 days by its own clock, within its
+   permission. Storing a withdraw, a replacement that does not list a
+   file, passing the 30 days, learning a narrower grant or a voided
+   admission deletes the bytes, partial downloads and agents' copies, which
+   are scoped to the message they were authorised for (D43). A
+   replacement shares its files with whoever may read it, exactly as it
+   shares its text, so nothing is carried forward silently: a replacement
+   lists only files its writer lists again, and a person confirms them.
+   Keeping a file means naming verified bytes held for the version being
+   replaced; approval checks again that this version still wins, is still
+   readable here and still lists the file, or the request fails and its
+   staging goes. While a replacement's manifest is on its way, what the
+   machine holds for the message stays, unserved, and never longer than an
+   earlier version that lists it may be kept.
+4. **Served under the text's permission [F2].** Bytes, manifests included,
+   go only to a peer the sender sees as a member now that may read the
+   winning version's text in the sender's view, and only bytes the sender
+   holds for that message (it wrote it, or received them for it). Every
+   refusal is the same 404 with the same body, decided from rows before
+   any disk access. Each chunk is checked again, and an active transfer
+   stops when the sender learns of a revocation. Why the second
+   condition: a member that learned a hash elsewhere could list it in a
+   message of its own (`TestANewReferenceToAKnownHashDoesNotWidenWhoIsServed`).
+5. **Uploads from the author, and carry on request [F9].** A machine puts a
+   message's files in `want` only in its answer to a pull from that
+   message's author, and only when it cannot dial the author. The author
+   knows its own files, so a want discloses nothing, and nobody promises
+   bytes it does not hold. A want is bound to the message, the winning
+   version and the hash, reserves its size, and lapses after a day or
+   three answers without the bytes; the receiver takes an upload only
+   from the author against a want it issued, and checks before reading
+   the body. In a room where laptops only dial out and one member
+   listens, that member is the path: asked by a permitted peer for a file
+   it may keep but lacks, it answers "not yet", starts one carry job (a
+   want to the author), and holds the file within its budget while the
+   text lives. A lapsed job is answered "gave up" for a day, and the
+   reader is told `unavailable`. A per-room setting has three values:
+   `off`, `carry` (default, since every member already carries the room's
+   text for others) and `keep` (want every file).
+6. **Nothing unverified is exposed [F3].** The declared total must equal
+   the manifest's size (at most 16 KiB for a manifest) before a byte is
+   taken; a partial download is hidden; the whole must match the SHA-256,
+   or it is discarded and the peer counted (`bad_file`). Permission and
+   "shown this version" are checked again before a copy is written for an
+   agent.
+7. **a2p2 never opens a file.** It writes the verified copy, mode 0600,
+   under `$A2P2_HOME/files/<room id>/` with a sanitised name and never over
+   an existing file. It does not decompress, preview, render or run it.
+   Tool results say a file is data from another machine.
+8. **A person confirms the exact bytes [F6, F11].** `send` with `files`
+   opens each path once, refuses anything but a regular file after
+   opening, and copies and hashes from that one handle into staging. The
+   request shows each path as resolved from the opened file, in full,
+   with control and bidirectional characters escaped, its size and
+   SHA-256, the room, the recipients, and for a replacement which message
+   it replaces. Approval re-checks the staged digests and sends them;
+   the source is never read again. Declined, expired after 24 hours,
+   failed, or after this machine's own admission is voided, nothing is
+   written and staging is deleted.
+9. **Bounds and cleanup [F7, F10].** At most 8 files per record, 256 MiB
+   per file, 1 GiB of held, partial, staged and copied bytes per room and 4
+   GiB per machine. A reference over a limit is refused before anything is
+   scheduled; the budget is reserved at the declared size before the first
+   byte. One transfer per peer per direction and 8 in all, with a total
+   time limit and a minimum rate, under limits separate from pulls. Bytes
+   and their directory are synced before the row that makes them live; a
+   send's record and its file rows commit in one transaction after its
+   bytes are safe, so a send is never published without them. Temporary
+   files have a recognisable name. Deletions are by rows, queued in the
+   transaction that decides them, and never remove a path a live row
+   names; a start completes the queue and removes files no row names.
+
+**Who can reach whom.** Text and files take the same connections; what
+files add is item 5.
+
+| Author | Reader | How the file arrives |
+|---|---|---|
+| listens | listens or dials out | the reader fetches from the author |
+| dials out | listens | the answer to the author's pull carries the reader's `want`; the author uploads (`TestAReaderThatListensGetsAFileFromAnOutboundOnlyAuthorByUpload`) |
+| dials out | dials out, one member listens | the listener wants the manifest and then, asked by the reader, the file, from the author's next pull; the reader fetches from it (`TestInARoomWithOneListenerAFileFromAnOutboundOnlyAuthorReachesAnOutboundOnlyReader`) |
+| dials out | dials out, no listener | no path, as for the text |
+| asleep or gone | any | any member that fetched, carried or keeps it and can be dialled; otherwise `coming` until a want lapses, `unavailable` from every member asked (`TestAFileWhoseOnlyHolderIsGoneIsUnavailableAndTheReaderIsToldSo`) |
+| any | asleep | asks when it wakes |
+| networking off | any, or any and networking off | nothing moves to or from that machine |
+
+The listener does not help when it is set `off`, when the file is over its
+budget, or when it may not read the text; the reader is then told
+`unavailable` (`TestWithCarryOffTheListenerAnswersNotHeldAndTheFileStaysUnavailable`,
+`TestAListenerOverItsBudgetDoesNotCarryAFile`,
+`TestAListenerThatMayNotReadTheTextNeitherCarriesNorReceivesTheFile`). A
+copy held only by a machine nobody can dial, other than the author, is
+not reachable (`TestAWantGoesOnlyToTheMessagesAuthorNeverToAnotherHolder`);
+under `carry` the listener asked first already holds it. A reader is told
+`here`, `partial`, `coming`, `not asked`, `fetchable`, `unavailable` (who
+said no or gave up, when), `list pending`, `list unavailable`, `list
+invalid` or `gone` and why.
+
+**Mixed versions.** A 0.1.0 writer's replacement has no `files`, so it
+drops the files, as a 0.2 replacement without files does. 0.1.0 shows the
+highest version whose text it holds, while files follow the winning
+header; when a newer header arrives without readable text the two can
+differ, and the reader is told the files are gone (`why: live`). A first
+record of a stream may have a header of 8,192 bytes; `files` adds 75.
+
+**Limits, said plainly.** The confirmation is a guard rail (P3): an agent
+running as the same user can call `confirm` itself, or read a file and
+paste it as text. Withdrawing after others fetched removes the copies a2p2
+keeps; a copy an agent moved is out of reach. A removed machine keeps what
+it fetched (T5). F2 binds honest machines: a member holding bytes can hand
+them to anyone. A member that may read a message can tell from the answers
+("not yet", "gave up") whether a listener carries or keeps; machines that
+may not read it cannot. Attacks on the program that later opens a file are out of
+scope, since a2p2 opens nothing.

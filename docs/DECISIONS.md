@@ -1065,6 +1065,35 @@ dispatch-only CI job runs `go build`, `go vet` and `go test` on
 `windows-latest`; until it has passed, the README says a2p2 builds for
 Windows and has not yet run there.
 
+After the first dispatched run (2026-11-24; 5 of 12 packages failed):
+
+- **SIDs are compared resolved.** Every home was refused as "owned by
+  another user (LA)". The runner's account is the machine's built-in
+  Administrator (RID 500), and SDDL writes that account as the constant
+  `LA` while the token gives `S-1-5-21-...-500`: the same account, compared
+  as text. The check now resolves each owner and trustee with
+  `ConvertStringSidToSid` before comparing. The rule is unchanged: the
+  owner must be the token's user or the token's default owner
+  (`TokenOwner`, which for an elevated administrator can be the
+  Administrators group), and the list may allow in only the user, SYSTEM
+  and Administrators. A home a2p2 creates names the user as owner and
+  sole entry. This lets no one else in: another standard user is still
+  refused if any entry allows them, and an owner of Administrators admits
+  only those who could take the directory anyway.
+- **Line endings.** Git for Windows checked the golden vectors out with
+  CRLF, so every vector differed. `.gitattributes` now checks every text
+  file out with LF on every system; the test is unchanged.
+- **Tests, not the product:** one harness test compared a directory in
+  Unix spelling (`/work/proj`; the daemon keeps `\work\proj`), and two
+  `internal/node` tests left a database open, which Windows cannot remove
+  at the end of a test. The deep differential schedules of `internal/node`
+  took 19 minutes on the runner and are left out of the Windows job; they
+  test the delivery rules, not the system. The record-test lines in that
+  log were `-v` logging, not failures.
+- **The workflow** takes a `what` input (`linux`, the default, `windows`
+  or `all`) so a run by hand spends only the minutes asked for; pull
+  requests still run only the Linux job.
+
 **Revisit if** the dispatched run shows that the socket file does not
 inherit the home's list, or if a harness documents its Windows hook
 shell, which would let paths with spaces be quoted for it.
@@ -1093,13 +1122,17 @@ third member is reachable or someone forwards a port by hand.
   nothing (the report above). Old machines answer 404, which the asker
   reports; the wire version stays 2.
 - **Why it is safe to answer.** The asker is authenticated by TLS and must
-  be a current member of a shared room. The responder dials only the
-  asker's own source IP address (any port) or an address its book already
-  holds for the asker's key, which it would dial while pulling anyway;
-  anything else is answered `not_tried`. So a member can cause a TCP
-  connect and a TLS ClientHello only to itself or to an address it
-  already advertised; the dial-back adds no way to aim traffic at a third
-  party. It closes after the handshake, skips special and (for a remote
+  be a current member of a shared room. The responder dials only the IP
+  address the request came from, on at most two ports; anything else is
+  answered `not_tried`. So a member can cause at most two TCP connects and
+  TLS ClientHellos, and only to the address it asks from; the dial-back
+  adds no way to aim traffic at a third party. An earlier allowance, also
+  dialling addresses the responder's book held for the asker, was
+  removed after the second review: a member could have listed a third
+  party's endpoint as its own and had it probed at once, outside the
+  scheduler's dial budget. The limit left: a member behind a shared
+  address can cause two connection attempts to that address. To check an
+  IPv6 address the asker asks over IPv6. It closes after the handshake, skips special and (for a remote
   asker) loopback addresses, never resolves names, and answers at a fixed
   deadline unless everything dialled was reached. Rate limits per key (4,
   then one per 10 minutes) and per machine (16, then one per 10 seconds,
@@ -1134,18 +1167,31 @@ third member is reachable or someone forwards a port by hand.
   wildcard address or on this machine's address on the gateway's network,
   and ended with that listener. The router's mapped address is the only
   address ever verified for advertising: advertised after a member
-  reaches it, while one has within three hours and while the mapping
-  exists.
+  reaches it, while one has within three hours, while the mapping exists
+  and while its lease has not run out; a new mapping starts unconfirmed,
+  two failed checks in a row withdraw it, and checks a changing mapping
+  asks for are paced at one per five minutes.
 - **A new file in the home, `portmap.json`**, not a table: what would
   remove each mapping that may exist, written before each request, so
   that `net off`, a stop, or the next start after a crash removes it.
   It is not a database table because it must be written before a UDP or
   HTTP request that is not part of any store transaction, and read by a
-  run that may have networking off. A removal that fails is shown and
-  retried. A crash leaves a finite mapping until its lease ends (at most 2
+  run that may have networking off. It holds every field a deletion
+  needs, the external port separately from the external address (a
+  mapping noted before the router answered has no address, and the second
+  review found such a record would have deleted port 0). It is written to
+  an exclusive private temporary file, synced, renamed and the directory
+  synced, and read strictly: a record that cannot be used whole, or one
+  for another router, makes the daemon send nothing and keep the file,
+  and `status` says what to remove by hand. A UPnP forward is deleted only
+  after the router says it is this machine's and a2p2's. A removal that
+  fails is shown and retried. A crash leaves a finite mapping until its lease ends (at most 2
   hours), and a permanent UPnP rule, granted only when the router refuses
   finite ones, until the next start on that network or a person removes
   it on the router.
+- **Declined from the second review:** guarding against hand edits of the
+  recorded networking decision. Whoever can edit the home is the user
+  (DESIGN 10).
 - **Declined from the review:** an empty address list withdrawing a
   machine's earlier addresses. A listener that briefly advertised nothing
   would be forgotten by every member that can reach it only at a stored

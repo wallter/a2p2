@@ -116,25 +116,42 @@ func newToken() (string, error) {
 }
 
 // advertised works out which addresses other nodes should dial; IPv4
-// only for a decision recorded before IPv6 (DESIGN 11).
-func advertised(cfg Config, ln net.Listener, ipv4Only bool) []string {
+// only for a decision recorded before IPv6 (DESIGN 11). An "advertise"
+// entry the listener cannot serve (an IPv6 address under an IPv4-only
+// decision or listener, an IPv4 one on an IPv6 listener) is left out and
+// returned in dropped, with why.
+func advertised(cfg Config, ln net.Listener, ipv4Only bool) (addrs, dropped []string) {
 	if ln == nil {
-		return nil
-	}
-	if len(cfg.Advertise) > 0 {
-		return cfg.Advertise
+		return nil, nil
 	}
 	tcp := ln.Addr().(*net.TCPAddr)
+	if len(cfg.Advertise) > 0 {
+		ip, _ := netip.AddrFromSlice(tcp.IP)
+		ip = ip.Unmap()
+		v4, v6 := !ip.IsUnspecified() && ip.Is4() || ipv4Only, !ip.IsUnspecified() && ip.Is6()
+		for _, a := range cfg.Advertise {
+			ap, err := netip.ParseAddrPort(a)
+			switch {
+			case err == nil && v4 && ap.Addr().Unmap().Is6() && !ap.Addr().Is4In6():
+				dropped = append(dropped, a+" (an IPv6 address; the listener takes IPv4 only)")
+			case err == nil && v6 && ap.Addr().Unmap().Is4():
+				dropped = append(dropped, a+" (an IPv4 address; the listener takes IPv6 only)")
+			default:
+				addrs = append(addrs, a)
+			}
+		}
+		return addrs, dropped
+	}
 	port := fmt.Sprint(tcp.Port)
 	if tcp.IP.IsLoopback() {
-		return []string{net.JoinHostPort(tcp.IP.String(), port)}
+		return []string{net.JoinHostPort(tcp.IP.String(), port)}, nil
 	}
 	if !tcp.IP.IsUnspecified() {
-		return []string{net.JoinHostPort(tcp.IP.String(), port)}
+		return []string{net.JoinHostPort(tcp.IP.String(), port)}, nil
 	}
 	// Unspecified: one dual-stack socket; IPv4 and global IPv6 addresses
 	// (DESIGN 11).
-	return advertisable(localAddrs(), tcp.Port, ipv4Only)
+	return advertisable(localAddrs(), tcp.Port, ipv4Only), nil
 }
 
 // advert is what this run advertises: the router's mapped address while
@@ -412,7 +429,10 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 			peerLn.Close()
 		}
 	}()
-	addrs := advertised(r.cfg, peerLn, netw.IPv4Only)
+	addrs, dropped := advertised(r.cfg, peerLn, netw.IPv4Only)
+	if len(dropped) > 0 {
+		slog.Warn("not advertised", "addrs", strings.Join(dropped, "; "))
+	}
 	if len(addrs) > node.MaxAddrs {
 		addrs = addrs[:node.MaxAddrs]
 	}
@@ -456,6 +476,7 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	surf, err := node.OpenSurface(parent, m, rooms, node.SurfaceOpts{Name: r.cfg.Name, Joiner: joiner, Book: book,
 		Addrs: adv.now, Network: netw, NetworkFault: r.getFault, NotMember: x.NotMemberSince,
 		Probe: prober, Reach: reach, Mapping: func() *node.PortMapping { return mappingView(keeper, mapErr) },
+		NotAdvertised: dropped,
 		OnNetwork: func(node.Network) {
 			select {
 			case r.restart <- struct{}{}:
@@ -490,7 +511,7 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	}()
 	keeping := false
 	if peerLn != nil {
-		h := peerHandler{JoinServer: node.NewJoinServer(rooms), x: x, g: g, db: node.NewDialBackServer(rooms, prober, book)}
+		h := peerHandler{JoinServer: node.NewJoinServer(rooms), x: x, g: g, db: node.NewDialBackServer(rooms, prober)}
 		ln := peerLn
 		peerLn = nil // Serve owns it now
 		lnCtx, lnStop := context.WithCancel(ctx)
@@ -545,8 +566,13 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 // gateway's network: never for one that would forward to another service.
 // changed is called when the mapped address changes.
 func (r *run) keeper(netw node.Network, ln net.Listener, changed func()) (*portmap.Keeper, string) {
-	rec := &mapRecord{path: filepath.Join(r.home, "portmap.json")}
-	left, _ := rec.Load()
+	// A record that cannot be used whole stops everything: nothing is sent
+	// to the router, the file stays, and status says what to remove by hand.
+	path := filepath.Join(r.home, "portmap.json")
+	left, err := (&portmap.File{Path: path}).Load()
+	if err != nil {
+		return nil, portmap.UnusableText(err)
+	}
 	want := netw.MapPort && ln != nil
 	if !want && len(left) == 0 {
 		return nil, ""
@@ -558,6 +584,10 @@ func (r *run) keeper(netw node.Network, ln net.Listener, changed func()) (*portm
 	gw, local, err := gwf()
 	if err != nil {
 		return nil, err.Error()
+	}
+	rec := &portmap.File{Path: path, Gateway: gw}
+	if _, err := rec.Load(); err != nil {
+		return nil, portmap.UnusableText(err)
 	}
 	var m portmap.Mapper = &portmap.Client{Gateway: gw, Local: local}
 	if r.o.Mapper != nil {
@@ -602,48 +632,18 @@ func (r *run) keeper(netw node.Network, ln net.Listener, changed func()) (*portm
 	return k, why
 }
 
-// mapRecord is home/portmap.json: every mapping this machine may have on
-// a router, written before each request so that a later run removes what
-// a crash left.
-type mapRecord struct{ path string }
-
-func (m *mapRecord) Load() ([]portmap.Mapping, error) {
-	b, err := os.ReadFile(m.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var out []portmap.Mapping
-	return out, json.Unmarshal(b, &out)
-}
-
-func (m *mapRecord) Save(held []portmap.Mapping) error {
-	if len(held) == 0 {
-		if err := os.Remove(m.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return nil
-	}
-	b, err := json.Marshal(held)
-	if err != nil {
-		return err
-	}
-	tmp := m.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, m.path)
-}
-
 // mappedAddr is the mapped external address, to verify by a dial-back
-// before it is advertised.
+// before it is advertised: none once the lease has run out, whether or
+// not a renewal is still being tried.
 func mappedAddr(k *portmap.Keeper) []string {
+	return mappedAt(k, time.Now())
+}
+
+func mappedAt(k *portmap.Keeper, now time.Time) []string {
 	if k == nil {
 		return nil
 	}
-	if m := k.State().Mapping; m != nil && m.External.Addr().IsValid() && m.External.Port() != 0 {
+	if m := k.State().Mapping; m != nil && m.External.Addr().IsValid() && m.External.Port() != 0 && m.Live(now) {
 		return []string{m.External.String()}
 	}
 	return nil

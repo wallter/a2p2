@@ -57,7 +57,7 @@ func TestWhatAMemberSaysItSawIsShownAndNeverAdvertised(t *testing.T) {
 // A mapped address is advertised only while a member has reached it
 // within VerifiedFor, while it is still the mapping, and until members
 // try it and fail.
-func TestAMappedAddressIsAdvertisedOnlyWhileRecentlyReachedAndStillMapped(t *testing.T) {
+func TestAMappedAddressIsAdvertisedOnlyWhileRecentlyReachedAndStillMappedAndOneMissDoesNotWithdrawIt(t *testing.T) {
 	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
 	mapped := []string{"198.51.100.7:40001"}
 	var mu sync.Mutex
@@ -85,16 +85,25 @@ func TestAMappedAddressIsAdvertisedOnlyWhileRecentlyReachedAndStillMapped(t *tes
 	if len(r.Verified()) != 0 {
 		t.Fatalf("advertised without a mapping: %v", r.Verified())
 	}
-	// Mapped again, and members try it and fail: withdrawn.
+	// Mapped again: it starts unconfirmed, whatever was known before.
 	mu.Lock()
 	mapped = []string{"198.51.100.7:40001"}
 	mu.Unlock()
+	if len(r.Verified()) != 0 {
+		t.Fatalf("a mapping that came back was advertised before a check: %v", r.Verified())
+	}
+	r.Check(context.Background(), []string{"p"}, true)
+	// Members try it and fail: withdrawn after reachMisses checks, not one.
 	l.mu.Lock()
 	l.open = map[string]bool{}
 	l.mu.Unlock()
 	r.Check(context.Background(), []string{"p"}, true)
+	if !slices.Equal(r.Verified(), mapped) {
+		t.Fatalf("one failed check withdrew an address confirmed within the window: %v", r.Verified())
+	}
+	r.Check(context.Background(), []string{"p"}, true)
 	if len(r.Verified()) != 0 {
-		t.Fatalf("advertised after members failed to reach it: %v", r.Verified())
+		t.Fatalf("advertised after %d checks in a row failed to reach it: %v", reachMisses, r.Verified())
 	}
 }
 
@@ -194,5 +203,41 @@ func TestNetCheckGivesTheAdvertiseLineForAPortForwardedByHand(t *testing.T) {
 	nc.Reach.Saw = []string{"100.64.3.2"} // carrier-grade NAT: forwarding cannot help
 	if got := forwardLine(nc); got != "" {
 		t.Fatalf("forward behind CGNAT %q", got)
+	}
+}
+
+// A mapping that changes again and again does not make this machine ask
+// members again and again: nudges are taken at most every
+// reachNudgeEvery, and one that comes too soon is checked when the pace
+// allows.
+func TestNudgesToCheckThePortMappingArePaced(t *testing.T) {
+	defer func(f, n time.Duration) { reachFirst, reachNudgeEvery = f, n }(reachFirst, reachNudgeEvery)
+	reachFirst, reachNudgeEvery = time.Hour, 300*time.Millisecond
+	f := &fakeDialBack{}
+	r := NewReacher(f, ReachOpts{Members: func() []string { return []string{"p"} },
+		Addrs: func() []string { return []string{"192.168.1.5:7423"} }})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	asks := func() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.asked) }
+	r.Nudge()
+	deadline := time.Now().Add(5 * time.Second)
+	for asks() < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	for range 5 {
+		r.Nudge()
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := asks(); n != 1 {
+		t.Fatalf("%d checks within the pace, want 1", n)
+	}
+	for asks() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := asks(); n != 2 {
+		t.Fatalf("%d checks after the pace, want the one held back", n)
 	}
 }

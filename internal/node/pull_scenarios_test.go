@@ -264,6 +264,9 @@ func TestANewcomerWithoutHistoryIsNeverGivenEarlierTextIncludingThroughAnOffer(t
 			t.Fatalf("N holds earlier text: %+v", got)
 		}
 	}
+	// A write makes a new harness; close the last one, whose databases
+	// Windows cannot remove while they are open.
+	t.Cleanup(func() { h.close() })
 	h = h.apply(op{kind: opSend, machine: "P", agent: "pat"})
 	h.px.net.pageText, h.px.net.offerText = nil, nil
 	h = h.apply(pullOp("P", "N", pullOffer))

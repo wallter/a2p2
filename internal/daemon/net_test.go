@@ -239,7 +239,7 @@ func TestAMappingLeftByACrashIsRemovedAtTheNextStartAndAFailureIsShown(t *testin
 	m.useRouter(r, "")
 	left := r.mapping(7423)
 	r.held[left.Key()] = true // on the router since the crash
-	rec := &mapRecord{path: filepath.Join(m.home, "portmap.json")}
+	rec := &portmap.File{Path: filepath.Join(m.home, "portmap.json")}
 	if err := rec.Save([]portmap.Mapping{left}); err != nil {
 		t.Fatal(err)
 	}
@@ -261,6 +261,83 @@ func TestAMappingLeftByACrashIsRemovedAtTheNextStartAndAFailureIsShown(t *testin
 	}
 	if got, _ := rec.Load(); len(got) != 0 {
 		t.Fatalf("record after removal %v", got)
+	}
+}
+
+// A record that cannot be used whole (here: one entry for another router,
+// then one that does not parse) makes the daemon send nothing to the
+// router, keep the file, and say in status what to remove by hand.
+func TestARecordThatCannotBeUsedIsKeptAndNothingIsSent(t *testing.T) {
+	m := newMachineWith(t, "a", nil)
+	r := newFakeRouter()
+	m.useRouter(r, "")
+	path := filepath.Join(m.home, "portmap.json")
+	other := r.mapping(7423)
+	other.Gateway = netip.MustParseAddr("192.0.2.1") // another network's router
+	if err := (&portmap.File{Path: path}).Save([]portmap.Mapping{r.mapping(7423), other}); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{"", `[{"protocol":"pcp","gateway":"127.0.0.1","internal_port":70000}]`} {
+		if body != "" {
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		before, _ := os.ReadFile(path)
+		m.stop()
+		m.start()
+		st := m.decide(localapi.NetReq{State: node.NetworkOn, Listen: m.ln.ln.Addr().String(), MapPort: true})
+		if st.Mapping == nil || !strings.Contains(st.Mapping.Error, "cannot be used") ||
+			!strings.Contains(st.Mapping.Error, "nothing was sent to the router") || !strings.Contains(st.Mapping.Error, path) {
+			t.Fatalf("%q: mapping %+v", body, st.Mapping)
+		}
+		time.Sleep(50 * time.Millisecond)
+		m.stop()
+		if held, unmaps := r.count(); held != 0 || unmaps != 0 {
+			t.Fatalf("%q: sent to the router: held %d, removals %d", body, held, unmaps)
+		}
+		if after, _ := os.ReadFile(path); string(after) != string(before) {
+			t.Fatalf("%q: the record changed", body)
+		}
+		m.start()
+	}
+}
+
+// An "advertise" entry the listener cannot serve under the recorded
+// decision is not advertised, and is returned with why for net check.
+func TestAConfiguredIPv6AddressIsNotAdvertisedUnderAnIPv4OnlyDecision(t *testing.T) {
+	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	cfg := Config{Advertise: []string{"192.0.2.1:7423", "[2001:db8::1]:7423", "host.example:7423"}}
+	addrs, dropped := advertised(cfg, ln, true)
+	if !slices.Equal(addrs, []string{"192.0.2.1:7423", "host.example:7423"}) || len(dropped) != 1 ||
+		!strings.Contains(dropped[0], "[2001:db8::1]:7423 (an IPv6 address; the listener takes IPv4 only)") {
+		t.Fatalf("IPv4 only: %v, dropped %v", addrs, dropped)
+	}
+	if addrs, dropped := advertised(cfg, ln, false); len(addrs) != 3 || len(dropped) != 0 {
+		t.Fatalf("both families: %v, dropped %v", addrs, dropped)
+	}
+}
+
+// The address the router forwards to is the source the system selects
+// for the gateway, not the first address in the gateway's subnet; one
+// that is not on the gateway's network is refused. The route lookup
+// itself is tried only on loopback.
+func TestTheMappedAddressIsTheSourceTheSystemSelectsForTheGateway(t *testing.T) {
+	gw := netip.MustParseAddr("192.168.1.1")
+	nets := []ifNet{{iface: "en0", prefix: netip.MustParsePrefix("192.168.1.5/24")},
+		{iface: "en0", prefix: netip.MustParsePrefix("192.168.1.9/24")}, {iface: "en1", prefix: netip.MustParsePrefix("10.0.0.2/8")}}
+	if got, err := pickLocal(gw, "en0", netip.MustParseAddr("192.168.1.9"), nets); err != nil || got.String() != "192.168.1.9" {
+		t.Fatalf("picked %s %v", got, err)
+	}
+	if _, err := pickLocal(gw, "en0", netip.MustParseAddr("10.0.0.2"), nets); err == nil {
+		t.Fatal("took a source off the gateway's network")
+	}
+	if src, err := sourceFor(netip.MustParseAddr("127.0.0.1")); err != nil || src.String() != "127.0.0.1" {
+		t.Fatalf("loopback route lookup: %s %v", src, err)
 	}
 }
 

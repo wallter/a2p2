@@ -237,6 +237,12 @@ func printNetCheck(nc node.NetCheck) {
 	if len(nc.Reach.NotTried) > 0 {
 		fmt.Println("not tried by members:", strings.Join(nc.Reach.NotTried, ", "), "("+node.NotTriedText+")")
 	}
+	for _, n := range nc.Reach.NotChecked {
+		fmt.Println(n)
+	}
+	for _, a := range nc.NotAdvertised {
+		fmt.Println("not advertised:", a)
+	}
 	if len(nc.Reach.Saw) > 0 {
 		fmt.Println("members see this machine as", strings.Join(nc.Reach.Saw, ", "), "(what they say; shown, never advertised)")
 	}

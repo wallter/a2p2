@@ -70,6 +70,9 @@ type NetCheck struct {
 	// IPv4Only: the decision was recorded before a2p2 listened on IPv6
 	// (Network.IPv4Only).
 	IPv4Only bool `json:"ipv4_only,omitempty"`
+	// NotAdvertised is the configured "advertise" entries the listener
+	// cannot serve, each with why.
+	NotAdvertised []string `json:"not_advertised,omitempty"`
 	// Mapping is the router's port mapping, when a person asked for one
 	// or one is left to remove.
 	Mapping *PortMapping `json:"mapping,omitempty"`
@@ -136,7 +139,7 @@ func (s *Surface) ReachNow() Reach {
 // reached to dial back. With networking off it dials nothing.
 func (s *Surface) NetCheck(ctx context.Context) (NetCheck, error) {
 	nc := NetCheck{State: s.net.State, Listen: s.net.Listen, Fault: s.fault(), Advertised: s.Addrs(),
-		Members: []MemberCheck{}, IPv4Only: s.net.State == NetworkOn && s.net.IPv4Only}
+		Members: []MemberCheck{}, IPv4Only: s.net.State == NetworkOn && s.net.IPv4Only, NotAdvertised: s.notAdv}
 	nc.Listening = nc.State == NetworkOn && nc.Fault == ""
 	if nc.Advertised == nil {
 		nc.Advertised = []string{}
@@ -198,6 +201,7 @@ func (s *Surface) NetCheck(ctx context.Context) (NetCheck, error) {
 	}
 	wg.Wait()
 	var reached []string
+	byFamily := map[string][]string{} // members reached over each family: asked over it
 	for i := range nc.Members {
 		m := &nc.Members[i]
 		if s.book != nil {
@@ -205,6 +209,9 @@ func (s *Surface) NetCheck(ctx context.Context) (NetCheck, error) {
 				if r, ok := results[key{m.Node, a}]; ok {
 					m.Addrs = append(m.Addrs, r)
 					m.Reached = m.Reached || r.Result == ProbeReached
+					if f := AddrFamily(a); r.Result == ProbeReached && f != "" && !slices.Contains(byFamily[f], m.Node) {
+						byFamily[f] = append(byFamily[f], m.Node)
+					}
 				}
 			}
 		}
@@ -213,7 +220,7 @@ func (s *Surface) NetCheck(ctx context.Context) (NetCheck, error) {
 		}
 	}
 	if nc.Listening && s.reach != nil && len(reached) > 0 {
-		nc.Reach = s.reach.Check(ctx, reached, true)
+		nc.Reach = s.reach.CheckFamilies(ctx, byFamily, true)
 	} else {
 		nc.Reach = s.ReachNow()
 	}

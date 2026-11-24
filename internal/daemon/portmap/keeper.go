@@ -2,6 +2,7 @@ package portmap
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"sync"
@@ -63,6 +64,7 @@ type Keeper struct {
 	st   State
 	held []Mapping         // may exist on the router; written to rec before each request
 	why  map[string]string // key: why its removal failed
+	live string            // key of the mapping granted: kept whatever a renewal of it answers
 }
 
 // NewKeeper keeps internal mapped through m, recording in rec; changed,
@@ -96,10 +98,15 @@ func (k *Keeper) leftLocked() []string {
 
 // note records h before a request (asking) or forgets it after a
 // definite answer that nothing was made. The record is written before the
-// request goes out; a failure to write stops the request.
+// request goes out; a failure to write stops the request. A renewal of the
+// mapping granted changes nothing: it exists until removed or expired,
+// whatever the renewal's answer.
 func (k *Keeper) note(h Mapping, asking bool) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if h.Key() == k.live {
+		return nil
+	}
 	i := slices.IndexFunc(k.held, func(x Mapping) bool { return x.Key() == h.Key() })
 	switch {
 	case asking && i < 0:
@@ -131,6 +138,7 @@ func (k *Keeper) granted(m Mapping) {
 	} else {
 		k.held[i] = m
 	}
+	k.live = m.Key()
 	_ = k.saveLocked()
 }
 
@@ -148,7 +156,12 @@ func (k *Keeper) remove(keep string) {
 		err := k.m.Unmap(ctx, h)
 		cancel()
 		k.mu.Lock()
-		if err == nil {
+		// A UPnP forward that is not this machine's is left alone: nothing
+		// of this machine's is there to remove.
+		if err == nil || errors.Is(err, ErrNotOurs) {
+			if h.Key() == k.live {
+				k.live = ""
+			}
 			k.held = slices.DeleteFunc(k.held, func(x Mapping) bool { return x.Key() == h.Key() })
 			delete(k.why, h.Key())
 		} else {
@@ -173,10 +186,14 @@ func (k *Keeper) publish(st State) {
 func (k *Keeper) Run(ctx context.Context) {
 	if k.rec != nil {
 		left, err := k.rec.Load()
-		k.mu.Lock()
 		if err != nil {
-			k.st.Err = "the record of earlier mappings cannot be read: " + err.Error()
+			// Nothing is sent to the router and the record is kept: the
+			// person removes the mapping by hand (UnusableText).
+			k.publish(State{Err: UnusableText(err), Tried: time.Now()})
+			<-ctx.Done()
+			return
 		}
+		k.mu.Lock()
 		k.held = left
 		k.mu.Unlock()
 	}
@@ -240,6 +257,13 @@ func (k *Keeper) Run(ctx context.Context) {
 		case <-time.After(wait):
 		}
 	}
+}
+
+// UnusableText says, for status, that a record could not be used and what
+// a person does about it.
+func UnusableText(err error) string {
+	return err.Error() + "; nothing was sent to the router. If the router forwards a TCP port described \"" +
+		description + "\" to this machine, remove that forward in the router's settings, then delete the file"
 }
 
 // LeftText joins Left for one line.
