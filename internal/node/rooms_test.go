@@ -569,7 +569,10 @@ func TestRestartReplaysTheLogToTheSameStateAndDecidesLaterEntriesTheSame(t *test
 	if len(afterInfo.Forks) != 1 || !afterInfo.Forks[0].Open || len(afterInfo.Requests) != 1 {
 		t.Fatalf("after restart: %+v", afterInfo)
 	}
-	// Settling after the restart: same as the control machine.
+	// Settling after the restart: same as the control machine. The
+	// restarted b has to have pulled the room's log before it signs
+	// (maySign); this stands in for that pull.
+	b.r.rooms[room].pulled = true
 	for _, n := range []*lnode{b, ctl} {
 		n.change(room, Change{Kind: core.EntryRemove, Target: a.id})
 	}

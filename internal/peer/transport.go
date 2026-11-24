@@ -303,8 +303,12 @@ func Serve(ctx context.Context, ln net.Listener, id *Identity, h Handler, refres
 	if j, ok := h.(JoinHandler); ok {
 		mux.Handle("POST "+pathJoinV2, joinV2Route(j))
 	}
+	if p, ok := h.(PullHandler); ok {
+		mux.Handle("POST "+pathPullV2, newPullServer(p))
+	}
 	protos := new(http.Protocols)
-	protos.SetHTTP1(true) // HTTP/1.1 only: one request per connection at a time, small surface
+	protos.SetHTTP1(true) // v0.2 clients: HTTP/1.1, one request per connection at a time
+	protos.SetHTTP2(true) // the pull exchange: waiting pulls to one peer share one connection (ALPN h2)
 	srv := &http.Server{
 		Handler:           guard(newLimiter(), mux),
 		Protocols:         protos,

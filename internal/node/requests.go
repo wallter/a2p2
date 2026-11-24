@@ -349,18 +349,18 @@ func (r *Rooms) Confirm(ctx context.Context, id string, approve bool) (Confirmat
 	return c, nil
 }
 
-// maySign is the hook for "since starting, a daemon signs no entry for a
-// room until it has pulled that room's log from another member" (DESIGN-next
-// section 3). Creating a room and rooms where this machine is the only
-// member are exempt. Until pull exists (step 5) nothing sets rl.pulled, so
-// the rule is not enforced yet: step 5 sets rl.pulled on the first
-// successful pull of the room since start and makes this return
-// rl.pulled for the other rooms.
+// maySign enforces "since starting, a daemon signs no entry for a room
+// until it has pulled that room's log from another member" (DESIGN-next
+// section 3). rl.pulled is set by the first pull of the room since start
+// that ended without an error (Exchange.Pull), by a join's delivery of the
+// log (Receive), and for a room created or pinned in this run. Rooms where
+// this machine is the only member are exempt: there is no one to pull
+// from. The rule narrows the restore problem; it cannot detect a restore.
 func (r *Rooms) maySign(rl *roomLog) bool {
 	if len(rl.st.Members) <= 1 {
 		return true
 	}
-	return true // step 5: return rl.pulled
+	return rl.pulled
 }
 
 // check says why request q cannot apply to rl's current state, or "".

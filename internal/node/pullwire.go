@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wallter/a2p2/internal/core"
 	"github.com/wallter/a2p2/internal/store"
@@ -94,7 +95,7 @@ type PullResponse struct {
 	Peers   []PullPeer                      `json:"peers,omitempty"`
 }
 
-// PullPeer is a member with addresses (filled in step 5b).
+// PullPeer is a member with addresses and when it was last heard from.
 type PullPeer struct {
 	Node  string   `json:"node"`
 	Addrs []string `json:"addrs,omitempty"`
@@ -107,6 +108,8 @@ type PullError struct {
 	Status int    `json:"-"`
 	Code   string `json:"error"`
 	Detail string `json:"detail,omitempty"`
+	// RetryAfter is the wait a 429 or 503 asks for (its Retry-After).
+	RetryAfter time.Duration `json:"-"`
 }
 
 func (e *PullError) Error() string {
