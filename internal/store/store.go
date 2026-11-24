@@ -83,7 +83,10 @@ func (s *Store) Changes() int64 { return s.changes.Load() }
 func Open(path string) (*Store, error) {
 	dsn := "file:" + path + "?_txlock=immediate" +
 		"&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)" +
-		"&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+		"&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)" +
+		// Dropped text (withdrawn, expired, voided) is overwritten in the
+		// database file, not only unlinked; see Scrub for the log file.
+		"&_pragma=secure_delete(1)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -100,6 +103,16 @@ func Open(path string) (*Store, error) {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// Scrub moves everything in the write-ahead log into the database file and
+// truncates the log, so that text dropped since the last scrub (withdrawn,
+// expired, voided) is no longer in any file of the store. It is not a
+// forensic guarantee: blocks the operating system has freed are its own.
+// The daemon calls it every minute and it is cheap when little was written.
+func (s *Store) Scrub(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
+	return err
+}
 
 func (s *Store) migrate() error {
 	var v int

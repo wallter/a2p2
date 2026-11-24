@@ -251,6 +251,9 @@ func (m *Machine) PruneDue() bool { return m.pruneDue.Load() }
 // pruneIfDue runs Prune before a write or a confirmation when a read asked
 // for it, so what was shown as expired is durably expired before anything
 // acts on it.
+// Scrub removes dropped text from the store's log file (store.Scrub).
+func (m *Machine) Scrub(ctx context.Context) error { return m.st.Scrub(ctx) }
+
 func (m *Machine) pruneIfDue(ctx context.Context) error {
 	if m.pruneDue.Load() {
 		return m.Prune(ctx)

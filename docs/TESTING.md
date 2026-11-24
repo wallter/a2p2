@@ -153,8 +153,11 @@ is gone from every surface, but its bytes can stay on disk. The summary
 greps each daemon's database files for the withdrawn text; in four of
 six runs the write-ahead log still held it at the end, and once the main
 database file did (free pages; the store does not set
-`secure_delete`). D9 says machines drop the withdrawn text; on disk that
-holds only once SQLite reuses the pages.
+`secure_delete`). D9 says machines drop the withdrawn text. That was
+fixed afterwards (decision D43): the store now overwrites freed content
+and truncates its write-ahead log every minute, proven by
+`TestWithdrawnTextIsInNoFileOfTheStoreAfterAScrub`. The chaos runs above
+predate the fix.
 
 Not covered: a real WAN, latency or loss (`tc netem` is not used),
 clock skew, a full disk, power loss (a kill -9 leaves the kernel's page

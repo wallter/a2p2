@@ -540,6 +540,11 @@ func prune(ctx context.Context, m *node.Machine) {
 			return
 		case <-t.C:
 		}
+		// Withdrawn and expired text leaves the store's files within a
+		// minute (requirement D9), not only its tables.
+		if err := m.Scrub(ctx); err != nil && ctx.Err() == nil {
+			slog.Warn("scrubbing", "err", err)
+		}
 		if m.PruneDue() || time.Since(last) >= time.Hour {
 			last = time.Now()
 			if err := m.Prune(ctx); err != nil && ctx.Err() == nil {

@@ -808,3 +808,22 @@ clause where one exists." Until the owner decides, D1 and D6 stay
 
 **Revisit if** the chaos runs become slow enough or flaky enough that
 nobody runs them, or CI gains Docker and a time budget for them.
+
+## D43. Dropped text leaves the store's files, not only its tables (2026-11-24)
+
+The container fault tests (D42) grep every member's files after a run and
+found withdrawn text still on disk: in the write-ahead log until the daemon
+stopped, and once in freed space of the database file. No view showed it,
+but requirement D9 says machines drop the withdrawn text.
+
+- The database is opened with `secure_delete`, so content freed by dropping
+  a text is overwritten in the database file.
+- `Store.Scrub` checkpoints and truncates the write-ahead log; the daemon
+  calls it every minute. Text that was withdrawn, expired or voided is
+  therefore out of every file of the store within about a minute.
+- This is not a forensic guarantee. Blocks the operating system or the disk
+  has freed are outside the store's reach, and backups keep what they copied.
+
+Cost: slightly more writing when text is dropped, and one cheap checkpoint a
+minute. Test: `TestWithdrawnTextIsInNoFileOfTheStoreAfterAScrub`.
+
