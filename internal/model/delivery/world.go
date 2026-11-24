@@ -264,6 +264,13 @@ func (w *World) DiskLost(id MachineID) MachineID {
 // reports holding it. This stands for a buggy or dishonest member.
 func (w *World) Withhold(server MachineID, id RecordID) { w.machines[server].withhold[id] = true }
 
+// Observed says whether m holds an observation of peer's summary, the
+// base of an offer (for the node's differential tests).
+func (w *World) Observed(m, peer MachineID) bool {
+	_, ok := w.machines[m].st.obs[peer]
+	return ok
+}
+
 // write signs and stores a new record from m. The first write after a start
 // begins a new stream linked to every head of the machine's own history.
 func (w *World) write(m *Machine, r *Record, body string) *Record {

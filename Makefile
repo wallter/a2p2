@@ -47,6 +47,18 @@ fuzz:             ## short fuzz smoke run of the record and entry decoders; FUZZ
 bench:
 	$(GO) test -run '^$$' -bench . -benchmem ./...
 
+# The deep random differential tests at other seeds, one after another
+# (about two minutes a seed). A failure logs its operations; reduce them
+# with A2P2_MODEL_REDUCE=file A2P2_MODEL_MATCH=text go test -run
+# TestReduceAFailingSchedule ./internal/node. Not part of check.
+.PHONY: model-sweep
+model-sweep:      ## make model-sweep [SEEDS="1 2 3"]: deep random differential runs per seed; exits 1 if any fails
+	@mkdir -p .model-sweep; fail=0; for s in $${SEEDS:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20}; do \
+	  if A2P2_MODEL_DEEP=1 A2P2_MODEL_SEED=$$s A2P2_MODEL_DUMP=1 $(GO) test -count=1 -timeout 60m \
+	    -run '^(TestRealExchangeAgreesWithTheDeliveryModelOnRandomSchedules|TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules)$$' \
+	    ./internal/node > .model-sweep/seed-$$s.log 2>&1; then echo "seed $$s ok"; rm -f .model-sweep/seed-$$s.log; \
+	  else echo "seed $$s FAILED (.model-sweep/seed-$$s.log)"; fail=1; fi; done; exit $$fail
+
 e2e: build        ## real harnesses, spends model tokens: make e2e HARNESS=claude
 	scripts/e2e/run.sh $${HARNESS:-all}
 

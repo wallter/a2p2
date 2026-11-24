@@ -112,6 +112,9 @@ Rows marked "model" include tests of the rules in `internal/members` or
 | Many messages in one millisecond | Every view keeps each author's order, the same on every read | `TestMessagesOfOneMillisecondKeepTheOrderWrittenInEveryView` |
 | Branch under a message withheld, or held only as a header | Its replies are listed, the parent marked missing | `TestRealExchangeAgreesWithTheDeliveryModelOnTheBranchUnderAnUnheldParent`, model `TestBranchUnderAnUnheldMessageListsItsRepliesWithTheParentMissing`, `TestBranchUnderAHeaderWithoutTextListsItsRepliesWithTheParentMissing` |
 | `peek` for one room while another is busy | Counts and first lines come from that room only | `TestPeekForOneRoomTakesItsFirstLinesBeforeTheCap` |
+| Random schedules of the real exchange at seeds other than the fixed one | The implementation agrees with the delivery model after every step. `make check` runs 14 seeds that once disagreed at the default size (3 with the race detector); `A2P2_MODEL_DEEP=1` runs 12 of them at the deep size; `make model-sweep` runs any seeds. At the deep size seed 6 meets the known gap two rows down and seed 16 a gap of the comparison (an offer built on a partial observation) | `TestRealExchangeAgreesWithTheDeliveryModelAtSeedsThatOnceDisagreed`, `TestRealExchangeAgreesWithTheDeliveryModelOnTheReducedSeedScenarios`, `TestRealExchangeOfferOnAPartialObservationMayCarryOtherRecordsThanTheModels` (skips as a gap of the comparison) |
+| Newcomer without history whose admitter's latest record is withheld by the only member holding it | Earlier text is held without text, undecided, until the head arrives, then `not_admitted` | `TestRealExchangeNewcomerWhoseFrontierHeadIsWithheldDecidesOnceItArrives`, model `TestNewcomerWithoutHistoryHoldsEarlierTextNotAdmittedWhileItsAdmittersHeadIsWithheld`, `TestRemovedNewcomerNotToldOfItsRemovalIsServedNothingMore` |
+| Offer cut by a limit of one, or a record offered and refused out of order after the server's restore | The rest of the round's one offer may repeat what the server holds (a wasted copy between members). A record refused out of order is not offered again in that exchange, so the gap closes one exchange later (known gap against the model, which fills it at once) | `TestRealExchangeOfferCutByALimitOfOneMayOfferTheServerWhatItHolds`, `TestRealExchangeOfferRefusedOutOfOrderAfterARestoreWaitsForTheNextExchange` (skips as a known gap), model `TestOfferLimitedToOneIsBuiltEachPullOnTheLastSummary`, `TestAPullWhoseReplyIsLostGivesThePullerNoSummaryToOfferOn` |
 
 | Real daemon killed with `kill -9` at a random moment, then started | What `send` accepted survives; the room converges with each message once and in its author's order | `make chaos` (not in `make check`) |
 | Real daemon paused (frozen) for 5 to 15 seconds | Its peers back off and it catches up after | `make chaos` |
@@ -274,6 +277,23 @@ and network splits (see [Chaos runs of real daemons](#chaos-runs-of-real-daemons
 - `A2P2_MODEL_DEEP=1 go test ./internal/members ./internal/model/delivery ./internal/node`
   uses larger search bounds and includes measurements. The last recorded
   deep membership run took 33 minutes.
+- `make model-sweep SEEDS="1 2 3"` runs the deep random differential tests
+  of `internal/node` once per seed (`A2P2_MODEL_SEED`), about two minutes a
+  seed, and keeps the log of each failing seed in `.model-sweep/`. A
+  failure logs its operations; `A2P2_MODEL_REDUCE=<file>
+  A2P2_MODEL_MATCH=<text> go test -run TestReduceAFailingSchedule
+  ./internal/node` shrinks them to a schedule that still fails that way.
+  On 2026-11-24 the deep real-exchange test was swept over seeds 1 to 26
+  and the fixed seed. Before the harness was corrected, seeds 1, 2, 4 and
+  6 failed (a head counted reachable that a withholding member held; an
+  offer cut by a limit of one); after each correction the sweep was run
+  again and found the next mismatches of the harness (seeds 5, 7, 8, 10,
+  11, 13, 15, 17, 24), each reduced to a scenario in
+  `internal/node/pull_seeds_test.go`. It now passes at every one of those
+  seeds except 6 (a known gap of the code against the model) and 16 (a gap
+  of the comparison); both are named there. The deep implementation test
+  (`TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules`) passed
+  at seeds 1 to 12.
 - `go test ./internal/core -run '^$' -fuzz FuzzParseRecord -fuzztime 20s`
   fuzzes the record parser. Use `FuzzParseEntry` for log entries or
   `FuzzDecodeToken` for invite tokens.
