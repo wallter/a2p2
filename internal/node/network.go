@@ -3,6 +3,8 @@ package node
 import (
 	"context"
 	"net"
+	"net/netip"
+	"slices"
 	"strings"
 
 	"github.com/wallter/a2p2/internal/store"
@@ -24,6 +26,14 @@ const (
 type Network struct {
 	State  string // off, outbound or on
 	Listen string // the address listened on, when on
+	// MapPort: with on, the router is asked to forward the listening port
+	// (a2p2 net on --map-port; DESIGN 11). Recorded in the decision's role
+	// as "map_port".
+	MapPort bool
+	// IPv4Only: with on, a decision recorded before IPv6 was part of one
+	// (its role lacks "ipv6"). Its listener and addresses stay IPv4 until
+	// the person decides again (DESIGN 11).
+	IPv4Only bool
 	// Request is the decision's id in requests; empty when none was ever
 	// taken (networking is then off).
 	Request string
@@ -36,24 +46,64 @@ func LoadNetwork(ctx context.Context, st *store.Store) (Network, error) {
 	if err != nil || !ok {
 		return Network{State: NetworkOff}, err
 	}
+	role := strings.Fields(q.Role)
 	n := Network{State: q.Action, Listen: q.Name, Request: q.ID}
+	if n.State == NetworkOn {
+		n.MapPort = slices.Contains(role, roleMapPort)
+		n.IPv4Only = !slices.Contains(role, roleIPv6)
+	}
 	if n.State != NetworkOutbound && n.State != NetworkOn {
 		n = Network{State: NetworkOff, Request: q.ID}
 	}
 	return n, nil
 }
 
+// The words of a networking decision's role: roleMapPort asks for port
+// mapping; roleIPv6 marks a decision taken knowing that a wildcard
+// listener also takes IPv6 (every on decision from this version).
+const (
+	roleMapPort = "map_port"
+	roleIPv6    = "ipv6"
+)
+
+// MapPortText is what a person is told before deciding on port mapping.
+const MapPortText = "This machine will also ask the router of this network to forward the listening port to it " +
+	"(PCP, NAT-PMP or UPnP), which opens that port on the router to the whole internet. Anyone can then connect; " +
+	"only room members get anything from it, since every connection must prove a member's key first. The mapping " +
+	"is renewed while networking is on and removed by a2p2 net off or a2p2 stop; after a crash it lapses " +
+	"with its lifetime (2 hours), unless the router grants only permanent mappings, which the next start " +
+	"removes."
+
 // NetworkText says exactly what choosing n does, for the person deciding.
 func NetworkText(n Network) string {
 	switch n.State {
 	case NetworkOn:
-		return "listen for other machines on " + n.Listen + ", and connect out to the machines in this " +
+		s := "listen for other machines on " + n.Listen + listenScope(n) + ", and connect out to the machines in this " +
 			"machine's rooms and to admin machines of joins"
+		if n.MapPort {
+			s += "; and ask the router to forward the listening port from the internet"
+		}
+		return s
 	case NetworkOutbound:
 		return "listen on no address; connect out only, to the machines in this machine's rooms and to " +
 			"admin machines of joins"
 	}
 	return "listen on no address and connect to no machine: this machine only"
+}
+
+// listenScope says which families a listener on n.Listen takes.
+func listenScope(n Network) string {
+	host, _, err := net.SplitHostPort(n.Listen)
+	ip, perr := netip.ParseAddr(host)
+	switch {
+	case err != nil || perr != nil:
+		return ""
+	case n.IPv4Only && ip.Is4():
+		return " (IPv4 only: this decision was recorded before a2p2 listened on IPv6; a2p2 net on again adds it)"
+	case ip.IsUnspecified():
+		return " (IPv4 and IPv6)"
+	}
+	return ""
 }
 
 // SetNetwork records a person's networking decision. It is reached only
@@ -63,6 +113,9 @@ func NetworkText(n Network) string {
 func (s *Surface) SetNetwork(ctx context.Context, n Network) (Network, error) {
 	switch n.State {
 	case NetworkOff, NetworkOutbound:
+		if n.MapPort {
+			return Network{}, userErr("port mapping needs networking on with a listener: a2p2 net on --map-port")
+		}
 		n.Listen = ""
 	case NetworkOn:
 		host, port, err := net.SplitHostPort(n.Listen)
@@ -75,10 +128,17 @@ func (s *Surface) SetNetwork(ctx context.Context, n Network) (Network, error) {
 	now := s.m.now()
 	q := store.Request{ID: s.r.newID(), Kind: store.RequestNetwork, Action: n.State, Name: n.Listen,
 		Created: now, DecidedAt: now}
+	if n.State == NetworkOn {
+		role := []string{roleIPv6}
+		if n.MapPort {
+			role = append(role, roleMapPort)
+		}
+		q.Role = strings.Join(role, " ")
+	}
 	if err := s.m.st.RecordDecision(ctx, q); err != nil {
 		return Network{}, err
 	}
-	n.Request = q.ID
+	n.Request, n.IPv4Only = q.ID, false
 	if s.onNet != nil {
 		s.onNet(n)
 	}

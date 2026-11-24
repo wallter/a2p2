@@ -10,6 +10,31 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Added
 
+- **`a2p2 net check`** says whether this machine can talk to the members
+  of its rooms and whether they can reach it, address by address, and ends
+  with one sentence saying what to do. `a2p2 net check HOST:PORT` and
+  `a2p2 net check --invite` test an address, or an invite's addresses and
+  key, before joining, without using the invite.
+- **Reachability in `status` and the page:** "reachable by peers: yes, no
+  or unknown", checked by asking members to connect back (a new peer
+  request, `/p/v2/dialback`; older machines answer that they do not know
+  it, and nothing else changes).
+- **IPv6:** after a new `a2p2 net on`, a listener on `0.0.0.0` or `::`
+  takes IPv4 and IPv6, and global IPv6 addresses are advertised (stable
+  before temporary, never link-local). A networking decision made with an
+  earlier version stays IPv4 only until you run `a2p2 net on` again.
+- **`a2p2 net on --map-port`** asks the router to forward the port (PCP,
+  NAT-PMP, then UPnP), only when a person decides it at a terminal. It is
+  renewed while on, removed on `net off`, when the listener stops and on a
+  clean stop, and what a crash left is removed at the next start; `status`
+  and `net check` show it and any removal that failed. What a removal
+  needs is written durably before each request; a record that cannot be
+  used is kept, nothing is sent, and `status` says what to remove by
+  hand. A UPnP forward is deleted only if the router says it is this
+  machine's. The router's address is advertised only while a member
+  reaches it and its lease lasts; what members say they see is shown,
+  never advertised. A member asked to connect back dials only the address
+  the request came from, on at most two ports. Not available on Windows.
 - **Windows support.** The daemon and the CLI run on Windows 10 (1803 or
   later) and 11. The test suite passes on a Windows Server 2025 runner
   (amd64); the harness installers have not been tried with real

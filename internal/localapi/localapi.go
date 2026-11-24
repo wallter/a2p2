@@ -313,6 +313,9 @@ type (
 	NetReq struct {
 		State  string `json:"state"`
 		Listen string `json:"listen,omitempty"`
+		// MapPort: with on, ask the router to forward the listening port
+		// (a2p2 net on --map-port), a decision like the rest of it.
+		MapPort bool `json:"map_port,omitempty"`
 	}
 	// Network is a networking decision. In status it is the latest one;
 	// Applied and Reason are set only when what runs differs from it: the
@@ -323,8 +326,11 @@ type (
 		State   string `json:"state"`
 		Listen  string `json:"listen,omitempty"`
 		Request string `json:"request,omitempty"`
-		Applied string `json:"applied,omitempty"`
-		Reason  string `json:"reason,omitempty"`
+		MapPort bool   `json:"map_port,omitempty"`
+		// IPv4Only: a decision from before IPv6 (DESIGN 11): IPv4 only until decided again.
+		IPv4Only bool   `json:"ipv4_only,omitempty"`
+		Applied  string `json:"applied,omitempty"`
+		Reason   string `json:"reason,omitempty"`
 	}
 	NetResp struct {
 		Network
@@ -447,6 +453,11 @@ type (
 		// Levels are the local agents' reading levels other than the
 		// default: an agent and room not listed is at "all".
 		Levels []store.AgentLevel `json:"levels"`
+		// Reach is whether other members can reach this machine (yes, no
+		// or unknown), checked by asking them to dial back (PROTOCOL 4.7).
+		Reach node.Reach `json:"reach"`
+		// Mapping is the router's port mapping, when a person asked for one.
+		Mapping *node.PortMapping `json:"mapping,omitempty"`
 	}
 	Empty struct{}
 )
@@ -568,7 +579,7 @@ func RequestOf(q node.RequestView) Request {
 
 // NetworkOf renders a networking state.
 func NetworkOf(n node.Network) Network {
-	return Network{State: n.State, Listen: n.Listen, Request: n.Request}
+	return Network{State: n.State, Listen: n.Listen, Request: n.Request, MapPort: n.MapPort, IPv4Only: n.IPv4Only}
 }
 
 // AlertOf renders an alert.
@@ -598,7 +609,8 @@ func PreviewOf(p node.Preview) PreviewResp {
 func StatusOf(st node.StatusView, listen []string, info Info) Status {
 	out := Status{Node: st.Node, Name: st.Name, Human: st.Human, Local: st.Local, Rooms: roomsOf(st.Rooms),
 		Agents: st.Agents, Peers: []Peer{}, Listen: listen, Version: info.Version, PID: info.PID, Notice: st.Notice,
-		Network: statusNetwork(st), Waiting: st.Waiting, Levels: st.Levels}
+		Network: statusNetwork(st), Waiting: st.Waiting, Levels: st.Levels, Reach: st.Reach,
+		Mapping: st.Mapping}
 	if out.Levels == nil {
 		out.Levels = []store.AgentLevel{}
 	}
@@ -813,8 +825,14 @@ func Handler(s *node.Surface, info Info) http.Handler {
 	// does not prove that a person made it, since any program running as
 	// this user can call this socket.
 	handle(mux, "net", func(ctx context.Context, r NetReq) (NetResp, error) {
-		n, err := s.SetNetwork(ctx, node.Network{State: r.State, Listen: r.Listen})
+		n, err := s.SetNetwork(ctx, node.Network{State: r.State, Listen: r.Listen, MapPort: r.MapPort})
 		return NetResp{Network: NetworkOf(n), Text: node.NetworkText(n), Applies: "now: the daemon applies it at once"}, err
+	})
+	// net/check tries every member's addresses now and asks those reached
+	// to dial back (a2p2 net check); it dials nothing while networking is
+	// off and decides nothing.
+	handle(mux, "net/check", func(ctx context.Context, _ Empty) (node.NetCheck, error) {
+		return s.NetCheck(ctx)
 	})
 	handle(mux, "stop", func(ctx context.Context, _ Empty) (Empty, error) {
 		if info.Stop != nil {

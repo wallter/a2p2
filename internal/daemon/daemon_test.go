@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wallter/a2p2/internal/daemon/portmap"
 	"github.com/wallter/a2p2/internal/localapi"
 	"github.com/wallter/a2p2/internal/node"
 	"github.com/wallter/a2p2/internal/store"
@@ -121,6 +123,31 @@ type machine struct {
 	mu        sync.Mutex
 	xx        *node.Exchange // the current run's pull exchange
 	onHandler func(path string, enter bool)
+	// router, if set, is the fake router port mapping talks to; without
+	// one a test machine finds no gateway, so no test reaches a real one.
+	router portmap.Mapper
+	// local, if valid, is this machine's address on the fake router's
+	// network; otherwise 127.0.0.1, where the test listener is.
+	local netip.Addr
+}
+
+func (m *machine) gateway() (gw, local netip.Addr, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.router == nil {
+		return netip.Addr{}, netip.Addr{}, errors.New("no router in tests")
+	}
+	local = netip.MustParseAddr("127.0.0.1")
+	if m.local.IsValid() {
+		local = m.local
+	}
+	return netip.MustParseAddr("127.0.0.1"), local, nil
+}
+
+func (m *machine) mapper(netip.Addr, netip.Addr) portmap.Mapper {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.router
 }
 
 // newMachine starts a machine with networking on, decided through the
@@ -169,7 +196,8 @@ func (m *machine) start() {
 		}
 		done <- RunWith(context.Background(), m.home, "test", RunOpts{
 			Listen: listen, Ready: func() { close(ready) },
-			Exchange: func(x *node.Exchange) { m.setX(x) }, Handler: m.hook})
+			Exchange: func(x *node.Exchange) { m.setX(x) }, Handler: m.hook,
+			Gateway: m.gateway, Mapper: m.mapper})
 	}()
 	select {
 	case <-ready:

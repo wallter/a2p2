@@ -494,6 +494,169 @@ designed (1,920 streams per 64-machine room after 30 days,
 all shared rooms may be needed at 100 rooms; posting policy (T6) is
 deferred to stage 3 and needs a new entry kind [M14].
 
+Whoever can edit the home is the user: editing the recorded networking
+decision or `portmap.json` by hand can widen the listener or point a
+cleanup at a forward, and no check here is meant to stop that.
+
+## 11. Reachability
+
+**Can this machine talk to others, and why not (`a2p2 net check`).** A
+person learning that a laptop drops every inbound connection should not
+have to ask a colleague. `a2p2 net check` reports the networking state,
+whether the listener is bound, the addresses advertised, and for every
+other member of every room each known address tried now: a TCP connection,
+then the pinned TLS handshake, closed without a request, with the outcome
+(reached, refused, timed out, wrong key, not an a2p2 machine, unreachable)
+and the time taken. It ends with one sentence saying what to do. It
+observes and decides nothing; with networking off it dials nothing.
+`a2p2 net check HOST:PORT` and `--invite` test addresses before any room
+exists, from the CLI process under a throwaway key (PROTOCOL 4.7).
+
+**The dial-back.** Only another machine can say whether this one is
+reachable. A member asks a member to connect back to the addresses it
+advertises and hears which of them completed a handshake with its own key
+(PROTOCOL 4.7). The responder dials only for a current member of a shared
+room, only expecting that member's key, and only the IP address the
+request came from, on at most two ports (the listening port and a mapped
+external port); any other address it answers as not tried. So an IPv6
+address is checked by asking over IPv6, and the daemon asks about each
+address family it advertises only members it reaches over that family;
+`net check` says "not checked: no member reachable over IPv6" when there
+is none. It sends no request after the handshake, answers no sooner than
+its deadline unless every address dialled was reached, and limits
+requests per key and for the whole machine, so it adds no way to aim
+traffic at a third party; the one limit left is that a member behind a
+shared address can cause two connection attempts to that address per
+request. The daemon asks after each run starts (so after each networking
+decision) and then hourly; `status` and the page show "reachable by
+peers: yes, no or unknown" with when it was checked. The rules are in `node.DialBackServer`
+and `node.Reacher`; the dialling is `peer.Prober`.
+
+**More machines reachable without a third party.** N1 lets a machine that
+cannot accept connections take part through a member that can. Two
+machines behind ordinary home routers have no such member. Four things
+widen who can be reached, none of them a service run by anyone else.
+
+- **Not classic hole punching.** Punching needs a rendezvous machine that
+  both unreachable peers reach at the same time. In a2p2 such a machine is,
+  by construction, a member that already carries their messages, so the
+  direct path would add much code (simultaneous opens, keep-alives, NAT
+  behaviour classes) to save one hop that costs nothing. It is not done.
+- **IPv6.** Many home networks hand out global IPv6 addresses with no NAT,
+  only a firewall that may let a port in. Under a networking decision taken
+  with this version, a listener on the wildcard address (`0.0.0.0` or `::`)
+  is one dual-stack socket, and `a2p2 net on` says so and names the IPv6
+  addresses it will advertise. A decision recorded before keeps the scope
+  it was taken with: an IPv4 listener and no IPv6 address, until the
+  person runs `a2p2 net on` again; `status` and `net check` say so. An
+  `advertise` entry the listener cannot serve under that scope (an IPv6
+  address under an IPv4-only decision) is not advertised, and `net check`
+  says why. A person who wants IPv4 only gives `listen` one IPv4 address
+  of the machine. The machine advertises its IPv4 addresses (not loopback, not
+  link-local) and its global IPv6 addresses, never link-local ones, and a
+  temporary (privacy) address only if the interface has no stable one.
+  Unique-local addresses (`fc00::/7`) are advertised after the others, and
+  every dial path (pulls, dial-backs, probes, joins) tries one only if this
+  machine holds an address in the same `/48` now, so a peer elsewhere never
+  waits on an address it cannot route. Which addresses are temporary is
+  read from the system where it says so (Linux `/proc/net/if_inet6`, the
+  macOS `SIOCGIFAFLAG_IN6` ioctl); where it cannot be read (Windows) every
+  global address counts as stable. At most 8 addresses are advertised: a
+  verified mapped one first, then IPv4, then global IPv6, then
+  unique-local. A machine's own list in a pull replaces what was learned
+  from it before; an empty list changes nothing, so a listener that once
+  advertised nothing is not forgotten by members that can reach it only
+  at a stored address. The limit: an address of a machine that other
+  members passed on (not its own word) stays in a book, tried last, until
+  it has failed for a day and five attempts; and a machine that stops
+  listening altogether is still dialled at its last list until then.
+- **The address others see is shown, never advertised.** The dial-back
+  answer carries the IP address the responder saw the request come from
+  (`saw`). `net check` shows it ("members see this machine as") and
+  compares it with the router's external address to detect a second layer
+  of translation. It never becomes an address to advertise, even after a
+  dial-back to it succeeds: the member that reports it is the one that
+  would test it, so one lying member could make this machine publish
+  someone else's address to every other member. A person who forwarded a
+  port by hand says so with the existing `advertise` key, and `net check`
+  prints the exact line when members see a public address this machine
+  does not advertise.
+- **Port mapping, by a person's decision.** `a2p2 net on --map-port` asks
+  the router of the local network to forward the listening port: PCP
+  (RFC 6887) first, NAT-PMP (RFC 6886) if the router answers PCP with
+  NAT-PMP's version refusal, then UPnP IGD (SSDP, then `AddPortMapping`
+  on the gateway's `WANIPConnection` or `WANPPPConnection` service). Only
+  the standard library is used. The gateway is the default route's next
+  hop, read from the system (Linux `/proc/net/route`, the route with the
+  lowest metric; the macOS routing table, the unscoped default route);
+  with several uplinks only that route's router is asked, so a mapping on
+  another uplink's router is never made. On Windows mapping reports itself
+  unavailable. This machine's address on that network is the source
+  address the system selects for the gateway (a route lookup that sends
+  nothing), not the first address in the gateway's subnet. A mapping is
+  made only for a listener bound to the wildcard address or to that
+  address,
+  so the router never forwards to another service that holds the port on
+  another address, and it ends with that listener, however the listener
+  ends. Answers are checked before they count: the UDP source must be the
+  gateway's port, a PCP answer must carry the request's nonce, a grant
+  must have a lifetime, an external port and an address, an SSDP answer
+  must be a 200 for a gateway device, a SOAP answer must be a complete
+  response, and a SOAP fault counts as a refusal (one that moves to the
+  next port, asks for a permanent lease or counts a removal as done) only
+  if it is a complete fault with a UPnP error code; a UPnP description or
+  control URL is followed only if its host is the gateway. NAT-PMP and SSDP carry no authentication, so a machine on
+  the same network that spoofs the gateway's address can still answer
+  first; what it can obtain is a wrong mapping shown in `status`, not a
+  connection to anything but this machine's listener. The mapping asks for
+  two hours, is renewed at half of what was granted, however short, and a
+  permanent UPnP lease is asked for only when the router refuses finite
+  ones. The external address the router reports is the only candidate for
+  advertising: it is advertised after a member reaches it, while a member
+  has reached it within three hours, while the mapping exists and while
+  its lease has not run out, whether or not a renewal is being tried. A
+  new mapping, or one that comes back, starts unconfirmed; one failed check
+  does not withdraw a confirmed address, two in a row do. A mapping that
+  keeps changing asks members to check at most every five minutes. If it is
+  not the address members see, the router is behind another NAT
+  (carrier-grade NAT or a second router), and `net check` says the
+  mapping cannot help. Mapping is a decision like turning networking on:
+  asked at a terminal, saying that it opens a port on the router to the
+  internet and that only room members get anything from it, and recorded
+  in the networking decision. It is never on by default and no agent tool
+  or hook can ask for it. `status` and `net check` show the protocol, the
+  external address, whether a member reached it, and when it expires.
+- **Mappings are always cleaned up, or said not to be.** Before each
+  request that could create a mapping, everything that removing it needs
+  (the external port among it, even before the router names an external
+  address) is written to `portmap.json` in the home, durably (a new private
+  file, synced, renamed, the directory synced), and it stays there while
+  it may exist:
+  after a failed renewal, after a NAT-PMP or UPnP grant whose external
+  address could then not be read, after an answer that cannot be used. It
+  is removed when the listener stops, on `net off`, on a decision without
+  `--map-port` and on a clean stop, and at every start, whatever the
+  decision, for what an earlier run left. A removal that fails is shown in
+  `status` and `net check` and retried every five minutes, at stop and at
+  the next start. What a crash leaves: a finite mapping until its lease
+  ends (at most two hours), and a permanent UPnP rule, if the router
+  granted only that, until a2p2 next starts on that network and removes it,
+  or until a person deletes the rule described `a2p2` on the router's own
+  page. The record is used whole or not at all: a field out of range or
+  unknown, a mapping on another router than this network's (after a move),
+  or a file that does not parse, and nothing is sent to any router, the
+  file is kept, and `status` says the record cannot be used and what to
+  remove by hand. A deletion reaches only this machine's own mapping: PCP
+  by the nonce kept from the request, NAT-PMP by the sending host's
+  internal port, and a UPnP forward only after the router says it points
+  at this machine's address and port with the description `a2p2`; one that
+  does not is left alone.
+
+Interfaces and gateways are read through `internal/daemon` (build-tagged
+per system); the mapping protocols are `internal/daemon/portmap` and every
+test of them runs against fake PCP, NAT-PMP and UPnP responders on
+loopback. No test or check sends anything to a real router.
+
 ## 12. Attachments (0.2 draft)
 
 Not built: the design for L1, for review before any code. **[F1]** to

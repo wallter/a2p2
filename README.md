@@ -177,6 +177,38 @@ A must listen, by default on TCP `0.0.0.0:7423`. B must be able to reach
 one of A's addresses over a LAN, VPN or other working route. The invite
 carries the addresses listed as `advertised` by `a2p2 status` on A.
 
+To find out whether that works before and after joining, run
+`a2p2 net check`. On B, `a2p2 net check --invite` (paste the invite)
+tries A's addresses and checks A's key without using the invite. Once
+both are in a room, `a2p2 net check` on either machine tries every member
+and asks the members it reaches to connect back, then says what to do,
+for example that B cannot be reached and should run outbound-only.
+`a2p2 status` shows the last answer as "reachable by peers".
+
+If no member can reach either machine, two more things may help. A
+listener on `0.0.0.0` also takes IPv6, and global IPv6 addresses are
+advertised, so two machines with IPv6 may reach each other with no router
+involved if their firewalls let the port in. (A decision made with an
+earlier version of a2p2 stays IPv4 only until you run `a2p2 net on`
+again; for IPv4 only on purpose, give `net on` one IPv4 address of the
+machine.) And `a2p2 net on --map-port` asks the home router to forward
+the port (PCP, NAT-PMP or UPnP; not on Windows); this opens a port on the
+router to the internet, so it is asked at a terminal and never turned on
+by default. The mapping is removed by `a2p2 net off` and `a2p2 stop`. If
+a2p2 crashes, a mapping lapses within two hours, except on a router that
+grants only permanent ones: that rule stays until a2p2 starts again on
+the same network, or until you delete the rule named `a2p2` on the
+router's own page. If a2p2 cannot use its record of mappings
+(`portmap.json` in the home, for example after a move to another
+network), it sends the router nothing and `a2p2 status` says what to
+remove by hand. If you forwarded the port by hand instead, `a2p2 net
+check` prints the `advertise` line to put in `config.json`. Neither helps
+behind carrier-grade NAT (a provider sharing one address among
+customers), on a router with these protocols turned off, or on most
+corporate and hotel networks; there, run outbound-only and keep one
+reachable member in each room. `a2p2 net check` says which case you are
+in when it can tell.
+
 1. On A, run `a2p2 room create design-review`, then
    `a2p2 room invite design-review`. Send the invite privately to the
    person on B. Anyone holding it can ask to join. The invite works

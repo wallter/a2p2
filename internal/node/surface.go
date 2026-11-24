@@ -68,6 +68,14 @@ type SurfaceOpts struct {
 	// NotMember, if set, lists the peers that keep refusing this machine
 	// as not a member of a room, with since when (Exchange.NotMemberSince).
 	NotMember func(room string) map[string]time.Time
+	// Probe, if set, tries members' addresses for a2p2 net check; Reach,
+	// if set, is the run's dial-back state (only a run that listens).
+	Probe Prober
+	Reach *Reacher
+	// Mapping, if set, is the router's port mapping now (nil: none yet).
+	Mapping func() *PortMapping
+	// NotAdvertised is the configured addresses left out, each with why.
+	NotAdvertised []string
 }
 
 // MaybeRemovedAfter is how long every other member of a room must have
@@ -80,17 +88,21 @@ const MaybeRemovedText = "this machine may have been removed from this room; ask
 
 // Surface serves the surfaces of one machine.
 type Surface struct {
-	m     *Machine
-	r     *Rooms
-	j     *Joiner
-	book  *AddrBook
-	name  string
-	addrs func() []string
-	local string
-	net   Network
-	fault func() string
-	onNet func(Network)
-	notMb func(room string) map[string]time.Time
+	m       *Machine
+	r       *Rooms
+	j       *Joiner
+	book    *AddrBook
+	name    string
+	addrs   func() []string
+	local   string
+	net     Network
+	fault   func() string
+	onNet   func(Network)
+	notMb   func(room string) map[string]time.Time
+	probe   Prober
+	reach   *Reacher
+	mapping func() *PortMapping
+	notAdv  []string
 	// waiting, if set (tests), is called each time Inbox starts to wait:
 	// a readiness barrier.
 	waiting func()
@@ -101,7 +113,8 @@ type Surface struct {
 // registers the human.
 func OpenSurface(ctx context.Context, m *Machine, r *Rooms, o SurfaceOpts) (*Surface, error) {
 	s := &Surface{m: m, r: r, j: o.Joiner, book: o.Book, name: o.Name, addrs: o.Addrs, local: localRoomID(m.ID),
-		net: o.Network, fault: o.NetworkFault, onNet: o.OnNetwork, notMb: o.NotMember}
+		net: o.Network, fault: o.NetworkFault, onNet: o.OnNetwork, notMb: o.NotMember,
+		probe: o.Probe, reach: o.Reach, mapping: o.Mapping, notAdv: o.NotAdvertised}
 	if s.fault == nil {
 		s.fault = func() string { return "" }
 	}
@@ -1353,6 +1366,10 @@ type StatusView struct {
 	// Levels are the local agents' reading levels that are not the
 	// default: an agent and room not listed is at "all".
 	Levels []store.AgentLevel
+	// Reach is whether members can reach this machine (ReachNow).
+	Reach Reach
+	// Mapping is the router's port mapping, when a person asked for one.
+	Mapping *PortMapping
 }
 
 // WriterView is an agent seen writing in a room.
@@ -1427,7 +1444,7 @@ func (s *Surface) Status(ctx context.Context, show bool) (StatusView, error) {
 	}
 	return StatusView{Node: s.m.ID, Name: s.name, Human: s.HumanID(), Local: s.local, Rooms: rooms, Agents: agents,
 		Peers: peers, Waiting: waiting, Network: s.net, Decided: decided, Fault: s.fault(), Notice: notice, Writers: writers,
-		Levels: levels}, nil
+		Levels: levels, Reach: s.ReachNow(), Mapping: s.MappingNow()}, nil
 }
 
 // mayBeRemoved: every other member of r has refused this machine as not a

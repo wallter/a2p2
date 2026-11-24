@@ -123,6 +123,9 @@ func joinV2Route(j JoinHandler) http.Handler {
 type JoinClient struct {
 	cert tls.Certificate
 	err  error
+	// Usable, if set, says whether an address is worth dialling from here
+	// (PullClient.Usable); set before use.
+	Usable func(addr string) bool
 }
 
 var _ node.JoinTransport = (*JoinClient)(nil)
@@ -143,7 +146,7 @@ func (c *JoinClient) Join(ctx context.Context, addrs []string, check func(string
 	defer cancel()
 	lastErr := errors.New("peer: no usable address")
 	for _, addr := range addrs {
-		if !validAddr(addr) {
+		if !validAddr(addr) || c.Usable != nil && !c.Usable(addr) {
 			continue
 		}
 		var checkErr error

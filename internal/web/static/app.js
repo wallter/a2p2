@@ -130,6 +130,11 @@ function renderSide() {
   box.append(el("h2", "", "This machine"),
     el("div", "", el("strong", "", S.st.name), " ", el("span", "muted", fp(S.st.node))),
     el("div", "", el("span", "dot " + (net.state === "off" ? "" : "ok")), "Network: " + (NETWORK_WORDS[net.state] || net.state)));
+  if (net.state !== "off" && S.st.reach) {
+    const rc = S.st.reach;
+    box.append(el("div", "sub", "Reachable by peers: " + rc.state + (rc.checked ? ", checked " + ago(rc.checked) : "") +
+      (rc.why ? " (" + rc.why + ")" : "")));
+  }
   for (const a of listen) {
     const loopback = /^(127\.|\[::1\]:|localhost:)/i.test(a);
     box.append(el("div", "sub", a + (loopback ? " (this machine only)" : "")));

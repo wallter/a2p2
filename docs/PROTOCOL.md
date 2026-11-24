@@ -446,6 +446,203 @@ Error body: `{"error":"<code>","detail":"<≤ 200 bytes>"}`.
 | Requester pacing | a waiting pull answered `same` well before its wait, with nothing stored either way, counts as a failure for back-off |
 | Inbound connections | 256 |
 
+### 4.7 Dial-back and `net check`
+
+A machine cannot see from inside whether others can connect to it. It asks
+a member to try: `POST /p/v2/dialback`, strict JSON, over the same pinned
+mutual TLS as a pull (HTTP/2).
+
+```json
+{"v":2,"addrs":["203.0.113.9:40001","203.0.113.9:7423","192.168.1.5:7423"]}
+```
+
+answered 200 with
+
+```json
+{"v":2,"reached":["203.0.113.9:40001"],"not_tried":["192.168.1.5:7423"],"saw":"203.0.113.9"}
+```
+
+| Field | Meaning | Limit |
+|---|---|---|
+| `addrs` | addresses the asker says are its own: literal IP address and port, IPv6 in brackets without a zone, no names, none repeated once normalised (`[::ffff:198.51.100.4]:7423` repeats `198.51.100.4:7423`) | 1 to 8, each ≤ 255 bytes |
+| `reached` | the asked addresses at which the asker's own key completed the handshake, in the order asked; omitted when none | only addresses asked |
+| `not_tried` | the asked addresses the responder did not dial (rule 5); omitted when none | only addresses asked, none also in `reached` |
+| `saw` | the IP address the responder saw this request come from: an IP literal without zone or port, or absent; anything else makes the answer invalid. Shown to a person, never advertised | ≤ 255 bytes |
+
+Responder, in order:
+
+1. The asker is the TLS peer key. It must be a member now of a room the
+   responder holds; otherwise 403 `not_member`, with the body of every
+   other 403, and nothing is dialled.
+2. Declared size ≤ 4 KiB before the body is read (413 `too_large`); strict
+   JSON and the limits above (400 `bad_request`).
+3. Rate limits, each 429 `rate_limited` with `Retry-After`: per asking key a
+   burst of 4, then one every 10 minutes; for the whole responder a burst
+   of 16, then one every 10 seconds; at most 4 requests being dialled at
+   once. A key over its own limit spends nothing of the responder's.
+4. Unspecified, multicast, broadcast and link-local addresses are never
+   dialled. A loopback address is dialled only when the request itself
+   came over loopback (the asker is on the responder's machine).
+5. Of the rest, the responder dials only the IP address the request came
+   from, on at most two ports the asker names (the first two such
+   addresses asked: its listening port and a mapped external port). Every
+   other address is answered in `not_tried`, without a dial. To have an
+   IPv6 address checked, the asker sends the request over IPv6.
+6. The addresses left are dialled at once, all within 3 seconds together:
+   a TCP connection, then a TLS 1.3 handshake in which the responder
+   presents its own certificate and accepts only the asker's key. The
+   connection is then closed; no HTTP request is sent on it. Unless every
+   address dialled was reached, the answer waits for the 3 seconds.
+
+A machine that does not know the route answers 404; the asker reports
+that member as running an a2p2 without the dial-back.
+
+**What a member can cause.** A member's request makes the responder open
+at most two TCP connections, and send TLS ClientHellos (and its own
+certificate, to a server that proved the asker's key), to the address the
+request came from; nothing else. The one limit left: a member behind a
+shared address (a NAT, a proxy) can cause two connection attempts to that
+shared address per request, within the rate limits (4 per key per 10
+minutes, 6 a minute for the whole machine after a burst of 16). `not_tried`
+says only which addresses were not the source, which the asker knows. The
+answer says only whether the asker's own key answered, never whether an
+address refused, timed out or answered with another key, and its time is
+fixed by the 3-second bound. Names are never looked up.
+
+**When the daemon asks.** A run that listens asks, for each address family
+it advertises, up to three members it can reach over that family (members
+whose addresses completed a pinned handshake first), over that family and
+about that family's addresses only: 20 seconds after it starts, so after
+every networking decision, then every hour, or after 10 minutes when no
+member answered, and when the router's mapping changes, at most every 5
+minutes. It never asks a member about a family twice within an hour
+otherwise, except when a person runs `a2p2 net check`, which asks over each
+family the members it reached over it. A family with no such member is
+reported in `not_checked` ("not checked: no member reachable over IPv6"). The answer is `yes` if any
+member reached any address, `no` if members answered and tried but reached
+none, `unknown` otherwise (none answered, or those that answered tried
+nothing); an `unknown` never replaces a `yes` or `no` already known.
+
+**Local API.** `status` gains `reach`: `{"state":"yes"|"no"|"unknown",
+"checked"?,"reached"?,"by"?,"not_tried"?,"saw"?,"verified"?,"not_checked"?,"why"?}`;
+`no` with `why` when networking is off, outbound only, or on and not
+listening. `net/check` (new; request `{}`) tries now every known address
+of every other member of every room (one probe per node and address, at
+most 64, 8 at a time; each a TCP connection within 3 s and a pinned
+handshake within 5 s, then closed) and, if one was reached and this
+machine listens, asks the members reached to dial back, without the
+hourly limit. It answers `{"state","listening","listen"?,"fault"?,
+"ipv4_only"?,"advertised":[…],"not_advertised"?,"members":[{"room","room_label","node",
+"name"?,"reached","addrs":[{"addr","result","ms","node"?,"detail"?}]}],
+"reach":{…},"mapping"?,"forward"?,"advice"}`. `result` is `reached`,
+`refused`, `timed_out`, `wrong_key` (the certificate offered names another
+key; the server has not proved it holds that key), `not_a2p2`,
+`unreachable` or `not_tried`; `not_advertised` is each `advertise` entry
+of `config.json` that the listener cannot serve under the recorded
+decision (an IPv6 address under an IPv4-only decision or listener), which
+is left out, with why; `advice` is one sentence saying what to do.
+While networking is off it dials nothing. It decides nothing, but it does
+change two things: the reachability answer `status` shows, and the order
+in which the address book tries a member's addresses (an address that
+answered goes first, as after a pull).
+
+**CLI.** `a2p2 net check [--json]` prints that. `a2p2 net check HOST:PORT`
+and `a2p2 net check --invite [TOKEN]` (the token as the argument or on
+stdin) run in the CLI process, not the daemon: a DNS lookup if HOST is a
+name, a TCP connection, then a TLS handshake that presents a certificate
+of a fresh throwaway key once the server's certificate is accepted, then
+close, with no HTTP request. The other side learns the source address
+and that throwaway certificate; never the token, which stays unused, nor
+this machine's key. The forms report whether an a2p2 machine answered and
+its key, and for an invite whether that key matches the invite's
+fingerprint ("certificate key mismatch" if not, in which case no
+certificate is presented). Neither needs a daemon, a terminal or
+networking on.
+
+**Addresses a machine gives (DESIGN 11).** `addrs` in pulls and invites
+lists, at most 8: the router's mapped address while verified (below),
+then IPv4 interface addresses (not loopback, not link-local), then global
+IPv6 (a temporary address only where its interface has no stable one;
+never deprecated or tentative ones), then unique-local IPv6. IPv6 is
+listened on and advertised only under a networking decision whose role
+holds `ipv6`, which every `on` decision from this version records; an
+older decision stays IPv4 (a `tcp4` listener, no IPv6 address) until the
+person decides again, and `network` in `status` carries `ipv4_only`. A
+dialler skips a peer's unique-local address, on every dial path (pulls,
+dial-backs, probes, joins), unless it holds one in the same `/48` now.
+A peer's own list in a pull replaces the addresses earlier learned from
+that peer itself; an empty list changes nothing.
+
+**Mapped addresses.** `saw` is never a candidate: one lying member could
+otherwise make this machine publish someone else's address. The only
+candidate is the external address in the router's answer to a mapping
+this machine asked for under the recorded decision. It goes first in the
+dial-back's `addrs`, and is advertised while a member reached it within
+the last 3 hours, the mapping still exists and its lease has not run out
+(whatever the renewal state). A new mapping (another external address or
+port, or the same one after it stopped being the mapping, or after a
+restart) starts unconfirmed. It is withdrawn when the window passes or
+after 2 checks in a row in which members tried it and none reached it;
+one such check does not withdraw it. A person who forwarded a port
+by hand sets `advertise` in `config.json`; `net/check` gives the line in
+`forward` when members see a public address that is not advertised and
+no mapping was asked for.
+
+**Port mapping.** `net` takes `"map_port": true` with `on`, refused with
+`off` and `outbound`; it is recorded in the networking decision's role
+(words `ipv6` and `map_port`, no new column; older daemons ignore it), and
+`status`'s `network` carries `map_port`. A mapping is asked for only while
+such a decision applies and the listener is bound to the wildcard address
+or to this machine's address on the gateway's network, which is the
+source address the system selects for the gateway (a route lookup by
+connecting a UDP socket, which sends nothing); otherwise `mapping.error`
+says why. The gateway is the default route's next hop (the lowest metric
+on Linux, the unscoped route on macOS). Before each request that could
+create a mapping, what would remove it (protocol, gateway, this machine's
+address, internal port, external port even before any external address is
+known, lifetime, PCP nonce, UPnP control URL and service) is written to
+`portmap.json` in the home: a new temporary file created exclusively with
+mode 0600, synced, renamed over the old one, and the directory synced. A
+definite refusal or no answer at all removes it again. The file is read
+strictly: an unknown field, a value out of range, a field of another
+protocol, more than 16 mappings, a mapping on another router than this
+network's, or a file that does not parse, and nothing is sent to any
+router, the file is kept, and `mapping.error` says that the record cannot
+be used and what to remove by hand. The daemon asks: PCP MAP (RFC 6887, UDP 5351, TCP,
+the listening port as internal and suggested external port, lifetime
+7,200 s, a random nonce kept for renewal and deletion); if the answer is
+NAT-PMP's version refusal (version 0, opcode 129, result 1), NAT-PMP (RFC
+6886, opcode 2, then opcode 0 for the external address); if neither
+answers, UPnP IGD (an SSDP `M-SEARCH` for `InternetGatewayDevice:1`, only
+a 200 answer with that `ST` from the gateway's IP, the description and
+control URL followed only when their host is the gateway's IP,
+`AddPortMapping` for TCP with lease 7,200 s, the next three ports on
+error 718, lease 0 only on error 725, then `GetExternalIPAddress`). A
+grant with lifetime 0, external port 0 or no external address, a SOAP 200
+that is not a complete `…Response` envelope, and a datagram of the wrong
+length are not taken for success; only an HTTP 500 that is a complete SOAP
+`Fault` with a numeric UPnP `errorCode` is taken for a refusal (to try the
+next port, a permanent lease, or to count a removal as done). Each UDP request is sent up to 3 times,
+waiting 250 ms, 500 ms, then 1 s. The mapping is renewed at half the
+lifetime granted, however short (hourly when permanent); a failed
+renewal keeps it (it still exists until it expires) and is retried within
+5 minutes and before it expires. Everything recorded is deleted, each
+deletion reaching only this machine's own mapping: PCP by lifetime 0 with
+the nonce kept from the request (the server deletes only the mapping of
+that client and nonce), NAT-PMP by lifetime 0 for the internal port (the
+router deletes only the sending host's mapping), and UPnP by
+`GetSpecificPortMappingEntry` for the recorded external port, then
+`DeletePortMapping` only if that entry forwards to this machine's address
+and internal port with the description `a2p2` (error 714 counts as
+removed; an entry that is someone else's is left and forgotten). Each
+takes at most 2 s. This happens when the listener stops,
+on `net off`, on a decision without `map_port`, and on a stop; and at
+every start, whatever the decision, for what an earlier run left. A
+removal that fails stays recorded, is shown in `mapping.not_removed` and
+is retried every 5 minutes, at stop and at the next start. `status` and
+`net/check` carry `mapping`: `{"protocol"?,"external"?,"expires"?,
+"reached","error"?,"not_removed"?}`.
+
 ## 5. Join
 
 ### 5.1 Token

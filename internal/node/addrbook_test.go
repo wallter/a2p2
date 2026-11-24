@@ -169,3 +169,22 @@ func TestPeersAreAskedForWhenAnAddressIsMissingOrHourlyAndListedOnlyWhenAsked(t 
 		t.Fatalf("an hour later: asked %v", q)
 	}
 }
+
+// A machine's own new list replaces what it said of itself before (a
+// mapped address it no longer advertises is dropped); what a third party
+// passed on stays; an empty list changes nothing, so a listener that
+// briefly advertised nothing is still found where it was.
+func TestAMachinesOwnNewListReplacesItsOldOneAndAnEmptyListChangesNothing(t *testing.T) {
+	b := NewAddrBook()
+	b.Replace("n", []string{"198.51.100.7:40001", "192.168.1.5:7423"}, bookT0)
+	b.Learn("n", []string{"10.0.0.5:7423"}, bookT0)
+	b.Replace("n", []string{"192.168.1.5:7423"}, bookT0.Add(time.Hour))
+	got := b.Addrs("n")
+	if slices.Contains(got, "198.51.100.7:40001") || !slices.Contains(got, "192.168.1.5:7423") || !slices.Contains(got, "10.0.0.5:7423") {
+		t.Fatalf("after its new list: %v", got)
+	}
+	b.Replace("n", nil, bookT0.Add(2*time.Hour))
+	if after := b.Addrs("n"); !slices.Equal(after, got) {
+		t.Fatalf("an empty list changed %v to %v", got, after)
+	}
+}

@@ -57,8 +57,11 @@ Talking (as the human, or --as <label> for a script)
 Rooms across machines
   a2p2 net on [ADDR]              listen for other machines and connect out
                                   Without ADDR, use the configured address or 0.0.0.0:7423.
+  a2p2 net on [ADDR] --map-port   also ask the router to forward the port (opens it to the internet)
   a2p2 net on --outbound-only     connect out only: pull rooms and follow joins, listen on nothing
   a2p2 net off                    this machine only: no listener, no connections
+  a2p2 net check [HOST:PORT | --invite [TOKEN]]
+                                  can this machine reach its members, can they reach it, and what to do
   a2p2 room create LABEL          make a room with this machine as its admin
   a2p2 room invite ROOM [--history] [--member|--admin]
                                   print a one-time invite (valid 30 minutes)
@@ -500,6 +503,9 @@ func status(c *cmd) error {
 			fmt.Printf("network  %s, %s\n", st.Network.State, st.Network.Reason)
 		case st.Network.State == "on":
 			fmt.Printf("network  on, listening on %s\n", addressText(st.Network.Listen))
+			if st.Network.IPv4Only {
+				fmt.Println("         IPv4 only: decided before a2p2 listened on IPv6; run a2p2 net on again to add it")
+			}
 			if len(st.Listen) > 0 {
 				addresses := make([]string, 0, len(st.Listen))
 				for _, addr := range st.Listen {
@@ -511,6 +517,19 @@ func status(c *cmd) error {
 			fmt.Println("network  outbound only, accepts no incoming connections")
 		default:
 			fmt.Println("network  off, this machine only. To connect to other machines, run a2p2 net on.")
+		}
+		if st.Network.State != "off" {
+			reach := "reachable by peers: " + st.Reach.State
+			if st.Reach.Checked != "" {
+				reach += ", checked " + clock(st.Reach.Checked)
+			}
+			if st.Reach.Why != "" {
+				reach += " (" + st.Reach.Why + ")"
+			}
+			fmt.Println("         " + reach + "; a2p2 net check explains")
+		}
+		if st.Mapping != nil {
+			fmt.Println("         " + mappingText(st.Mapping))
 		}
 		if st.Waiting > 0 {
 			fmt.Printf("requests %d pending. Run a2p2 confirm to review.\n", st.Waiting)
@@ -905,14 +924,18 @@ func printAlert(w io.Writer, a localapi.Alert) {
 // terminal, recorded by the daemon (a decided request of kind network),
 // and applied by the daemon at once.
 func netCmd(c *cmd, args []string) error {
+	if len(args) > 0 && args[0] == "check" {
+		return netCheck(c, args[1:]) // observes only: no decision, no terminal needed
+	}
 	outbound := c.fs.Bool("outbound-only", false, "connect out only; listen on nothing")
+	mapPort := c.fs.Bool("map-port", false, "also ask the router to forward the listening port")
 	if err := c.fs.Parse(permute(c.fs, args)); err != nil {
 		return errUsage
 	}
 	rest := c.fs.Args()
 	if len(rest) == 0 || (rest[0] != "on" && rest[0] != "off") || len(rest) > 2 ||
-		rest[0] == "off" && (len(rest) > 1 || *outbound) || *outbound && len(rest) > 1 {
-		return usagef("a2p2 net on [ADDR] | net on --outbound-only | net off")
+		rest[0] == "off" && (len(rest) > 1 || *outbound || *mapPort) || *outbound && (len(rest) > 1 || *mapPort) {
+		return usagef("a2p2 net on [ADDR] [--map-port] | net on --outbound-only | net off")
 	}
 	if !terminal() {
 		return errors.New("run this networking command in a terminal to review and apply it")
@@ -944,6 +967,13 @@ func netCmd(c *cmd, args []string) error {
 		"on":       "This machine will listen on " + addressText(req.Listen) + ". Anyone who can reach this address can connect. Only room members can fetch room messages. This machine will also connect out.",
 	}[req.State]
 	fmt.Fprintln(os.Stderr, what)
+	if req.State == "on" {
+		fmt.Fprintln(os.Stderr, daemon.FamiliesText(req.Listen))
+	}
+	if *mapPort {
+		req.MapPort = true
+		fmt.Fprintln(os.Stderr, node.MapPortText)
+	}
 	fmt.Fprintln(os.Stderr, "The daemon applies it as soon as it is recorded.")
 	if ask("Apply this? Type yes: ") != "yes" {
 		return errors.New("nothing changed")

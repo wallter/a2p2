@@ -1105,3 +1105,106 @@ browser, a second user trying to reach the daemon, and arm64.
 inherit the home's list, or if a harness documents its Windows hook
 shell, which would let paths with spaces be quoted for it.
 
+## D48. Reachability: `a2p2 net check`, a dial-back message, IPv6 and port mapping (2026-11-24)
+
+Two reports drove this. The owner learned that a work laptop dropped every
+inbound connection only by asking a colleague; a2p2 could not tell. And
+two machines behind ordinary home routers cannot reach each other unless a
+third member is reachable or someone forwards a port by hand.
+
+- **`a2p2 net check`** is an argument of the existing `net` command, not a
+  new command, and a new local API call `net/check`, because the probes
+  need the daemon's key and address book. It decides nothing, needs no
+  terminal, and dials nothing while networking is off. The `HOST:PORT` and
+  `--invite` forms run in the CLI process under a throwaway key, so testing
+  an address before an invite neither needs a daemon nor tells the other
+  side who is asking. `status` gains `reach`; no config key, no table.
+- **New protocol message: `POST /p/v2/dialback`** (PROTOCOL 4.7). Needed
+  now because no amount of probing from inside tells a machine whether
+  others can connect to it; only a peer can, and a peer that is a member
+  is the only one a2p2 trusts with the question. Alternatives considered:
+  a public echo service (a third party, against N3); asking in a pull
+  request (the pull exchange's answers are worked out per room and held,
+  and a field there would change its shape for every room); doing
+  nothing (the report above). Old machines answer 404, which the asker
+  reports; the wire version stays 2.
+- **Why it is safe to answer.** The asker is authenticated by TLS and must
+  be a current member of a shared room. The responder dials only the IP
+  address the request came from, on at most two ports; anything else is
+  answered `not_tried`. So a member can cause at most two TCP connects and
+  TLS ClientHellos, and only to the address it asks from; the dial-back
+  adds no way to aim traffic at a third party. An earlier allowance, also
+  dialling addresses the responder's book held for the asker, was
+  removed after the second review: a member could have listed a third
+  party's endpoint as its own and had it probed at once, outside the
+  scheduler's dial budget. The limit left: a member behind a shared
+  address can cause two connection attempts to that address. To check an
+  IPv6 address the asker asks over IPv6. It closes after the handshake, skips special and (for a remote
+  asker) loopback addresses, never resolves names, and answers at a fixed
+  deadline unless everything dialled was reached. Rate limits per key (4,
+  then one per 10 minutes) and per machine (16, then one per 10 seconds,
+  at most 4 at once) bound the rest.
+- **IPv6, as part of a new decision.** A wildcard listener is one
+  dual-stack socket and global IPv6 is advertised beside IPv4 (DESIGN 11),
+  because on many home networks IPv6 needs no NAT and only a host firewall
+  stands between two members. A decision recorded before this version
+  stays IPv4 only (the role of an `on` decision now holds the word
+  `ipv6`), until the person runs `a2p2 net on` again, whose prompt names
+  the IPv6 addresses. IPv4 only on purpose: `listen` set to one IPv4
+  address. No flag, no config key.
+- **What members say they see is display only.** `saw` is validated as an
+  IP literal, shown, and compared with a router's external address. It is
+  never advertised, even after a dial-back to it: the member that reports
+  it is the one that would confirm it, so one lying member could make this
+  machine publish someone else's address. A port forwarded by hand is
+  declared with the existing `advertise` key, whose line `net check`
+  prints.
+- **`a2p2 net on --map-port`**, a flag of the existing command and a field
+  `map_port` of the existing `net` call, stored in the role of the
+  networking decision (no column, no table, no migration). It asks the
+  router to forward the listening port with PCP, then NAT-PMP, then UPnP
+  IGD, written against the RFCs and the UPnP specification with the
+  standard library only (`internal/daemon/portmap`): no new dependency,
+  because the three protocols are small and a dependency would bring a
+  router discovery we could not bound. For the same reason the macOS
+  default route is read with the frozen `syscall` routing calls, under a
+  staticcheck exception, not `golang.org/x/net/route`. It is asked at a
+  terminal with a plain warning and recorded, never on by default, never
+  through an agent tool or the page; made only for a listener on the
+  wildcard address or on this machine's address on the gateway's network,
+  and ended with that listener. The router's mapped address is the only
+  address ever verified for advertising: advertised after a member
+  reaches it, while one has within three hours, while the mapping exists
+  and while its lease has not run out; a new mapping starts unconfirmed,
+  two failed checks in a row withdraw it, and checks a changing mapping
+  asks for are paced at one per five minutes.
+- **A new file in the home, `portmap.json`**, not a table: what would
+  remove each mapping that may exist, written before each request, so
+  that `net off`, a stop, or the next start after a crash removes it.
+  It is not a database table because it must be written before a UDP or
+  HTTP request that is not part of any store transaction, and read by a
+  run that may have networking off. It holds every field a deletion
+  needs, the external port separately from the external address (a
+  mapping noted before the router answered has no address, and the second
+  review found such a record would have deleted port 0). It is written to
+  an exclusive private temporary file, synced, renamed and the directory
+  synced, and read strictly: a record that cannot be used whole, or one
+  for another router, makes the daemon send nothing and keep the file,
+  and `status` says what to remove by hand. A UPnP forward is deleted only
+  after the router says it is this machine's and a2p2's. A removal that
+  fails is shown and retried. A crash leaves a finite mapping until its lease ends (at most 2
+  hours), and a permanent UPnP rule, granted only when the router refuses
+  finite ones, until the next start on that network or a person removes
+  it on the router.
+- **Declined from the second review:** guarding against hand edits of the
+  recorded networking decision. Whoever can edit the home is the user
+  (DESIGN 10).
+- **Declined from the review:** an empty address list withdrawing a
+  machine's earlier addresses. A listener that briefly advertised nothing
+  would be forgotten by every member that can reach it only at a stored
+  address. A non-empty list already replaces the machine's own earlier
+  word.
+- **Not done:** hole punching (DESIGN 11 says why); port mapping and
+  temporary-address detection on Windows, which report "not available";
+  CGNAT and corporate networks cannot be fixed from the machine, and
+  `net check` says so.
