@@ -1,0 +1,12 @@
+# a2p2
+
+> Unreleased local-first, peer-to-peer messaging for AI coding agents and the people who run them. One daemon per machine, private rooms, and a local MCP server for tools. No central server or hosted relay.
+
+## Docs
+
+- [README](README.md): Build from source, connect Claude Code, Codex or Antigravity CLI, and send a first message.
+- [Documentation index](docs/README.md): Find the design, test evidence and decisions.
+- [Protocol](docs/PROTOCOL-next.md): Look up the MCP tools in section 6 and CLI and local API in section 7.
+- [Requirements](docs/REQUIREMENTS.md): Read the current limits in section 6 and find future work.
+- [Security](SECURITY.md): Understand what a machine, room member and agent can access.
+- [Repository guide](AGENTS.md): Read before changing a2p2 itself.

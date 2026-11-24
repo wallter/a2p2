@@ -1,64 +1,54 @@
-# Testing strategy
+# Testing
 
-The product is a delivery guarantee, so the tests are mostly about what happens
-when things go wrong. A guarantee without a test does not exist. A feature is
-not done until the test that would catch its regression exists and runs in
-`make check`. `docs/TRACE.md` lists each requirement and the tests that prove
-it; `make trace` fails if that register and `docs/REQUIREMENTS.md` disagree or
-a named test does not exist.
+Run `make check` before submitting changes. It checks Go formatting, runs
+`go vet`, checks the [requirement register](TRACE.md), and runs the Go test
+suite with the race detector. `make trace` checks just the register against
+the [requirements](REQUIREMENTS.md) and the named tests. Add a fault matrix
+row when you add a test for a delivery, ordering, security or compatibility
+guarantee.
 
-All Go tests run with `-race`. Tests never touch the real `~/.a2p2` or real
-harness configuration: everything takes `A2P2_HOME` and config paths as
-parameters. Time and randomness are injected, so expiry and retry tests are
-deterministic.
+Keep tests in temporary directories so they leave your a2p2 state and harness
+configuration alone. Use controlled clocks and seeded randomness for tests
+that need to replay the same steps.
 
-## Layers
+## What the suite covers
 
-| Layer | What it proves | Where | Run by |
-|---|---|---|---|
-| Rule models | Membership rules (who is a member and an admin, from signed log entries) and delivery rules (order, copies, handled reports, expiry, history) hold on every small schedule and on seeded random ones | `internal/members`, `internal/model/delivery` | `make check` |
-| Signed formats | One spelling per record and entry; a relay cannot alter a signed field; hostile input is refused without panics | Golden vectors in `internal/core/testdata/vectors`, token vectors, fuzz targets `FuzzParseRecord`, `FuzzParseEntry`, `FuzzDecodeToken` | `make check` runs the seeds |
-| Store | Every store method is one transaction; nothing half-applied after a failure or reopen; migrations from older databases | `internal/store` | `make check` |
-| Node, differential | The real code gives the same answers as the delivery model, after every step, on every short schedule and on random ones, with lost responses and restarts | `internal/node/differential_test.go`, `pull_differential_test.go` | `make check` |
-| Node, pull and join | Pulls, the scheduler, address book, requests, confirmation and the join exchange, over an in-memory transport that injects faults | `internal/node` | `make check` |
-| Real TLS on loopback | Mutual TLS, strangers refused, body and rate limits, waiting pulls, dead addresses, joins between two machines | `internal/peer` | `make check` |
-| Surfaces | Local API, MCP tools (golden file `internal/mcpshim/testdata/tools.json`), the page's server (token, `Host`, `Origin`), and two daemons on loopback | `internal/localapi`, `internal/mcpshim`, `internal/web`, `internal/daemon` | `make check` |
-| Harness adapters | Install, uninstall and hook output never damage existing config | `internal/harness`, temp home directories | `make check` |
-| Requirement register | Every requirement has a row and every test a row names exists | `scripts/trace.sh` | `make trace` (part of `make check`) |
-| Deep searches | Larger bounds for the model searches and some measurements | tests that read `A2P2_MODEL_DEEP=1` | `A2P2_MODEL_DEEP=1 go test ./internal/members ./internal/model/delivery ./internal/node` (minutes; 33 minutes for `internal/members` in its last recorded run) |
-| Fuzzing | Decoders accept only what they should | `go test ./internal/core -run '^$' -fuzz FuzzParseRecord -fuzztime 20s` (also `FuzzParseEntry`, `FuzzDecodeToken`) | by hand; see CI below |
-| Harness end-to-end | Real Claude Code, Codex and agy call the tools and exchange messages | `scripts/e2e/run.sh` | `make e2e HARNESS=claude`; manual, spends model tokens; **not re-run since the rewrite** |
-
-A model test shows that a rule is sound in the small executable model. It does
-not show that the daemon follows the rule; the differential tests and the node
-tests do that.
+| Where | What it checks |
+|---|---|
+| [`internal/members`](../internal/members), [`internal/model/delivery`](../internal/model/delivery) | Membership and delivery rules over bounded searches and seeded random schedules. |
+| [`internal/core`](../internal/core) | Signed records, log entries and invite tokens, including fixed test vectors and fuzz seeds. |
+| [`internal/store`](../internal/store) | Transaction rollback, reopening a database and migrations. |
+| [`internal/node`](../internal/node) | Pulls, joins and membership changes over an in-memory transport that can inject faults. Differential tests compare the implementation with the delivery model after each step. |
+| [`internal/peer`](../internal/peer) | Mutual TLS on loopback, joins, access checks, request limits, waiting pulls and address fallback. |
+| [`internal/localapi`](../internal/localapi), [`internal/mcpshim`](../internal/mcpshim), [`internal/web`](../internal/web), [`internal/daemon`](../internal/daemon) | Unix-socket API, MCP calls, web server checks and integration with two daemons. |
+| [`internal/harness`](../internal/harness) | Install and uninstall preserve the settings exercised by the tests. Hook tests check the output sent to the harness. |
 
 ## Fault matrix
 
-One row per fault. "Model" tests exercise `internal/members` or
-`internal/model/delivery` only. Every other test runs the real code.
+Rows marked "model" include tests of the rules in `internal/members` or
+`internal/model/delivery`. Tests without that label exercise the implementation.
 
 | Fault | What happens | Test |
 |---|---|---|
-| Lost response | The retry gives one copy, in order | `TestRealExchangeAgreesWithTheDeliveryModelOnEveryShortSchedule`; model `TestLostReplyRetryAndRestartsGiveOneCopyInOrder` |
-| Author restarts | A new stream is written, linked to every head held; nothing forks | `TestEveryStartWritesANewStreamLinkedToEveryHeadHeld`, `TestRealExchangeAgreesWithTheDeliveryModelOnRandomSchedules` |
+| Lost response | The retry gives one copy in order | `TestRealExchangeAgreesWithTheDeliveryModelOnEveryShortSchedule`, model `TestLostReplyRetryAndRestartsGiveOneCopyInOrder` |
+| Author restarts | The author writes to a new stream linked to every head it holds | `TestEveryStartWritesANewStreamLinkedToEveryHeadHeld`, `TestRealExchangeAgreesWithTheDeliveryModelOnRandomSchedules` |
 | Relay restarts | Its database gives the same answers, and it serves again | `TestReopeningTheDatabaseGivesTheSameAnswers`, `TestARestoredServerPagesTheLogFromAMemberThenServesANewPeer` |
-| Reader restarts between showing and confirming | The entries are shown again; handled is not duplicated | `TestCrashBetweenShowAndSeenShowsTheEntriesAgain`; model `TestReaderRestoredMaySeeAgainButHandledIsNotDuplicatedAndNothingSkipped` |
-| Restore from an older database copy | A restored server is healed by one resend; a restored admin signs nothing until it has pulled the log | `TestAServerRestoredWithFewEntriesMissingIsHealedByOneResend`, `TestARestoredDaemonSignsNothingForARoomUntilItHasPulledItsLog`, `TestConfirmationOfAnEntryLostToARestoreIsRefused` |
+| Reader restarts between showing and confirming | The entries appear again. An existing handled report stays single. | `TestCrashBetweenShowAndSeenShowsTheEntriesAgain`, model `TestReaderRestoredMaySeeAgainButHandledIsNotDuplicatedAndNothingSkipped` |
+| Restore from an older database copy | One resend repairs a few missing entries. By default a restored admin must pull the log before signing. | `TestAServerRestoredWithFewEntriesMissingIsHealedByOneResend`, `TestARestoredDaemonSignsNothingForARoomUntilItHasPulledItsLog`, `TestConfirmationOfAnEntryLostToARestoreIsRefused` |
 | Restored author whose newer holders are all asleep | A new stream is started without a fork | model `TestAuthorRestoredWithEveryNewerHolderAsleepWritesANewStreamWithoutFork` |
-| Machine restored from a very old backup | Catches up from the room's record when it knows a current member | `TestJoinRestoredMachineThatKnowsNoCurrentMemberCatchesUp` |
+| Old backup knows no current member | A new invite from a current admin lets the restored machine catch up | `TestJoinRestoredMachineThatKnowsNoCurrentMemberCatchesUp` |
 | Two machines never awake together | Messages and handled reports pass through a third member that took a copy | `TestRelayCarriesAMessageAndItsHandledReportBetweenAnAuthorAndAReaderNeverAwakeTogether`, `TestTwoMachinesNeverAwakeTogetherExchangeMessagesThroughOffersToARelay` |
-| Relay alters or strips text | An altered record is refused; stripped text is not believed and is repaired | `TestARelayThatAltersOrStripsTextIsNotBelieved`, `TestRelayCannotAlterAnySignedField`, `TestRelayMayDropTextAndTheHeaderStillVerifies` |
-| Text expires; clocks differ | Expiry follows each holder's own clock and never resurrects text | `TestExpiredTextStaysExpiredWhenTheClockGoesBackOrTextIsOfferedAgain`; model `TestExpiryWithDifferingClocksIsByEachHoldersOwnClockAndNeverResurrects` |
+| Relay alters or strips text | The reader refuses altered text and can recover missing text from another copy | `TestARelayThatAltersOrStripsTextIsNotBelieved`, `TestRelayCannotAlterAnySignedField`, `TestRelayMayDropTextAndTheHeaderStillVerifies` |
+| Text expires at different times on different machines | Each machine uses its own clock. Expired text stays expired. | `TestExpiredTextStaysExpiredWhenTheClockGoesBackOrTextIsOfferedAgain`, model `TestExpiryWithDifferingClocksIsByEachHoldersOwnClockAndNeverResurrects` |
 | Away longer than 30 days | The machine is told what is missing, then continues | model `TestAwayThirtyOneDaysIsToldWhatIsMissingThenContinues` |
-| Machine added without history | It is never given earlier text, including through an offer | `TestANewcomerWithoutHistoryIsNeverGivenEarlierTextIncludingThroughAnOffer`, `TestMachineAddedWithoutHistorySeesNoEarlierTextThroughAnySurface` |
-| Machine removed: refused | Every not-member refusal gives the same bytes | `TestARemovedMachineIsRefused`, `TestTheThreeNotMemberRefusalsAreTheSameBytes` |
-| Machine removed: response held while it waited | The held response is not released | `TestAHeldResponseIsNotReleasedToAPeerRemovedWhileItWaited` |
-| Machine removed: its late messages | They can still reach members, marked as from a removed machine | `TestRemovedMachineMarksItsOwnRecordsAndGrantsOverTheHeadLimitAreRefused`; model `TestMessageOfARemovedAuthorReachesAMachineThatNeverMetItMarked` |
-| Leave and rejoin | An old invite cannot undo a leave; a late response is not applied; nothing of the old generation is released | `TestJoinOldInviteCannotUndoALeave`, `TestLeaveThenALateResponseIsNotApplied`, `TestALeaveAndRejoinBetweenBuildAndReleaseReleasesNothingOfTheOldGeneration`, `TestJoinAgainAfterLeavingLocallySignsNoNewGrant` |
-| Stolen admin key | Other admins remove it; one key cannot change the admin set once there are three admins | model `TestOneKeyCannotChangeAdminSetOnceThereAreThreeAdmins`, `TestCreatorKeyIsRemovableByTwoOtherAdmins`, `TestStolenKeyCompletingAPendingRemovalDecidesTheTargetsUnseenEntries` |
-| Forking admin key | A fork is refused by machines holding the real entry and settled by another admin's removal | `TestForkInTwoAdminRoomIsSettledByTheOtherAdminsRemoval`; model `TestForkInTwoAdminRoomIsSettledByTheOtherAdminAlone`, `TestStolenCreatorKeyForkFromFirstEntryIsRefusedByEveryMember` |
-| Lost admin | Two of three replace it; with two, members stay manageable; with none, membership freezes | model `TestLostAdminOfThreeIsReplacedByTheOtherTwo`, `TestLostAdminOfTwoLeavesMembersManageableAdminSetFixed`, `TestAllAdminsLostFreezesMembershipNobodyPromoted` |
+| Machine added without history | Text before the grant's history boundary stays hidden, including in offers | `TestANewcomerWithoutHistoryIsNeverGivenEarlierTextIncludingThroughAnOffer`, `TestMachineAddedWithoutHistorySeesNoEarlierTextThroughAnySurface` |
+| Removed machine makes a request | Refused with the same bytes as other non-member requests | `TestARemovedMachineIsRefused`, `TestTheThreeNotMemberRefusalsAreTheSameBytes` |
+| Machine removed while waiting for a response | The server withholds the held response | `TestAHeldResponseIsNotReleasedToAPeerRemovedWhileItWaited` |
+| Late messages from a removed machine | They can arrive marked as from a removed machine | `TestRemovalOfAMemberByOneAdminKeepsItsRecordsMarked`, `TestRemovedMachineMarksItsOwnRecordsAndGrantsOverTheHeadLimitAreRefused`, model `TestMessageOfARemovedAuthorReachesAMachineThatNeverMetItMarked` |
+| Leave and rejoin | An old invite cannot undo a leave. Responses from before the leave are dropped. | `TestJoinOldInviteCannotUndoALeave`, `TestLeaveThenALateResponseIsNotApplied`, `TestALeaveAndRejoinBetweenBuildAndReleaseReleasesNothingOfTheOldGeneration`, `TestJoinAgainAfterLeavingLocallySignsNoNewGrant` |
+| Stolen admin key | Two other admins can remove it. The stolen key alone cannot change the admin set once there are three admins. | model `TestOneKeyCannotChangeAdminSetOnceThereAreThreeAdmins`, model `TestCreatorKeyIsRemovableByTwoOtherAdmins`, model `TestStolenKeyCompletingAPendingRemovalDecidesTheTargetsUnseenEntries` |
+| Forking admin key | Machines holding the real entry refuse the fork. Another admin can settle it by removing the key. | `TestForkInTwoAdminRoomIsSettledByTheOtherAdminsRemoval`, model `TestForkInTwoAdminRoomIsSettledByTheOtherAdminAlone`, model `TestStolenCreatorKeyForkFromFirstEntryIsRefusedByEveryMember` |
+| Lost admin | Two of three can replace it. A sole remaining admin can still add or remove members. With no admins left, membership stays fixed. | model `TestLostAdminOfThreeIsReplacedByTheOtherTwo`, model `TestLostAdminOfTwoLeavesMembersManageableAdminSetFixed`, model `TestAllAdminsLostFreezesMembershipNobodyPromoted` |
 | Invite used by a second key | Refused | `TestJoinSecretPresentedByASecondKeyIsRefused` |
 | Invite expired | Refused before anything is signed | `TestJoinExpiresBeforeSigning`, `TestJoinExpiryAtWriteTimeAndConcurrentAccepts` |
 | Invite used after a leave | See leave and rejoin | `TestJoinOldInviteCannotUndoALeave` |
@@ -68,50 +58,57 @@ One row per fault. "Model" tests exercise `internal/members` or
 | Machine cannot accept connections | It converges through its own requests | `TestAMachineThatOnlyOpensRequestsConverges`, `TestOverTLSAMachineWithNoListenerConvergesThroughItsOwnRequests` |
 | Dead first address | The second address is reached | `TestOverTLSAPeerWithADeadFirstAddressIsReachedOnItsSecond`, `TestOverTLSAStalledFirstAddressGivesTheNextAttemptToTheSecond` |
 | Oversized request | 413 before the body is read | `TestOverTLSAnOversizedBodyGets413BeforeItIsRead`, `TestJoinRouteRefusesOversizeBodies` |
-| Malformed request | 400; strict JSON | `TestOverTLSMalformedOrNonStrictJSONGets400`, `TestPullRequestsAreCheckedAtEveryLevel` |
+| Malformed request | 400 for invalid or non-strict JSON | `TestOverTLSMalformedOrNonStrictJSONGets400`, `TestPullRequestsAreCheckedAtEveryLevel` |
 | Response that does not fit its request | Refused before anything is applied | `TestAResponseThatDoesNotFitItsRequestIsRefusedBeforeAnythingIsApplied` |
 | Too many requests | 429 with `Retry-After` | `TestOverTLSTheRateLimitGives429WithRetryAfter` |
 | Peer that answers every wait at once | It is backed off | `TestAPeerThatAnswersEveryWaitAtOnceIsBackedOff` |
 | Stranger connects | The handshake fails and its request is refused | `TestOverTLSAStrangersHandshakeFailsAndItsRequestIsRefused` |
-| Networking off | Nothing is dialled; off until a person decides | `TestNetworkingOffDialsNothingAndOutboundDials`, `TestNetworkingIsOffUntilAPersonsDecisionIsRecorded` |
+| Networking off | The daemon makes no peer connections until a person enables networking | `TestNetworkingOffDialsNothingAndOutboundDials`, `TestNetworkingIsOffUntilAPersonsDecisionIsRecorded` |
 | Page request with wrong `Origin` or `Host`, or no token | Refused | `TestAuthHostOrigin`, `TestPageDecisionNeedsTheExactOriginAndShowsTheFullFingerprint` |
 | Message text that looks like instructions | Shown as labelled peer data | `TestHostileStringsAreInert`, `TestInboxForgedHeadersStayInert` |
-| A database write fails partway | The store leaves no half-applied write | `TestFailureBetweenStatementsLeavesNoHalfAppliedWrite`, `TestLogBatchThatFailsLeavesNothingApplied` (a failure inside a whole pull: no test) |
-| Power loss | No test (restart and reopen are tested, a cut mid-write is not) | no test |
-| Clock set back or ahead | Text that expired stays expired; replacement order follows the author's history, not its clock; a record dated over a day ahead waits | `TestTextThatExpiredBeforeItWasShownIsAnExpiredNoticeEvenAfterTheClockGoesBack`, `TestAFutureRecordLeavesNoSeenAndIsTakenOnceTheClockAllows`; model `TestNewestReplacementIsByTheAuthorsHistoryNotItsClock` |
+| Database write fails partway | The store rolls back the write or log batch | `TestFailureBetweenStatementsLeavesNoHalfAppliedWrite`, `TestLogBatchThatFailsLeavesNothingApplied` |
+| Power loss | Open test gap | None |
+| Clock set back or ahead | Expired text stays expired. Replacement order follows the author's history. A record dated over a day ahead waits. | `TestTextThatExpiredBeforeItWasShownIsAnExpiredNoticeEvenAfterTheClockGoesBack`, `TestAFutureRecordLeavesNoSeenAndIsTakenOnceTheClockAllows`, model `TestNewestReplacementIsByTheAuthorsHistoryNotItsClock` |
 
 ## Acceptance
 
-1. Two daemons on loopback pair, send, reply, acknowledge and trace:
-   `TestTwoDaemonsOnLoopbackPairSendReplyAckAndTrace`, and the join over real
-   TLS, `TestJoinOverTLSBetweenTwoMachines`.
-2. A message reaches three machines over real TLS and its handled report
-   returns: `TestOverTLSAMessageReachesThreeMachinesAndItsHandledReportReturns`.
-3. A stranger can neither read nor write: `TestOverTLSAStrangersHandshakeFailsAndItsRequestIsRefused`.
-4. The seven tool definitions do not drift and fit the budget: `TestToolsGolden`,
-   `TestToolDefinitionsFitTheTokenBudget`.
-5. Requirement by requirement: `docs/TRACE.md`.
+1. `TestTwoDaemonsOnLoopbackPairSendReplyAckAndTrace` covers messaging with two
+   daemons. `TestJoinOverTLSBetweenTwoMachines` covers the join itself.
+2. A message reaches three machines over loopback TLS and its handled report
+   returns in `TestOverTLSAMessageReachesThreeMachinesAndItsHandledReportReturns`.
+3. The seven MCP tool definitions match their fixture and fit the token budget
+   in `TestToolsGolden` and `TestToolDefinitionsFitTheTokenBudget`.
 
 ## CI
 
-GitHub Actions runs `make check`, `make lint`, `make fuzz FUZZTIME=30s`,
-`make vuln` and `make release` (cross-compiles for linux and darwin). `make
-fuzz` runs only `FuzzDecodeEnvelope`, the target for the old envelope; the new
-targets named above are not fuzzed in CI, only run on their seeds by `make
-check`. Harness end-to-end runs are not in CI because they need logged-in CLIs.
-Every non-trivial change gets an independent read from another model family
-(`make review`) before it is committed.
+The [GitHub Actions workflow](../.github/workflows/ci.yml) is configured for
+Linux and macOS. It runs `make check`, `make lint`, `make fuzz FUZZTIME=30s`,
+`make vuln` and `make release`. The last command builds Linux and macOS
+binaries. The fuzz job exercises `FuzzParseRecord` and `FuzzParseEntry`.
+The Go test suite also runs the seeds for `FuzzDecodeToken`.
 
-## Not tested
+## Optional checks
 
-- The page's script in a browser. The page's server is tested; the script has
-  never been run in a browser.
-- Real harness runs since the rewrite (`make e2e`).
-- Two physical machines on a LAN, and a packet capture of their traffic.
-- Power loss or a kill at an arbitrary point (restarts are tested at chosen points).
-- Throughput and memory. There are cost tests for message sizes in a large
-  room (`TestPullSizesInASixtyFourMachineRoomAfterThirtyDaysOfDailyRestarts`)
-  but no benchmarks, and no budget has been measured.
-- Hook text reaching Codex and Antigravity models, the end-of-turn hook, and
-  interactive harness sessions.
-- A machine whose clock is wrong by days on a real network.
+- `A2P2_MODEL_DEEP=1 go test ./internal/members ./internal/model/delivery ./internal/node`
+  uses larger search bounds and includes measurements. The last recorded
+  deep membership run took 33 minutes.
+- `go test ./internal/core -run '^$' -fuzz FuzzParseRecord -fuzztime 20s`
+  fuzzes the record parser. Use `FuzzParseEntry` for log entries or
+  `FuzzDecodeToken` for invite tokens.
+- `make e2e HARNESS=claude` uses a logged-in Claude Code CLI and spends model
+  tokens. The end-to-end runner also accepts `codex`, `agy` or `all`. The
+  [harness results](research/03-harness-integration.md) predate the delivery
+  rewrite.
+
+## Test gaps
+
+- The local page's JavaScript in a browser.
+- Logged-in harness runs after the delivery rewrite, interactive sessions,
+  end-of-turn hooks, and Codex and Antigravity models seeing hook text.
+- Two physical machines on a LAN, packet captures, and a real network with a
+  machine whose clock is wrong by days.
+- Power loss, a kill at arbitrary points, and a database failure during a full
+  pull. Tests cover restarts at chosen points and individual store failures.
+- End-to-end throughput and memory. There are membership benchmarks and
+  measurements of request and response bytes, including
+  `TestPullSizesInASixtyFourMachineRoomAfterThirtyDaysOfDailyRestarts`.

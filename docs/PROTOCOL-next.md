@@ -1,9 +1,14 @@
-# Wire and local formats for the next version (draft, not built)
+# Wire protocol and local interfaces
 
-**Status: draft for review, revision 2, 2026-11-23; nothing here is built.**
-Revised after `docs/research/decisions/design-next-review3-sol.md`. Exact
-formats for what `docs/DESIGN-next.md` describes; the design says why, this
-file says exactly what. Cited there as "PROTOCOL n".
+**Status.** The unreleased daemon uses the stage 1 protocol. This document
+started as revision 2 on 2026-11-23, after the review in
+`design-next-review3-sol.md`. See [Design](DESIGN-next.md) for the rules and
+[Decisions](DECISIONS.md) for changes made during implementation.
+The design cites these sections as "PROTOCOL n".
+
+- [Conventions](#0-conventions), [record header](#1-record-header), and [receiving a record](#2-receiving-a-record)
+- [Log entry](#3-log-entry), [pull](#4-pull), and [join](#5-join)
+- [MCP tools](#6-mcp-tools-golden-file), [local API and CLI](#7-local-api-and-cli), [schema](#8-schema-migrations-2-to-9), and [golden vectors](#9-golden-vectors)
 
 ## 0. Conventions
 
@@ -22,26 +27,29 @@ file says exactly what. Cited there as "PROTOCOL n".
 | Agent id (local API, tools) | `<label>@<short node>` |
 | Base64 | RFC 4648 section 4 alphabet, `=` padding required, pad bits zero, no whitespace or line breaks |
 
-**Strict JSON** (headers, entries, bodies, and every peer request and
-response): RFC 8259, UTF-8 without BOM. Invalid UTF-8, and `\u` escapes
-that form a lone surrogate, are errors. Object keys are case-sensitive and
-compared after unescaping; a duplicate key at any depth is an error. Signed
-JSON nests at most 16 levels; deeper is `bad_json`. `null` is never a valid
-value, at any depth. Writers emit compact JSON with fields in any order
-and omit every field whose value would be zero, empty, false or absent;
-receivers accept insignificant whitespace, parse by name, and treat a
-present zero, empty string, empty array or `false` in a known field as an
-error. An unknown top-level field may hold any value except null. Signed bytes
-are never re-encoded: they are stored and passed on exactly as received.
+Headers, entries, bodies and all peer requests and responses use
+**strict JSON** (RFC 8259, UTF-8 without BOM).
 
-A peer's key is its node id, learned from the room log or an invite token;
-every outbound TLS connection is pinned to it. Addresses are hints, learned
-from the token, a peer's `addrs`, and `peers` in responses, stored per
-node (`peer_addrs`, section 8) and tried most recent success first. At most
-8 per node; an address a node reports for itself takes a slot before one
-heard from a third party; one that has failed for 24 hours and at least 5
-attempts is dropped. Dials to addresses that have never completed a pinned
-handshake share one budget for the daemon (2 a second, burst 8).
+- Reject invalid UTF-8 and `\u` escapes that form a lone surrogate.
+- Compare case-sensitive keys after unescaping. Reject duplicate keys at
+  any depth. More than 16 levels in signed JSON is `bad_json`.
+- Reject `null` at any depth. Unknown top-level fields can hold any other
+  value.
+- Writers emit compact JSON in any field order and omit zero, empty,
+  false or absent values. Receivers accept insignificant whitespace and
+  parse by name. A known field with zero, an empty string, an empty
+  array or `false` is an error.
+- Store and pass on the exact signed bytes.
+
+A peer's key is its node id. Learn it from the room log or an invite
+token and pin every outbound TLS connection to it.
+
+Learn addresses from the token, a peer's `addrs` and `peers` in responses.
+Keep at most 8 per node (`peer_addrs`, section 8) and try them by most
+recent success. Give addresses a node reports for itself priority for
+those slots. Drop an address after 24 hours of failure and at least 5
+failed attempts. Dials to addresses that have yet to complete a pinned
+handshake share one daemon budget (2 a second, burst 8).
 
 ## 1. Record header
 
@@ -108,9 +116,9 @@ bytes refuses to write: `too_many_heads`.
 
 ## 2. Receiving a record
 
-Wire object: `{"h": base64(header), "s": base64(signature), "b":
-base64(body)}`; `b` omitted when no text is sent. Checks in this order;
-the first failure gives the code and the record is not stored.
+The wire object is `{"h": base64(header), "s": base64(signature), "b":
+base64(body)}`. Omit `b` when sending no text. Run the checks in order. The
+first failure gives the code and prevents storing the record.
 
 **Syntax**
 
@@ -389,7 +397,7 @@ Sizes are measured by `TestPullSizesInASixtyFourMachineRoomAfterThirtyDaysOfDail
 
 | Step | Action | Failure |
 |---|---|---|
-| 1 | TLS peer key → node id | handshake fails |
+| 1 | Use the TLS peer key as the node id | handshake fails |
 | 2 | declared size, then the rate limit for this peer, both before the body is read | 413 `too_large`, 429 `rate_limited` |
 | 3 | strict JSON at every level, `v`, field limits, the shape of 4.1 | 400 `bad_request` |
 | 4 | room known; apply `log.entries` (section 3), from a non-member all or none: only if, applied, they make it a member | 403 `not_member` (also for an unknown room) |
@@ -527,13 +535,14 @@ new grant is signed if it is still a member; approval returns the log).
 | 429 | `rate_limited`, `Retry-After` | 10 requests per minute per source IP address, counted before the body is read; 10 per minute per key that presented a valid secret; polls naming an unknown invite share 60 per minute, counted before any lookup |
 | 503 | `unavailable`, `Retry-After` | the room already has 32 requests waiting for a person |
 
-The joiner polls every `retry_ms`, doubling to 60 s, until signed (and
-`more` is false), refused or expired, and tells the person the outcome.
+The joiner starts polling at an interval of `retry_ms` and doubles it
+up to 60 s. It stops on signed with `more` false, refused or expired,
+and tells the person the outcome.
 
 ## 6. MCP tools (golden file)
 
-`internal/mcpshim/testdata/tools.json` after the change. Compact: 3,741
-bytes; A2 proxy ⌈3,741 / 4⌉ = 936 ≤ 1,000.
+The [golden file](../internal/mcpshim/testdata/tools.json) is 3,741 bytes
+in compact JSON. The A2 proxy is ⌈3,741 / 4⌉ = 936 ≤ 1,000.
 
 ```json
 [
@@ -706,8 +715,9 @@ Tool behaviour:
 
 ## 7. Local API and CLI
 
-Socket calls are `POST /v1/<name>`, JSON in and out; errors `{"error"}` with
-400 (user error) or 500. CLI `--json` prints the response unchanged.
+Socket calls use `POST /v1/<name>` with JSON requests and responses.
+Errors return `{"error"}` with 400 (user error) or 500. CLI `--json`
+prints the response unchanged.
 
 | Call | Request | Response |
 |---|---|---|
@@ -732,25 +742,37 @@ Socket calls are `POST /v1/<name>`, JSON in and out; errors `{"error"}` with
 | `room/leave` (new) | `{"room"}` | `{}` |
 | `room/list` (new) | `{"room"?}` | `{"rooms":[{"id","label","members":[…],"admins":[…],"pending":[…],"no_effect":[{"entry","reason"}],"forks":[…],"limits":[…]}]}` |
 
-Every machine has a room labelled `local` with itself as the only member,
-made at first start; it cannot be invited to or left. Networking has three
-states: `off` (no listener, no pulls, no join polling, no dials),
-`outbound` (everything except a listener: requirement N1) and `on`. The
-socket is open to any program running as the same user: `confirm`, `net`
-and `room/join/accept` are kept out of the agent tools and hooks and every
-use is recorded, which is a guard rail and not a lock (REQUIREMENTS 6).
+At first start each machine creates `local` with itself as the only
+member. The room cannot be shared by invite or left.
+
+Networking states:
+
+- `off` has no listener, pulls, join polling or dials.
+- `outbound` has everything except a listener (requirement N1).
+- `on` includes a listener.
+
+Any program running as the same user can call the socket. The agent tools
+and hooks omit `confirm`, `net` and `room/join/accept`. The daemon records
+each use of those calls. See [Requirements section 6](REQUIREMENTS.md#6-limits-in-plain-words).
 
 `Entry`: `{"key","version","kind":"message"|"withdrawn"|"replaced"|"expired"|"voided","id","room","from","from_node","author_removed","to","parent","thread","parent_state":"here"|"missing"|"expired"|"withdrawn","late","created","text","choices"}`.
 `Wait`: `{"room","author","have","known","since","reason":"text"|"link"|"gap"}`.
 
-CLI added: `confirm [<id>] [--decline]` (no id: list), `alerts [--wait
-<seconds>]`, `room admin <room> <machine>`, `room leave <room>`. Changed:
-`room invite <room> [--history] [--member|--admin]`, `join` (token on stdin,
-shows the preview, asks on the terminal, then waits unless `--no-wait`),
-`send --reply-to --ask-handled --replaces`, `inbox --thread`, `trace`,
-`room list`, `net on [<addr>] [--outbound-only]`, `net off`. `confirm`,
-`net` and the approval step of `join` refuse unless stdin is a terminal
-(`join` without one prints the preview and stops).
+The CLI follows the socket calls above. See `a2p2 help` for the full syntax.
+
+- `confirm [<id>] [--decline]` lists requests without an id.
+  `alerts [--wait <seconds>]` shows or waits for alerts.
+- Room commands include `room list [ROOM]`, `room admin <room> <machine>`,
+  `room leave <room>` and `room invite <room> [--history] [--member|--admin]`.
+- `join [TOKEN] [--no-wait]` reads the token on stdin when omitted. It
+  previews the invite, asks at the terminal and waits unless `--no-wait`
+  is set.
+- `send` supports `--reply-to`, `--ask-handled` and `--replaces`.
+  `inbox --thread ID` and `trace ID` inspect messages.
+- `net on [<addr>] [--outbound-only]` and `net off` change network state.
+
+`confirm`, `net` and the approval step of `join` require a terminal on
+stdin. Without one, `join` prints the preview and stops.
 
 ## 8. Schema (migrations 2 to 9)
 
@@ -790,10 +812,10 @@ in causal order within a batch.
 
 ## 9. Golden vectors
 
-Step 1 generates these with a fixed test key, commits them under
-`internal/core/testdata/vectors/`, and tests that the decoder gives each
-the stated outcome. Each vector holds the wire object, the expected id or
-code, and a one-line note.
+Step 1 used a fixed test key to generate
+[these vectors](../internal/core/testdata/vectors/). The decoder tests
+check the expected outcomes. Each vector holds a wire object, an expected
+id or code, and a one-line note.
 
 | Name | Proves |
 |---|---|
