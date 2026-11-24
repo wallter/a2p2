@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -121,6 +122,7 @@ type harness struct {
 	ids     uint64 // other random bytes
 	texts   int
 	log     []string
+	ops     []op // what log says, to replay a failing schedule (A2P2_MODEL_DUMP)
 	stopped bool
 	c       *counts
 	// px, when set, runs the real exchange and the room log instead of
@@ -245,6 +247,7 @@ func (h *harness) clone() *harness {
 	}
 	c.backups = slices.Clone(h.backups)
 	c.log = slices.Clone(h.log)
+	c.ops = slices.Clone(h.ops)
 	if h.px != nil {
 		c.px = h.px.clone()
 	}
@@ -363,6 +366,9 @@ func (o op) String() string {
 
 func (h *harness) fail(format string, a ...any) {
 	h.t.Helper()
+	if os.Getenv("A2P2_MODEL_DUMP") == "1" {
+		h.t.Logf("operations (A2P2_MODEL_REDUCE reads these):\n%s", dumpOps(h.ops))
+	}
 	h.t.Fatalf("after:\n  %s\n%s", strings.Join(h.log, "\n  "), fmt.Sprintf(format, a...))
 }
 
@@ -519,6 +525,7 @@ func (h *harness) apply(o op) *harness {
 func (h *harness) do(o op, variant int) {
 	h.t.Helper()
 	h.log = append(h.log, o.String())
+	h.ops = append(h.ops, o)
 	ctx := context.Background()
 	if !o.same {
 		h.advance(delivery.Hour)
@@ -1496,9 +1503,13 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 	if testing.Short() {
 		runs = 3
 	}
-	r := rand.New(rand.NewPCG(20261123, 3))
-	lr := rand.New(rand.NewPCG(20261124, 11))
-	rr := rand.New(rand.NewPCG(20261124, 17))
+	s1, s2 := modelSeed(t, 20261123), uint64(20261124)
+	if s1 != 20261123 {
+		s2 = s1
+	}
+	r := rand.New(rand.NewPCG(s1, 3))
+	lr := rand.New(rand.NewPCG(s2, 11))
+	rr := rand.New(rand.NewPCG(s2, 17))
 	c := &counts{}
 	total := 0
 	for i := 0; i < runs; i++ {

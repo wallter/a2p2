@@ -27,7 +27,14 @@ package node
 //   - A lost response loses the response of the round's last request: the
 //     server has then seen the requester's whole summary, as the model's
 //     server has. If the requester had applied the round's first response
-//     (its log entries), the model's requester learns those changes too.
+//     (its log entries), the model's requester learns those changes too,
+//     before its one pull, as the real one did before asking for the page.
+//     The model's pull offers only if the real requests before the lost
+//     one did, and with a limit of one its page may be larger than the
+//     real one (one record): the real page must then be part of it.
+//   - An observation made only through a lost exchange (the responses
+//     applied before the lost one) has no model counterpart: an offer
+//     built on it is left out of the pull, and counted.
 //   - A pull whose server knows of its own removal while the requester does
 //     not is skipped (and counted): the requester learns it from the first
 //     response and stops, so the server has seen only digests, while the
@@ -47,6 +54,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -74,6 +82,21 @@ const (
 )
 
 func deepModel() bool { return os.Getenv("A2P2_MODEL_DEEP") == "1" }
+
+// modelSeed is the seed of a random differential test: def, unless
+// A2P2_MODEL_SEED names another (a seed sweep, `make model-sweep`).
+func modelSeed(t testing.TB, def uint64) uint64 {
+	v := os.Getenv("A2P2_MODEL_SEED")
+	if v == "" {
+		return def
+	}
+	s, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		t.Fatalf("A2P2_MODEL_SEED=%q: %v", v, err)
+	}
+	t.Logf("seed %d", s)
+	return s
+}
 
 func pullFlags(n int) string {
 	var out []string
@@ -146,6 +169,9 @@ type pxState struct {
 	gapsUnknown map[delivery.MachineID]bool
 	c           *pxCounts
 	offers      int // records offered by the requests up to a lost response
+	// pageSubset: the last pull's page was lost after offers over several
+	// requests; see pullRest.
+	pageSubset bool
 }
 
 // knownGaps is the model's waiting list mw of a machine that served, after
@@ -487,6 +513,7 @@ func (p *pxState) pull(h *harness, o op) {
 		return
 	}
 	p.c.pulls++
+	p.pageSubset = false
 	ctx := context.Background()
 	opt := delivery.PullOpt{Offer: o.n&pullOffer != 0, LostReply: o.n&pullLost != 0}
 	offers := 0
@@ -546,8 +573,12 @@ func (p *pxState) pull(h *harness, o op) {
 	// sameCopies), or newer. An offer built on either may offer again what
 	// the server held already; see sameTexts.
 	state := func(x store.Held) string { return fmt.Sprintf("%s/%v", x.Reason, x.Record.Body() != nil) }
+	// So may a real offer cut by a limit of one: the round sends the rest
+	// of its one offer, built on the observation the round began with
+	// (4.3), where each model pull builds a new offer on the summary the
+	// last one returned.
 	var heldBefore map[string]string
-	if p.lostAfter[[2]delivery.MachineID{pm, sm}] {
+	if p.lostAfter[[2]delivery.MachineID{pm, sm}] || opt.Offer && opt.Limit == 1 {
 		heldBefore = map[string]string{}
 		for id, x := range h.all(ss) {
 			heldBefore[id] = state(x)
@@ -588,16 +619,28 @@ func (p *pxState) pull(h *harness, o op) {
 				}
 				got[h.id(id)] = true
 			}
-			if a, b := slices.Sorted(maps.Keys(want)), slices.Sorted(maps.Keys(got)); !slices.Equal(a, b) {
+			a, b := slices.Sorted(maps.Keys(want)), slices.Sorted(maps.Keys(got))
+			if c.what == "pages" && p.pageSubset && len(b) <= 1 && (len(b) == 0 || want[b[0]]) {
+				p.c.uncompared += len(a) - len(b) // text the model's larger page carried
+				a = b
+			}
+			if !slices.Equal(a, b) {
 				h.fail("text sent in %s: model %v, implementation %v", c.what, a, b)
 			}
 			p.c.texts += len(want)
 		}
 	}
 	fails := func(what string, merr error) {
-		_, ierr := real()
+		st, ierr := real()
 		if merr == nil || ierr == nil {
 			h.fail("%s: model %v, implementation %v", what, merr, ierr)
+		}
+		if st.Responses > 0 {
+			// Refused part way (seed 24: a server restored to before it
+			// knew of the requester's removal answered a request before it
+			// refused one). The requester observed the server from that
+			// answer; the model's refused pull observed nothing.
+			p.lostAfter[[2]delivery.MachineID{pm, sm}] = true
 		}
 		p.c.failed++
 	}
@@ -633,6 +676,15 @@ func (p *pxState) pull(h *harness, o op) {
 		opt.Offer = false
 		p.c.offerDropped++
 		h.log[len(h.log)-1] += " (offer left out: the server knows of its own removal)"
+	}
+	if opt.Offer && p.lostAfter[[2]delivery.MachineID{pm, sm}] && !h.w.Observed(pm, sm) {
+		// The requester's only observation of the server came from the
+		// responses it applied before a lost one; the model's lost pull
+		// gives it none, so the model offers nothing where the real
+		// requester offers on those digests. Such pulls run without it.
+		opt.Offer = false
+		p.c.offerDropped++
+		h.log[len(h.log)-1] += " (offer left out: observed only through a lost exchange)"
 	}
 	h.prune(ps)
 	h.prune(ss)
@@ -711,8 +763,24 @@ func (p *pxState) pullRest(h *harness, pm, sm delivery.MachineID, kp2 int, opt d
 		// The model's one request offers what the real requests up to the
 		// lost one offered, counted on the wire.
 		mopt := opt
+		if p.offers == 0 {
+			// The real requests up to the lost one offered nothing: an
+			// offer built on an empty observation waits for the peer's
+			// detail, which came in the lost response (4.3 step 3).
+			mopt.Offer = false
+		}
 		if opt.Limit > 0 {
 			mopt.Limit = max(p.offers, 1)
+			// The model's one limit bounds its page too, the real page
+			// limit is one: the real page is then one of the model's.
+			p.pageSubset = mopt.Limit > 1
+		}
+		if st.Responses > 0 {
+			// The real requester applied the opening's log entries before
+			// the request whose page was lost, and asked for the authors
+			// they admit: the model's requester learns them first too.
+			p.learnTo(h, pm, kp2)
+			p.lostAfter[[2]delivery.MachineID{pm, sm}] = true
 		}
 		r, err := h.w.Pull(pm, sm, mopt)
 		if err != nil {
@@ -720,10 +788,6 @@ func (p *pxState) pullRest(h *harness, pm, sm delivery.MachineID, kp2 int, opt d
 		}
 		*textTo, *textFrom = r.TextTo, r.TextFrom
 		p.c.modelPulls++
-		if st.Responses > 0 {
-			p.learnTo(h, pm, kp2)
-			p.lostAfter[[2]delivery.MachineID{pm, sm}] = true
-		}
 		p.lostAfter[[2]delivery.MachineID{sm, pm}] = true
 		p.c.lost++
 		return
@@ -961,10 +1025,11 @@ func (p *pxState) report(t testing.TB, what string, d time.Duration, n int, h *c
 }
 
 // settle ends a schedule (the model is not consulted after it): every
-// machine awake and reachable, every member pulls from every other it
-// sees as a member until a pass stores nothing. Then every record held
-// pending a permission decision must have been decided, unless no member
-// holds the head its frontier names (its head cannot arrive).
+// machine awake, reachable and withholding nothing, every member pulls
+// from every other it sees as a member until a pass stores nothing. Then
+// every record held pending a permission decision must have been decided,
+// unless no member that serves the machine holds the head its frontier
+// names (its head cannot arrive).
 func (p *pxState) settle(h *harness) {
 	h.t.Helper()
 	ctx := context.Background()
@@ -1028,6 +1093,11 @@ func (p *pxState) settle(h *harness) {
 	}
 	before := pending()
 	p.net.noInbound, p.net.down, p.net.lose = map[string]bool{}, map[string]bool{}, nil
+	// Every member serves honestly from here: a head only a withholding
+	// member holds cannot arrive while it withholds (G4, and REQUIREMENTS
+	// section 6: a member could withhold one), so the check below would
+	// count it reachable when it is not.
+	clear(p.withhold)
 	for pass := 0; pass < 8; pass++ {
 		stored := 0
 		for _, a := range names {
@@ -1053,10 +1123,14 @@ func (p *pxState) settle(h *harness) {
 		}
 	}
 	for k, heads := range after {
+		// A head can arrive only from a member that serves this machine:
+		// one that sees it as a member (a removed machine that has not
+		// learned of its removal is refused and told nothing, T5).
 		reachable := false
+		self := h.sims[delivery.MachineID(k[0])].m.ID
 		for _, head := range heads {
 			for _, n := range names {
-				if s := h.sims[n]; s != nil && slices.Contains(members(s), s.m.ID) {
+				if s := h.sims[n]; s != nil && slices.Contains(members(s), s.m.ID) && slices.Contains(members(s), self) {
 					if _, ok := holds(s, head); ok {
 						reachable = true
 					}
@@ -1064,7 +1138,7 @@ func (p *pxState) settle(h *harness) {
 			}
 		}
 		if reachable {
-			h.fail("%s: %s still pending a permission decision after settling, its head held by a member", k[0], h.id(k[1]))
+			h.fail("%s: %s still pending a permission decision after settling, its head held by a member that serves it", k[0], h.id(k[1]))
 		} else {
 			p.c.unreachable++
 		}
@@ -1127,10 +1201,19 @@ func TestRealExchangeAgreesWithTheDeliveryModelOnEveryShortSchedule(t *testing.T
 // fixed seed over three founders and two machines admitted later, through
 // the real exchange: everything the exhaustive search does, plus replaces,
 // partial reads, clocks up to 10 hours apart, a server withholding a
-// record, and more machines and steps.
+// record, and more machines and steps. A2P2_MODEL_SEED names another seed
+// (`make model-sweep`); other seeds that once disagreed are in
+// pull_seeds_test.go.
 func TestRealExchangeAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T) {
-	start := time.Now()
-	runs, steps := 6, 40
+	runs, steps := randomPullSize()
+	runRandomPulls(t, modelSeed(t, 20261124), runs, steps)
+}
+
+// randomPullSize is the number of runs and steps of a random schedule of
+// the real exchange: 6 of 40, fewer under the race detector or -short, 300
+// of 60 with A2P2_MODEL_DEEP=1.
+func randomPullSize() (runs, steps int) {
+	runs, steps = 6, 40
 	if raceDetector {
 		runs = 1
 	}
@@ -1140,6 +1223,13 @@ func TestRealExchangeAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T) {
 	if deepModel() {
 		runs, steps = 300, 60
 	}
+	return runs, steps
+}
+
+// runRandomPulls runs random schedules from seed through the real exchange,
+// comparing with the model after every step, and settles each run.
+func runRandomPulls(t *testing.T, seed uint64, runs, steps int) {
+	start := time.Now()
 	founders := map[delivery.MachineID][]string{"M": {"alice", "bob"}, "P": {"pat"}, "Q": {"quinn"}}
 	later := map[delivery.MachineID][]string{"N": {"nina"}, "O": {"otto"}}
 	agents := map[delivery.MachineID][]string{}
@@ -1149,7 +1239,6 @@ func TestRealExchangeAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T) {
 	for k, v := range later {
 		agents[k] = v
 	}
-	const seed = 20261124
 	r := rand.New(rand.NewPCG(seed, 5))
 	lr := rand.New(rand.NewPCG(seed, 13))
 	rr := rand.New(rand.NewPCG(seed, 19))
