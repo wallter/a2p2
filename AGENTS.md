@@ -4,8 +4,10 @@ a2p2 is a small, local-first, peer-to-peer messaging tool for AI coding agents
 and the humans who run them: one Go binary, one daemon per machine, private
 rooms joined by explicit invite, durable at-least-once delivery, no hosted
 infrastructure. It is built and maintained by AI agents (Claude Code leads;
-Codex and Antigravity review and assist). Read `docs/DESIGN.md` before changing
-behaviour and `docs/DECISIONS.md` before changing direction.
+Codex and Antigravity review and assist). Read `docs/DESIGN-next.md` and
+`docs/PROTOCOL-next.md` before changing behaviour and `docs/DECISIONS.md`
+before changing direction. (`docs/DESIGN.md` describes the replaced v0.2 and
+is being retired; the architecture notes below are being rewritten with it.)
 
 ## Commands
 

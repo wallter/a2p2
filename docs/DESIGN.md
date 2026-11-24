@@ -1,5 +1,11 @@
 # a2p2 design
 
+> **Out of date (2026-11-24).** This file describes v0.2, whose delivery
+> core has been replaced. The current design is
+> [`DESIGN-next.md`](DESIGN-next.md) and the exact formats are in
+> [`PROTOCOL-next.md`](PROTOCOL-next.md). Those two replace this file once
+> the old code has been deleted (in progress).
+
 Status: v0.2 (2026-11-22), revised after two independent design reviews
 (`research/04-design-review.md`). This is the source of truth for what a2p2 is and
 is not. Decisions and their reasons live in [DECISIONS.md](DECISIONS.md); how we
