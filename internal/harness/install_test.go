@@ -133,6 +133,11 @@ func tree(t *testing.T, root string) map[string]string {
 		}
 		rel, _ := filepath.Rel(root, p)
 		v := info.Mode().String()
+		if info.Mode()&os.ModeSymlink != 0 {
+			l, _ := os.Readlink(p)
+			out[rel] = v + " -> " + l
+			return nil
+		}
 		if !d.IsDir() {
 			b, err := os.ReadFile(p)
 			if err != nil {

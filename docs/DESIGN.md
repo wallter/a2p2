@@ -231,7 +231,10 @@ Seen moves a cursor, confirming exactly the keys and versions the inbox
 returned; the hook prints counts only and never message text. Claude Code,
 Codex and Antigravity get the MCP server and a hook; OpenCode and Hermes
 Agent get the MCP server only, and Pi, which has no MCP, a skill that
-points its model at the CLI ([harness notes](HARNESSES.md)). Replies carry
+points its model at the CLI ([harness notes](HARNESSES.md)). Install
+records any entry named `a2p2` it replaces in `$A2P2_HOME/installs/`, and
+uninstall puts it back; without a record uninstall removes nothing
+(D44). Replies carry
 `parent_state`. The thread view lists held messages of a thread, or with
 `after` only those that follow a given message of it; the branch view
 follows `parent` down and misses replies below one not held (G3). The

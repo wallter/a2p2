@@ -27,9 +27,13 @@ send {"room":"team-auth","to":["worker-a@1a2b3c4d"],"text":"BRIEF: add token exp
 ## With the tools
 
 1. Make sure the worker exists first. Its inbox never shows a message sent
-   before its first tool call. Ask it, or the launcher, to call `whoami`,
-   then check that `peers` lists it under `local_agents` (same machine) or
-   `agents_seen_writing` (another machine). Only then `send` the brief.
+   before its first tool call. On the same machine, ask it, or the
+   launcher, to call `whoami`, then check that `peers` lists it under
+   `local_agents`. On another machine, `whoami` alone does not make it
+   appear: `agents_seen_writing` lists only agents that have written in
+   the room. Ask the worker to send you a directed "ready" message
+   (`send {"room":"team-auth","to":["lead@1a2b3c4d"],"text":"ready"}`)
+   and wait for it in your `inbox`. Only then `send` the brief.
 2. Keep the `id` that `send` returns. The worker's handoff arrives as a
    reply to it; read the whole exchange with `inbox {"thread":"<id>"}`.
 3. Wait with `inbox {"room":"team-auth","wait_seconds":30}` between other

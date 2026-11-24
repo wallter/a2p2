@@ -37,7 +37,7 @@ func (r *rec) run(name string, args ...string) error {
 
 func setup(t *testing.T) (Options, *rec) {
 	r := &rec{fail: map[string]bool{"mcp remove": true}}
-	return Options{HomeDir: t.TempDir(), Binary: "/opt/a2p2", Run: r.run,
+	return Options{HomeDir: t.TempDir(), StateDir: filepath.Join(t.TempDir(), "installs"), Binary: "/opt/a2p2", Run: r.run,
 		LookPath: func(f string) (string, error) { return "/bin/" + f, nil }}, r
 }
 

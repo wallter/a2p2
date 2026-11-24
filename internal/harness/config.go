@@ -22,15 +22,17 @@ import (
 // and a file a2p2 creates gets a <file>.a2p2.new marker listing the
 // directories it created, so that uninstall puts the home back (I2).
 type fileAdapter struct {
-	cli   string                                    // the harness's command, looked up on PATH
-	path  func(o Options) (string, error)           // the file a2p2 edits
-	what  string                                    // what the entry is, for the report
-	add   func(b []byte, o Options) ([]byte, error) // b with exactly one current a2p2 entry
-	del   func(b []byte) ([]byte, bool, error)      // b without a2p2's entry; whether it had one
-	empty func(b []byte) bool                       // nothing but what the harness itself adds is left
-	same  func(a, b []byte) bool                    // a and b are the same configuration
-	find  func(o Options) (bool, string, error)     // doctor: registered, and the binary it runs
-	notes []string                                  // printed after a successful install
+	cli   string                                       // the harness's command, looked up on PATH
+	path  func(o Options) (string, error)              // the file a2p2 edits
+	what  string                                       // what the entry is, for the report
+	add   func(b []byte, o Options) ([]byte, error)    // b with exactly one current a2p2 entry
+	del   func(b []byte) ([]byte, bool, error)         // b without a2p2's entry; whether it had one
+	prior func(b []byte) (bool, string, error)         // the entry named a2p2 in b before install, if any
+	put   func(b []byte, prior string) ([]byte, error) // b with that entry put back
+	empty func(b []byte) bool                          // nothing but what the harness itself adds is left
+	same  func(a, b []byte) bool                       // a and b are the same configuration
+	find  func(o Options) (bool, string, error)        // doctor: registered, and the binary it runs
+	notes []string                                     // printed after a successful install
 }
 
 var adapters = map[string]fileAdapter{
@@ -70,8 +72,8 @@ func (a fileAdapter) install(name string, o Options) (string, error) {
 	if _, err := o.lookPath(a.cli); err != nil {
 		return "", fmt.Errorf("%s is not on PATH; install it first, then run: a2p2 install %s", a.cli, name)
 	}
-	if r, err := filepath.EvalSymlinks(path); err == nil {
-		path = r
+	if path, err = resolve(path); err != nil {
+		return "", err
 	}
 	orig, existed, err := readMaybe(path)
 	if err != nil {
@@ -82,10 +84,30 @@ func (a fileAdapter) install(name string, o Options) (string, error) {
 		return "", err
 	}
 	p := prefix(o)
-	if existed && bytes.Equal(b, orig) {
-		return fmt.Sprintf("%s already up to date in %s", a.what, path), nil
+	rec, err := loadRecord(name, o)
+	if err != nil {
+		return "", err
 	}
-	rep := []string{fmt.Sprintf("%swrite %s in %s (%s)", p, a.what, path, o.Binary)}
+	var rep []string
+	if rec == nil {
+		had, prior, err := a.prior(orig)
+		if err != nil {
+			return "", err
+		}
+		rec = &record{Harness: name, File: path, Had: had, Prior: prior}
+		if had {
+			rep = append(rep, p+"replace the entry named a2p2 already in "+path+"; uninstall puts it back")
+		}
+		if !o.DryRun {
+			if err := saveRecord(rec, o); err != nil {
+				return "", err
+			}
+		}
+	}
+	if existed && bytes.Equal(b, orig) {
+		return strings.Join(append(rep, fmt.Sprintf("%s already up to date in %s", a.what, path)), "\n"), nil
+	}
+	rep = append(rep, fmt.Sprintf("%swrite %s in %s (%s)", p, a.what, path, o.Binary))
 	if !o.DryRun {
 		if err := saveRecorded(path, existed, orig, b, true); err != nil {
 			return "", err
@@ -101,13 +123,20 @@ func (a fileAdapter) install(name string, o Options) (string, error) {
 	return strings.Join(append(rep, a.notes...), "\n"), nil
 }
 
-func (a fileAdapter) uninstall(o Options) (string, error) {
+func (a fileAdapter) uninstall(name string, o Options) (string, error) {
+	rec, err := loadRecord(name, o)
+	if err != nil {
+		return "", err
+	}
+	if rec == nil {
+		return noRecord(name, o), nil
+	}
 	path, err := a.path(o)
 	if err != nil {
 		return "", err
 	}
-	if r, err := filepath.EvalSymlinks(path); err == nil {
-		path = r
+	if path, err = resolve(path); err != nil {
+		return "", err
 	}
 	cur, existed, err := readMaybe(path)
 	if err != nil {
@@ -121,19 +150,42 @@ func (a fileAdapter) uninstall(o Options) (string, error) {
 		}
 		if had {
 			rep = append(rep, prefixed(o.DryRun, "remove "+a.what+" from "+path))
-			if !o.DryRun {
-				if err := writeKeepingMode(path, b); err != nil {
-					return "", err
-				}
-			}
-			cur = b
 		}
+		if rec.Had {
+			if b, err = a.put(b, rec.Prior); err != nil {
+				return "", err
+			}
+			rep = append(rep, prefixed(o.DryRun, "put back the entry named a2p2 that install replaced"))
+		}
+		switch {
+		case o.DryRun || bytes.Equal(b, cur):
+		case len(b) == 0: // nothing is left: no empty file stays behind
+			if err := os.Remove(path); err != nil {
+				return "", err
+			}
+		default:
+			if err := writeKeepingMode(path, b); err != nil {
+				return "", err
+			}
+		}
+		cur = b
+	}
+	if !existed && rec.Had {
+		rep = append(rep, path+" is gone, so the entry named a2p2 that install replaced was not put back; it was: "+rec.Prior)
 	}
 	if len(rep) == 0 {
 		rep = append(rep, "no "+a.what+" found in "+path)
 	}
 	more, err := restoreRecorded(path, cur, existed && a.empty(cur), a.same, o.DryRun)
-	return strings.Join(append(rep, more...), "\n"), err
+	if err != nil {
+		return "", err
+	}
+	if !o.DryRun {
+		if err := dropRecord(name, o); err != nil {
+			return "", err
+		}
+	}
+	return strings.Join(append(rep, more...), "\n"), nil
 }
 
 func (a fileAdapter) doctor(name string, o Options) Check {
@@ -186,20 +238,25 @@ func saveRecorded(path string, existed bool, orig, b []byte, record bool) error 
 }
 
 // restoreRecorded finishes an uninstall once a2p2's entries are gone from
-// path, whose content is now cur: it writes back the original bytes when
-// nothing else changed, or deletes the file a2p2 created when empty says
-// nothing else is in it, and removes the records. It returns report lines.
+// path, whose content is now cur: it writes back the original bytes and
+// deletes the backup when nothing else changed, keeps the backup when the
+// file changed since in other ways, and deletes the file a2p2 created when
+// empty says nothing else is in it. It returns report lines.
 func restoreRecorded(path string, cur []byte, empty bool, eq func(a, b []byte) bool, dry bool) ([]string, error) {
 	var rep []string
 	orig, err := os.ReadFile(path + bakSuffix)
 	switch {
 	case err == nil:
-		if eq(orig, cur) {
-			rep = append(rep, prefixed(dry, "restore "+path+" from "+path+bakSuffix))
-			if !dry {
-				if err := writeKeepingMode(path, orig); err != nil {
-					return nil, err
-				}
+		if !eq(orig, cur) {
+			// The file changed since install in ways a2p2 did not make; it
+			// keeps them, and the backup stays for the person to compare.
+			rep = append(rep, "kept "+path+bakSuffix+": the file has changed since a2p2 first edited it; compare the two and delete the backup yourself")
+			break
+		}
+		rep = append(rep, prefixed(dry, "restore "+path+" from "+path+bakSuffix))
+		if !dry {
+			if err := writeKeepingMode(path, orig); err != nil {
+				return nil, err
 			}
 		}
 		rep = append(rep, prefixed(dry, "remove "+path+bakSuffix))
@@ -252,6 +309,8 @@ var opencodeAdapter = fileAdapter{
 	what:  "MCP server",
 	add:   opencodeAdd,
 	del:   opencodeDel,
+	prior: opencodePrior,
+	put:   opencodePut,
 	empty: func(b []byte) bool { d, err := jsonDoc(b, ""); return err == nil && len(withoutSchema(d)) == 0 },
 	same:  same,
 	find:  opencodeFind,
@@ -322,9 +381,73 @@ func opencodeAdd(b []byte, o Options) ([]byte, error) {
 	if cur, ok := m["a2p2"]; ok && same(cur, want) {
 		return b, nil
 	}
-	m["a2p2"] = want
-	d["mcp"], _ = json.Marshal(m)
-	return encodeJSON(d), nil
+	return opencodeWith(d, m, want)
+}
+
+// opencodeWith sets (or with nil, removes) mcp.a2p2 and checks the result
+// parses back with every other key and server unchanged.
+func opencodeWith(d, m map[string]json.RawMessage, entry json.RawMessage) ([]byte, error) {
+	if entry != nil {
+		m["a2p2"] = entry
+	} else {
+		delete(m, "a2p2")
+	}
+	if len(m) == 0 {
+		delete(d, "mcp")
+	} else {
+		d["mcp"], _ = json.Marshal(m)
+	}
+	out := encodeJSON(d)
+	d2, err := jsonDoc(out, "the computed opencode.json")
+	if err == nil {
+		var m2 map[string]json.RawMessage
+		m2, err = opencodeServers(d2)
+		for k, v := range d {
+			if k != "mcp" && !same(v, d2[k]) {
+				err = errors.New("lost key " + k)
+			}
+		}
+		for k, v := range m {
+			if !same(v, m2[k]) {
+				err = errors.New("lost server " + k)
+			}
+		}
+		if len(d2) != len(d) || len(m2) != len(m) {
+			err = errors.New("extra keys")
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("a2p2 computed an opencode.json it cannot read back (%v); nothing was written", err)
+	}
+	return out, nil
+}
+
+func opencodePrior(b []byte) (bool, string, error) {
+	d, err := jsonDoc(b, "opencode.json")
+	if err != nil {
+		return false, "", err
+	}
+	m, err := opencodeServers(d)
+	if err != nil {
+		return false, "", err
+	}
+	e, ok := m["a2p2"]
+	return ok, string(e), nil
+}
+
+func opencodePut(b []byte, prior string) ([]byte, error) {
+	d, err := jsonDoc(b, "opencode.json")
+	if err != nil {
+		return nil, err
+	}
+	m, err := opencodeServers(d)
+	if err != nil {
+		return nil, err
+	}
+	if !json.Valid([]byte(prior)) {
+		return nil, errors.New("the recorded a2p2 entry is not JSON; put it back yourself: " + prior)
+	}
+	return opencodeWith(d, m, json.RawMessage(prior))
 }
 
 func opencodeDel(b []byte) ([]byte, bool, error) {
@@ -339,13 +462,8 @@ func opencodeDel(b []byte) ([]byte, bool, error) {
 	if _, ok := m["a2p2"]; !ok {
 		return b, false, nil
 	}
-	delete(m, "a2p2")
-	if len(m) == 0 {
-		delete(d, "mcp")
-	} else {
-		d["mcp"], _ = json.Marshal(m)
-	}
-	return encodeJSON(d), true, nil
+	out, err := opencodeWith(d, m, nil)
+	return out, true, err
 }
 
 // opencodeFind looks in both files OpenCode reads; opencode.jsonc may hold
@@ -434,262 +552,6 @@ func stripJSONC(b []byte) []byte {
 	return out
 }
 
-// --- Hermes Agent ---
-
-// Hermes Agent (seen with 0.15.2) reads mcp_servers from
-// $HERMES_HOME/config.yaml (default ~/.hermes). a2p2 has no YAML library,
-// so it edits the text: it adds or replaces only the a2p2 entry under a
-// block-style top-level mcp_servers key, and refuses any other layout.
-// Hermes passes a stdio server only PATH, HOME, USER, LANG, LC_ALL, TERM,
-// SHELL, TMPDIR and XDG_* from its own environment, so an A2P2_HOME set
-// at install time is written into the entry.
-var hermesAdapter = fileAdapter{
-	cli:   "hermes",
-	path:  hermesPath,
-	what:  "MCP server",
-	add:   hermesAdd,
-	del:   hermesDel,
-	empty: func(b []byte) bool { return len(bytes.TrimSpace(b)) == 0 },
-	same:  hermesSame,
-	find:  hermesFind,
-	notes: []string{"no hook installed for Hermes; its tools appear as mcp_a2p2_<tool>, and it needs a model context of at least 64K tokens"},
-}
-
-func hermesPath(o Options) (string, error) {
-	dir, err := envOr(o, "HERMES_HOME", ".hermes")
-	return filepath.Join(dir, "config.yaml"), err
-}
-
-type yamlBlock struct {
-	lines      []string
-	head       int // index of the "mcp_servers:" line, -1 if none
-	end        int // first line after the block
-	indent     string
-	entry, eod int // the a2p2 entry's lines [entry, eod), entry -1 if none
-}
-
-func indentOf(l string) string { return l[:len(l)-len(strings.TrimLeft(l, " \t"))] }
-
-func significant(l string) bool {
-	t := strings.TrimSpace(l)
-	return t != "" && !strings.HasPrefix(t, "#")
-}
-
-// keyIs reports whether a trimmed YAML line is the mapping key k.
-func keyIs(t, k string) (rest string, ok bool) {
-	for _, q := range []string{k, `"` + k + `"`, `'` + k + `'`} {
-		if r, ok := strings.CutPrefix(t, q+":"); ok && (r == "" || r[0] == ' ' || r[0] == '\t') {
-			return strings.TrimSpace(r), true
-		}
-	}
-	return "", false
-}
-
-func parseHermes(b []byte) (*yamlBlock, error) {
-	s := string(b)
-	y := &yamlBlock{lines: strings.SplitAfter(s, "\n"), head: -1, entry: -1}
-	if y.lines[len(y.lines)-1] == "" {
-		y.lines = y.lines[:len(y.lines)-1]
-	}
-	refuse := func(why string) error {
-		return fmt.Errorf("config.yaml %s; a2p2 will not edit it. Add an a2p2 entry under mcp_servers yourself", why)
-	}
-	for i, l := range y.lines {
-		t := strings.TrimRight(l, "\r\n")
-		if !significant(t) {
-			continue
-		}
-		if strings.TrimSpace(t) == "---" && i > 0 || strings.HasPrefix(t, "...") {
-			return nil, refuse("holds more than one document")
-		}
-		if indentOf(t) != "" {
-			if strings.Contains(indentOf(t), "\t") {
-				return nil, refuse("is indented with tabs")
-			}
-			continue
-		}
-		if strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[") {
-			return nil, refuse("is not a block mapping")
-		}
-		if rest, ok := keyIs(t, "mcp_servers"); ok {
-			if y.head >= 0 {
-				return nil, refuse("has mcp_servers twice")
-			}
-			rest = strings.TrimSpace(strings.SplitN(rest, " #", 2)[0])
-			switch rest {
-			case "", "{}", "null", "~":
-				y.head = i
-			default:
-				return nil, refuse("has mcp_servers in flow style")
-			}
-		}
-	}
-	if y.head < 0 {
-		return y, nil
-	}
-	y.end = len(y.lines)
-	for i := y.head + 1; i < len(y.lines); i++ {
-		t := strings.TrimRight(y.lines[i], "\r\n")
-		if significant(t) && indentOf(t) == "" {
-			y.end = i
-			break
-		}
-	}
-	for i := y.head + 1; i < y.end; i++ {
-		t := strings.TrimRight(y.lines[i], "\r\n")
-		if !significant(t) {
-			continue
-		}
-		if y.indent == "" {
-			y.indent = indentOf(t)
-		}
-		if indentOf(t) == y.indent {
-			if y.entry >= 0 && y.eod < 0 {
-				y.eod = i
-			}
-			if _, ok := keyIs(strings.TrimSpace(t), "a2p2"); ok {
-				if y.entry >= 0 {
-					return nil, refuse("has two a2p2 entries")
-				}
-				y.entry, y.eod = i, -1
-			}
-		} else if len(indentOf(t)) < len(y.indent) {
-			return nil, refuse("has an mcp_servers block a2p2 cannot follow")
-		}
-	}
-	if y.entry >= 0 && y.eod < 0 {
-		y.eod = y.end
-		// Trailing blank or comment lines belong to what follows.
-		for y.eod > y.entry+1 && !significant(y.lines[y.eod-1]) {
-			y.eod--
-		}
-	}
-	return y, nil
-}
-
-func yamlString(s string) string {
-	b, _ := json.Marshal(s) // a JSON string is a valid YAML double-quoted scalar
-	return string(b)
-}
-
-func hermesEntry(indent string, o Options) []string {
-	args := []string{}
-	for _, a := range []string{"mcp", "--harness", "hermes"} {
-		args = append(args, yamlString(a))
-	}
-	e := []string{
-		indent + "a2p2:\n",
-		indent + indent + "command: " + yamlString(o.Binary) + "\n",
-		indent + indent + "args: [" + strings.Join(args, ", ") + "]\n",
-	}
-	if h := os.Getenv("A2P2_HOME"); h != "" && o.HomeDir == "" {
-		e = append(e, indent+indent+"env:\n", indent+indent+indent+"A2P2_HOME: "+yamlString(h)+"\n")
-	}
-	return e
-}
-
-func hermesAdd(b []byte, o Options) ([]byte, error) {
-	y, err := parseHermes(b)
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	switch {
-	case y.head < 0:
-		out = append(out, y.lines...)
-		if n := len(out); n > 0 && !strings.HasSuffix(out[n-1], "\n") {
-			out[n-1] += "\n"
-		}
-		out = append(append(out, "mcp_servers:\n"), hermesEntry("  ", o)...)
-	default:
-		ind := y.indent
-		if ind == "" {
-			ind = "  "
-		}
-		e := hermesEntry(ind, o)
-		if y.entry >= 0 && strings.Join(y.lines[y.entry:y.eod], "") == strings.Join(e, "") {
-			return b, nil
-		}
-		head := y.lines[: y.head+1 : y.head+1]
-		rest := y.lines[y.head+1:]
-		if y.entry >= 0 {
-			rest = append(append([]string{}, y.lines[y.head+1:y.entry]...), y.lines[y.eod:]...)
-		}
-		h := strings.TrimRight(head[y.head], "\r\n")
-		if r, _ := keyIs(h, "mcp_servers"); strings.TrimSpace(strings.SplitN(r, " #", 2)[0]) != "" {
-			// "mcp_servers: {}" or null: an empty map, now written as a block.
-			head = append(append([]string{}, head[:y.head]...), "mcp_servers:\n")
-		}
-		out = append(append(append([]string{}, head...), e...), rest...)
-	}
-	return []byte(strings.Join(out, "")), nil
-}
-
-func hermesDel(b []byte) ([]byte, bool, error) {
-	y, err := parseHermes(b)
-	if err != nil {
-		return nil, false, err
-	}
-	if y.entry < 0 {
-		return b, false, nil
-	}
-	out := append(append([]string{}, y.lines[:y.entry]...), y.lines[y.eod:]...)
-	left := false
-	for _, l := range out[y.head+1 : y.end-(y.eod-y.entry)] {
-		if significant(l) {
-			left = true
-		}
-	}
-	if !left { // as hermes mcp remove does: no servers, no key
-		out = append(out[:y.head:y.head], out[y.head+1:]...)
-	}
-	return []byte(strings.Join(out, "")), true, nil
-}
-
-// hermesSame compares two config.yaml texts as uninstall leaves them: an
-// mcp_servers key with no servers and a missing final newline do not count.
-func hermesSame(a, b []byte) bool {
-	norm := func(x []byte) string {
-		y, err := parseHermes(x)
-		if err != nil || y.head < 0 {
-			return strings.TrimSuffix(string(x), "\n")
-		}
-		for _, l := range y.lines[y.head+1 : y.end] {
-			if significant(l) {
-				return strings.TrimSuffix(string(x), "\n")
-			}
-		}
-		out := append(append([]string{}, y.lines[:y.head]...), y.lines[y.head+1:]...)
-		return strings.TrimSuffix(strings.Join(out, ""), "\n")
-	}
-	return norm(a) == norm(b)
-}
-
-func hermesFind(o Options) (bool, string, error) {
-	path, err := hermesPath(o)
-	if err != nil {
-		return false, "", err
-	}
-	b, ok, err := readMaybe(path)
-	if err != nil || !ok {
-		return false, "", err
-	}
-	y, err := parseHermes(b)
-	if err != nil || y.entry < 0 {
-		return false, "", err
-	}
-	for _, l := range y.lines[y.entry+1 : y.eod] {
-		if v, ok := keyIs(strings.TrimSpace(l), "command"); ok {
-			var s string
-			if json.Unmarshal([]byte(v), &s) == nil {
-				return true, s, nil
-			}
-			return true, strings.Trim(v, `'`), nil
-		}
-	}
-	return true, "", nil
-}
-
 // --- Pi ---
 
 // Pi (seen with 0.73.1) has no MCP by design; it runs command-line tools
@@ -701,7 +563,9 @@ var piAdapter = fileAdapter{
 	path:  piPath,
 	what:  "skill",
 	add:   piAdd,
-	del:   func(b []byte) ([]byte, bool, error) { return nil, bytes.Contains(b, []byte(piMarker)), nil },
+	del:   piDel,
+	prior: func([]byte) (bool, string, error) { return false, "", nil }, // a skill a2p2 did not write is refused
+	put:   func(b []byte, _ string) ([]byte, error) { return b, nil },
 	empty: func(b []byte) bool { return len(b) == 0 },
 	same:  func(a, b []byte) bool { return bytes.Equal(a, b) },
 	find:  piFind,
@@ -714,6 +578,13 @@ func piPath(o Options) (string, error) {
 }
 
 const piMarker = "<!-- written by a2p2 install; a2p2 uninstall removes it -->"
+
+func piDel(b []byte) ([]byte, bool, error) {
+	if !bytes.Contains(b, []byte(piMarker)) {
+		return b, false, nil
+	}
+	return nil, true, nil
+}
 
 func piAdd(b []byte, o Options) ([]byte, error) {
 	if len(b) > 0 && !bytes.Contains(b, []byte(piMarker)) {

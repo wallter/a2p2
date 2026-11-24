@@ -32,7 +32,8 @@ can read; a thread is one topic within it.
 - Start a new topic with `send` and no `reply_to`. Say the topic in the
   first line.
 - `send` with `reply_to` also places a message in a thread when you need
-  `to` to differ from the author: `send {"room":"auth-expiry","reply_to":"<id>","to":["everyone"],"text":"..."}`.
+  `to` to differ from the author (`to`, in `send` or `reply`, replaces the
+  default recipients): `send {"room":"auth-expiry","reply_to":"<id>","to":["everyone"],"text":"..."}`.
 - Read one topic with `inbox {"thread":"<root id>"}`; it marks nothing
   seen.
 

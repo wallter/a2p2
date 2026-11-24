@@ -34,6 +34,7 @@ type Options struct {
 	DryRun   bool                                    // describe changes without writing or running anything
 	Run      func(name string, args ...string) error // runs a harness CLI (nil = exec)
 	LookPath func(file string) (string, error)       // nil = exec.LookPath
+	StateDir string                                  // where install records live ("" = $A2P2_HOME/installs or ~/.a2p2/installs)
 }
 
 type spec struct {
@@ -370,8 +371,36 @@ func Install(name string, o Options) (string, error) {
 	if _, err := o.lookPath(cli); err != nil {
 		return "", fmt.Errorf("%s is not on PATH; install it first, then run: a2p2 install %s", cli, name)
 	}
+	if _, err := resolve(h.path); err != nil {
+		return "", err
+	}
+	if path, _ := codexConfig(o); name == "codex" {
+		if _, err := resolve(path); err != nil {
+			return "", err
+		}
+	}
 	p := prefix(o)
 	rep := []string{fmt.Sprintf("%sregister MCP server: %s mcp add a2p2 (%s)", p, cli, o.Binary)}
+	// The first install records what it replaces, before changing anything.
+	rec, err := loadRecord(name, o)
+	if err != nil {
+		return "", err
+	}
+	if rec == nil {
+		file, had, prior, err := cliEntry(name, o)
+		if err != nil {
+			return "", err
+		}
+		rec = &record{Harness: name, File: file, Had: had, Prior: prior}
+		if had {
+			rep = append(rep, p+"replace the entry named a2p2 already in "+file+"; uninstall puts it back")
+		}
+		if !o.DryRun {
+			if err := saveRecord(rec, o); err != nil {
+				return "", err
+			}
+		}
+	}
 	if !o.DryRun {
 		_ = o.run(cli, "mcp", "remove", "a2p2") // idempotent: ignore failure
 		if err := o.run(cli, mcpAdd(name, o)...); err != nil {
@@ -428,10 +457,20 @@ func Install(name string, o Options) (string, error) {
 // kept to undo it, so the home is as it was (I2).
 func Uninstall(name string, o Options) (string, error) {
 	if a, ok := adapters[name]; ok {
-		return a.uninstall(o)
+		return a.uninstall(name, o)
 	}
 	h, err := loadHooks(name, o) // validate before touching anything
 	if err != nil {
+		return "", err
+	}
+	rec, err := loadRecord(name, o)
+	if err != nil {
+		return "", err
+	}
+	if rec == nil {
+		return noRecord(name, o), nil
+	}
+	if _, err := resolve(h.path); err != nil {
 		return "", err
 	}
 	// The reverse of Install: the hook file first, then the registration.
@@ -475,13 +514,26 @@ func Uninstall(name string, o Options) (string, error) {
 		}
 	}
 	if _, err := o.lookPath(cli); err != nil {
-		mcp = append(mcp, cli+" is not on PATH; skipped mcp remove")
-	} else {
-		mcp = append(mcp, p+"unregister MCP server: "+cli+" mcp remove a2p2")
+		mcp = append(mcp, cli+" is not on PATH; skipped mcp remove. The install record is kept: run uninstall again once "+cli+" is back")
+		return strings.Join(append(rep, mcp...), "\n"), nil
+	}
+	mcp = append(mcp, p+"unregister MCP server: "+cli+" mcp remove a2p2")
+	if !o.DryRun {
+		if err := o.run(cli, "mcp", "remove", "a2p2"); err != nil {
+			mcp = append(mcp, "mcp remove reported: "+err.Error())
+		}
+	}
+	if rec.Had {
+		mcp = append(mcp, p+"put back the entry named a2p2 that install replaced, in "+rec.File)
 		if !o.DryRun {
-			if err := o.run(cli, "mcp", "remove", "a2p2"); err != nil {
-				mcp = append(mcp, "mcp remove reported: "+err.Error())
+			if err := putBackCLIEntry(name, rec); err != nil {
+				return strings.Join(append(rep, mcp...), "\n"), err
 			}
+		}
+	}
+	if !o.DryRun {
+		if err := dropRecord(name, o); err != nil {
+			return strings.Join(append(rep, mcp...), "\n"), err
 		}
 	}
 	return strings.Join(append(rep, mcp...), "\n"), nil

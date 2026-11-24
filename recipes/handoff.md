@@ -32,6 +32,8 @@ reply {"id":"2d6c44fdc9d52438505cf24c6a6123ea","text":"DONE: expired sessions ar
   already reported it, which is fine.
 - If the brief asked you to report to someone other than its author, add
   `to`: `reply {"id":"<brief id>","to":["reviewer@1a2b3c4d"],"text":"..."}`.
+  `to` replaces the default recipients: the author and the others in the
+  thread no longer receive it unless you list them too.
 - A long log does not belong in the message; a message holds about 16 KB.
   Commit it or name the file that holds it.
 
