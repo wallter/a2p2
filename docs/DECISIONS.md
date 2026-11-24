@@ -1208,3 +1208,64 @@ third member is reachable or someone forwards a port by hand.
   temporary-address detection on Windows, which report "not available";
   CGNAT and corporate networks cannot be fixed from the machine, and
   `net check` says so.
+
+## D50. A faster gate, tests run in shards, and a release workflow that does not repeat them (2026-11-24)
+
+The owner asked for faster releases and faster iteration without testing
+less: "parallelize tests, improve the performance, slim out, profile".
+Measured on the development machine (18 cores) on the same commit:
+`make check` took 288 seconds, almost all of it `internal/node`, whose
+tests Go runs one after another; `make prerelease` ran its five steps one
+after another in about 13 minutes (769 seconds); and the release workflow ran `make
+check`, `make lint` and `make vuln` again on a two-core runner, about 20
+minutes, once past Go's ten-minute test limit.
+
+- **Shards from outside the package.** `scripts/gotest.sh` compiles each
+  package whose tests took 20 seconds or more (by
+  `scripts/test-timings.tsv`, refreshed with `make test-timings`) once and
+  runs its top-level tests as several processes of that binary, each with
+  `-test.run` an anchored list of names and its own `TMPDIR`, balanced by
+  recorded times. It fails if the shards are not exactly the listed tests
+  or a shard did not report each of its tests once. The same tests, flags,
+  seeds and race detector run as before. `t.Parallel()` inside the
+  packages was not used: other work was changing them at the same time,
+  and running tests of one package in one process at once would have
+  needed every one of them checked for shared state; separate processes
+  share nothing but the disk, and the tests use only temporary
+  directories and port 0.
+- **Steps at the same time.** `make check` runs its eight steps together
+  (`scripts/gate.sh`), and `make prerelease` runs check, lint, vuln,
+  check-linux and chaos together, each to its own log, one line per step
+  with its time, the full log of a failed step, and a non-zero exit
+  naming every failed step. `make check-linux` uses the same shards in its
+  container.
+- **The tag is gated locally.** `make prerelease` writes
+  `.prerelease/stamp` (commit and time, git-ignored) only when every step
+  passed on a clean tree. `make tag VERSION=...` refuses unless the stamp
+  names HEAD, the tree is clean, HEAD is on `origin/main`, the changelog
+  has the section and the tag is new; then it tags and pushes.
+  `make verify-release` waits for the workflow and checks the published
+  assets, the checksum and the version from this machine.
+- **The release workflow only builds and publishes**, with `go vet`, the
+  changelog check and the version check. It no longer runs `make check`,
+  `make lint` or `make vuln`: they ran on this commit locally, on macOS
+  and on Linux in a container, minutes before. Running them again on a
+  two-core runner took about 20 minutes and, with a release candidate,
+  doubled the time from a green gate to a release. The release job now
+  builds in about 90 seconds on two CPUs without a cache (measured in a
+  container limited to two CPUs here; not yet on the runner).
+- A release candidate is now optional, for releases that change the wire
+  protocol or the database.
+
+Cost: the hosted workflow trusts the local gate. `make tag` refuses a
+commit without a passing `make prerelease`, but a tag made by hand with
+`git tag` and `git push` is published without any test having run on it.
+Accepted: one maintainer, who uses `make tag`, and docs/RELEASING.md says
+not to tag by hand. Also, running everything at once loads the machine
+more, which exposes timing races: in seven runs of `make prerelease` and
+five more of `make check` on 2026-11-24, two tests with tight waits failed once
+each (TESTING.md names them), and the recipes check failed once because
+a `grep -q` under `pipefail` made the `printf` feeding it fail; that
+script was fixed. Revisit if a second person can push tags, if timing
+failures keep recurring, or if a release goes out that the local gate
+did not cover.

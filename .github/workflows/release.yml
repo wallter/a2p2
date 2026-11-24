@@ -5,6 +5,12 @@ name: release
 # SHA256SUMS, and attaches them to a GitHub release made with the gh CLI,
 # with that version's section of CHANGELOG.md as the notes. This is the only
 # workflow that runs without a person asking; see docs/RELEASING.md.
+#
+# The tests are not run here: `make prerelease` ran check, lint, vuln, the
+# Linux suite in a container and a chaos run on this commit, and `make tag`
+# refuses to tag a commit without its stamp (DECISIONS, D-cycle). A tag
+# pushed by hand skips that gate; the steps below still build from the tag
+# with no cache and check what they publish.
 on:
   push:
     tags: ['v*']
@@ -16,7 +22,7 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     permissions:
       contents: write # create the release and upload its files; nothing else
     steps:
@@ -27,9 +33,8 @@ jobs:
           # No module or build cache: a cache saved by another workflow run
           # must not be able to change what goes into a released binary.
           cache: false
-      - run: make check
-      - run: make lint
-      - run: make vuln
+      # A short sanity check of the tagged source; the full gate ran locally.
+      - run: go vet ./...
       - name: the changelog has a section for this version
         run: scripts/changelog.sh "$GITHUB_REF_NAME" > notes.md && test -s notes.md
       - run: make release VERSION="$GITHUB_REF_NAME"

@@ -13,6 +13,63 @@ Keep tests in temporary directories so they leave your a2p2 state and harness
 configuration alone. Use controlled clocks and seeded randomness for tests
 that need to replay the same steps.
 
+## How make check and make test run
+
+`make check` runs its steps at the same time (`scripts/gate.sh`): fmt,
+vet, the Windows build gate, licences, trace, recipes, the race tests
+and the launcher's tests. It prints one line per step as it ends, with
+its time, then the full log of every step that failed, and exits non-zero
+naming each failed step.
+
+`make test` (`scripts/gotest.sh`) runs every test once with
+`-race -count=1 -timeout 30m`, as `go test ./...` did. A package whose
+tests took 20 seconds or more in total by
+[`scripts/test-timings.tsv`](../scripts/test-timings.tsv) is split into
+shards, because Go runs the top-level tests of one package one after
+another:
+
+- the package's test binary is compiled once (`go test -race -c`), and
+  its tests, fuzz targets and examples are listed with `-test.list`;
+- the longest recorded tests are placed first, each on the least loaded
+  shard; tests with no recorded time are dealt round-robin;
+- each shard is one process of that binary, run in the package directory
+  with its own `TMPDIR` and `-test.run` set to an anchored alternation of
+  its names (`^(TestA|TestB)$`, which also runs their subtests);
+- the runner fails if the shards together are not exactly the listed
+  tests, or if a shard that exited 0 did not report each of its tests
+  once (`--- PASS`, `--- FAIL` or `--- SKIP` in `-test.v` output).
+
+Every other package runs in one `go test`, at the same time as the shards.
+`SHARDS` sets the number of shards per package: by default the number of
+CPUs, at most 12; the pull-request job uses 2 and `make check-linux` 8.
+`make test-timings` runs the tests and rewrites the timings file; run it
+when tests are added or become slower, so that the shards stay balanced
+and a package that has grown past 20 seconds is sharded. A missing or
+stale entry changes only how the tests are grouped, never which run.
+
+Tests of a sharded package must not share anything between processes.
+Checked on 2026-11-24 for the six packages sharded then (`internal/node`,
+`internal/daemon`, `internal/mcpshim`, `internal/peer`,
+`internal/members`, `internal/model/delivery`): every listener binds
+port 0, every directory comes from `t.TempDir()` or `os.MkdirTemp`, the
+fixed addresses in tests (`127.0.0.1:7423`, `127.0.0.1:7422`) are
+strings that are parsed or shown, never bound, and package-level
+variables that tests change (limits, timeouts) live in one process and
+are never written to disk. Test data under `testdata/` is only written
+with `-update`. No test needed a change.
+
+Running the steps together loads the machine more than running them one
+after another did, which can expose timing races. One was seen in
+`TestOverTLSAHeldPullGivesUpItsConcurrencySlot` (`internal/peer`), in
+the container during a `make prerelease`: the test's hold signal is sent
+before the held request gives up its concurrency slot, so a request
+sent at once can still be refused. Another was seen in
+`TestACrashAfterTheRouterMadeTheMappingIsUndoneFromTheRecordFile`
+(`internal/daemon/portmap`, the `pcp` case) during a `make check` with a
+load average of 14: its fake router must answer within the client's
+30-millisecond tries. Neither depends on the order of tests or on the
+shards; both are timing races of the tests.
+
 ## What the suite covers
 
 | Where | What it checks |
@@ -311,20 +368,27 @@ pull request that changes Go code, `go.mod`, `go.sum`, the Makefile,
 `make check` and `make lint`. Nothing runs on a push to `main`, and no job
 runs on macOS.
 
+`make check` runs there with `SHARDS=2` for the runner's two cores.
+
 The [release workflow](../.github/workflows/release.yml) runs when a tag
 starting with `v` is pushed. On Linux, without a module or build cache, it
-runs `make check`, `make lint` and `make vuln`, checks that CHANGELOG.md
-has a section for the tag, runs `make release VERSION=<tag>`, checks that
-the Linux binary reports the tag, and publishes the binaries and
-`SHA256SUMS` as a GitHub release with that section as its notes (a
-prerelease when the tag contains a hyphen).
+runs `go vet ./...`, checks that CHANGELOG.md has a section for the tag,
+runs `make release VERSION=<tag>`, checks that the Linux binary reports
+the tag, and publishes the binaries and `SHA256SUMS` as a GitHub release
+with that section as its notes (a prerelease when the tag contains a
+hyphen). It does not run the tests: they ran in `make prerelease` on the
+same commit, which `make tag` checks (DECISIONS, D-cycle).
 
 Before a tag, a maintainer runs `make prerelease` on their own machine:
-`make check`, `make lint`, `make vuln`, `make check-linux` and a 60-second
-`make chaos` run. `make check-linux` runs `go vet` and the race tests on
-Linux in a Docker container, so a macOS machine also tests Linux.
-`make chaos` runs real daemons in Docker containers through kills, pauses
-and network splits (see [Chaos runs of real daemons](#chaos-runs-of-real-daemons)).
+`make check`, `make lint`, `make vuln`, `make check-linux` and one `make
+chaos` run at its default length, all at the same time, each to its own
+log in `.prerelease/`. It prints one line per step with its time and
+exits non-zero naming every failed step; when every step passed on a
+clean tree it writes `.prerelease/stamp`. `make check-linux` runs `go vet`
+and the same sharded race tests on Linux in a Docker container, so a
+macOS machine also tests Linux. `make chaos` runs real daemons in Docker
+containers through kills, pauses and network splits (see
+[Chaos runs of real daemons](#chaos-runs-of-real-daemons)).
 
 ## Optional checks
 
