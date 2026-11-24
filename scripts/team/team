@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """team: start a small formation of AI coding harnesses that coordinate
-through an a2p2 room, watch them, stop them and measure the run.
+through an a2p2 room, supervise them, stop them and measure the run.
 
 It is a layer on top of a2p2: it uses only the a2p2 CLI and passes the
 a2p2 MCP server to each harness for one run on its command line (or, for
-Antigravity, in a workspace file in a directory the launcher created). It
-never edits a harness's configuration and never reads a harness's screen:
-it uses exit statuses, the files a harness writes and what the room shows.
-Text that members post is never treated as an instruction to the launcher.
+Antigravity, in a workspace file the launcher creates). It never edits a
+harness's configuration and never reads a harness's screen: it uses exit
+statuses, the files a harness writes and what the room shows. Text that
+members post is never treated as an instruction to the launcher.
 
     team [-m MANIFEST] up [--wait]
     team [-m MANIFEST] status
@@ -17,27 +17,56 @@ Text that members post is never treated as an instruction to the launcher.
 
 MANIFEST defaults to $TEAM_MANIFEST, then ./team.json. See README.md.
 Python 3 standard library only.
+
+Processes: `up` starts one supervisor per run. The supervisor starts each
+member under a small guard process that leads the member's process group
+and holds a pipe from the supervisor. Only the supervisor signals members,
+and only process groups whose leader it started and has not yet reaped.
+Nothing ever signals a pid read from disk. If the supervisor dies, each
+guard sees the pipe close and ends its own group.
 """
 import argparse
 import datetime
 import json
+import math
 import os
+import queue
 import re
-import shutil
+import select
 import signal
 import subprocess
 import sys
+import threading
 import time
+import uuid
 
 HERE = os.path.dirname(os.path.realpath(__file__))
+SELF = os.path.realpath(__file__)
 LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 HARNESSES = ("claude", "codex", "agy", "command")
 HARD_CAP = 16
 REFUSAL_CODES = ("invalid_request", "not_found", "not_allowed", "not_shown",
                  "already_done", "not_registered", "too_large", "networking_off",
                  "not_caught_up", "rate_limited", "unavailable", "internal")
-FINISHED = ("done", "failed", "limit", "stopped")
+# Final states. "exited" is the supervisor's record of an exit that the
+# observer has not classified yet.
+FINAL = ("done", "failed", "not_ready", "limit", "stopped", "lost")
 KILL_GRACE = 5.0
+TICK = 0.1          # supervisor loop: deadlines, exits and stop requests
+HEARTBEAT_STALE = 3.0
+ACK_WAIT = 3.0
+
+# Profiles that keep the harness's own permission and sandbox controls.
+CLAUDE_MODES = ("", "default", "acceptEdits", "plan")
+CODEX_SANDBOXES = ("read-only", "workspace-write")
+CLAUDE_TOOLS_REFUSED = re.compile(r"^(\*|Bash|Bash\(\*\)|Bash\(:\*\))$|dangerous", re.I)
+
+TOP_KEYS = {"room", "a2p2_home", "a2p2", "state_dir", "max_members", "lead", "watcher_label",
+            "kickoff", "prelude", "poll_seconds", "silence_seconds", "members"}
+MEMBER_KEYS = {"label", "harness", "model", "brief", "brief_file", "limit_seconds",
+               "silence_seconds", "workdir", "worktree"}
+HARNESS_KEYS = {"claude": {"permission_mode", "allowed_tools", "max_budget_usd"},
+                "codex": {"sandbox"}, "agy": set(), "command": {"command", "mcp_harness"}}
 
 
 class Fail(Exception):
@@ -45,6 +74,13 @@ class Fail(Exception):
 
 
 # ---------------------------------------------------------------- manifest
+
+def positive(v, what):
+    """A finite number above zero; refuses booleans, strings, NaN and infinity."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+        raise Fail(f"manifest: {what} must be a finite number above zero, not {v!r}")
+    return float(v)
+
 
 def load_manifest(path):
     path = os.path.abspath(path)
@@ -58,6 +94,9 @@ def load_manifest(path):
     def p(v):
         return v if v is None else os.path.normpath(os.path.join(base, os.path.expanduser(v)))
 
+    unknown = set(m) - TOP_KEYS
+    if unknown:
+        raise Fail(f"manifest: unknown keys {', '.join(sorted(unknown))}")
     for k in ("room", "a2p2_home", "members"):
         if k not in m:
             raise Fail(f"manifest: {k!r} is required")
@@ -65,6 +104,7 @@ def load_manifest(path):
     if os.sep in a2p2 or a2p2.startswith("."):
         a2p2 = p(a2p2)
     else:
+        import shutil
         a2p2 = shutil.which(a2p2) or a2p2
     stem = os.path.splitext(os.path.basename(path))[0]
     man = {
@@ -78,8 +118,8 @@ def load_manifest(path):
         "watcher": m.get("watcher_label", "team"),
         "kickoff": m.get("kickoff", ""),
         "prelude": p(m["prelude"]) if m.get("prelude") else os.path.join(HERE, "prelude.md"),
-        "poll": float(m.get("poll_seconds", 5)),
-        "silence": float(m.get("silence_seconds", 300)),
+        "poll": positive(m.get("poll_seconds", 5), "poll_seconds"),
+        "silence": positive(m.get("silence_seconds", 300), "silence_seconds"),
         "members": [],
     }
     if not LABEL_RE.match(man["room"]):
@@ -99,14 +139,34 @@ def load_manifest(path):
         h = mm.get("harness")
         if h not in HARNESSES:
             raise Fail(f"manifest: {label}: harness must be one of {', '.join(HARNESSES)}")
+        unknown = set(mm) - MEMBER_KEYS - HARNESS_KEYS[h]
+        if unknown:
+            raise Fail(f"manifest: {label}: keys not used by {h}: {', '.join(sorted(unknown))}")
         if h != "command" and not mm.get("model"):
             raise Fail(f"manifest: {label}: model is required for {h}")
-        if h == "command" and not isinstance(mm.get("command"), list):
+        if h == "command" and not (isinstance(mm.get("command"), list) and mm["command"]):
             raise Fail(f"manifest: {label}: command must be a list of arguments")
         if mm.get("workdir") and mm.get("worktree"):
             raise Fail(f"manifest: {label}: give workdir or worktree, not both")
         if h == "agy" and mm.get("workdir"):
             raise Fail(f"manifest: {label}: agy needs a directory the launcher creates (omit workdir)")
+        mode = mm.get("permission_mode", "")
+        if h == "claude" and mode not in CLAUDE_MODES:
+            raise Fail(f"manifest: {label}: permission_mode {mode!r} is not allowed; "
+                       f"use one of {', '.join(repr(x) for x in CLAUDE_MODES[1:])} (or omit it)")
+        tools = mm.get("allowed_tools", [])
+        if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
+            raise Fail(f"manifest: {label}: allowed_tools must be a list of tool names")
+        bad = [t for t in tools if CLAUDE_TOOLS_REFUSED.search(t.strip())]
+        if bad:
+            raise Fail(f"manifest: {label}: allowed_tools {bad} would skip Claude Code's permission checks; "
+                       "name scoped tools such as Read or Bash(git status:*)")
+        sandbox = mm.get("sandbox", "read-only")
+        if h == "codex" and sandbox not in CODEX_SANDBOXES:
+            raise Fail(f"manifest: {label}: sandbox {sandbox!r} is not allowed; use one of {', '.join(CODEX_SANDBOXES)}")
+        budget = mm.get("max_budget_usd")
+        if budget is not None:
+            positive(budget, f"{label}: max_budget_usd")
         brief = mm.get("brief", "")
         if mm.get("brief_file"):
             with open(p(mm["brief_file"])) as f:
@@ -115,12 +175,12 @@ def load_manifest(path):
             "label": label,
             "harness": h,
             "model": mm.get("model", ""),
-            "sandbox": mm.get("sandbox", "read-only"),
-            "permission_mode": mm.get("permission_mode", ""),
-            "allowed_tools": list(mm.get("allowed_tools", [])),
-            "max_budget_usd": mm.get("max_budget_usd"),
-            "limit": float(mm.get("limit_seconds", 900)),
-            "silence": float(mm.get("silence_seconds", man["silence"])),
+            "sandbox": sandbox,
+            "permission_mode": mode,
+            "allowed_tools": list(tools),
+            "max_budget_usd": budget,
+            "limit": positive(mm.get("limit_seconds", 900), f"{label}: limit_seconds"),
+            "silence": positive(mm.get("silence_seconds", man["silence"]), f"{label}: silence_seconds"),
             "workdir": p(mm.get("workdir")),
             "worktree": p(mm.get("worktree")),
             "command": mm.get("command"),
@@ -174,12 +234,16 @@ def history(man, since=None, page=200):
     return out
 
 
-def ts(iso):
-    return datetime.datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+def ts(iso_):
+    return datetime.datetime.fromisoformat(iso_.replace("Z", "+00:00")).timestamp()
 
 
 def iso(t):
     return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if t else ""
+
+
+def log(msg):
+    print(f"{iso(time.time())} {msg}", flush=True)
 
 
 # ------------------------------------------------------------------ state
@@ -197,7 +261,7 @@ def load_roster(man):
 
 
 def save_roster(man, r):
-    tmp = roster_path(man) + ".tmp"
+    tmp = roster_path(man) + f".{os.getpid()}.tmp"
     with open(tmp, "w") as f:
         json.dump(r, f, indent=2)
     os.replace(tmp, roster_path(man))
@@ -207,28 +271,27 @@ def mdir(man, label):
     return os.path.join(man["state"], "members", label)
 
 
-def alive(pid):
-    if not pid:
-        return False
+def control_dir(man):
+    return os.path.join(man["state"], "control")
+
+
+def supervisor_live(man):
+    """True if the supervisor touched its heartbeat recently. Informational
+    only: stop decisions go through the control handshake."""
     try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
+        return time.time() - os.path.getmtime(os.path.join(man["state"], "heartbeat")) < HEARTBEAT_STALE
+    except OSError:
         return False
-    except PermissionError:
-        return True
 
 
-def watcher_alive(man):
+def create_new(path, text):
+    """Write a file that must not exist yet; refuses existing files and symlinks."""
     try:
-        with open(os.path.join(man["state"], "watcher.pid")) as f:
-            return alive(int(f.read().strip()))
-    except (OSError, ValueError):
-        return False
-
-
-def log(msg):
-    print(f"{iso(time.time())} {msg}", flush=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except FileExistsError:
+        raise Fail(f"{path} already exists (or is a symlink); the launcher will not overwrite it")
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
 
 
 # ----------------------------------------------------------------- launch
@@ -242,36 +305,53 @@ def prompt_for(man, m, kickoff_id, lead_id):
     return prelude + m["brief"].strip() + "\n"
 
 
-def prepare(man, m, prompt):
-    """Builds the member's command line and its per-run files. Returns
-    (argv, cwd, env, final_path)."""
+def prepare_dirs(man, m):
+    """Creates the member's directory, working directory and per-run
+    configuration files, before anything else happens. Returns the
+    working directory."""
     d = mdir(man, m["label"])
-    os.makedirs(d, exist_ok=True)
-    with open(os.path.join(d, "prompt.md"), "w") as f:
-        f.write(prompt)
+    os.makedirs(d)
     if m["workdir"]:
         work = m["workdir"]
+        if not os.path.isdir(work):
+            raise Fail(f"{m['label']}: workdir {work} is not a directory")
     elif m["worktree"]:
         work = os.path.join(d, "work")
-        if not os.path.isdir(work):
-            r = subprocess.run(["git", "-C", m["worktree"], "worktree", "add", "--detach", work, "HEAD"],
-                               capture_output=True, text=True)
-            if r.returncode != 0:
-                raise Fail(f"{m['label']}: git worktree add failed: {r.stderr.strip()}")
+        r = subprocess.run(["git", "-C", m["worktree"], "worktree", "add", "--detach", work, "HEAD"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise Fail(f"{m['label']}: git worktree add failed: {r.stderr.strip()}")
     else:
         work = os.path.join(d, "work")
-        os.makedirs(work, exist_ok=True)
+        os.makedirs(work)
+    label, home, exe = m["label"], man["home"], man["a2p2"]
+    if m["harness"] == "claude":
+        create_new(os.path.join(d, "mcp.json"), json.dumps(
+            {"mcpServers": {"a2p2": {"command": exe, "args": ["mcp", "--harness", "claude", "--name", label],
+                                     "env": {"A2P2_HOME": home}}}}))
+    elif m["harness"] == "agy":
+        agents = os.path.join(work, ".agents")
+        if os.path.islink(agents):
+            raise Fail(f"{m['label']}: {agents} is a symlink; the launcher will not write through it")
+        os.makedirs(agents, exist_ok=True)
+        create_new(os.path.join(agents, "mcp_config.json"), json.dumps(
+            {"mcpServers": {"a2p2": {"command": exe, "args": ["mcp", "--harness", "agy", "--name", label],
+                                     "env": {"A2P2_HOME": home}}}}))
+    return work
+
+
+def launch_spec(man, m, prompt, work):
+    """The member's command line and environment additions."""
+    d = mdir(man, m["label"])
+    with open(os.path.join(d, "prompt.md"), "w") as f:
+        f.write(prompt)
     final = os.path.join(d, "final.txt")
     label, home, exe = m["label"], man["home"], man["a2p2"]
-    env = dict(os.environ, A2P2_HOME=home)
+    env = {"A2P2_HOME": home}
     h = m["harness"]
     if h == "claude":
-        cfg = os.path.join(d, "mcp.json")
-        with open(cfg, "w") as f:
-            json.dump({"mcpServers": {"a2p2": {"command": exe, "args": ["mcp", "--harness", "claude", "--name", label],
-                                               "env": {"A2P2_HOME": home}}}}, f)
         argv = ["claude", "-p", prompt, "--model", m["model"], "--no-session-persistence",
-                "--mcp-config", cfg, "--strict-mcp-config",
+                "--mcp-config", os.path.join(d, "mcp.json"), "--strict-mcp-config",
                 "--allowedTools", ",".join(["mcp__a2p2__*"] + m["allowed_tools"]),
                 "--output-format", "stream-json", "--verbose"]
         if m["permission_mode"]:
@@ -287,19 +367,20 @@ def prepare(man, m, prompt):
                 "-c", 'mcp_servers.a2p2.default_tools_approval_mode="approve"',
                 "--json", "-o", final]
     elif h == "agy":
-        os.makedirs(os.path.join(work, ".agents"), exist_ok=True)
-        with open(os.path.join(work, ".agents", "mcp_config.json"), "w") as f:
-            json.dump({"mcpServers": {"a2p2": {"command": exe, "args": ["mcp", "--harness", "agy", "--name", label],
-                                               "env": {"A2P2_HOME": home}}}}, f)
         argv = ["agy", "--settings", json.dumps({"permissions": {"allow": ["mcp(a2p2/*)"]}}),
                 "--model", m["model"], "--print-timeout", f"{int(m['limit'])}s", "-p=" + prompt]
     else:
+        # A custom command is trusted input: the person who writes the
+        # manifest vouches for it, as for any program they run.
         vals = {"a2p2": exe, "home": home, "label": label, "room": man["room"], "workdir": work,
                 "final": final, "prompt_file": os.path.join(d, "prompt.md"), "team_dir": HERE}
         argv = [str(a).format(**vals) for a in m["command"]]
         env.update(A2P2_BIN=exe, TEAM_LABEL=label, TEAM_ROOM=man["room"], TEAM_FINAL=final,
                    TEAM_PROMPT_FILE=vals["prompt_file"], TEAM_MCP_HARNESS=m["mcp_harness"])
-    return argv, work, env, final
+    spec = {"argv": argv, "cwd": work, "env": env}
+    with open(os.path.join(d, "launch.json"), "w") as f:
+        json.dump(spec, f)
+    return final
 
 
 def server_harness(m):
@@ -308,9 +389,20 @@ def server_harness(m):
 
 # -------------------------------------------------------------------- up
 
-def cmd_up(man, args):
-    if os.path.exists(roster_path(man)):
+def reserve(man):
+    """Claims the state directory for one run; a second `up` is refused."""
+    os.makedirs(man["state"], exist_ok=True)
+    try:
+        os.close(os.open(os.path.join(man["state"], "reserved"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except FileExistsError:
         raise Fail(f"{man['state']} already holds a run; remove it or set another state_dir")
+
+
+def cmd_up(man, args):
+    reserve(man)
+    os.makedirs(os.path.join(man["state"], "members"))
+    os.makedirs(control_dir(man))
+    works = {m["label"]: prepare_dirs(man, m) for m in man["members"]}
     if not os.path.isdir(man["home"]):
         os.makedirs(man["home"], mode=0o700)
     st = a2p2_json(man, "status")
@@ -324,33 +416,31 @@ def cmd_up(man, args):
     lead_id = f"{man['lead']}@{node8}"
     roster_line = ", ".join(f"{m['label']} ({m['harness']})" for m in man["members"])
     kickoff = man["kickoff"] or "Kickoff. Each member has its own brief."
-    kickoff += f"\n\nMembers: {roster_line}. Lead: {lead_id}. Reply to this message with your plan, and later with your DONE: or BLOCKED: report."
+    kickoff += (f"\n\nMembers: {roster_line}. Lead: {lead_id}. Reply to this message with your plan, "
+                "and later with your DONE: or BLOCKED: report.")
     kickoff_id = a2p2(man, "send", "--as", man["lead"], "--room", man["room"], kickoff).strip()
-    os.makedirs(os.path.join(man["state"], "members"), exist_ok=True)
     roster = {"room": man["room"], "home": man["home"], "node8": node8, "lead": lead_id,
               "watcher": f"{man['watcher']}@{node8}", "kickoff": kickoff_id, "started": time.time(),
-              "ended": None, "manifest": man["path"], "members": []}
+              "ended": None, "manifest": man["path"], "supervisor_pid": None, "members": []}
     for m in man["members"]:
-        prompt = prompt_for(man, m, kickoff_id, lead_id)
-        argv, work, _, final = prepare(man, m, prompt)
+        final = launch_spec(man, m, prompt_for(man, m, kickoff_id, lead_id), works[m["label"]])
         d = mdir(man, m["label"])
         roster["members"].append({
             "label": m["label"], "id": f"{m['label']}@{node8}", "harness": m["harness"],
             "server_harness": server_harness(m), "model": m["model"], "limit": m["limit"],
-            "silence": m["silence"], "workdir": work, "out": os.path.join(d, "out.log"),
+            "silence": m["silence"], "workdir": works[m["label"]], "out": os.path.join(d, "out.log"),
             "err": os.path.join(d, "err.log"), "final": final, "pid": None, "state": "pending",
-            "launched": None, "connected": None, "ended": None, "exit": None, "note": ""})
+            "launched": None, "connected": None, "ended": None, "wall_clock": None, "exit": None,
+            "limit_hit": False, "stop_requested": None, "note": ""})
     save_roster(man, roster)
-    with open(os.path.join(man["state"], "watcher.log"), "a") as wl:
-        w = subprocess.Popen([sys.executable, os.path.realpath(__file__), "-m", man["path"], "_watch"],
+    with open(os.path.join(man["state"], "supervisor.log"), "a") as wl:
+        w = subprocess.Popen([sys.executable, SELF, "-m", man["path"], "_supervise"],
                              stdin=subprocess.DEVNULL, stdout=wl, stderr=subprocess.STDOUT,
                              start_new_session=True)
-    with open(os.path.join(man["state"], "watcher.pid"), "w") as f:
-        f.write(str(w.pid))
     deadline = time.time() + 30
     while time.time() < deadline:
         r = load_roster(man)
-        if all(x["pid"] or x["state"] in FINISHED for x in r["members"]) or w.poll() is not None:
+        if all(x["pid"] or x["state"] in FINAL for x in r["members"]) or w.poll() is not None:
             break
         time.sleep(0.1)
     print(f"kickoff {kickoff_id} in room {man['room']}; state in {man['state']}")
@@ -360,122 +450,324 @@ def cmd_up(man, args):
         cmd_report(man, args)
 
 
-# ---------------------------------------------------------------- watcher
+# ----------------------------------------------------------------- guard
 
-def connected(agents, member):
-    """The member's MCP server registered its label with the harness name
-    after the member was launched. The launcher registered the label
-    earlier with harness "cli", so only the tool server can produce this."""
-    for a in agents:
-        if a.get("id") == member["id"] and a.get("harness") == member["server_harness"] \
-                and a.get("last_seen") and ts(a["last_seen"]) >= member["launched"]:
-            return a
-    return None
+def cmd_guard(argv):
+    """Leads the member's process group. Runs the member; if the pipe from
+    the supervisor closes (the supervisor died), ends the whole group.
+    Exits with the member's status (128 + signal if it was killed)."""
+    child = subprocess.Popen(argv, stdin=subprocess.DEVNULL)
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, signal.SIG_IGN)  # the member gets group signals itself
+    orphaned_at = None
+    while True:
+        code = child.poll()
+        if code is not None:
+            return code if code >= 0 else 128 - code
+        if orphaned_at is None:
+            r, _, _ = select.select([0], [], [], 0.2)
+            if r and not os.read(0, 1):
+                orphaned_at = time.monotonic()
+                os.killpg(0, signal.SIGTERM)
+        else:
+            if time.monotonic() - orphaned_at > KILL_GRACE:
+                os.killpg(0, signal.SIGKILL)
+            time.sleep(0.1)
 
 
-def killpg(pid, sig):
-    try:
-        os.killpg(pid, sig)
-    except (ProcessLookupError, PermissionError):
-        pass
+# ------------------------------------------------------------- supervisor
 
+class Supervisor:
+    """Owns the member processes. Its loop never calls a2p2 and never waits
+    on the room, so deadlines and stop requests are handled within a tick.
+    Room observation and posting run in a separate thread."""
 
-def cmd_watch(man, _args):
-    roster = load_roster(man)
-    procs, term_at, silent_posted, asked = {}, {}, set(), set()
-    mans = {m["label"]: m for m in man["members"]}
-    for x in roster["members"]:
-        m = mans[x["label"]]
-        with open(os.path.join(mdir(man, x["label"]), "prompt.md")) as f:
-            prompt = f.read()
-        argv, work, env, _ = prepare(man, m, prompt)
+    def __init__(self, man):
+        self.man = man
+        self.roster = load_roster(man)
+        self.lock = threading.Lock()
+        self.procs = {}           # label -> Popen of the guard, while not reaped
+        self.deadline = {}        # label -> monotonic limit deadline
+        self.started = {}         # label -> monotonic launch time
+        self.kill_at = {}         # label -> monotonic time to send SIGKILL
+        self.posts = queue.Queue()
+        self.shutdown = None      # the signal that asked the supervisor to end
+        self.done = threading.Event()
+
+    def save(self):
+        with self.lock:
+            save_roster(self.man, self.roster)
+
+    def member(self, label):
+        return next(x for x in self.roster["members"] if x["label"] == label)
+
+    def heartbeat(self):
+        hb = os.path.join(self.man["state"], "heartbeat")
+        try:
+            os.utime(hb)
+        except FileNotFoundError:
+            open(hb, "w").close()
+
+    def launch(self, x):
+        with open(os.path.join(mdir(self.man, x["label"]), "launch.json")) as f:
+            spec = json.load(f)
+        env = dict(os.environ, **spec["env"])
+        launched = time.time()     # taken before the process exists
+        t0 = time.monotonic()
         try:
             with open(x["out"], "w") as out, open(x["err"], "w") as err:
-                p = subprocess.Popen(argv, cwd=work, env=env, stdin=subprocess.DEVNULL,
-                                     stdout=out, stderr=err, start_new_session=True)
+                p = subprocess.Popen([sys.executable, SELF, "_guard", "--", *spec["argv"]], cwd=spec["cwd"],
+                                     env=env, stdin=subprocess.PIPE, stdout=out, stderr=err,
+                                     start_new_session=True)
         except OSError as e:
-            x.update(state="failed", ended=time.time(), launched=time.time(), note=f"could not start: {e}")
-            post(man, f"failed: {x['label']} could not start ({x['harness']}: {e.strerror or e}).")
-            continue
-        procs[x["label"]] = p
-        x.update(pid=p.pid, state="launched", launched=time.time())
-        log(f"launched {x['label']} pid {p.pid}")
-    save_roster(man, roster)
-    while True:
-        now = time.time()
+            with self.lock:
+                x.update(state="failed", launched=launched, ended=time.time(), note=f"could not start: {e}")
+            self.posts.put(f"failed: {x['label']} could not start ({x['harness']}: {e.strerror or e}).")
+            self.save()
+            return
+        self.procs[x["label"]] = p
+        self.started[x["label"]] = t0
+        self.deadline[x["label"]] = t0 + x["limit"]
+        with self.lock:
+            x.update(pid=p.pid, state="launched", launched=launched)
+        self.save()  # each launch is published as it happens
+        log(f"launched {x['label']} guard pid {p.pid}")
+
+    def signal_group(self, label, sig):
+        """Only for a guard this supervisor started and has not reaped, so
+        its pid is still reserved as the group id."""
+        p = self.procs.get(label)
+        if p is None or p.returncode is not None:
+            return
         try:
-            agents = a2p2_json(man, "status").get("agents", [])
+            os.killpg(p.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    def terminate(self, label, why):
+        x = self.member(label)
+        if label in self.kill_at or label not in self.procs:
+            return False
+        with self.lock:
+            if why == "limit":
+                x.update(limit_hit=True, state="stopping")
+            else:
+                x.update(stop_requested=why, state="stopping")
+        self.signal_group(label, signal.SIGTERM)
+        self.kill_at[label] = time.monotonic() + KILL_GRACE
+        return True
+
+    def reap(self, label):
+        """Called when the guard has exited but is not reaped yet: ends what
+        is left of its group while the group id is still reserved."""
+        p = self.procs[label]
+        self.signal_group(label, signal.SIGKILL)
+        code = p.wait()
+        del self.procs[label]
+        self.kill_at.pop(label, None)
+        x = self.member(label)
+        with self.lock:
+            x.update(state="exited", exit=code, ended=time.time(),
+                     wall_clock=round(time.monotonic() - self.started[label], 1))
+        self.save()
+        log(f"{label} exited {code}")
+
+    def exited(self, label):
+        p = self.procs[label]
+        try:
+            r = os.waitid(os.P_PID, p.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return True
+        return r is not None and r.si_pid == p.pid
+
+    def control(self):
+        d = control_dir(self.man)
+        for name in sorted(os.listdir(d)):
+            if not (name.startswith("req-") and name.endswith(".json")):
+                continue
+            path = os.path.join(d, name)
+            try:
+                with open(path) as f:
+                    req = json.load(f)
+                os.remove(path)
+            except (OSError, ValueError):
+                continue
+            label = req.get("stop")
+            hit = [lb for lb in list(self.procs) if (label is None or lb == label) and self.terminate(lb, "team stop")]
+            ack = os.path.join(d, "ack-" + name[4:])
+            with open(ack + ".tmp", "w") as f:
+                json.dump({"stopping": hit}, f)
+            os.replace(ack + ".tmp", ack)
+
+    def on_signal(self, signum, _frame):
+        self.shutdown = signum
+
+    def run(self):
+        for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(s, self.on_signal)
+        with self.lock:
+            self.roster["supervisor_pid"] = os.getpid()
+        self.heartbeat()
+        observer = threading.Thread(target=Observer(self).run, daemon=True)
+        observer.start()
+        try:
+            for x in self.roster["members"]:
+                if self.shutdown is None:
+                    self.launch(x)
+            while self.procs:
+                self.heartbeat()
+                if self.shutdown is not None:
+                    for label in list(self.procs):
+                        self.terminate(label, "supervisor ended")
+                self.control()
+                now = time.monotonic()
+                for label in list(self.procs):
+                    if self.exited(label):
+                        self.reap(label)
+                    elif label in self.kill_at:
+                        if now >= self.kill_at[label]:
+                            self.signal_group(label, signal.SIGKILL)
+                    elif now >= self.deadline[label]:
+                        x = self.member(label)
+                        self.terminate(label, "limit")
+                        self.posts.put(f"limit: {label} passed its {x['limit']:.0f}s wall-clock limit "
+                                       "and was stopped.")
+                time.sleep(TICK)
+        finally:
+            # On any failure, leave no member behind.
+            for label in list(self.procs):
+                self.signal_group(label, signal.SIGKILL)
+                code = self.procs[label].wait()
+                x = self.member(label)
+                with self.lock:
+                    x.update(state="exited", exit=code, ended=time.time(), stop_requested="supervisor failed",
+                             wall_clock=round(time.monotonic() - self.started[label], 1))
+                del self.procs[label]
+            for x in self.roster["members"]:
+                if x["state"] == "pending":
+                    with self.lock:
+                        x.update(state="lost", note="never launched")
+            self.save()
+            self.done.set()
+        observer.join()
+        with self.lock:
+            self.roster["ended"] = time.time()
+        self.save()
+        write_report(self.man)
+        log("all members finished")
+
+
+class Observer:
+    """Reads the room and posts the watcher's messages. Slow or blocked a2p2
+    calls here never delay the supervisor's deadlines."""
+
+    def __init__(self, sup):
+        self.sup = sup
+        self.man = sup.man
+        self.silent = set()
+        self.asked = set()
+
+    def flush(self):
+        while True:
+            try:
+                text = self.sup.posts.get_nowait()
+            except queue.Empty:
+                return
+            post(self.man, text)
+
+    def run(self):
+        next_poll = 0.0
+        while True:
+            finishing = self.sup.done.is_set()
+            self.flush()
+            if finishing or time.monotonic() >= next_poll:
+                self.poll(final=finishing)
+                next_poll = time.monotonic() + self.man["poll"]
+            self.flush()
+            if finishing:
+                return
+            self.sup.done.wait(0.2)
+
+    def ready(self, agents, x):
+        """The member's own MCP server registered its label: the harness's
+        name, this run's working directory, and a last-seen time at or after
+        the launch time taken before the process started. A CLI call under
+        the label keeps an earlier harness name and directory, so a label
+        reused from another run or directory does not count."""
+        for a in agents:
+            if a.get("id") != x["id"] or a.get("harness") != x["server_harness"] or not a.get("last_seen"):
+                continue
+            if not a.get("cwd") or os.path.realpath(a["cwd"]) != os.path.realpath(x["workdir"]):
+                continue
+            if ts(a["last_seen"]) >= x["launched"]:
+                return True
+        return False
+
+    def poll(self, final=False):
+        sup = self.sup
+        # Only exits that happened before the agents were read are
+        # classified, so a registration just before the exit is not missed.
+        exited = {x["label"] for x in sup.roster["members"] if x["state"] == "exited"}
+        try:
+            agents = a2p2_json(self.man, "status").get("agents", [])
         except (Fail, ValueError, subprocess.SubprocessError):
             agents = []
-        hist = history(man)
-        for x in roster["members"]:
-            if x["state"] in FINISHED:
+        hist = history(self.man)
+        now = time.time()
+        for x in sup.roster["members"]:
+            if x["state"] in FINAL or not x["launched"]:
                 continue
-            p = procs.get(x["label"])
-            if x["state"] == "launched":
-                a = connected(agents, x)
-                if a:
-                    x.update(state="running", connected=now)
-                    post(man, f"started: {x['label']} ({x['harness']}{', ' + x['model'] if x['model'] else ''}); "
-                              f"its a2p2 tool server connected as {x['id']} after {now - x['launched']:.0f}s.")
-            mine = [e for e in hist if e.get("from") == x["id"] and ts(e["created"]) >= x["launched"] - 1]
+            if not x["connected"] and self.ready(agents, x):
+                with sup.lock:
+                    x["connected"] = now
+                    if x["state"] == "launched":
+                        x["state"] = "running"
+                post(self.man, f"started: {x['label']} ({x['harness']}{', ' + x['model'] if x['model'] else ''}); "
+                               f"its a2p2 tool server connected as {x['id']} within {now - x['launched']:.0f}s.")
+            mine = [e for e in hist if e.get("from") == x["id"] and ts(e["created"]) >= x["launched"]]
             for e in mine:
-                if e["id"] not in asked and any(t.startswith("human@") for t in e.get("to") or []):
-                    asked.add(e["id"])
-                    post(man, f"needs input: {x['label']} asked the person a question (message {e['id']}).")
-            code = p.poll() if p else None
-            stop_marker = os.path.join(mdir(man, x["label"]), "stop")
-            if code is not None:
-                x.update(ended=now, exit=code)
-                el = now - x["launched"]
-                where = x["final"] if os.path.exists(x["final"]) and os.path.getsize(x["final"]) else x["out"]
-                if x["harness"] == "claude":
-                    extract_claude_final(x)
-                    where = x["final"] if os.path.exists(x["final"]) else x["out"]
-                never = "" if x["connected"] else " Its a2p2 tool server never connected."
-                if x.get("limit_hit"):
-                    x["state"] = "limit"
-                elif os.path.exists(stop_marker):
-                    x["state"] = "stopped"
-                    post(man, f"stopped: {x['label']} by team stop after {el:.0f}s (exit {code}).")
-                elif code == 0:
-                    x["state"] = "done"
-                    post(man, f"done: {x['label']} exited 0 after {el:.0f}s; final answer saved at {where}.{never}")
+                if e["id"] not in self.asked and any(t.startswith("human@") for t in e.get("to") or []):
+                    self.asked.add(e["id"])
+                    post(self.man, f"needs input: {x['label']} asked the person a question (message {e['id']}).")
+            if x["label"] in exited:
+                self.classify(x)
+                continue
+            if x["state"] == "exited":
+                continue
+            if x["state"] in ("launched", "running"):
+                last = max([ts(e["created"]) for e in mine] + [x["connected"] or x["launched"]])
+                if now - last > x["silence"]:
+                    if x["label"] not in self.silent:
+                        self.silent.add(x["label"])
+                        post(self.man, f"silent: {x['label']} has posted nothing in the room for {now - last:.0f}s.")
                 else:
-                    x["state"] = "failed"
-                    post(man, f"failed: {x['label']} exited {code} after {el:.0f}s; output saved at {where}.{never}")
-                x["note"] = never.strip()
-                log(f"{x['label']} ended: {x['state']} exit {code}")
-                continue
-            if x["label"] in term_at:
-                if now - term_at[x["label"]] > KILL_GRACE:
-                    killpg(x["pid"], signal.SIGKILL)
-                continue
-            if now - x["launched"] > x["limit"]:
-                x.update(state="stopping", limit_hit=True)
-                term_at[x["label"]] = now
-                killpg(x["pid"], signal.SIGTERM)
-                post(man, f"limit: {x['label']} passed its {x['limit']:.0f}s wall-clock limit and was stopped.")
-                continue
-            if os.path.exists(stop_marker):
-                x["state"] = "stopping"
-                term_at[x["label"]] = now
-                continue
-            last = max([ts(e["created"]) for e in mine] + [x["connected"] or x["launched"]])
-            if now - last > x["silence"]:
-                if x["label"] not in silent_posted:
-                    silent_posted.add(x["label"])
-                    post(man, f"silent: {x['label']} has posted nothing in the room for {now - last:.0f}s.")
-            else:
-                silent_posted.discard(x["label"])
-        save_roster(man, roster)
-        if all(x["state"] in FINISHED for x in roster["members"]):
-            break
-        time.sleep(man["poll"])
-    roster["ended"] = time.time()
-    save_roster(man, roster)
-    write_report(man)
-    log("all members finished")
+                    self.silent.discard(x["label"])
+        sup.save()
+
+    def classify(self, x):
+        if x["harness"] == "claude":
+            extract_claude_final(x)
+        where = x["final"] if os.path.exists(x["final"]) and os.path.getsize(x["final"]) else x["out"]
+        el, code, label = x["wall_clock"], x["exit"], x["label"]
+        never = "" if x["connected"] else " Its a2p2 tool server never connected."
+        if x["limit_hit"]:
+            state, text = "limit", None
+        elif x["stop_requested"] == "team stop":
+            state, text = "stopped", f"stopped: {label} by team stop after {el:.0f}s (exit {code})."
+        elif x["stop_requested"]:
+            state, text = "stopped", f"stopped: {label} because the {x['stop_requested']} after {el:.0f}s (exit {code})."
+        elif not x["connected"]:
+            state, text = "not_ready", (f"not ready: {label} exited {code} after {el:.0f}s and its a2p2 tool "
+                                        f"server never connected; output saved at {where}.")
+        elif code == 0:
+            state, text = "done", f"done: {label} exited 0 after {el:.0f}s; final answer saved at {where}."
+        else:
+            state, text = "failed", f"failed: {label} exited {code} after {el:.0f}s; output saved at {where}."
+        with self.sup.lock:
+            x.update(state=state, note=never.strip())
+        if text:
+            post(self.man, text)
+        log(f"{label}: {state}")
 
 
 def extract_claude_final(x):
@@ -495,6 +787,10 @@ def extract_claude_final(x):
                 f.write(res)
     except OSError:
         pass
+
+
+def cmd_supervise(man, _args):
+    Supervisor(man).run()
 
 
 # ------------------------------------------------------------ status/stop
@@ -518,44 +814,59 @@ def cmd_status(man, _args):
     for x in r["members"]:
         mine = [e for e in hist if e.get("from") == x["id"]]
         last = f"{ago(ts(mine[-1]['created']))} ago: {clean(mine[-1].get('text'), 40)}" if mine else "-"
-        el = (x["ended"] or time.time()) - x["launched"] if x["launched"] else 0
+        el = x["wall_clock"] if x.get("wall_clock") is not None else \
+            (time.time() - x["launched"] if x["launched"] else 0)
         state = x["state"] + (f" ({x['exit']})" if x["exit"] is not None else "")
         rows.append((x["label"], x["harness"], str(x["pid"] or "-"), state, last, f"{el:.0f}s"))
     w = [max(len(row[i]) for row in rows) for i in range(5)]
     for row in rows:
         print("  ".join(c.ljust(w[i]) for i, c in enumerate(row[:5])) + "  " + row[5])
-    if not watcher_alive(man) and not r.get("ended"):
-        print("note: the watcher is not running; states may be stale")
+    if not r.get("ended") and not supervisor_live(man):
+        print("note: the supervisor is not running; states may be stale")
 
 
 def cmd_stop(man, args):
+    """Asks the live supervisor to stop members. Signals nothing itself."""
     r = load_roster(man)
-    targets = [x for x in r["members"] if x["state"] not in FINISHED and (not args.label or x["label"] == args.label)]
     if args.label and not any(x["label"] == args.label for x in r["members"]):
         raise Fail(f"no member {args.label!r}")
-    for x in targets:
-        open(os.path.join(mdir(man, x["label"]), "stop"), "w").close()
-        if x["pid"]:
-            killpg(x["pid"], signal.SIGTERM)
-    deadline = time.time() + KILL_GRACE + 10
-    while time.time() < deadline and watcher_alive(man):
-        r = load_roster(man)
-        if all(x["state"] in FINISHED for x in r["members"] if x["label"] in [t["label"] for t in targets]):
-            break
-        time.sleep(0.2)
-    if not watcher_alive(man):
-        # Nobody is watching: finish the records here.
+    if r.get("ended"):
+        print("the run has already ended")
+        return
+    nonce = uuid.uuid4().hex
+    d = control_dir(man)
+    req = os.path.join(d, f"req-{nonce}.json")
+    with open(req + ".tmp", "w") as f:
+        json.dump({"stop": args.label}, f)
+    os.replace(req + ".tmp", req)
+    ack = os.path.join(d, f"ack-{nonce}.json")
+    deadline = time.monotonic() + ACK_WAIT
+    while time.monotonic() < deadline and not os.path.exists(ack):
+        time.sleep(0.05)
+    if not os.path.exists(ack):
+        try:
+            os.remove(req)
+        except OSError:
+            pass
         r = load_roster(man)
         for x in r["members"]:
-            if x["label"] in [t["label"] for t in targets] and x["state"] not in FINISHED:
-                if alive(x["pid"]):
-                    killpg(x["pid"], signal.SIGKILL)
-                x.update(state="stopped", ended=time.time())
-                post(man, f"stopped: {x['label']} by team stop (the watcher was not running).")
-        if all(x["state"] in FINISHED for x in r["members"]) and not r.get("ended"):
-            r["ended"] = time.time()
+            if x["state"] not in FINAL:
+                x.update(state="lost", note="the supervisor was not running; nothing was signalled")
+        r["ended"] = time.time()
         save_roster(man, r)
-    print(f"stopped {len(targets)} member(s)")
+        print("the run is not live: no supervisor answered. Nothing was signalled; "
+              "the roster is marked ended. Check for leftover processes yourself.")
+        return
+    with open(ack) as f:
+        hit = json.load(f)["stopping"]
+    os.remove(ack)
+    end = time.monotonic() + KILL_GRACE + 5
+    while time.monotonic() < end:
+        r = load_roster(man)
+        if all(x["state"] in FINAL for x in r["members"] if x["label"] in hit):
+            break
+        time.sleep(0.1)
+    print(f"stopped {len(hit)} member(s)" + (f": {', '.join(hit)}" if hit else ""))
 
 
 def cmd_logs(man, args):
@@ -609,8 +920,9 @@ def build_report(man):
         members.append({
             "label": x["label"], "id": x["id"], "harness": x["harness"], "model": x["model"],
             "state": x["state"], "exit": x["exit"],
-            "wall_clock_s": round((x["ended"] or time.time()) - x["launched"], 1) if x["launched"] else None,
-            "connected_after_s": round(x["connected"] - x["launched"], 1) if x["connected"] else None,
+            "wall_clock_s": x["wall_clock"] if x.get("wall_clock") is not None else
+            (round(time.time() - x["launched"], 1) if x["launched"] else None),
+            "connected_within_s": round(x["connected"] - x["launched"], 1) if x["connected"] else None,
             "messages_sent": len(mine),
             "replies_to_more_than_one_inbox": len(multi),
             "questions_to_person": len([e for e in mine if any(t.startswith("human@") for t in e.get("to") or [])]),
@@ -635,7 +947,7 @@ def build_report(man):
         "person_requests_waiting": waiting,
         "notes": "Refusals and empty inbox polls are counted from the harness logs and are only as "
                  "complete as those logs. Room-wide replies count as reaching more than one inbox "
-                 "when the team has more than two agents.",
+                 "when the team has more than two agents. Connection is seen within one poll.",
     }
 
 
@@ -644,13 +956,13 @@ def markdown(rep):
            f"{rep['wall_clock_s']:.0f}s, {len(rep['members'])} members, {rep['messages_in_room']} messages "
            f"({rep['watcher_messages']} from the watcher, {rep['messages_from_lead']} from the lead, "
            f"{rep['messages_from_person']} from the person); person requests waiting: {rep['person_requests_waiting']}.", "",
-           "| Member | Harness | Model | State (exit) | Wall-clock | Connected after | Sent | Multi-inbox replies | Questions to person | Refusals | Empty polls | Report |",
+           "| Member | Harness | Model | State (exit) | Wall-clock | Connected within | Sent | Multi-inbox replies | Questions to person | Refusals | Empty polls | Report |",
            "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for m in rep["members"]:
         refusals = ", ".join(f"{k} {v}" for k, v in sorted(m["refusals_by_code"].items())) or "0"
+        conn = f"{m['connected_within_s']}s" if m["connected_within_s"] is not None else "never"
         out.append(f"| {m['label']} | {m['harness']} | {m['model'] or '-'} | {m['state']} ({m['exit']}) | "
-                   f"{m['wall_clock_s']}s | {m['connected_after_s'] if m['connected_after_s'] is not None else 'never'}"
-                   f"{'s' if m['connected_after_s'] is not None else ''} | {m['messages_sent']} | "
+                   f"{m['wall_clock_s']}s | {conn} | {m['messages_sent']} | "
                    f"{m['replies_to_more_than_one_inbox']} | {m['questions_to_person']} | {refusals} | "
                    f"{m['empty_inbox_polls_in_logs']} | {m['final_report'] or '-'} |")
     return "\n".join(out) + "\n"
@@ -674,24 +986,27 @@ def cmd_report(man, _args):
 # ------------------------------------------------------------------- main
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="team", description="Launch and watch a team of harnesses on an a2p2 room.")
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:2] == ["_guard", "--"]:
+        return cmd_guard(argv[2:])
+    ap = argparse.ArgumentParser(prog="team", description="Launch and supervise a team of harnesses on an a2p2 room.")
     ap.add_argument("-m", "--manifest", default=os.environ.get("TEAM_MANIFEST", "team.json"))
     sub = ap.add_subparsers(dest="cmd", required=True)
-    up = sub.add_parser("up", help="start every member and the watcher")
+    up = sub.add_parser("up", help="start every member and the supervisor")
     up.add_argument("--wait", action="store_true", help="wait until every member has finished, then report")
     sub.add_parser("status", help="list the roster")
-    st = sub.add_parser("stop", help="end one member, or all")
+    st = sub.add_parser("stop", help="ask the supervisor to end one member, or all")
     st.add_argument("label", nargs="?")
     lg = sub.add_parser("logs", help="print a member's output and error logs")
     lg.add_argument("label")
     lg.add_argument("-n", type=int, default=0, help="only the last N lines of each")
     sub.add_parser("report", help="measure the run: report.json and report.md")
-    sub.add_parser("_watch")
+    sub.add_parser("_supervise")
     args = ap.parse_args(argv)
     try:
         man = load_manifest(args.manifest)
         {"up": cmd_up, "status": cmd_status, "stop": cmd_stop, "logs": cmd_logs,
-         "report": cmd_report, "_watch": cmd_watch}[args.cmd](man, args)
+         "report": cmd_report, "_supervise": cmd_supervise}[args.cmd](man, args)
     except Fail as e:
         print(f"team: {e}", file=sys.stderr)
         return 1
