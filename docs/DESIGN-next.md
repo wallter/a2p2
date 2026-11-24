@@ -1,22 +1,22 @@
 # Design for the next version (draft, not built)
 
-**Status: draft for review, revision 2, 2026-11-23; nothing here is built.**
-Revised after `docs/research/decisions/design-next-review-sol.md`.
-`docs/DESIGN.md` describes the code as it is (v0.2). This file describes what
-stage 1 of `docs/REQUIREMENTS.md` section 9 will build. It replaces
-`DESIGN.md` when that code lands.
+**Status: draft for review, revision 3, 2026-11-23; nothing here is built.**
+Revised after `docs/research/decisions/design-next-review-sol.md` and
+`design-next-rereview-sol.md`. `docs/DESIGN.md` describes the code as it is
+(v0.2). This file gives the rules of stage 1 of `docs/REQUIREMENTS.md`
+section 9 and why; `docs/PROTOCOL-next.md` gives the exact formats.
 
 Notation: **[M4]** is rule 4 in `internal/model/members/FINDINGS.md`;
 **[R7]** is rule 7 and **[RM2]** is membership rule R2 in
-`internal/model/delivery/FINDINGS.md`. Requirements are cited by id (D5,
-T9). **Not modelled** marks a design choice no model test covers; reviewers
-should attack those first.
+`internal/model/delivery/FINDINGS.md`. Requirements are cited by id.
+**Not modelled** marks a choice no model test covers; reviewers should
+attack those first.
 
 ## 1. Summary
 
-Changes from v0.2: signed records (D8); pull from any member instead of
-the outbox (D2); a new stream per daemon start [R2]; a signed member log
-with several admins [M1–M13]; 30-day text with signed stubs [R6]; withdraw,
+Changes from v0.2: signed records (D8); pull from any member instead of the
+outbox (D2); a new stream per daemon start [R2]; a signed member log with
+several admins [M1–M14]; 30-day text with signed stubs [R6]; withdraw,
 replace, handled and replies as records [R7]; per-agent cursors [R7]; short
 invites confirmed by a person (T3, P3); outbound-only machines (N1).
 
@@ -28,261 +28,222 @@ logs, and the one-member `local` room.
 
 ## 2. Records
 
-A record is a signed header plus an optional body [R1]. Four kinds: `message`,
-`handled`, `withdraw`, `replace` (delivery FINDINGS, "Record"). The v0.2
-kinds `question` and `answer` go: `ask_human` sends a message addressed to
-the agent `human` on this machine, and the answer is a reply from `human`.
+A record is a signed header plus an optional body [R1], of four kinds:
+`message`, `handled`, `withdraw`, `replace` (delivery FINDINGS, "Record").
+`ask_human` becomes a message to the agent `human` on this machine; the
+answer is a reply from `human`. Formats: PROTOCOL sections 1 and 2.
 
-| Field | Meaning |
-|---|---|
-| `v`, `room`, `author` | 2; room id; author node id |
-| `epoch`, `seq`, `prev` | random 64-bit stream id per daemon start [R2]; position from 1; id of `seq - 1` |
-| `links` | seq 1 only: heads of the author's history held, `{id, epoch, seq}` [R2] |
-| `version` | `replace` only: one above the text it replaces [R7] |
-| `kind`, `agent`, `to` | kind; agent label; addressees `{node, agent}`, empty for everyone |
-| `ask_handled`, `ref` | room-wide post asks for reports [R7]; message a non-message concerns |
-| `parent`, `thread` | message answered; thread's first message (D10) |
-| `created`, `body`, `size` | author's clock (RFC 3339 UTC); SHA-256 of the body; its length |
+- A receiver stores a record only if it verifies, is the next position of
+  its stream with matching `prev`, and (first record) its links are held
+  [R4]. A second record at a held position is a fork and is refused.
+- Every start writes a new stream whose first record links every head of
+  the author's history held [R2]; there is no cap on links.
+- A replace carries a version one above the text it replaces as its author
+  knew it (the model's `World.amend`); the highest version wins, then the
+  highest id [R7]. A withdraw or replace must share `ref`'s author machine;
+  any agent there may issue it (T2).
+- Only an agent shown the text may report handled [R7]: an addressee, or
+  anyone on a room-wide post with `ask_handled` (the model's `canHandle`).
+- Text expires 30 days after `created` by the holder's clock, recorded and
+  never undone [R6]. **Not modelled:** a record dated more than 24 hours
+  ahead of the receiver's clock is not accepted yet; its stream waits.
 
-**Not modelled: encoding.** The author encodes the header once as compact
-JSON; the Ed25519 signature covers those bytes exactly as sent. The id is
-the first 16 bytes of SHA-256 over `"a2p2 record v2\x00"` followed by them,
-as 32 hex. Wire form: `{"h": base64(header), "s": base64(sig), "b":
-base64(body)}`, `b` omitted when no text is sent. Headers are kept byte for
-byte. Refused: a duplicate JSON key, an unknown `v`, a body whose length or
-hash does not match, a `ref`, `parent` or `thread` in another room. Unknown
-fields are kept and ignored. The body is JSON `{"text", "choices"}`. Full
-node ids in `to` stop a key ground to an 8-hex prefix claiming another
-agent's handled rights.
-
-Limits: body 16 KiB, header 4 KiB (8 KiB for a seq-1 header, room for
-about 100 links), 32 addressees, labels 64 bytes, 64 member machines per
-room. A stream links every head [R2]; there is no cap on links. **Not
-modelled:** if a machine's own heads would not fit, it has written from
-many restored backups without catching up. It refuses to write, says so,
-and pulls; a pulled later stream of its own may link those heads. If they
-still do not fit, the person re-adds it under a new key.
-
-```json
-{"v":2,"room":"r_9f2c4e1a0b7d4c3e8a5f6b2d1c0e9f8a",
- "author":"ab12cd34…(64 hex)","epoch":"5b1e0c9a7f3d2e41","seq":3,
- "prev":"0c6f…(32 hex)","kind":"message","agent":"claude-api",
- "to":[{"node":"cd34ef56…(64 hex)","agent":"codex-web"}],
- "parent":"7a91…","thread":"7a91…","created":"2026-11-23T19:00:00Z",
- "body":"e3b0…(64 hex)","size":58}
-```
-
-A receiver stores a record only if it verifies, is the next position of its
-stream with matching `prev`, and (seq 1) its links are held [R4]; a second
-record at a held position is a fork and is refused. A withdraw or replace
-must share `ref`'s author machine; any agent there may issue it (T2).
-
-**Who may author [RM1].** A machine stores a record if its author is or
-was a member in its view, and only from a peer that is a member now. A
-removed author's records are marked "author removed"; a voided author's are
-dropped, and agents shown one get a "voided" notice
+**Who may author [RM1].** A machine stores a record if its author is or was
+a member in its view, and only from a peer that is a member now. A record
+by an author who is not a member now is always shown marked "author
+removed", whoever relayed it. A voided author's records are no longer
+shown or served, and agents shown one get a "voided" notice
 (`TestWithdrawWrittenBeforeRemovalAndArrivingAfterStillWorks`,
-`TestVoidedAdmissionHidesAndDropsItsRecordsAndTellsReadersWhoSawThem`). A
-member not yet told of a removal relays the removed machine's new records,
-marked.
+`TestVoidedAdmissionHidesAndDropsItsRecordsAndTellsReadersWhoSawThem`).
+There is no cut-off on records, so a removed machine's later writes can
+still reach informed machines through a member not yet told of the removal
+(`TestRecordWrittenAfterRemovalReachesNoHonestMemberButARelayedCopyIsKeptMarked`).
+T1 therefore holds after a removal only in this weaker form: such records
+are marked, never shown as a member's.
 
-**Not modelled: "is or was a member".** The members model computes grant
-effects but not this list, so promotion adds `State.Admitted`: the creator
-and every target of an applied grant. A machine that leaves `Admitted` was
-voided. A test checks it against the delivery model's grant and void events.
+**"Was a member" is "has ever had an effective admission"**, which is
+`members.State.Admitted` [M13]; it is not period-aware. After any effective
+admission a machine's records are kept, and marked when it is not a member
+now, even if a later grant of it is voided. `Admitted` can shrink when more
+entries show an admission never took effect
+(`TestAdmittedCanShrinkWhenMoreEntriesArrive`), and [M13] says a store must
+not drop records only for that. **Not modelled:** such records are hidden
+and not served but their bytes are kept, so they return if the machine
+re-enters `Admitted`; the delivery model drops them [RM1].
 
-**Expiry** follows [R6]: text expires 30 days after `created`, by the
-holder's clock, recorded and never undone. **Not modelled:** a record whose
-`created` is more than 24 hours ahead of the receiver's clock is not
-accepted yet; by [R4] its stream waits there until the clock catches up.
+**Not modelled: too many heads.** A machine whose own heads would not fit
+in a first record's header (PROTOCOL 1) has written from many restored
+backups without catching up. It refuses to write and says why; the person
+re-adds it under a new key. This is a stated limit.
 
 ## 3. Room log
 
-An entry has `v`, `room`, `author`, `seq`, `prev`, `parents` (ids of the
-entries the author had seen), `kind` (`create`, `add`, `remove`, `admin`),
-`target`, and for `create` the room label [M13]. An `add`, or an `admin`
-naming a machine that is not a member, also carries `history` (default
-false) and `from`: the admitter's heads, per author, of the records it held
-when signing. Entries are encoded, signed, identified (domain
-`"a2p2 entry v2\x00"`), stored byte for byte and refused exactly as headers
-are in section 2.
+An entry is one of `create`, `add`, `remove`, `admin` [M14]; `create`
+carries the room label (**not modelled**, display only). An `add`, or an
+`admin` naming a non-member, carries `history` and `from`, the admitter's
+per-author heads (PROTOCOL 3).
 
-**Not modelled: `from` encoding.** The model admits from per-stream
-positions [R8]; with gap-free prefixes closed under links (Q8) those are the
-records at or before the admitter's per-author heads. A record whose
-relation to `from` cannot be decided is treated as before it. When grants
-differ on `history`, the more restrictive applies [RM2]
-(`TestTwoGrantsThatDifferOnHistoryTheMoreRestrictiveApplies`).
-
-Entries go through `members.Machine` [M11]: held until their parents are
-present; a second entry by one key at one position is refused with its
-dependants and kept as evidence until the forking key is removed as an
-admin; a fork by a key that was not an admin at either entry changes
-nothing and both are accepted (`TestForkByMemberWhoIsNotAnAdminChangesNothing`).
-`members.Resolve` gives members, admins and a reason for every entry
-without effect (A4) by [M3] to [M10] and [M12], with no timers [M13, T10]. `admin`
-also grants membership; removing an admin removes the machine, and a later
-add brings it back [M8]. Entries are passed on in causal order, evidence
-after them. The `members` table is a cache derived from the log.
-
-**Fork evidence is a vote [M12].** Two different entries one key signed at
-one position, at least one while it was an admin, count as that key's vote
-for its own removal; one other admin's removal vote completes it, evidence
-alone removes nobody, and the branch that remover had seen take effect
-stands (`TestForkInTwoAdminRoomIsSettledByTheOtherAdminAlone`,
-`TestForkSettledByOneRemoverKeepsTheBranchItHadSeen`). A sole admin's fork
-never settles. The forking machine rejoins under a new key.
-
-**Not modelled: pull before signing.** Since starting, a daemon signs no
-log entry for a room until it has pulled that room's log from another
-member (creation and sole-member rooms exempt). This narrows the restore
-problem; it cannot detect a restore.
+- Entries go through `members.Machine` [M11]: held until their parents are
+  present; a second entry by one key at one position is refused with its
+  dependants and kept as evidence. A fork by a key that was not an admin at
+  either entry changes nothing (`TestForkByMemberWhoIsNotAnAdminChangesNothing`).
+- `members.Resolve` gives members, admins and a reason for every entry
+  without effect (A4) by [M2]–[M10] and [M12], with no timers [M14, T10].
+  `admin` also grants membership; removing an admin removes the machine;
+  a later add brings it back [M8]. The `members` table is a cache of it.
+- **Fork evidence is a vote [M12].** Two entries one key signed at one
+  position, one at least while it was an admin, count as its vote for its
+  own removal; one other admin's vote completes it; evidence alone removes
+  nobody (`TestForkInTwoAdminRoomIsSettledByTheOtherAdminAlone`,
+  `TestForkSettledByOneRemoverKeepsTheBranchItHadSeen`). A sole admin's
+  fork never settles.
+- **Parents.** A machine signs entries naming as parents only entries it
+  has accepted, never one it refused as a fork, so the branch the settling
+  admin had accepted stands [M11, M12]
+  (`TestSettlingRemovalNamesOnlyAcceptedEntries`). One open fork does not
+  hold back settling another (`TestOneOpenForkDoesNotHoldBackSettlingAnother`).
+- Entries are passed on in causal order, evidence after them.
+- **Not modelled: pull before signing.** Since starting, a daemon signs no
+  entry for a room until it has pulled that room's log from another member
+  (creation and sole-member rooms exempt). It narrows the restore problem
+  and cannot detect a restore.
+- **No-history grants.** When two grants differ, the more restrictive
+  applies [RM2]: without history beats with history, and of two frontiers
+  the one that hides more for each author, which is the model's per-stream
+  maximum (`restrict` in `membership.go`;
+  `TestTwoGrantsThatDifferOnHistoryTheMoreRestrictiveApplies`). **Not
+  modelled:** a record whose relation to `from` cannot be decided is
+  treated as hidden.
 
 `a2p2 room list` and the page show members, admins, changes waiting for a
-second admin [M4], entries without effect with reasons, and fork evidence;
-an unsettled fork is an alert (A3).
+second admin [M4], entries without effect with reasons, fork evidence, and
+the REQUIREMENTS section 6 limits for the room's admin count. An unsettled
+fork is an alert (A3).
 
 ## 4. Pull
 
-One endpoint, `POST /p/v2/pull`, over the existing pinned mutual TLS, per
-room. It is the model's Pull [R3, R5], carried both ways in one round trip.
+One request type over the pinned mutual TLS, per room: the model's Pull
+[R3, R5] carried both ways (PROTOCOL 4).
 
-| Request | Response |
-|---|---|
-| `room`; full `summary` and `authors` taken [R3]; `log`: the requester's log heads and entries the server seems to lack; `offer`: records for the server; `addrs` (hints); `wait_ms` up to 240,000 | `log` entries the requester lacks; `page` [R3]; the server's full `summary`; `peers`: other members' addresses (hints); `more` if cut at a limit |
+- **Server.** It applies the request's log entries first (from a non-member
+  only if they make it a member, T4), then requires the peer to be a member
+  now (T5), then stores the offer under [RM1] and [R4]. A page carries
+  wanted text first, then later records, predecessors first, only for the
+  authors the requester takes [R3], with text only within the requester's
+  permission [R8, RM2]. Membership and permission are checked when a page
+  is built and again when a held response is released [RM2]
+  (`TestHeldResponseIsNotReleasedToAPeerRemovedWhileItWaited`,
+  `TestHeldResponseIsCheckedAgainstAPermissionNarrowedWhileItWaited`).
+- **Offers [RM3].** A request may carry records for the server, built
+  against the server's last summary, only for a peer the sender sees as a
+  member and within its permission; with no summary, no offer
+  (`TestNoHistoryNewcomerIsNeverHandedEarlierTextIncludingThroughAnOffer`).
+  A stale offer costs bytes, never correctness, and is how an N1 machine
+  passes on what it writes (`TestMachineThatOnlyOpensRequestsStillConverges`).
+  An offer cut by the size limit says so, and the rest follows at once.
+- **Requester.** It applies the response only if the room's local
+  generation is the one the request was made under (it changes on leave and
+  on join), then log entries, then the page [RM1, R4], in one transaction.
+  Each side keeps the other's summary as a dated observation, the only
+  source of copy reports [R5].
 
-The server applies the request's log entries first (from a non-member, only
-if they make it a member), so a newcomer presenting its own `add` is served
-at once (T4); it then requires the TLS node id to be a member, else 403
-(T5), and stores the `offer` under [RM1] and [R4]. The request lists the
-authors the requester takes [R3], so no page slot goes on records it would
-refuse. A page puts wanted text first, then later records with the text the
-requester may read [R3, R8]. With `wait_ms` the server holds the response
-until it has something new. Membership and permission are checked when the
-page is built and again when a held response is released [RM2]
-(`TestHeldResponseIsNotReleasedToAPeerRemovedWhileItWaited`,
-`TestHeldResponseIsCheckedAgainstAPermissionNarrowedWhileItWaited`).
-
-**Offers [RM3].** A request may carry an offer built against the server's
-last summary; with no summary yet, no offer. It is built only for a peer the
-sender sees as a member, within its permission
-(`TestNoHistoryNewcomerIsNeverHandedEarlierTextIncludingThroughAnOffer`).
-A stale offer costs bytes, never correctness; offers are how an N1 machine
-passes on what it writes (`TestMachineThatOnlyOpensRequestsStillConverges`).
-A machine not yet told of a removal still hands text to the removed machine:
-the existing "Removal is not instant" limit.
-
-The requester applies log entries, then the page [R4]. Each side keeps the
-other's summary as a dated observation, the only source of copy reports
-[R5].
+**Not modelled: encoding of the model's summary.** A request carries, per
+author, a digest of that author's stream positions, positions without text,
+and wanted texts; the server answers with its own detail for authors whose
+digest differs, and the requester repeats with its detail for just those
+(PROTOCOL 4.3). Equal digests mean equal holdings for that author, so the
+model's server would send nothing for it and learns exactly what a full
+summary would tell it; for the other authors the server receives the full
+[R3] summary, so pages and copy reports are those of the model. For 64
+machines a digest-only request is about 6 KB, and detail is about 1.2 KB per
+differing author after 30 days.
 
 **Not modelled: when and from whom.**
 
 | Trigger | Action |
 |---|---|
 | Start or wake | Short pulls of every room from two members |
-| Steady state | A waiting pull per room to each of two *anchors*: the most reliable member, and one that rotates at each wait through every eligible member and each of its addresses (N2), so groups that favour their own anchors still meet |
+| Steady state | A waiting pull per room to each of two *anchors*: the most reliable member, and one that rotates at every end, cancellation or failure of a wait through every eligible member and each of its addresses (N2) |
 | Local write or new records | Re-issue waiting pulls at once, with offers |
 | A peer holds what we lack | Pull from it at once; repeat while `more` |
 | Failure | Back off 1 s doubling to 5 min with jitter; next member |
 
-Standard-library HTTP/2 (`ForceAttemptHTTP2`) lets
-waiting pulls to one peer share a TLS connection. Limits: request 1 MiB;
-response 4 MiB or 512 records; four other concurrent requests per peer, then
-`429`; the 256 inbound connection cap stays.
+A server holds a waiting pull at most 240 s; client and server deadlines
+exceed it by 30 s. A rotating anchor is first probed with a short pull of
+10 s; a probe that fails moves on. Waiting pulls to one peer share one
+HTTP/2 connection.
 
-**Cost (estimates).** About 130 transfers of about 2 KB deliver 63 copies
-of a 1 KiB message in a 64-machine room, plus full summaries (section 10).
-Step 7 measures JSON and base64 overhead, summaries, duplicate offers, 100
-rooms, anchor load, and an outbound-only machine behind a relay (N1).
+**Cost (estimates).** About 130 transfers of about 2 KB deliver 63 copies of
+a 1 KiB message in a 64-machine room, plus summaries. Step 7 measures
+JSON and base64 overhead, summaries, duplicate offers, 100 rooms, anchor
+load, and an outbound-only machine behind a relay (N1).
 
 ## 5. Storage
 
-**Not modelled: schema.** Migration 2 adds tables and columns; migration 3
-(step 7) drops `messages`, `deliveries`, `marks` and `rooms.owner`, carrying
-no data over. One `DECISIONS.md` entry justifies the tables.
+**Not modelled: schema** (PROTOCOL 8). Migration 2 drops the v0.2 tables'
+data and creates the new tables; the daemon tells the person once. Signed
+headers and read state are kept for the room's life in stage 1. One
+`DECISIONS.md` entry justifies the tables.
 
-| Table | Holds | Key and indexes |
-|---|---|---|
-| `rooms` | id, label, create entry id, left (tombstone) | id |
-| `log` | entry bytes, signature, state (accepted, held, refused), arrival batch | (room, id); (room, author, seq) |
-| `members` | cache derived from `log`: node, admin, name, addresses, last answered | (room, node) |
-| `records` | header bytes, signature, body or null, reason [R6], parsed header fields | (room, id); unique (room, author, epoch, seq); (room, ref); (room, parent); (room, thread) |
-| `streams` | contiguous position; highest position known and when (gaps) | (room, author, epoch) |
-| `observed` | each peer's last summary and its time | (room, peer) |
-| `agents` | as today | id |
-| `cursors` | per agent and stream: start and cursor [R7, R8] | (agent, room, author, epoch) |
-| `reads` | confirmed keys, the text version confirmed, per-author heads [R7] | (agent, room, key) |
-| `invites` | secret hash, room, history, role, expiry, bound key, entries returned | secret hash |
-| `requests` | what a person is asked to approve, and the answer (P3) | id |
+One transaction each: a send; applying one response or one request's log and
+offer; a Seen; signing a log entry; a pruning pass. On start
+`members.Machine` is rebuilt by replaying `log` in arrival batches, which is
+deterministic. Pruning runs hourly and before every read, page and offer:
+text past expiry becomes `expired`, never undone; withdrawn text is deleted
+when the withdraw is stored [R6].
 
-One transaction each: a send; applying one response or offer; a Seen;
-signing a log entry; a pruning pass. On start `members.Machine` is rebuilt
-by replaying `log` in arrival batches, which is deterministic.
+## 6. Reading and surfaces
 
-Pruning runs hourly and before every read, page and offer: text past expiry
-by this clock becomes `expired`, never undone; withdrawn text is deleted
-when the withdraw is stored [R6]. Signed headers and read state are kept for
-the room's life in stage 1 (section 10).
-
-## 6. Reading
-
-The inbox is the model's walk from each agent's cursors [R7]: winning
-text, `expired` and withdraw or replace notices, `late`, and what it waits
-for. Only Seen moves a cursor, confirming exactly the keys and versions the
-inbox returned; the hook prints counts only. Replies carry `parent_state`.
-The thread view lists held messages with that `thread`; the branch view
-follows `parent` down and misses replies below one not held (G3). Neither
-marks anything. Only an agent whose Seen confirmed the text may report it
-handled [R7]; copy reports are dated observations [R5].
+The inbox is the model's walk from each agent's cursors [R7]: winning text,
+`expired`, withdraw and replace notices, `late`, and what it waits for. Only
+Seen moves a cursor, confirming exactly the keys and versions the inbox
+returned; the hook prints counts only. Replies carry `parent_state`. The
+thread view lists held messages of a thread; the branch view follows
+`parent` down and misses replies below one not held (G3). Neither marks
+anything. A reply goes to its parent's author unless the sender names
+addressees (D10).
 
 Reasons shown (A4) in `a2p2 trace`, the page and tool results: *missing*
 (being fetched, expired, withdrawn, before admission); *refused* (does not
-verify, not the next position, fork, author never a member, dated ahead,
+verify, not the next position, fork, author never admitted, dated ahead,
 peer not a member); *pending* (needs a second admin, waits for a person,
 waits for an entry it had seen); and every `members.Resolve` reason.
 
-MCP tools, still seven:
+MCP tools stay seven (exact JSON in PROTOCOL 6): `send` gains `reply_to`,
+`ask_handled` and `replaces`; `inbox` gains `thread`; `peers` shows admins
+and pending changes; `reply` and `ack` report handled only where [R7]
+allows; `ask_human` sends to `human`. Copy and handled reports stay in
+`a2p2 trace` and the page. A2 is checked by a proxy, the bytes of the
+compact tool definitions divided by four, rounded up: 3,224 bytes and 806
+today; `TestToolsGolden` asserts at most 1,000. The proxy is not a token
+count; the true count per model family is measured once in step 7 and
+recorded.
 
-| Tool | Before | After |
-|---|---|---|
-| `whoami` | label, node, rooms, mode | unchanged |
-| `peers` | rooms, members, agents, reachability | adds admins, pending changes |
-| `send(text, room?, to?)` | post | adds `reply_to?` (reply with your own `to`, D10), `ask_handled?` (D5), `replaces?` (own message: replace, or withdraw with empty text, D9) |
-| `inbox(room?, wait_seconds?, limit?)` | unread; shim confirms | adds `thread?`: a root gives the thread, other ids the branch; marks nothing |
-| `reply`, `ack` | mark handled | only where [R7] allows |
-| `ask_human` | question kind | message to `human` here |
-
-Copy and handled reports stay in `a2p2 trace` and the page. A2's estimate
-is the bytes of the tool definitions JSON divided by four, rounded up:
-3,224 bytes, 806 tokens today. Four parameters at about 30 tokens bring it
-to about 920; `TestToolsGolden` asserts at most 1,000.
-
-**Not modelled: alerts (A3).** New local call `alerts(wait_ms)` and CLI
-`a2p2 alerts --wait` (A3 needs a way to wait): returns on a request for a
-person, a fork, or text missing for a day.
+**Not modelled: alerts (A3).** `alerts(wait_ms)` on the socket and `a2p2
+alerts --wait` return on a request for a person, a fork, or text missing
+for a day; A3 needs a way to wait.
 
 ## 7. Trust changes
 
-**Not modelled: pairing (T3).** `a2p2 room invite <room> [--history]
-[--member|--admin]` on an admin machine prints a token such as
-`a2p2:7K3Q-M9XD-2HTW-PB4R-C8NV-QF6J-W1ZA-5TME@203.0.113.7:7443`: 32
-base32 characters (160 bits): an 80-bit secret and the first 80 bits of the
-admin key's fingerprint, plus addresses. Single use, 15 minutes, only the
-secret's hash stored. `a2p2 join` (token on stdin) checks the TLS key
-against the fingerprint and asks the person to confirm before sending the
-secret. The admin machine binds the invite to the joiner's key and records
-a request naming room, fingerprint, role and history; on approval it
-revalidates and signs. A retry by the same key returns the same entries;
-the joiner polls with back-off until approval or expiry. No choice means no
-history (T3).
+**Not modelled: join (T3).** The token holds a secret, the admin key's
+fingerprint and addresses (PROTOCOL 5). The joiner checks the admin's TLS
+key against the fingerprint and stops on a mismatch; sends the secret; the
+admin machine binds the invite to the joiner's key (single use) and answers
+with a preview of room, role and history; a person on the joiner confirms
+and the joiner accepts; the admin machine raises a request naming the
+joiner's fingerprint, label, role and history; a person confirms; the
+daemon revalidates and signs and returns the entries; the joiner may poll.
+Once signed, the joiner is a member by the log, so any later request from
+that key is answered as a member's, expired invite or not. If the invite
+expired or the joiner was removed before signing, the answer is a refusal
+with a reason, shown to the person. No choice means no history.
 
 **Not modelled: requests for a person (P3), narrowed.** Signing log
-entries, turning networking on and sending a join secret wait for a
-recorded confirmation naming exactly what is approved, given on the local
-page or by `a2p2 confirm <id>` in a terminal (new: always-on machines are
-often headless), never through agent tools. A same-user agent set on
-bypassing it can.
+entries, turning networking on and sending a join accept wait for
+a recorded confirmation naming exactly what is approved, given on the local
+page or by `a2p2 confirm` in a terminal (new: always-on machines are often
+headless), never through agent tools. A same-user agent set on bypassing
+it can; an OS-separated approver may come later.
 
 | Change | Entries | Confirmed on |
 |---|---|---|
@@ -290,106 +251,110 @@ bypassing it can.
 | Remove a non-admin | one `remove` [M3] | that admin |
 | Make an admin, one admin so far | one `admin` [M4] | that admin (and a new joiner) |
 | Make an admin, more admins | matching `admin` from two [M4] | both |
-| Remove an admin (own vote not counted) | matching `remove` from two [M4, M5] | both |
+| Remove an admin | matching `remove` from two, own vote not counted [M4, M5]; one, if the target signed a fork [M12] | each signer |
 | Remove a machine being made an admin concurrently | matching `remove` from two [M4] | both |
 
-`a2p2 room admin <room> <machine>` is new, needed to replace a lost admin
-(T9); the other admin sees the first entry as a request ("needs a matching
-entry from another admin", [M4]). `a2p2 room list` states the section 6
-limits that apply to the room's admin count.
+`a2p2 room admin` is new, needed to replace a lost admin (T9); the other
+admin sees the first entry as a request [M4].
 
 **First three admins (T9 default).** Invites for the second and third
-machines default to `--admin`. The second is one `admin` entry; the third an
+machines default to admin. The second is one `admin` entry; the third an
 `add`, so it joins at once, plus `admin` entries from both admins, confirmed
-on both and on the joiner. `TestFirstThreeMachinesBecomeAdminsWithTwoAdminConfirmations`
-covers only how these entries resolve; step 4 adds a bootstrap test for
-pairing and confirmations. A daemon never co-signs on its own.
+on both and on the joiner.
+`TestFirstThreeMachinesBecomeAdminsWithTwoAdminConfirmations` covers only
+how these resolve; step 4 adds a bootstrap test. A daemon never co-signs on
+its own.
 
 **Leaving.** A vote on one's own removal does not count [M5], so `a2p2 room
-leave` (new: otherwise a machine cannot stop carrying a room) is local: a
-tombstone, cancelled pulls, the room's data deleted, so a late response
-cannot recreate it. Rejoining needs a new invite; an admin removes it from
-the list.
+leave` (new: otherwise a machine cannot stop carrying a room) is local: the
+room's data is deleted and its generation changes, so no late response
+applies. Rejoining needs a new invite; an admin removes it from the list.
 
 ## 8. Failure handling
 
-| Fault | What happens | Model test or gap |
+| Fault | What happens | Model test |
 |---|---|---|
 | Sleep | Others carry on; it pulls on wake | `TestRelayDeliversAndReportsHandledWithoutAuthorAndReaderEverAwakeTogether` |
 | Crash, lost reply | Send durable on return (D1); unconfirmed entries re-shown; next pull repeats | `TestLostReplyRetryAndRestartsGiveOneCopyInOrder` |
-| Disk lost | New key, added again; others repair its records | `TestDiskLostOnOnlyOtherHolderRecordSurvivesOnAuthorAndRepairContinues` |
+| Disk lost | Others repair its records; it rejoins under a new key | `TestDiskLostOnOnlyOtherHolderRecordSurvivesOnAuthorAndRepairContinues`; rejoining not covered by a model test |
 | Restore, author | New stream, no fork; older records may arrive late, marked | `TestAuthorRestoredWithEveryNewerHolderAsleepWritesANewStreamWithoutFork` |
 | Restore, reader | May be re-shown; handled not repeated | `TestReaderRestoredMaySeeAgainButHandledIsNotDuplicatedAndNothingSkipped` |
-| Restore, admin | Pulls the log before signing; a fork is an alert until one other admin settles it [M12] | `TestBackupRestoreForkIsSettledByRemovalOfTheForkingAdmin`, `TestForkInTwoAdminRoomIsSettledByTheOtherAdminAlone` |
-| Clock back / forward | Expired stays expired / expires early; future-dated records wait (not modelled) | `TestTextExpiredHereStaysExpiredWhenTheClockIsSetBack`, `TestExpiryWithDifferingClocksIsByEachHoldersOwnClockAndNeverResurrects` |
-| Removed machine | 403 once known; its records kept, marked [RM1, RM2]; what no member fetched in time is lost (G6) | `TestMessageOfARemovedAuthorReachesAMachineThatNeverMetItMarked`, `TestHeldResponseIsNotReleasedToAPeerRemovedWhileItWaited` |
-| Forked key | First branch or record kept, evidence passed on, alert | `TestStolenCreatorKeyForkFromFirstEntryIsRefusedByEveryMember`; Q8 |
+| Restore, admin | Pulls the log before signing; a fork is an alert until one other admin settles it [M12] | `TestForkInTwoAdminRoomIsSettledByTheOtherAdminAlone` |
+| Clock back / forward | Expired stays expired / expires early; future-dated records wait | `TestTextExpiredHereStaysExpiredWhenTheClockIsSetBack`, `TestExpiryWithDifferingClocksIsByEachHoldersOwnClockAndNeverResurrects`; waiting not covered |
+| Removed machine | Refused as a peer once known; its records kept, marked | `TestMessageOfARemovedAuthorReachesAMachineThatNeverMetItMarked`, `TestHeldResponseIsNotReleasedToAPeerRemovedWhileItWaited` |
+| Forked log key | First branch kept, evidence passed on, alert | `TestStolenCreatorKeyForkFromFirstEntryIsRefusedByEveryMember`; the alert not covered |
+| Forked record stream | Second record refused | Q8 checks closure only; passing on and alerting not covered |
 | Relay alters or strips | Refused, or text repaired | `TestRelayThatAltersARecordIsRefused`, `TestRelayThatStripsTextAndClaimsWithdrawalCannotLoseIt` |
-| Peer withholds | Other streams progress; rotation reaches other holders | `TestARefusedStreamDoesNotStarveOthersUnderAPageLimit`; G4 |
+| Peer withholds | Other streams progress; rotation reaches other holders | `TestARefusedStreamDoesNotStarveOthersUnderAPageLimit` covers paging; rotation not covered (G4) |
+
+Tests the build must add: rejoining after a lost disk; future-dated
+records; fork alerts and record-fork evidence; anchor rotation; the token
+proxy in `TestToolsGolden`; join and bootstrap; generation on leave and
+rejoin; the two-level summary against full summaries.
 
 ## 9. Package plan
 
 | Package | Change |
 |---|---|
-| `internal/core` | Records and entries, encoding, signing, limits; the envelope goes with its last caller |
+| `internal/core` | Records, entries, encoding, signing, limits; the envelope goes in step 3 |
 | `internal/members` | **Added**: `internal/model/members` moved with its tests, behind an adapter |
 | `internal/model/delivery` | Stays as the oracle; not imported by the daemon |
-| `internal/store` | Migrations 2 and 3; each method one transaction |
-| `internal/node` | Send, pull, offers, inbox, Seen, amendments, pruning, scheduler, invites, requests; outbox and owner refresh go; `Transport` is `Pull` and `Join` |
+| `internal/store` | Migration 2; each method one transaction |
+| `internal/node` | Send, pull, offers, inbox, Seen, amendments, pruning, scheduler, invites, requests; outbox and owner refresh go |
 | `internal/peer` | `/p/v2/pull`, `/p/v2/join`, HTTP/2; `/p/v1/*` go |
-| `localapi`, `mcpshim`, `web`, `cmd` | Section 6 tools, `alerts`, `confirm`, `room admin`, `room leave` |
+| `localapi`, `mcpshim`, `web`, `cmd` | PROTOCOL 6 and 7 |
 
-The daemon runs the membership model's code through an adapter: the id
-function is injected (model hash in tests, signed-bytes id in the daemon,
-one path through `Machine.Receive` and `validate`); `Offer` returns causal
-order; `core` checks signature and id first. The delivery model stays an
-oracle: a differential test runs its schedules against real nodes, ids and
-clocks normalised. Encoding, scheduling and pairing get their own tests.
+The adapter: the id function is injected (model hash in tests, signed-bytes
+id in the daemon, one path through `Machine.Receive` and `validate`);
+`Offer` returns causal order; `core` checks signature and id first. A
+differential test runs the delivery model's schedules against real nodes,
+ids and clocks normalised. Encoding, scheduling and joining get their own
+tests.
 
-Steps, each ending with `make check` passing and with `TRACE.md` rows
-updated in the step that moves or deletes a test they name:
+Steps, each ending with `make check` passing and `TRACE.md` rows updated in
+the step that moves or deletes a test they name:
 
-1. `core`: records and entries beside the envelope; fuzzed decoder.
-2. `internal/members` promoted with the adapter and `Admitted`, with its test.
-3. `store` migration 2; `node`, `localapi`, `mcpshim`, `cmd` converted
-   together for the `local` room.
-4. Room log, invites, requests, `/p/v2/join`; owner code deleted; bootstrap
-   test (pairing, confirmations, add then admin).
-5. Pull, offers, scheduler; outbox, `/p/v1/deliver` and envelope deleted
-   with their last callers; tests over real TLS.
-6. Tools, CLI, alerts, web page.
-7. Migration 3 and its test; differential test; section 4 measurements;
-   `TESTING.md` fault rows; this file replaces `DESIGN.md`.
+1. `core`: records and entries beside the envelope; decoder; record fuzz target.
+2. `internal/members` promoted with the adapter and `Admitted`, with tests.
+3. `store` migration 2 with a test from a populated v0.2 database (data
+   dropped, daemon starts, person told once); `node`, `localapi`, `mcpshim`,
+   `cmd`, `web`, `history` and `trace` converted together; the envelope,
+   outbox and `/p/v1/*` deleted. Rooms with other machines are unavailable
+   until step 5 (nothing is released between steps).
+4. Room log, invites, join, requests, `confirm`, `alerts`; bootstrap test.
+5. Pull, offers, scheduler; tests over real TLS.
+6. Final tool definitions and golden file; web page.
+7. Differential test; measurements, including the token count; `TESTING.md`
+   fault rows; this file replaces `DESIGN.md`.
 
-## 10. Open questions and known gaps
+## 10. Known gaps and limits
 
-Skipped KNOWN GAP tests:
-
-| Test | Design response |
+| Skipped test | Response |
 |---|---|
 | `TestAuthorLearnsOfCopiesOnMachinesItNeverMet` (G1) | Accept: copies only from direct contact |
 | `TestNewcomerWithoutHistoryIsNotHandedPostsItsAdmitterHadNotSeen` (G2) | Accept as the stated T3 exception |
-| `TestBranchUnderAMessageIncludesRepliesBelowAMissingReply` (G3) | Accept for stage 1; the thread view lists them; later, an ignorable ancestors field |
+| `TestBranchUnderAMessageIncludesRepliesBelowAMissingReply` (G3) | Accept for stage 1; the thread view lists them |
 | `TestWithholderThatUnderstatesWhatItHoldsIsDetected` (G4) | Accept; rotation narrows it |
 | `TestCopyReportsDoNotOutliveAHolderRestoredToBeforeTheCopy` (G5) | Accept; reports carry dates |
-| `TestWithdrawThatOnlyTheRemovedAuthorHoldsStillReachesMembers` (G6) | Accept: what a removed machine wrote that no member fetched in time is lost |
-| `TestAMoreRestrictiveGrantLearnedLaterDoesNotTakeBackTextAlreadyShown` (G7) | Accept: a narrower grant learned later drops shown text silently; to model next, a notice as for a voided author |
+| `TestWithdrawThatOnlyTheRemovedAuthorHoldsStillReachesMembers` (G6) | Accept: what a removed machine wrote that no member fetched while still allowed to relay it is lost |
+| `TestAMoreRestrictiveGrantLearnedLaterDoesNotTakeBackTextAlreadyShown` (G7) | Accept: a narrower grant learned later drops shown text silently; a notice is to be modelled next |
 | `TestStolenKeyCanSecondAVoidedPromotionVoteAndThenJoinTheRemoval`, `TestStolenKeyCanSecondAForkingKeysVoidedRemovalAndThenJoinTheRemoval` (members gap 4) | Accept; no rule can refuse it |
 
-Members gap 1 is closed by [M12]. Gaps 2, 3 and 5 are passing tests of
-stated limits; a sole admin's fork never settles (gap 2).
+Members gap 1 is closed by [M12]; gaps 2, 3 and 5 are passing tests of
+stated limits.
 
-Not settled:
+What remains partly resolved, as REQUIREMENTS section 6 limits:
 
-1. P3 is narrowed (section 7); an OS-separated approver may come later.
-2. Stream state grows until compaction is designed: 1,920 streams and a
-   27 KB summary per 64-machine room after 30 days
-   (`TestStreamCostForSixtyFourMachinesOverThirtyDays`), more after;
-   checkpoints are designed and modelled after step 7.
-3. Links: pulling cures too many heads only if another member holds a
-   later stream of this machine that links them; otherwise re-adding under
-   a new key is the only cure. No simpler sound rule was found.
-4. Waiting pulls reach 200 HTTP/2 streams at 100 rooms; one pull per peer
-   for all shared rooms may be needed.
-5. Posting policy (T6) is deferred to stage 3 (`TRACE.md`); it needs a new
-   entry kind [M13].
+| Finding | Limit |
+|---|---|
+| A removed machine's posts reach informed machines through a stale member, marked (T1 weakened) | "Removal is not instant" |
+| An offer hands text before the sender learns of a removal or narrower grant | "Removal is not instant" |
+| A restored admin pulls from a stale peer and reuses a position | "An admin machine restored from backup must catch up before it changes membership" |
+| A sole admin's fork never settles | "While a room has had only one admin, that key is the room" |
+| Too many heads: re-add under a new key | to be added to section 6 |
+
+Open: P3 against a same-user agent; stream state grows until compaction is
+designed (1,920 streams per 64-machine room after 30 days,
+`TestStreamCostForSixtyFourMachinesOverThirtyDays`); one pull per peer for
+all shared rooms may be needed at 100 rooms; posting policy (T6) is
+deferred to stage 3 and needs a new entry kind [M14].

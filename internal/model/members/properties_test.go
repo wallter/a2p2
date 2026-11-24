@@ -351,6 +351,30 @@ func checkInvariants(es []Entry, st State) error {
 			return fmt.Errorf("an admin %s is not a member", m)
 		}
 	}
+	// Admitted: exactly the creator and the targets of adds and admin
+	// grants that took effect, so every member is in it and a machine
+	// whose every admission was voided or never took effect is not.
+	want := map[string]bool{}
+	for _, e := range es {
+		if e.Kind == Create && st.Effects[e.ID].Applied {
+			want[e.Author] = true
+		}
+		if (e.Kind == Add || e.Kind == MakeAdmin) && st.Effects[e.ID].Applied {
+			want[e.Target] = true
+		}
+	}
+	if strings.Join(sortedKeys(want), ",") != strings.Join(st.Admitted, ",") {
+		return fmt.Errorf("Admitted is %v, admissions that took effect give %v", st.Admitted, sortedKeys(want))
+	}
+	in := map[string]bool{}
+	for _, x := range st.Admitted {
+		in[x] = true
+	}
+	for _, m := range st.Members {
+		if !in[m] {
+			return fmt.Errorf("member %s is not in Admitted", m)
+		}
+	}
 	return nil
 }
 
@@ -375,7 +399,7 @@ func TestEveryHonestHistoryResolvesSameInAnyOrderAndKeepsInvariants(t *testing.T
 			shuffled := append([]Entry(nil), h.es...)
 			rng.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
 			shuffled = append(shuffled, shuffled[0]) // a duplicate
-			if got := Resolve(shuffled); !reflect.DeepEqual(got.Members, st.Members) || !reflect.DeepEqual(got.Admins, st.Admins) || !reflect.DeepEqual(got.Effects, st.Effects) {
+			if got := Resolve(shuffled); !reflect.DeepEqual(got.Members, st.Members) || !reflect.DeepEqual(got.Admins, st.Admins) && reflect.DeepEqual(got.Admitted, st.Admitted) || !reflect.DeepEqual(got.Effects, st.Effects) {
 				t.Fatalf("P1: order changed the result (seed 1)\n%s", describe(h.es))
 			}
 		}
@@ -402,7 +426,7 @@ func TestMachinesReceivingSameEntriesInAnyOrderAgree(t *testing.T) {
 			for _, e := range es {
 				m.Receive(e)
 			}
-			if got := m.State(); len(m.Entries()) != len(h.es) || !reflect.DeepEqual(got.Members, want.Members) || !reflect.DeepEqual(got.Admins, want.Admins) {
+			if got := m.State(); len(m.Entries()) != len(h.es) || !reflect.DeepEqual(got.Members, want.Members) || !reflect.DeepEqual(got.Admins, want.Admins) && reflect.DeepEqual(got.Admitted, want.Admitted) {
 				t.Fatalf("P1: machine disagrees (seed 2)\n%s", describe(h.es))
 			}
 		}
@@ -553,7 +577,7 @@ func searchP3With(rules Rules, levels [][]history, depth int, shared cache, minA
 							if rng != nil {
 								es := append([]Entry(nil), nh.es...)
 								rng.Shuffle(len(es), func(i, j int) { es[i], es[j] = es[j], es[i] })
-								if got := rules.Resolve(es); !reflect.DeepEqual(got.Admins, s1.Admins) || !reflect.DeepEqual(got.Members, s1.Members) || !reflect.DeepEqual(got.Effects, s1.Effects) {
+								if got := rules.Resolve(es); !reflect.DeepEqual(got.Admins, s1.Admins) && reflect.DeepEqual(got.Admitted, s1.Admitted) || !reflect.DeepEqual(got.Members, s1.Members) || !reflect.DeepEqual(got.Effects, s1.Effects) {
 									res.example = "P1: order changed the result\n" + describe(nh.es)
 									return res
 								}
@@ -703,7 +727,7 @@ func TestResolveGivesEveryEntryAReasonOnArbitraryInput(t *testing.T) {
 			}
 		}
 		rng.Shuffle(len(es), func(i, j int) { es[i], es[j] = es[j], es[i] })
-		if got := Resolve(es); !reflect.DeepEqual(got.Members, st.Members) || !reflect.DeepEqual(got.Admins, st.Admins) || !reflect.DeepEqual(got.Effects, st.Effects) {
+		if got := Resolve(es); !reflect.DeepEqual(got.Members, st.Members) || !reflect.DeepEqual(got.Admins, st.Admins) && reflect.DeepEqual(got.Admitted, st.Admitted) || !reflect.DeepEqual(got.Effects, st.Effects) {
 			t.Fatalf("seed %d case %d: P1: order changed the result\n%s", seed, i, describe(es))
 		}
 	}
@@ -804,7 +828,7 @@ func searchForks(levels [][]history, depth, minAdmins int, rng *rand.Rand) p3Res
 							s1 := c.resolve(Final, nh.es)
 							es := append([]Entry(nil), nh.es...)
 							rng.Shuffle(len(es), func(i, j int) { es[i], es[j] = es[j], es[i] })
-							if got := Final.Resolve(es); !reflect.DeepEqual(got.Effects, s1.Effects) || !reflect.DeepEqual(got.Admins, s1.Admins) || !reflect.DeepEqual(got.Members, s1.Members) {
+							if got := Final.Resolve(es); !reflect.DeepEqual(got.Effects, s1.Effects) || !reflect.DeepEqual(got.Admins, s1.Admins) && reflect.DeepEqual(got.Admitted, s1.Admitted) || !reflect.DeepEqual(got.Members, s1.Members) {
 								return fail("P1: order changed the result", nh.es)
 							}
 							attack := nh.es[len(h.es):]
@@ -1084,7 +1108,7 @@ func TestSeededRoomsKeepEveryProperty(t *testing.T) {
 				}
 				es := append([]Entry(nil), h.es...)
 				rng.Shuffle(len(es), func(i, j int) { es[i], es[j] = es[j], es[i] })
-				if got := Resolve(es); !reflect.DeepEqual(got.Members, st.Members) || !reflect.DeepEqual(got.Admins, st.Admins) {
+				if got := Resolve(es); !reflect.DeepEqual(got.Members, st.Members) || !reflect.DeepEqual(got.Admins, st.Admins) && reflect.DeepEqual(got.Admitted, st.Admitted) {
 					t.Fatalf("%s: P1: order changed the result (seed 4)\n%s", name, describe(h.es))
 				}
 			}

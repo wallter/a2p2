@@ -642,3 +642,36 @@ func TestFirstThreeMachinesBecomeAdminsWithTwoAdminConfirmations(t *testing.T) {
 	wantApplied(t, st, c2)
 	wantList(t, "admins", st.Admins, "A", "B", "C")
 }
+
+// Admitted is not monotone: a machine admitted in a set can leave Admitted
+// when more entries arrive, because a later-arriving entry can show that
+// its admission never took effect. Smallest cases found by search over
+// every honest room up to four entries plus one entry by any key:
+//
+//   - A adds B; A's restored backup signs another entry at the same
+//     position. The fork voids A's grants from that position (rule 11).
+//   - A adds C and removes it; B, not having seen either, adds C and then
+//     removes it. B's removal is concurrent with A's add, and a removal
+//     beats a concurrent add (rule 8), so A's add never took effect.
+//
+// So a store must not drop a machine's records just because it has left
+// Admitted.
+//
+// Requirements: T5
+func TestAdmittedCanShrinkWhenMoreEntriesArrive(t *testing.T) {
+	r := newRoom(t, "A")
+	r.add("A", "B")
+	before := r.state(Final)
+	wantList(t, "admitted", before.Admitted, "A", "B")
+	r.put(Entry{Author: "A", Seq: 2, Prev: r.root, Kind: Add, Target: "A", Parents: []string{r.root}})
+	wantList(t, "admitted", r.state(Final).Admitted, "A")
+
+	r = newRoom(t, "A")
+	h1 := []string{r.root, r.admin("A", "B")}
+	r.add("A", "C", h1...)
+	r.remove("A", "C", r.all()...)
+	addC := r.add("B", "C", h1...)
+	wantList(t, "admitted", r.state(Final).Admitted, "A", "B", "C")
+	r.remove("B", "C", append(h1, addC)...)
+	wantList(t, "admitted", r.state(Final).Admitted, "A", "B")
+}

@@ -93,14 +93,58 @@ func (m *Machine) Receive(es ...Entry) {
 		}
 	}
 	m.order = still
-	m.settle()
+	if m.settle() && len(m.held) > 0 {
+		m.Receive()
+	}
 }
 
-// settle accepts refused branches once every forking key has been removed.
-func (m *Machine) settle() {
+// settle accepts refused branches of every fork that has been settled:
+// its key was removed as an admin, or it was not an admin at either entry.
+// Forks by other keys that are still open stay refused, with everything
+// that depends on them, so one open fork does not hold back another's
+// settlement.
+func (m *Machine) settle() bool {
 	if len(m.refused) == 0 {
-		return
+		return false
 	}
+	var still [][2]string
+	blocked := map[string]bool{}
+	if len(m.open) > 0 {
+		still, blocked = m.openForks()
+	}
+	m.open = still
+	// Accept refused entries in causal order, except the refused entries
+	// of open forks and what depends on them.
+	accepted := false
+	for changed := true; changed; {
+		changed = false
+		for _, id := range sortedKeys(m.refused) {
+			e := m.refused[id]
+			if blocked[id] {
+				continue
+			}
+			ready := true
+			for _, p := range e.Parents {
+				if blocked[p] {
+					blocked[id] = true
+				}
+				if _, ok := m.set[p]; !ok {
+					ready = false
+				}
+			}
+			if blocked[id] || !ready {
+				continue
+			}
+			m.set[id] = e
+			delete(m.refused, id)
+			changed, accepted = true, true
+		}
+	}
+	return accepted
+}
+
+// openForks returns the forks not yet settled, and their refused entries.
+func (m *Machine) openForks() ([][2]string, map[string]bool) {
 	all := map[string]Entry{}
 	for _, src := range []map[string]Entry{m.set, m.refused, m.held} {
 		for id, e := range src {
@@ -125,24 +169,16 @@ func (m *Machine) settle() {
 		cand = append(cand, e)
 	}
 	st := m.Rules.Resolve(cand)
+	var still [][2]string
+	blocked := map[string]bool{}
 	for _, pair := range m.open {
-		if !notAdminFork(st, pair) && !removedAsAdmin(st, all, all[pair[0]].Author) {
-			return
+		if notAdminFork(st, pair) || removedAsAdmin(st, all, all[pair[0]].Author) {
+			continue
 		}
+		still = append(still, pair)
+		blocked[pair[1]] = true
 	}
-	m.open = nil
-	for id, e := range all {
-		m.set[id] = e
-		delete(m.refused, id)
-		delete(m.held, id)
-	}
-	var still []string
-	for _, id := range m.order {
-		if _, ok := m.held[id]; ok {
-			still = append(still, id)
-		}
-	}
-	m.order = still
+	return still, blocked
 }
 
 // notAdminFork reports whether neither entry of a fork had effect because

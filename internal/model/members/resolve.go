@@ -40,7 +40,11 @@ const (
 type State struct {
 	Members []string
 	Admins  []string
-	Effects map[string]Effect
+	// Admitted lists every machine that has ever had an effective
+	// admission in this set: the creator, and every target of an add or
+	// admin grant that took effect, even if a later removal undid it.
+	Admitted []string
+	Effects  map[string]Effect
 
 	members, admins map[string]bool
 	// removedBy is, per machine, the ids of the removals of it that took
@@ -611,6 +615,13 @@ func (rs *resolver) resolve(ids []string) *State {
 	}
 	st.Members = sortedKeys(st.members)
 	st.Admins = sortedKeys(st.admins)
+	admitted := map[string]bool{root.Author: true}
+	for _, id := range order[1:] {
+		if e := rs.e[id]; (e.Kind == Add || e.Kind == MakeAdmin) && st.Effects[id].Applied {
+			admitted[e.Target] = true
+		}
+	}
+	st.Admitted = sortedKeys(admitted)
 	return st
 }
 

@@ -21,7 +21,7 @@ func machineWith(es []Entry) *Machine {
 }
 
 func sameState(a, b State) bool {
-	return reflect.DeepEqual(a.Members, b.Members) && reflect.DeepEqual(a.Admins, b.Admins)
+	return reflect.DeepEqual(a.Members, b.Members) && reflect.DeepEqual(a.Admins, b.Admins) && reflect.DeepEqual(a.Admitted, b.Admitted)
 }
 
 // Attack 2: the creator's key is stolen and the thief forks from the room's
@@ -323,4 +323,145 @@ func TestStolenKeyCanSecondAForkingKeysVoidedRemovalAndThenJoinTheRemoval(t *tes
 		t.Fatal("the limit no longer holds: update known gap 4 and atRest")
 	}
 	t.Skip("KNOWN GAP 4: one key can second a removed admin's voided vote and then revive it by joining the removal")
+}
+
+func holds(m *Machine, ids ...string) bool {
+	for _, id := range ids {
+		if _, ok := m.set[id]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// Two independent forks: B and C, both admins of four, each sign a second
+// entry at a position they had used. One open fork does not hold back the
+// other's settlement: once a removal of B arrives, every machine takes
+// both of B's branches and the removal whatever the state of C's fork, and
+// then likewise for C, in either order. Each remover had not yet received
+// the other fork. (A removal that names one branch of the other, still
+// open fork waits on machines holding that fork's other branch, like every
+// entry depending on a refused one, and is taken once that fork settles:
+// TestSettlingRemovalThatNamesAnotherOpenForkWaitsForIt.)
+//
+// Requirements: T9, D6
+func TestOneOpenForkDoesNotHoldBackSettlingAnother(t *testing.T) {
+	for _, bFirst := range []bool{true, false} {
+		r, _ := threeAdmins(t)
+		r.admin("A", "D", r.all()...)
+		r.admin("B", "D", r.all()...)
+		h0 := r.all()
+		lastB, lastC := r.last["B"], r.last["C"]
+		b1 := r.add("B", "X", h0...)
+		b2 := r.fork("B", lastB.Seq+1, lastB.ID, Add, "Y", h0...)
+		var c1, c2 string
+		if lastC.ID == "" {
+			c1 = r.add("C", "Z", h0...)
+			c2 = r.put(Entry{Author: "C", Seq: 1, Kind: Add, Target: "W", Parents: h0})
+		} else {
+			c1 = r.add("C", "Z", h0...)
+			c2 = r.fork("C", lastC.Seq+1, lastC.ID, Add, "W", h0...)
+		}
+		p1, p2 := machineWith(r.entries(h0...)), machineWith(r.entries(h0...))
+		p1.Receive(r.byID[b1], r.byID[c1], r.byID[b2], r.byID[c2])
+		p2.Receive(r.byID[b2], r.byID[c2], r.byID[b1], r.byID[c1])
+		rmB := r.remove("A", "B", append(h0, b1)...)
+		rmC := r.remove("D", "C", append(h0, c2)...)
+		first, second := rmB, rmC
+		firstFork, secondFork := []string{b1, b2}, []string{c1, c2}
+		if !bFirst {
+			first, second = rmC, rmB
+			firstFork, secondFork = secondFork, firstFork
+		}
+		for _, m := range []*Machine{p1, p2} {
+			m.Receive(r.byID[first])
+		}
+		p1.Receive(p2.Offer()...)
+		p2.Receive(p1.Offer()...)
+		for i, m := range []*Machine{p1, p2} {
+			if !holds(m, firstFork...) || !holds(m, first) {
+				t.Fatalf("bFirst=%v machine %d: first fork not settled while the other is open", bFirst, i+1)
+			}
+			if holds(m, secondFork...) {
+				t.Fatalf("bFirst=%v machine %d: second fork accepted before its removal", bFirst, i+1)
+			}
+		}
+		for _, m := range []*Machine{p1, p2} {
+			m.Receive(r.byID[second])
+		}
+		p1.Receive(p2.Offer()...)
+		p2.Receive(p1.Offer()...)
+		if !holds(p1, secondFork...) || !holds(p2, secondFork...) || !sameState(p1.State(), p2.State()) {
+			t.Fatalf("bFirst=%v: not settled: %v / %v", bFirst, p1.State().Members, p2.State().Members)
+		}
+		wantList(t, "admins", p1.State().Admins, "A", "D")
+	}
+}
+
+// The rule the design states: an admin signs a settling removal naming as
+// parents only entries it has accepted, never the branch it refused. Then
+// the branch it had accepted stands and the other does not. A signer that
+// names both branches sees neither take effect, so neither stands.
+//
+// Requirements: T9, D6
+func TestSettlingRemovalNamesOnlyAcceptedEntries(t *testing.T) {
+	r, h1, addD, addE := twoAdminFork(t)
+	a := machineWith(r.entries(h1...))
+	a.Receive(r.byID[addD], r.byID[addE])
+	if !holds(a, addD) || holds(a, addE) {
+		t.Fatal("expected A to accept D's branch and refuse E's")
+	}
+	rm := r.remove("A", "B", idsOf(a.Entries())...)
+	a.Receive(r.byID[rm])
+	other := machineWith(r.entries(h1...))
+	other.Receive(r.byID[addE], r.byID[addD])
+	other.Receive(a.Offer()...)
+	for _, m := range []*Machine{a, other} {
+		st := m.State()
+		wantApplied(t, st, addD)
+		wantReason(t, st, addE, ReasonAfterCut)
+		wantList(t, "members", st.Members, "A", "D", "P")
+	}
+
+	r, h1, addD, addE = twoAdminFork(t)
+	r.remove("A", "B", append(h1, addD, addE)...)
+	st := r.state(Final)
+	wantReason(t, st, addD, ReasonAfterCut)
+	wantReason(t, st, addE, ReasonAfterCut)
+	wantList(t, "members", st.Members, "A", "P")
+}
+
+// A removal of B signed by A, which had accepted B's first branch and C's
+// first branch, names C's first branch as a parent. A machine that holds
+// C's other branch refuses it until C's fork is settled, then takes both
+// forks; every machine ends in the same state.
+//
+// Requirements: T9, D6
+func TestSettlingRemovalThatNamesAnotherOpenForkWaitsForIt(t *testing.T) {
+	r, _ := threeAdmins(t)
+	r.admin("A", "D", r.all()...)
+	r.admin("B", "D", r.all()...)
+	h0 := r.all()
+	lastB := r.last["B"]
+	b1 := r.add("B", "X", h0...)
+	b2 := r.fork("B", lastB.Seq+1, lastB.ID, Add, "Y", h0...)
+	c1 := r.add("C", "Z", h0...)
+	c2 := r.put(Entry{Author: "C", Seq: 1, Kind: Add, Target: "W", Parents: h0})
+	p1, p2 := machineWith(r.entries(h0...)), machineWith(r.entries(h0...))
+	p1.Receive(r.byID[b1], r.byID[c1], r.byID[b2], r.byID[c2])
+	p2.Receive(r.byID[b2], r.byID[c2], r.byID[b1], r.byID[c1])
+	rmB := r.remove("A", "B", idsOf(p1.Entries())...)
+	p1.Receive(r.byID[rmB])
+	p2.Receive(p1.Offer()...)
+	if holds(p2, rmB) {
+		t.Fatal("expected the removal to wait on a machine holding C's other branch")
+	}
+	rmC := r.remove("D", "C", idsOf(p2.Entries())...)
+	p2.Receive(r.byID[rmC])
+	p1.Receive(p2.Offer()...)
+	p2.Receive(p1.Offer()...)
+	if !holds(p1, b1, b2, c1, c2, rmB, rmC) || !holds(p2, b1, b2, c1, c2, rmB, rmC) || !sameState(p1.State(), p2.State()) {
+		t.Fatalf("not settled: %v / %v", p1.State().Members, p2.State().Members)
+	}
+	wantList(t, "admins", p1.State().Admins, "A", "D")
 }

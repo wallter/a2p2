@@ -43,7 +43,15 @@ re-appointed admin could empty the room
     removed as an admin, a machine accepts both branches and rule 9 decides.
     A settled fork stays settled: what that key signs after being re-admitted
     counts normally. A fork by a key that was not an admin at either entry
-    had no effect, and machines accept both branches at once.
+    had no effect, and machines accept both branches at once. Each fork
+    settles on its own: an open fork by another key holds back only the
+    entries that depend on its refused branch
+    (`TestOneOpenForkDoesNotHoldBackSettlingAnother`). An admin signs a
+    settling removal naming as parents only entries it has accepted, so its
+    branch stands (`TestSettlingRemovalNamesOnlyAcceptedEntries`). A
+    removal that names one branch of another open fork waits on machines
+    holding that fork's other branch until it settles
+    (`TestSettlingRemovalThatNamesAnotherOpenForkWaitsForIt`).
 12. Fork evidence is a vote. Two different entries one key signed at one
     position, at least one while it was an admin, count as that key's vote
     for its own removal as an admin, in the period the fork was signed. The
@@ -56,7 +64,17 @@ re-appointed admin could empty the room
     Removals the forking key signed from the fork position on, which no
     remover had seen take effect, have no effect. The forking machine
     rejoins under a new key.
-13. No timers, and no entry kinds beyond create, add, remove and make admin.
+13. `State.Admitted` lists every machine that has ever had an effective
+    admission in the set: the creator and every target of an add or admin
+    grant that took effect, even if later undone. Every member is in it.
+    It is not monotone: more entries can show that an admission never took
+    effect, so a machine can leave it (`TestAdmittedCanShrinkWhenMoreEntriesArrive`).
+    Smallest cases: A adds B, then A's restored backup re-signs that
+    position (the fork voids the add); or A adds and removes C while B,
+    having seen neither, adds and removes C (B's removal beats A's
+    concurrent add). A store must not drop a machine's records only
+    because it left `Admitted`.
+14. No timers, and no entry kinds beyond create, add, remove and make admin.
 
 ## What holds
 
@@ -64,12 +82,12 @@ Deep run (`A2P2_MODEL_DEEP=1`), passed in 26.5 minutes:
 
 | Search | Size | Holds |
 |---|---|---|
-| Honest histories, up to 5 entries after create | 109,198 | P1, P2, P4, P5, P6, P7 |
+| Honest histories, up to 5 entries after create | 109,198 | P1, P2, P4, P5, P6, P7, Admitted |
 | One-key attacks on those, depth 2 | 44,049,546 | P3 |
 | Larger rooms, depth 2 | 35,136 | P3 |
 | One-key attacks with forks: every room 1 deep, rooms up to 2 entries 2 deep | 2,238,099 (1,573,476 with a fork) | P1, P3, settlement |
 | The same from four seeded rooms of four and five admins, 1 deep | 2,795 (2,183 with a fork) | P1, P3, settlement |
-| Seven seeded rooms (71,461 histories): 1 deep from every continuation, 2 deep from the seed | 12,418,131 attack sets | P1 to P7 |
+| Seven seeded rooms (71,461 histories): 1 deep from every continuation, 2 deep from the seed | 12,418,131 attack sets | P1 to P7, Admitted on the histories |
 
 Covered before being stopped, with the same rules: fork attacks two deep
 from rooms up to 3 entries after create (3,759,132 sets, 2,980,614 with a
