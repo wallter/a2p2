@@ -139,6 +139,12 @@ func TestEveryLocalCallRoundTripsAndRefusesAUserError(t *testing.T) {
 	}
 	userError(t, a.c, "seen", SeenReq{Agent: "x@00000000"})
 	r := call[SendResp](t, a.c, "send", SendReq{Agent: bob, Text: "reply", ReplyTo: m.ID})
+	if r.RoomLabel != node.LocalLabel || len(r.To) != 1 || r.To[0] != alice || in.Entries[0].RoomLabel != node.LocalLabel {
+		t.Fatalf("send names its room and addressees: %+v, %+v", r, in.Entries[0])
+	}
+	if st := call[Status](t, a.c, "status", StatusReq{}); len(st.Rooms[0].Agents) != 2 || st.Rooms[0].Agents[0].LastSeen == "" {
+		t.Fatalf("status lists the agents seen writing: %+v", st.Rooms[0].Agents)
+	}
 	th := call[Entries](t, a.c, "thread", ThreadReq{Agent: alice, ID: m.ID})
 	if len(th.Entries) != 2 || th.Entries[1].ID != r.ID || th.Entries[1].Parent != m.ID {
 		t.Fatalf("thread = %+v", th)

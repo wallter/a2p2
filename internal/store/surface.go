@@ -82,3 +82,34 @@ func (s *Store) MissingBefore(ctx context.Context, t time.Time, limit int) ([]Mi
 	}
 	return out, rows.Err()
 }
+
+// Writer is an agent seen writing messages in a room: its machine, its
+// label, and when it last wrote (by the record's signed creation time).
+type Writer struct {
+	Node  string
+	Agent string
+	Last  time.Time
+}
+
+// Writers lists, newest first, up to limit agents that wrote a message in
+// room, from the records held here (any text state). It reads headers
+// only, never text.
+func (rd *Reader) Writers(room string, limit int) ([]Writer, error) {
+	rows, err := rd.tx.Query(`SELECT author, agent, MAX(created) AS last FROM records
+		WHERE room = ? AND kind = 'message' GROUP BY author, agent ORDER BY last DESC, author, agent LIMIT ?`, room, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Writer
+	for rows.Next() {
+		var w Writer
+		var at int64
+		if err := rows.Scan(&w.Node, &w.Agent, &at); err != nil {
+			return nil, err
+		}
+		w.Last = fromMS(at)
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}

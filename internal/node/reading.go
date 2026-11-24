@@ -52,11 +52,13 @@ type Entry struct {
 	Kind    string
 	// ID is the message concerned; Record is the record at this position
 	// (the same for a message; the withdraw or replace for a notice).
-	ID       string
-	Record   string
-	Room     string
-	From     string // agent id, label@short node
-	FromNode string
+	ID     string
+	Record string
+	Room   string
+	// RoomLabel is the room's label (filled in by Surface).
+	RoomLabel string
+	From      string // agent id, label@short node
+	FromNode  string
 	// AuthorRemoved: the author is not a member of the room now, in this
 	// machine's view [RM1]. Always false in a room without a log.
 	AuthorRemoved bool

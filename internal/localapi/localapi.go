@@ -49,10 +49,14 @@ type (
 		Replaces   string   `json:"replaces,omitempty"`
 		Choices    []string `json:"choices,omitempty"`
 	}
+	// SendResp: to is the message's addressees as written, empty for
+	// everyone (and for a replace or withdraw, which keep the original's).
 	SendResp struct {
-		ID      string `json:"id"`
-		Room    string `json:"room"`
-		Created string `json:"created"`
+		ID        string   `json:"id"`
+		Room      string   `json:"room"`
+		RoomLabel string   `json:"room_label"`
+		Created   string   `json:"created"`
+		To        []string `json:"to,omitempty"`
 	}
 	InboxReq struct {
 		Agent  string `json:"agent"`
@@ -66,6 +70,7 @@ type (
 		Kind          string   `json:"kind"`
 		ID            string   `json:"id"`
 		Room          string   `json:"room"`
+		RoomLabel     string   `json:"room_label"`
 		From          string   `json:"from"`
 		FromNode      string   `json:"from_node"`
 		AuthorRemoved bool     `json:"author_removed,omitempty"`
@@ -324,6 +329,13 @@ type (
 		// Waiting is the number of requests in this room waiting for this
 		// machine's person.
 		Waiting int `json:"waiting"`
+		// Agents are the agents of members seen writing here, newest
+		// first (status only).
+		Agents []Writer `json:"agents,omitempty"`
+	}
+	Writer struct {
+		Agent    string `json:"agent"`
+		LastSeen string `json:"last_seen"`
 	}
 	RoomsResp struct {
 		Rooms []Room `json:"rooms"`
@@ -433,9 +445,9 @@ func waitOf(ms int64) (time.Duration, error) {
 
 // EntryOf renders a node entry (PROTOCOL-next section 7, Entry).
 func EntryOf(e node.Entry) Entry {
-	out := Entry{Key: e.Key, Version: e.Version, Kind: e.Kind, ID: e.ID, Room: e.Room, From: e.From, FromNode: e.FromNode,
-		AuthorRemoved: e.AuthorRemoved, Parent: e.Parent, Thread: e.Thread, ParentState: e.ParentState, Late: e.Late,
-		Created: Time(e.Created), Text: e.Text, Choices: e.Choices}
+	out := Entry{Key: e.Key, Version: e.Version, Kind: e.Kind, ID: e.ID, Room: e.Room, RoomLabel: e.RoomLabel,
+		From: e.From, FromNode: e.FromNode, AuthorRemoved: e.AuthorRemoved, Parent: e.Parent, Thread: e.Thread,
+		ParentState: e.ParentState, Late: e.Late, Created: Time(e.Created), Text: e.Text, Choices: e.Choices}
 	for _, a := range e.To {
 		out.To = append(out.To, node.AgentID(a))
 	}
@@ -517,6 +529,11 @@ func StatusOf(st node.StatusView, listen []string, info Info) Status {
 	out := Status{Node: st.Node, Name: st.Name, Human: st.Human, Local: st.Local, Rooms: roomsOf(st.Rooms),
 		Agents: st.Agents, Peers: []Peer{}, Listen: listen, Version: info.Version, PID: info.PID, Notice: st.Notice,
 		Network: NetworkOf(st.Network), Waiting: st.Waiting}
+	for i := range out.Rooms {
+		for _, w := range st.Writers[out.Rooms[i].ID] {
+			out.Rooms[i].Agents = append(out.Rooms[i].Agents, Writer{Agent: w.Agent, LastSeen: Time(w.Last)})
+		}
+	}
 	if out.Listen == nil {
 		out.Listen = []string{}
 	}
@@ -541,7 +558,11 @@ func Handler(s *node.Surface, info Info) http.Handler {
 	handle(mux, "send", func(ctx context.Context, r SendReq) (SendResp, error) {
 		m, err := s.Send(ctx, node.SendInput{Agent: r.Agent, Room: r.Room, Text: r.Text, To: r.To, ReplyTo: r.ReplyTo,
 			AskHandled: r.AskHandled, Replaces: r.Replaces, Choices: r.Choices})
-		return SendResp{ID: m.ID, Room: m.Room, Created: Time(m.Created)}, err
+		out := SendResp{ID: m.ID, Room: m.Room, RoomLabel: m.Label, Created: Time(m.Created)}
+		for _, a := range m.To {
+			out.To = append(out.To, node.AgentID(a))
+		}
+		return out, err
 	})
 	handle(mux, "inbox", func(ctx context.Context, r InboxReq) (InboxResp, error) {
 		wait, err := waitOf(r.WaitMS)

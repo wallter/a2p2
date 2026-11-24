@@ -34,6 +34,22 @@ type UserError struct{ Msg string }
 
 func (e *UserError) Error() string { return e.Msg }
 
+// ackRefusal is a user error that says why something is not allowed: it is a
+// *UserError to errors.As and ErrNotAllowed to errors.Is.
+type ackRefusal struct{ UserError }
+
+func (r *ackRefusal) Is(target error) bool { return target == ErrNotAllowed }
+
+func (r *ackRefusal) As(target any) bool {
+	if p, ok := target.(**UserError); ok {
+		*p = &r.UserError
+		return true
+	}
+	return false
+}
+
+func refuse(msg string) error { return &ackRefusal{UserError{msg}} }
+
 func userErr(format string, a ...any) error { return &UserError{fmt.Sprintf(format, a...)} }
 
 // Errors of the record operations. All are user errors.
@@ -41,6 +57,18 @@ var (
 	ErrNotHeld      = &UserError{"record not held here"}
 	ErrNotAllowed   = &UserError{"not allowed"}
 	ErrUnknownAgent = &UserError{"agent not registered"}
+)
+
+// Why Handled refused: each is ErrNotAllowed, and says what the agent can
+// do about it (D5's rule does not change; only the reason is told).
+var (
+	ErrAckNotMessage   = refuse("that id is a report, withdrawal or replacement, not a message")
+	ErrAckOwn          = refuse("you wrote this message; only its readers report handling it")
+	ErrAckNotAddressed = refuse("this message is not addressed to you and did not ask for handled reports " +
+		"(ask_handled); reply to it instead")
+	ErrAckNotShown = refuse("you have not been shown this message's text yet: read it with inbox first " +
+		"(a thread or recent view does not count); inbox never shows a message sent before you registered, so " +
+		"reply to that instead")
 )
 
 // MachineOpts injects the clock and randomness, so tests are deterministic.
@@ -222,6 +250,12 @@ type Sent struct {
 	ID      string
 	Room    string
 	Created time.Time
+	// To is a message's addressees as written; empty is everyone.
+	To []core.Addressee
+	// Already: a handled report that was held before this call.
+	Already bool
+	// Label is the room's label (filled in by Surface).
+	Label string
 }
 
 // Send writes a message. Once it returns, the message is committed (D1).
@@ -229,7 +263,8 @@ func (m *Machine) Send(ctx context.Context, d Draft) (Sent, error) {
 	if d.Everyone && len(d.To) > 0 {
 		return Sent{}, userErr("a post to everyone names no addressees")
 	}
-	return m.write(ctx, d.Room, d.Agent, func(v *roomView, f *core.RecordFields) error {
+	var to []core.Addressee
+	s, err := m.write(ctx, d.Room, d.Agent, func(v *roomView, f *core.RecordFields) error {
 		f.Kind, f.Text, f.Choices, f.AskHandled = core.KindMessage, d.Text, d.Choices, d.AskHandled
 		f.To = slices.Clone(d.To)
 		if d.ReplyTo != "" {
@@ -258,8 +293,11 @@ func (m *Machine) Send(ctx context.Context, d Draft) (Sent, error) {
 		if f.AskHandled && len(f.To) > 0 {
 			return userErr("ask_handled is only for a post to everyone")
 		}
+		to = slices.Clone(f.To)
 		return nil
 	})
+	s.To = to
+	return s, err
 }
 
 // Replace gives new text for one of this machine's own messages (any agent
@@ -324,7 +362,13 @@ func (m *Machine) Handled(ctx context.Context, room, agent, ref string) (Sent, e
 			return ErrNotHeld
 		}
 		if !store.CanHandle(t.h.Record, m.ID, agent) {
-			return ErrNotAllowed
+			switch {
+			case t.f.Kind != core.KindMessage:
+				return ErrAckNotMessage
+			case t.author == m.ID && t.f.Agent == agent:
+				return ErrAckOwn
+			}
+			return ErrAckNotAddressed
 		}
 		hs, err := v.refs(ref)
 		if err != nil {
@@ -337,7 +381,7 @@ func (m *Machine) Handled(ctx context.Context, room, agent, ref string) (Sent, e
 		}
 		if _, shown, err := v.rd.Read(agent, room, ref); err != nil || !shown {
 			if err == nil {
-				err = ErrNotAllowed
+				err = ErrAckNotShown
 			}
 			return err
 		}
@@ -345,7 +389,7 @@ func (m *Machine) Handled(ctx context.Context, room, agent, ref string) (Sent, e
 	})
 	var ex existing
 	if errors.As(err, &ex) {
-		return Sent{ID: ex.r.id, Room: room, Created: ex.r.f.Created}, nil
+		return Sent{ID: ex.r.id, Room: room, Created: ex.r.f.Created, Already: true}, nil
 	}
 	return s, err
 }
