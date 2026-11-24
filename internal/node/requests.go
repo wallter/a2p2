@@ -289,6 +289,12 @@ type ConfirmOpts struct {
 
 // ConfirmWith is Confirm with the person's options.
 func (r *Rooms) ConfirmWith(ctx context.Context, id string, approve bool, o ConfirmOpts) (Confirmation, error) {
+	if r.files != nil {
+		// A send with files signs no log entry: decided outside mu.
+		if q, err := r.m.st.GetRequest(ctx, id); err == nil && q.Kind == store.RequestSendFiles {
+			return r.files.confirmSend(ctx, q, approve)
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	q, err := r.m.st.GetRequest(ctx, id)

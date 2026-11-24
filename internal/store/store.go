@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -62,7 +64,7 @@ CREATE TABLE marks (
 // of it the next version does not use.
 //
 // migrations[i] upgrades the schema from version i to i+1. Append only.
-var migrations = []string{schema, schemaRecords, schemaLog, schemaPull, schemaKnownFrom, schemaInvites, schemaJoinPaging, schemaPeerAddrs, schemaHistory, schemaDropV02, schemaLevels, schemaReading}
+var migrations = []string{schema, schemaRecords, schemaLog, schemaPull, schemaKnownFrom, schemaInvites, schemaJoinPaging, schemaPeerAddrs, schemaHistory, schemaDropV02, schemaLevels, schemaReading, schemaFiles}
 
 // Store wraps the database. Safe for concurrent use.
 type Store struct {
@@ -71,6 +73,16 @@ type Store struct {
 	// before its commit. With one connection, a read that starts after
 	// changes was read sees every write counted by then (see Changes).
 	changes atomic.Int64
+	// root is the directory under which attachments live (files.go):
+	// the database's own directory. fileMu serialises putting bytes at a
+	// path with the deletion queue's run.
+	root   string
+	fileMu sync.Mutex
+	// stageMu serialises staging reservations; resMu guards staging, the
+	// bytes reserved by requests being staged (finding 9).
+	stageMu, resMu            sync.Mutex
+	staging                   map[string]stageRes
+	roomBudget, machineBudget int64
 }
 
 // Changes is the number of write transactions begun committing. Read it
@@ -94,7 +106,7 @@ func Open(path string) (*Store, error) {
 	// One connection: every transaction is serialised, which is what makes
 	// assigning positions and arrival order trivially race-free.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db}
+	s := &Store{db: db, root: filepath.Dir(path)}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate %s: %w", path, err)

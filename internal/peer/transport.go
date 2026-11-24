@@ -116,6 +116,9 @@ func Serve(ctx context.Context, ln net.Listener, id *Identity, h Handler) error 
 	mux := http.NewServeMux()
 	mux.Handle("POST "+pathJoinV2, joinV2Route(h))
 	mux.Handle("POST "+pathPullV2, newPullServer(ctx, h))
+	if fh, ok := h.(FileHandler); ok {
+		mux.Handle(pathFileV2, fileRoute(fh)) // GET and PUT, with their own limits (PROTOCOL 10.3)
+	}
 	protos := new(http.Protocols)
 	protos.SetHTTP1(true) // the join exchange: HTTP/1.1, one request per connection
 	protos.SetHTTP2(true) // the pull exchange: waiting pulls to one peer share one connection (ALPN h2)

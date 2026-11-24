@@ -447,6 +447,11 @@ func place(tx *sql.Tx, r *core.VerifiedRecord, o PutOpts) (Outcome, error) {
 	if err := hook("put:inserted"); err != nil {
 		return "", err
 	}
+	if f.Files != "" && (f.Kind == core.KindMessage || f.Kind == core.KindReplace) {
+		if err := fileSetTx(tx, f.Room, r.ID(), f.Files); err != nil {
+			return "", err
+		}
+	}
 	if _, err := tx.Exec(`INSERT INTO streams (room, author, epoch, contig) VALUES (?,?,?,?)
 		ON CONFLICT (room, author, epoch) DO UPDATE SET contig = excluded.contig`,
 		f.Room, r.Author(), f.Epoch, f.Seq); err != nil {

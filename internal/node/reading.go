@@ -80,6 +80,12 @@ type Entry struct {
 	Skipped bool
 	Epoch   string
 	Seq     int64
+	// Files are the files the version shown lists, with what this machine
+	// holds of each; FilesPending: the version has files whose list has
+	// not arrived; FilesNote: why the list will not come (PROTOCOL 10.2).
+	Files        []EntryFile
+	FilesPending bool
+	FilesNote    string
 }
 
 // Wait is a stream the inbox cannot pass yet (PROTOCOL Wait).
@@ -996,6 +1002,7 @@ func (v *roomView) decide(g *agentState, agent string, h *rec, heads map[string]
 				return nil, nil, err
 			}
 			e.Text, e.Choices, e.Version = text.f.Text, text.f.Choices, ver.id
+			v.fileState(e, ver)
 		}
 	case core.KindWithdraw:
 		if h.h.Effect != store.EffectOK {
@@ -1043,6 +1050,7 @@ func (v *roomView) decide(g *agentState, agent string, h *rec, heads map[string]
 			return nil, nil, err
 		}
 		e.Text, e.Choices, e.Version = h.f.Text, h.f.Choices, h.id
+		v.fileState(e, h)
 	default:
 		return nil, nil, nil // handled reports are for trace, not the inbox
 	}
@@ -1219,6 +1227,7 @@ func (v *roomView) threadEntry(h *rec) (*Entry, error) {
 			return nil, err
 		}
 		e.Text, e.Choices, e.Version = text.f.Text, text.f.Choices, ver.id
+		v.fileState(e, ver)
 		return e, nil
 	}
 	return nil, nil

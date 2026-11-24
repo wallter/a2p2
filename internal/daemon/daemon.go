@@ -393,6 +393,11 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	pulls := peer.NewPullClient(r.id, book)
 	defer pulls.Close()
 	x := node.NewExchange(rooms, pulls, node.ExchangeOpts{Book: book, Addrs: addrs})
+	files := node.NewFiles(rooms, peer.NewFileClient(pulls), node.FilesOpts{})
+	x.UseFiles(files)
+	if err := files.Start(parent); err != nil {
+		return false, err
+	}
 	if o.Exchange != nil {
 		o.Exchange(x)
 	}
@@ -432,7 +437,7 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 		wg.Wait()
 	}()
 	if peerLn != nil {
-		h := peerHandler{JoinServer: node.NewJoinServer(rooms), x: x, g: g}
+		h := filesPeerHandler{peerHandler{JoinServer: node.NewJoinServer(rooms), x: x, g: g}, files}
 		ln := peerLn
 		peerLn = nil // Serve owns it now
 		start(func() {
@@ -445,6 +450,7 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	if netw.State != node.NetworkOff { // off: no scheduler, no join polling, nothing dialled
 		start(func() { node.NewScheduler(x, node.SchedOpts{}).Run(ctx) })
 		start(func() { resumeJoins(ctx, surf) })
+		start(func() { files.Run(ctx, time.Minute) })
 	}
 	start(func() { prune(ctx, m) })
 	r.cur.Store(&handlers{

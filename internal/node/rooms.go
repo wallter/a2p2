@@ -88,6 +88,8 @@ type Rooms struct {
 	// waited for.
 	fmu    sync.Mutex
 	fronts map[string]readFront
+	// files, set by NewFiles, is the machine's attachment part (nil: none).
+	files *Files
 	// signs counts membership entries signed (create entries excluded);
 	// tests read it.
 	signs int

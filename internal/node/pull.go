@@ -58,6 +58,7 @@ type Exchange struct {
 	book       *AddrBook
 	addrs      []string
 	after      func(time.Duration) <-chan time.Time
+	files      *Files // set by UseFiles: wants in answers, files after pulls
 
 	// In memory, per room and peer (PROTOCOL 4.5): refused, how the
 	// peer last refused this machine as not a member; heard, the log heads
@@ -1048,6 +1049,12 @@ func (x *Exchange) release(ctx context.Context, peer string, q *PullRequest, b *
 			resp.Peers = ps
 		}
 	}
+	resp.Want = nil
+	if x.files != nil {
+		// Wants of the puller's files when it cannot be dialled, in what
+		// the answer leaves of its limit (PROTOCOL 10.4).
+		resp.Want = x.files.wantsFor(ctx, rl.id, peer, maxResponseBytes-jsonSize(resp)-wireMargin-16)
+	}
 	// What goes out is noted: evidence the peer cannot list, once; the
 	// page's streams, to find those blocked at the peer.
 	note := x.evidenceFor(rl.id, peer, true)
@@ -1143,6 +1150,10 @@ func (x *Exchange) Pull(ctx context.Context, room, peer string, o PullOpts) (Pul
 		return st, err
 	}
 	sent := map[string]bool{} // records and log entries given to the peer in this exchange
+	if x.files != nil {
+		// what the exchange stored may end files here [F1]
+		defer x.files.sweepRoom(context.WithoutCancel(ctx), room)
+	}
 	for st.Rounds < pullRoundsPerPull {
 		st.Rounds++
 		progress, err := x.round(ctx, room, peer, gen, o, &st, sent)
@@ -1675,6 +1686,9 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 			x.r.m.wakes.touch(room)
 		}
 		x.learnPeers(room, peer, resp.Peers)
+		if x.files != nil {
+			x.files.answerWants(room, peer, resp.Want)
+		}
 		st.Responses++
 		st.Stored += a.stored
 		st.Repaired += a.repaired
@@ -1880,6 +1894,8 @@ func checkResponse(resp *PullResponse, q *PullRequest) error {
 		return bad("log heads")
 	case len(resp.Peers) > MaxPeersListed, resp.Peers != nil && !q.Peers:
 		return bad("peers")
+	case !checkWants(resp.Want):
+		return bad("want")
 	}
 	for _, p := range resp.Peers {
 		if !validPeer(p) {

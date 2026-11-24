@@ -1,0 +1,8 @@
+{
+  "type": "manifest",
+  "note": "M1: a duplicate key",
+  "room": "r_00112233445566778899aabbccddeeff",
+  "wire": "{\"v\":1,\"v\":1,\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"files\":[]}",
+  "code": "invalid_manifest",
+  "check": "M1"
+}

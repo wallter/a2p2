@@ -1,0 +1,7 @@
+{
+  "type": "manifest",
+  "note": "a manifest with one file: its id is its SHA-256, the value of a header's files",
+  "room": "r_00112233445566778899aabbccddeeff",
+  "wire": "{\"v\":1,\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"files\":[{\"name\":\"build.log\",\"size\":14,\"sha256\":\"34f48d9460852dd25a8df37a526da93ba597b0e2e4ec7674dc93e107c09146c9\",\"type\":\"text/plain\"}]}",
+  "id": "97bc53c26d7f87011616d94023ec4c9575788c30f443d404e8fe65f4e1c1b7d4"
+}

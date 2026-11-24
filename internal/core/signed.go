@@ -92,7 +92,7 @@ func fieldName(k string) string {
 	switch k {
 	case "v", "room", "author", "epoch", "seq", "prev", "links", "version", "kind", "agent",
 		"to", "ask_handled", "ref", "parent", "thread", "created", "size",
-		"parents", "target", "label", "name", "history", "from":
+		"parents", "target", "label", "name", "history", "from", "files":
 		return k
 	}
 	if reasons[k] {
