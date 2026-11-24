@@ -58,3 +58,10 @@ release:          ## static binaries a2p2_<os>_<arch> and SHA256SUMS in dist/ (V
 
 clean:
 	rm -rf bin dist
+
+# Chaos: real daemons in Docker containers, killed, paused, disconnected and
+# partitioned from a seed (scripts/chaos). Needs Docker and minutes; not part
+# of check. Logs and the summary go to .chaos/ (git-ignored).
+.PHONY: chaos
+chaos:            ## make chaos [NODES=3] [SEED=1] [DURATION=90]; exits non-zero on any violation
+	python3 scripts/chaos/chaos.py run --nodes $${NODES:-3} --seed $${SEED:-1} --duration $${DURATION:-90}

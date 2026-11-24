@@ -89,6 +89,69 @@ Rows marked "model" include tests of the rules in `internal/members` or
 | Database write fails partway | The store rolls back the write or log batch | `TestFailureBetweenStatementsLeavesNoHalfAppliedWrite`, `TestLogBatchThatFailsLeavesNothingApplied` |
 | Power loss | Open test gap | None |
 | Clock set back or ahead | Expired text stays expired. Replacement order follows the author's history. A record dated over a day ahead waits. | `TestTextThatExpiredBeforeItWasShownIsAnExpiredNoticeEvenAfterTheClockGoesBack`, `TestAFutureRecordLeavesNoSeenAndIsTakenOnceTheClockAllows`, model `TestNewestReplacementIsByTheAuthorsHistoryNotItsClock` |
+| Real daemon killed with `kill -9` at a random moment, then started | What `send` accepted survives; the room converges with each message once and in its author's order | `make chaos` (not in `make check`) |
+| Real daemon paused (frozen) for 5 to 15 seconds | Its peers back off and it catches up after | `make chaos` |
+| Real machine taken off the network and put back | It catches up without anyone acting | `make chaos` |
+| Room split into two halves by the network, a daemon killed during the split, then healed | Both halves converge to the same records; handled reports arrive | `make chaos` |
+| One machine cut off for good (sabotage) | The chaos checker reports the missing records and exits non-zero | `make chaos` with `--sabotage isolate` |
+
+### Chaos runs of real daemons
+
+`make chaos` (`scripts/chaos/chaos.py run`) needs Docker and a few
+minutes, and is not part of `make check`. It builds the static Linux
+binary into a busybox image of about 17 MB and starts one daemon per
+container, each the container's main process with its own home volume,
+on one user-defined network. The last node runs `net on --outbound-only`,
+so it has no inbound route (N1). The room is formed by real invites,
+`join` and `confirm`, answered at a pseudo-terminal inside the containers;
+the driver checks each fingerprint against the joiner's node id. The
+first three nodes become admins, so the third needs both admins'
+confirmations.
+
+While a fault schedule made from the seed runs, every node's agent sends
+numbered room-wide posts, posts that ask for handled reports, replies in
+threads, one replace and one withdraw, and reads its inbox and reports
+handled what it may. The faults are `docker kill -s KILL` and start,
+`docker pause` and unpause, `docker network disconnect` and connect, and
+a partition into two halves (blackhole routes inside the containers)
+with a kill inside it and a heal; extra kills overlap the others. The
+schedule is written to `schedule.json` before anything runs. After the
+heal every node sends once more, and the checker requires, on every
+member: the same records (key, version, sender, text, thread and
+addressees), each message once, every message a sender accepted, each
+author's messages in the author's order in history and in the order its
+inbox showed them, no message shown twice and every message for the
+agent shown, nothing marked late, nothing still waited for, every
+handled report in `trace`, the withdrawn message and its text gone, the
+replacement text shown, every daemon running, no exit other than the
+kills, and no panic in any log. Variables: `NODES`, `SEED`, `DURATION`.
+Logs, the schedule, a snapshot and `summary.txt` go to `.chaos/`.
+
+The checker fails when delivery is broken. `chaos.py check DIR --drop
+n3:n1` deletes n1's records from n3's copy in a saved snapshot and
+reports four violations; `run --sabotage isolate` leaves one node cut
+off after the heal and fails the run.
+
+Recorded runs (2026-11-24, 3 nodes, default schedule unless stated):
+seeds 1, 2 and 3 (92 to 107 seconds of faults, 5 to 8 kills each, 169
+to 184 accepted messages, 82 to 85 handled reports) had no violations and
+settled within 6 seconds of the heal. Eight nodes, seed 4, 120 seconds
+(10 kills, 641 accepted messages, 866 handled reports): no violations,
+settled within 5 seconds. Seed 5 with `--sabotage isolate`: 11
+violations, exit 1, as it should.
+
+What the runs showed beyond the checks: the text of a withdrawn message
+is gone from every surface, but its bytes can stay on disk. The summary
+greps each daemon's database files for the withdrawn text; in four of
+six runs the write-ahead log still held it at the end, and once the main
+database file did (free pages; the store does not set
+`secure_delete`). D9 says machines drop the withdrawn text; on disk that
+holds only once SQLite reuses the pages.
+
+Not covered: a real WAN, latency or loss (`tc netem` is not used),
+clock skew, a full disk, power loss (a kill -9 leaves the kernel's page
+cache intact, so it does not test `synchronous(FULL)`), restores from
+backup, removals during faults, and machines on different versions.
 
 ## Acceptance
 
