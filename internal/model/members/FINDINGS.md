@@ -60,14 +60,22 @@ re-appointed admin could empty the room
 
 ## What holds
 
-Deep run (`A2P2_MODEL_DEEP=1`), passed in 28 minutes:
+Deep run (`A2P2_MODEL_DEEP=1`), passed in 26.5 minutes:
 
 | Search | Size | Holds |
 |---|---|---|
 | Honest histories, up to 5 entries after create | 109,198 | P1, P2, P4, P5, P6, P7 |
 | One-key attacks on those, depth 2 | 44,049,546 | P3 |
 | Larger rooms, depth 2 | 35,136 | P3 |
-| Seven seeded rooms (73,803 histories) | 32,786,313 attack sets | P1 to P7 |
+| One-key attacks with forks: every room 1 deep, rooms up to 2 entries 2 deep | 2,238,099 (1,573,476 with a fork) | P1, P3, settlement |
+| The same from four seeded rooms of four and five admins, 1 deep | 2,795 (2,183 with a fork) | P1, P3, settlement |
+| Seven seeded rooms (71,461 histories): 1 deep from every continuation, 2 deep from the seed | 12,418,131 attack sets | P1 to P7 |
+
+Covered before being stopped, with the same rules: fork attacks two deep
+from rooms up to 3 entries after create (3,759,132 sets, 2,980,614 with a
+fork, passed), and seeded attacks two deep from the first continuation step
+in five of the seven seeds (5,557,035 sets, passed). Before rule 12 the
+seeded search at that depth passed on all seven (32,786,313 sets).
 
 The seeded rooms include a re-appointed admin removed again, a removal
 completed and then voted on by a further admin (four and five admins), a

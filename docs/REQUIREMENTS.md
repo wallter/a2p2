@@ -250,13 +250,18 @@ there is no server.
   again after it has read the room.
 - **An admin machine restored from backup must catch up before it changes
   membership.** If it signs first, its new changes conflict with ones it made
-  before the backup was lost. With three admins the other two settle that by
-  removing its key, and it rejoins under a new one. With two admins it cannot
-  be settled, and machines can disagree about a member for good; the fix is a
-  new room.
+  before the backup was taken. That conflict is itself proof against the
+  key, so one other admin can remove it, and the machine rejoins under a new
+  key. Of the changes it made on the two sides of the conflict, those the
+  removing admin had seen stand and the others do not. A room whose only
+  admin does this cannot be settled.
 - **While a room has had only one admin, that key is the room.** A thief
   holding it can show a different history to a machine that never received
   the real one. Machines that did receive the real one refuse the other.
+- **What a removed machine wrote and nobody fetched is lost**, including a
+  withdrawal of one of its own messages.
+- **If a machine's permission to read earlier history is narrowed later**,
+  text its agents were already shown is dropped without a notice.
 - **"May not read earlier history" is kept by the members, not by
   mathematics.** Members refuse to hand earlier messages to such a machine,
   but any member can still quote or forward what it holds.

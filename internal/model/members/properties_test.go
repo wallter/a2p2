@@ -893,14 +893,15 @@ func TestOneKeyCannotChangeAdminSetByForkingItsOwnChain(t *testing.T) {
 	rng := rand.New(rand.NewSource(12))
 	// The short run attacks rooms up to two entries after create, and one
 	// four-admin room; the deep run every room one entry deep, then rooms
-	// up to three entries two entries deep, and four seeded rooms one entry
-	// deep (two entries deep there did not finish in 50 minutes).
+	// up to two entries after create two entries deep, and four seeded rooms
+	// one entry deep (rooms of three entries two deep took 13 minutes, and
+	// seeded rooms two deep did not finish in 50).
 	levels := histories(t)
 	res := searchForks(levels[:3], 1, 2, rng)
 	if deep() {
 		res = searchForks(levels, 1, 2, rng)
 		if res.example == "" {
-			r2 := searchForks(levels[:4], depth, 2, rng)
+			r2 := searchForks(levels[:3], depth, 2, rng)
 			r2.checked += res.checked
 			r2.forks += res.forks
 			res = r2
@@ -1090,7 +1091,8 @@ func TestSeededRoomsKeepEveryProperty(t *testing.T) {
 		}
 		// One-entry attacks: from the seed itself in the short run, from
 		// every continuation in the deep run, which also tries two-entry
-		// attacks from the first continuation step.
+		// attacks from the seed (from the first continuation step as well,
+		// this search alone took over 20 minutes).
 		attackFrom := levels[:1]
 		if deep() {
 			attackFrom = levels
@@ -1098,7 +1100,7 @@ func TestSeededRoomsKeepEveryProperty(t *testing.T) {
 		res := searchP3(Final, attackFrom, 1, c)
 		checked := res.checked
 		if res.example == "" && depth > 1 {
-			res = searchP3(Final, levels[:2], depth, nil)
+			res = searchP3(Final, levels[:1], depth, nil)
 			checked += res.checked
 		}
 		t.Logf("%s: %d histories, %d attack sets", name, n, checked)

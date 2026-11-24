@@ -36,7 +36,7 @@ delivery rework.
 | T2 | met | 2 | `TestCertIsNodeID`, `TestFromNodeComesFromTLS`, `TestPinningRefusesWrongServerKey` |
 | T3 | partly | 2 | `TestInviteIsSingleUseAndExpires`. No confirmation by a person, no choice about earlier history, and the token is over 300 characters. Model: `TestNewMachineInboxStartsEmptyAndHistoryFlagFiltersWhatMembersHandOver`, `TestFirstThreeMachinesBecomeAdminsWithTwoAdminConfirmations`. Known gap: `TestNewcomerWithoutHistoryIsNotHandedPostsItsAdmitterHadNotSeen` |
 | T4 | partly | 2 | `TestNewMemberCanTalkBeforeOthersHeard`, `TestThreeNodesNonOwnerSends`. The member list is fetched only from the room's owner |
-| T5 | met | 2 | `TestRemovedMemberIsCutOff`, `TestUsedInviteDoesNotReadmitARemovedNode`, `TestLateRefreshAnswerCannotResurrectARoom`. Model: `TestRemovedAdminsConcurrentRemovalOfCompromisedMachineStands`, `TestConcurrentAddAndRemoveOfSameMachineRemovalWins` |
+| T5 | met | 2 | `TestRemovedMemberIsCutOff`, `TestUsedInviteDoesNotReadmitARemovedNode`, `TestLateRefreshAnswerCannotResurrectARoom`. Model: `TestRemovedAdminsConcurrentRemovalOfCompromisedMachineStands`, `TestConcurrentAddAndRemoveOfSameMachineRemovalWins`, `TestMessageOfARemovedAuthorReachesAMachineThatNeverMetItMarked`, `TestHeldResponseIsNotReleasedToAPeerRemovedWhileItWaited`, `TestStaleViewHandsTextToARemovedMachineUntilTheServerLearns` |
 | T6 | not yet | 3 | |
 | T7 | met | 2 | `TestWireIsEncrypted`, `TestServerRejectsBadClientCerts` |
 | T8 | met | 2 | `TestHostileStringsAreInert`, `TestInboxForgedHeadersStayInert`, `TestNoticeSanitisesLabels` |
@@ -46,7 +46,7 @@ delivery rework.
 | U2 | not yet | 3 | |
 | U3 | partly | 3 | `TestLateJoinerGetsNoBackfill`. No way to read what was skipped |
 | U4 | partly | 3 | `TestHookOutputs` covers the unread count. No first-lines reading |
-| N1 | not yet | 2 | Today both machines must accept connections |
+| N1 | not yet | 2 | Today both machines must accept connections. Model: `TestMachineThatOnlyOpensRequestsStillConverges` |
 | N2 | untested | 2 | Several addresses are tried in turn; no test |
 | N3 | untested | 2 | True by construction; no test |
 | A1 | met | 2 | `TestToolsGolden`, `TestLocalRoundTrip`, and `make e2e` for the three harnesses |
