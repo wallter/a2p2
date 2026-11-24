@@ -232,6 +232,9 @@ type PullClient struct {
 	err   error
 	book  *node.AddrBook
 	dials *pullLimiter // to addresses never verified, for every peer
+	// Usable, if set, says whether an address is worth dialling from here
+	// (a unique-local IPv6 address of another site is not); set before use.
+	Usable func(addr string) bool
 
 	mu      sync.Mutex
 	clients map[string]*http.Client
@@ -315,6 +318,10 @@ func (c *PullClient) client(peer string) *http.Client {
 	return hc
 }
 
+func (c *PullClient) usable(addr string) bool {
+	return validAddr(addr) && (c.Usable == nil || c.Usable(addr))
+}
+
 // errDialBudget: the daemon's budget of dials to unverified addresses is
 // spent for now; the address is not tried and not counted as failing.
 var errDialBudget = errors.New("peer: dial budget for unverified addresses spent")
@@ -354,7 +361,7 @@ func (c *PullClient) Pull(ctx context.Context, peer string, req *node.PullReques
 	hc := c.client(peer)
 	lastErr := errors.New("peer: no usable address")
 	for _, addr := range c.book.Addrs(peer) {
-		if !validAddr(addr) {
+		if !c.usable(addr) {
 			continue
 		}
 		u := url.URL{Scheme: "https", Host: addr, Path: pathPullV2}

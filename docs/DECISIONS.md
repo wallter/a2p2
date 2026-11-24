@@ -984,3 +984,62 @@ Cost: a broken `main` is caught by the next local run or the next pull
 request, not by a push. Accepted: one maintainer, and the release gate is
 strict. Revisit if outside contributions become frequent.
 
+
+## D48. Reachability: `a2p2 net check`, a dial-back message, IPv6 and port mapping (2026-11-24)
+
+Two reports drove this. The owner learned that a work laptop dropped every
+inbound connection only by asking a colleague; a2p2 could not tell. And
+two machines behind ordinary home routers cannot reach each other unless a
+third member is reachable or someone forwards a port by hand.
+
+- **`a2p2 net check`** is an argument of the existing `net` command, not a
+  new command, and a new local API call `net/check`, because the probes
+  need the daemon's key and address book. It decides nothing, needs no
+  terminal, and dials nothing while networking is off. The `HOST:PORT` and
+  `--invite` forms run in the CLI process under a throwaway key, so testing
+  an address before an invite neither needs a daemon nor tells the other
+  side who is asking. `status` gains `reach`; no config key, no table.
+- **New protocol message: `POST /p/v2/dialback`** (PROTOCOL 4.7). Needed
+  now because no amount of probing from inside tells a machine whether
+  others can connect to it; only a peer can, and a peer that is a member
+  is the only one a2p2 trusts with the question. Alternatives considered:
+  a public echo service (a third party, against N3); asking in a pull
+  request (the pull exchange's answers are worked out per room and held,
+  and a field there would change its shape for every room); doing
+  nothing (the report above). Old machines answer 404, which the asker
+  reports; the wire version stays 2.
+- **Why it is safe to answer.** The asker is authenticated by TLS and must
+  be a current member of a shared room. The responder dials only the
+  asker's key, closes after the handshake, skips special and (for a
+  remote asker) loopback addresses, never resolves names, and answers
+  only "reached" or nothing at the end of a fixed deadline, so a third
+  party's address is always "not reached" and the answer and its timing
+  carry nothing about it. Rate limits per key (4, then one per 10 minutes)
+  and per machine (16, then one per 10 seconds, at most 4 at once) bound
+  the traffic to at most 8 connection attempts per allowed request.
+- **IPv6 and the seen address.** The listener on an unspecified host is
+  one dual-stack socket, and global IPv6 is advertised beside IPv4
+  (DESIGN 11), because on many home networks IPv6 needs no NAT at all and
+  only a host firewall stands between two members. The address members
+  see (`saw`) is a hint and is advertised only while a dial-back reaches
+  it. No config key.
+- **`a2p2 net on --map-port`**, a flag of the existing command and a field
+  `map_port` of the existing `net` call, stored as role `map_port` of the
+  networking decision (no column, no table, no migration). It asks the
+  router to forward the listening port with PCP, then NAT-PMP, then UPnP
+  IGD, written against the RFCs and the UPnP specification with the
+  standard library only (`internal/daemon/portmap`): no new dependency,
+  because the three protocols are small and a dependency would bring a
+  router discovery we could not bound. For the same reason the macOS
+  default route is read with the frozen `syscall` routing calls, under a
+  staticcheck exception, not `golang.org/x/net/route`. It is asked at a terminal with a
+  plain warning and recorded, never on by default, never through an agent
+  tool or the page, and the mapped address is advertised only after a
+  member reaches it. Renewed while on; removed on `net off`, on a decision
+  without it, and on a clean stop. A mapping left by a crash lapses with
+  its lifetime (2 hours) except on UPnP routers that grant only permanent
+  leases.
+- **Not done:** hole punching (DESIGN 11 says why); port mapping and
+  temporary-address detection on Windows, which report "not available";
+  CGNAT and corporate networks cannot be fixed from the machine, and
+  `net check` says so.

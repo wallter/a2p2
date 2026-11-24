@@ -45,6 +45,9 @@ type ExchangeOpts struct {
 	Book *AddrBook
 	// Addrs are this machine's own addresses, sent in opening requests.
 	Addrs []string
+	// AddrsNow, if set, replaces Addrs: the addresses as they are at each
+	// request (verified external ones come and go, DESIGN 11).
+	AddrsNow func() []string
 	// After is the timer of a held response; nil: time.After.
 	After func(time.Duration) <-chan time.Time
 }
@@ -57,6 +60,7 @@ type Exchange struct {
 	offerLimit int
 	book       *AddrBook
 	addrs      []string
+	addrsNow   func() []string
 	after      func(time.Duration) <-chan time.Time
 
 	// In memory, per room and peer (PROTOCOL 4.5): refused, how the
@@ -103,7 +107,7 @@ func NewExchange(r *Rooms, t PullTransport, o ExchangeOpts) *Exchange {
 	x := &Exchange{r: r, t: t, pageLimit: o.PageLimit, offerLimit: o.OfferLimit, refused: map[[2]string]*refusal{},
 		heard: map[[2]string][]string{}, seen: map[[2]string]seenSums{}, latest: map[[2]string]int64{},
 		evidence: map[[2]string]map[string]bool{}, pages: map[[2]string]*pageMemory{},
-		book: o.Book, addrs: slices.Clone(o.Addrs), after: o.After, waiting: map[[2]string]chan struct{}{},
+		book: o.Book, addrs: slices.Clone(o.Addrs), addrsNow: o.AddrsNow, after: o.After, waiting: map[[2]string]chan struct{}{},
 		asked: map[[2]string]time.Time{}, nextHold: map[[2]string][]chan struct{}{}, closed: make(chan struct{})}
 	if x.after == nil {
 		x.after = time.After
@@ -1244,6 +1248,12 @@ func (x *Exchange) prepare(ctx context.Context, room, peer string, gen int64, ch
 				q.Seen = s.server
 			}
 			q.Addrs = x.addrs
+			if x.addrsNow != nil {
+				q.Addrs = x.addrsNow()
+				if len(q.Addrs) > MaxAddrs {
+					q.Addrs = q.Addrs[:MaxAddrs]
+				}
+			}
 			q.Peers = x.wantPeers(rl, peer, p.at)
 		} else {
 			q.Snap, q.Detail = snap, map[string][]store.StreamDetail{}

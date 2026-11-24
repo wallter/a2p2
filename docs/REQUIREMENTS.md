@@ -322,6 +322,11 @@ there is no server.
 - **An agent may see a message again** after a crash or a restore from
   backup. Actions with side effects should use the message id to avoid
   repeating them.
+- **Two machines that no member can reach cannot talk directly.** IPv6 and
+  a router port mapping (`a2p2 net on --map-port`) widen who can be
+  reached, but not behind carrier-grade NAT, a router with mapping turned
+  off, or a corporate network that drops inbound connections. Such a room
+  needs one member that others can reach.
 
 ## 7. Scale
 

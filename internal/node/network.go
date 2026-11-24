@@ -24,6 +24,10 @@ const (
 type Network struct {
 	State  string // off, outbound or on
 	Listen string // the address listened on, when on
+	// MapPort: with on, the router is asked to forward the listening port
+	// (a2p2 net on --map-port; DESIGN 11). Recorded in the decision's role
+	// as "map_port".
+	MapPort bool
 	// Request is the decision's id in requests; empty when none was ever
 	// taken (networking is then off).
 	Request string
@@ -36,19 +40,32 @@ func LoadNetwork(ctx context.Context, st *store.Store) (Network, error) {
 	if err != nil || !ok {
 		return Network{State: NetworkOff}, err
 	}
-	n := Network{State: q.Action, Listen: q.Name, Request: q.ID}
+	n := Network{State: q.Action, Listen: q.Name, Request: q.ID, MapPort: q.Action == NetworkOn && q.Role == roleMapPort}
 	if n.State != NetworkOutbound && n.State != NetworkOn {
 		n = Network{State: NetworkOff, Request: q.ID}
 	}
 	return n, nil
 }
 
+// roleMapPort marks a networking decision that asks for port mapping.
+const roleMapPort = "map_port"
+
+// MapPortText is what a person is told before deciding on port mapping.
+const MapPortText = "This machine will also ask the router of this network to forward the listening port to it " +
+	"(PCP, NAT-PMP or UPnP), which opens that port on the router to the whole internet. Anyone can then connect; " +
+	"only room members get anything from it, since every connection must prove a member's key first. The mapping " +
+	"is renewed while networking is on and removed by a2p2 net off or a2p2 stop."
+
 // NetworkText says exactly what choosing n does, for the person deciding.
 func NetworkText(n Network) string {
 	switch n.State {
 	case NetworkOn:
-		return "listen for other machines on " + n.Listen + ", and connect out to the machines in this " +
+		s := "listen for other machines on " + n.Listen + ", and connect out to the machines in this " +
 			"machine's rooms and to admin machines of joins"
+		if n.MapPort {
+			s += "; and ask the router to forward the listening port from the internet"
+		}
+		return s
 	case NetworkOutbound:
 		return "listen on no address; connect out only, to the machines in this machine's rooms and to " +
 			"admin machines of joins"
@@ -63,6 +80,9 @@ func NetworkText(n Network) string {
 func (s *Surface) SetNetwork(ctx context.Context, n Network) (Network, error) {
 	switch n.State {
 	case NetworkOff, NetworkOutbound:
+		if n.MapPort {
+			return Network{}, userErr("port mapping needs networking on with a listener: a2p2 net on --map-port")
+		}
 		n.Listen = ""
 	case NetworkOn:
 		host, port, err := net.SplitHostPort(n.Listen)
@@ -75,6 +95,9 @@ func (s *Surface) SetNetwork(ctx context.Context, n Network) (Network, error) {
 	now := s.m.now()
 	q := store.Request{ID: s.r.newID(), Kind: store.RequestNetwork, Action: n.State, Name: n.Listen,
 		Created: now, DecidedAt: now}
+	if n.MapPort {
+		q.Role = roleMapPort
+	}
 	if err := s.m.st.RecordDecision(ctx, q); err != nil {
 		return Network{}, err
 	}

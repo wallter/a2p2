@@ -8,6 +8,26 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- **`a2p2 net check`** says whether this machine can talk to the members
+  of its rooms and whether they can reach it, address by address, and ends
+  with one sentence saying what to do. `a2p2 net check HOST:PORT` and
+  `a2p2 net check --invite` test an address, or an invite's addresses and
+  key, before joining, without using the invite.
+- **Reachability in `status` and the page:** "reachable by peers: yes, no
+  or unknown", checked by asking members to connect back (a new peer
+  request, `/p/v2/dialback`; older machines answer that they do not know
+  it, and nothing else changes).
+- **IPv6:** a listener on `0.0.0.0` or `::` takes IPv4 and IPv6, and global
+  IPv6 addresses are advertised (stable before temporary, never
+  link-local). The address members see is tried and advertised only once
+  a member reaches it.
+- **`a2p2 net on --map-port`** asks the router to forward the port (PCP,
+  NAT-PMP, then UPnP), only when a person decides it at a terminal. It is
+  renewed while on and removed on `net off` and on a clean stop; `status`
+  and `net check` show it. Not available on Windows.
+
 ## [0.1.0] - 2026-11-24
 
 The first release, a preview: read the limits and the status in the

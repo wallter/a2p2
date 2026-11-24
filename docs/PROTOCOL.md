@@ -446,6 +446,136 @@ Error body: `{"error":"<code>","detail":"<≤ 200 bytes>"}`.
 | Requester pacing | a waiting pull answered `same` well before its wait, with nothing stored either way, counts as a failure for back-off |
 | Inbound connections | 256 |
 
+### 4.7 Dial-back and `net check`
+
+A machine cannot see from inside whether others can connect to it. It asks
+a member to try: `POST /p/v2/dialback`, strict JSON, over the same pinned
+mutual TLS as a pull (HTTP/2).
+
+```json
+{"v":2,"addrs":["198.51.100.4:7423","[2001:db8::4]:7423"]}
+```
+
+answered 200 with
+
+```json
+{"v":2,"reached":["198.51.100.4:7423"],"saw":"203.0.113.9"}
+```
+
+| Field | Meaning | Limit |
+|---|---|---|
+| `addrs` | addresses the asker says are its own: literal IP address and port, IPv6 in brackets without a zone, no names, none repeated | 1 to 8, each ≤ 255 bytes |
+| `reached` | the asked addresses at which the asker's own key completed the handshake, in the order asked; omitted when none | only addresses asked |
+| `saw` | the IP address the responder saw this request come from; a hint, never an identity | ≤ 255 bytes |
+
+Responder, in order:
+
+1. The asker is the TLS peer key. It must be a member now of a room the
+   responder holds; otherwise 403 `not_member`, with the body of every
+   other 403, and nothing is dialled.
+2. Declared size ≤ 4 KiB before the body is read (413 `too_large`); strict
+   JSON and the limits above (400 `bad_request`).
+3. Rate limits, each 429 `rate_limited` with `Retry-After`: per asking key a
+   burst of 4, then one every 10 minutes; for the whole responder a burst
+   of 16, then one every 10 seconds; at most 4 requests being dialled at
+   once. A key over its own limit spends nothing of the responder's.
+4. Unspecified, multicast, broadcast and link-local addresses are skipped.
+   A loopback address is dialled only when the request itself came over
+   loopback (the asker is on the responder's machine).
+5. Every other address is dialled at once, all of them within 3 seconds
+   together: a TCP connection, then a TLS 1.3 handshake in which the
+   responder presents its own certificate and accepts only the asker's
+   key. The connection is then closed. No HTTP request or other byte is
+   sent on it.
+
+A machine that does not know the route answers 404; the asker reports
+that member as running an a2p2 without the dial-back. Nothing else
+changes, so the wire version stays 2.
+
+**Why it cannot be used to scan or flood.** The asker is a key some admin
+admitted to a shared room, and the responder dials nothing for anyone
+else. Each request costs the responder at most 8 TCP connections and TLS
+client hellos, about 2 KB, and the limits cap that at 4 requests per key
+per 10 minutes and 6 per minute for the whole machine (after a burst of
+16). The answer says only whether the asker's own key answered. It does
+not say whether an address refused, timed out, or answered with another
+key, and the time it takes is fixed by the 3-second bound for any address
+that does not answer. A third party's address is therefore always "not
+reached", and asking teaches the asker nothing about it. Names are never
+looked up, and this machine's own loopback services are never dialled for
+a remote asker.
+
+**When the daemon asks.** A run that listens asks up to three members
+(members whose addresses completed a pinned handshake first) 20 seconds
+after it starts, so after every networking decision, then every hour, or
+after 10 minutes when no member answered. It never asks a member twice
+within an hour except when a person runs `a2p2 net check`. The answer is
+`yes` if any member reached any address, `no` if members answered and
+reached none, `unknown` otherwise; an `unknown` never replaces a `yes` or
+`no` already known.
+
+**Local API.** `status` gains `reach`: `{"state":"yes"|"no"|"unknown",
+"checked"?,"reached"?,"by"?,"saw"?,"why"?}`; `no` with `why` when
+networking is off, outbound only, or on and not listening. `net/check`
+(new; request `{}`) tries now every known address of every other member
+of every room (one probe per node and address, at most 64, 8 at a time;
+each a TCP connection within 3 s and a pinned handshake within 5 s, then
+closed) and, if one was reached and this machine listens, asks the
+members reached to dial back, without the hourly limit. It answers
+`{"state","listening","listen"?,"fault"?,"advertised":[…],
+"members":[{"room","room_label","node","name"?,"reached","addrs":[{"addr",
+"result","ms","node"?,"detail"?}]}],"reach":{…},"advice"}`. `result` is
+`reached`, `refused`, `timed_out`, `wrong_key`, `not_a2p2`, `unreachable`
+or `not_tried`; `advice` is one sentence saying what to do. While
+networking is off it dials nothing. It records nothing and changes
+nothing.
+
+**CLI.** `a2p2 net check [--json]` prints that. `a2p2 net check HOST:PORT`
+and `a2p2 net check --invite [TOKEN]` (the token as the argument or on
+stdin) run in the CLI process, not the daemon: a TCP connection, then a
+TLS handshake presenting a fresh throwaway key, then close. They report
+whether an a2p2 machine answered and its key, and for an invite whether
+the key matches the invite's fingerprint. Nothing else is sent, the
+invite is not used, and the other side learns nothing about this machine.
+Neither needs a daemon, a terminal or networking on.
+
+**Addresses a machine gives (DESIGN 11).** With an unspecified listen host
+the listener is one dual-stack socket. `addrs` in pulls and invites lists,
+at most 8: external addresses a member reached (below), then IPv4
+interface addresses (not loopback, not link-local), then global IPv6 (a
+temporary address only where its interface has no stable one; never
+deprecated or tentative ones), then unique-local IPv6. A dialler skips a
+peer's unique-local address unless it holds one in the same `/48`.
+
+**Seen and mapped addresses.** `saw` is used only as a hint: a global,
+non-private IP address members saw that is not advertised becomes a
+candidate with the listening port, and so does a router's mapped external
+address. Candidates go first in the next dial-back's `addrs` (a candidate
+first seen in an answer is asked at once, in one more round to the members
+that answered), and a candidate is advertised only while the latest
+conclusive check reached it. `reach` in `status` gains `verified`, the
+candidates reached.
+
+**Port mapping.** `net` takes `"map_port": true` with `on`, refused with
+`off` and `outbound`; it is recorded in the networking decision as role
+`map_port` (no new column; older daemons ignore it), and `status`'s
+`network` carries `map_port`. While such a decision applies and the
+listener is bound, the daemon asks the default gateway: PCP MAP (RFC 6887,
+UDP 5351, TCP, the listening port as internal and suggested external port,
+lifetime 7,200 s, a random nonce kept for renewal and deletion); if the
+answer has version 0, NAT-PMP (RFC 6886, opcode 2, then opcode 0 for the
+external address); if neither answers, UPnP IGD (an SSDP `M-SEARCH` for
+`InternetGatewayDevice:1`, the description and control URL followed only
+when their host is the gateway's IP, `AddPortMapping` for TCP with lease
+7,200 s, the next three ports on error 718, lease 0 on error 725, then
+`GetExternalIPAddress`). Each UDP request is sent up to 3 times, waiting
+250 ms, 500 ms, then 1 s. The mapping is renewed at half the lifetime
+granted (at least every 30 s, hourly when permanent), asked for again after
+5 minutes when an attempt fails, and deleted (lifetime 0 with the same
+nonce, or `DeletePortMapping`) within 2 s when the run ends: `net off`, a
+decision without `map_port`, or a stop. `status` and `net/check` carry
+`mapping`: `{"protocol"?,"external"?,"expires"?,"reached","error"?}`.
+
 ## 5. Join
 
 ### 5.1 Token

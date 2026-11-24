@@ -14,15 +14,18 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/wallter/a2p2/internal/core"
+	"github.com/wallter/a2p2/internal/daemon/portmap"
 	"github.com/wallter/a2p2/internal/localapi"
 	"github.com/wallter/a2p2/internal/node"
 	"github.com/wallter/a2p2/internal/peer"
@@ -129,16 +132,33 @@ func advertised(cfg Config, ln net.Listener) []string {
 	tcp := ln.Addr().(*net.TCPAddr)
 	port := fmt.Sprint(tcp.Port)
 	if tcp.IP.IsLoopback() {
-		return []string{net.JoinHostPort("127.0.0.1", port)}
+		return []string{net.JoinHostPort(tcp.IP.String(), port)}
 	}
 	if !tcp.IP.IsUnspecified() {
 		return []string{net.JoinHostPort(tcp.IP.String(), port)}
 	}
-	out := []string{}
-	ifaces, _ := net.InterfaceAddrs()
-	for _, a := range ifaces {
-		if ipn, ok := a.(*net.IPNet); ok && ipn.IP.To4() != nil && !ipn.IP.IsLoopback() && !ipn.IP.IsLinkLocalUnicast() {
-			out = append(out, net.JoinHostPort(ipn.IP.String(), port))
+	// Unspecified: one dual-stack socket; IPv4 and global IPv6 addresses
+	// (DESIGN 11).
+	return chooseAdvertised(localAddrs(), tcp.Port)
+}
+
+// advert is what this run advertises: external addresses a member
+// reached (a mapped port, or the address members see) first, then the
+// interface addresses, at most node.MaxAddrs.
+type advert struct {
+	base     []string
+	verified func() []string
+}
+
+func (a *advert) now() []string {
+	var out []string
+	var v []string
+	if a.verified != nil {
+		v = a.verified()
+	}
+	for _, x := range append(v, a.base...) {
+		if !slices.Contains(out, x) && len(out) < node.MaxAddrs {
+			out = append(out, x)
 		}
 	}
 	return out
@@ -151,6 +171,12 @@ type RunOpts struct {
 	Listen func(addr string) (net.Listener, error)
 	// Ready, if set, is called once every listener serves, the first time.
 	Ready func()
+	// Gateway, if set, replaces reading the default gateway and this
+	// machine's address on its network, for port mapping; Mapper, if set,
+	// replaces the client that talks to it. Tests give fake routers on
+	// loopback here: nothing in a test may reach a real router.
+	Gateway func() (gw, local netip.Addr, err error)
+	Mapper  func(gw, local netip.Addr) portmap.Mapper
 	// Exchange, if set, is given each run's pull exchange once it exists.
 	Exchange func(*node.Exchange)
 	// Handler, if set, is called as a local API or page request enters
@@ -361,7 +387,8 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	}
 	var peerLn net.Listener
 	if netw.State == node.NetworkOn {
-		listen := func(addr string) (net.Listener, error) { return net.Listen("tcp4", addr) }
+		// "tcp": an unspecified host gives one socket for IPv4 and IPv6.
+		listen := func(addr string) (net.Listener, error) { return net.Listen("tcp", addr) }
 		if o.Listen != nil {
 			listen = o.Listen
 		}
@@ -388,14 +415,34 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 		return false, err
 	}
 	pulls := peer.NewPullClient(r.id, book)
+	pulls.Usable = usableFrom(localAddrs()) // unique-local IPv6 only within its own site
 	defer pulls.Close()
-	x := node.NewExchange(rooms, pulls, node.ExchangeOpts{Book: book, Addrs: addrs})
+	// Port mapping, when a person asked for it (a2p2 net on --map-port).
+	var keeper *portmap.Keeper
+	var mapErr string
+	if netw.MapPort && peerLn != nil {
+		keeper, mapErr = r.keeper(peerLn)
+	}
+	adv := &advert{base: addrs}
+	x := node.NewExchange(rooms, pulls, node.ExchangeOpts{Book: book, Addrs: addrs, AddrsNow: adv.now})
 	if o.Exchange != nil {
 		o.Exchange(x)
 	}
 	joiner := node.NewJoiner(rooms, peer.NewJoinClient(r.id), node.JoinerOpts{Name: r.cfg.Name, Addrs: addrs})
+	// Reachability (PROTOCOL 4.7): the prober tries members' addresses for
+	// a2p2 net check and dials back for members that ask; a run that
+	// listens asks members to dial back to it.
+	prober := peer.NewProber(r.id)
+	var reach *node.Reacher
+	if peerLn != nil {
+		reach = node.NewReacher(pulls, node.ReachOpts{Members: rooms.OtherMembers, Book: book,
+			Addrs: func() []string { return addrs }, Port: peerLn.Addr().(*net.TCPAddr).Port,
+			Candidates: func() []string { return mappedAddr(keeper) }})
+		adv.verified = reach.Verified
+	}
 	surf, err := node.OpenSurface(parent, m, rooms, node.SurfaceOpts{Name: r.cfg.Name, Joiner: joiner, Book: book,
-		Addrs: func() []string { return addrs }, Network: netw, NetworkFault: r.getFault, NotMember: x.NotMemberSince,
+		Addrs: adv.now, Network: netw, NetworkFault: r.getFault, NotMember: x.NotMemberSince,
+		Probe: prober, Reach: reach, Mapping: func() *node.PortMapping { return mappingView(keeper, mapErr) },
 		OnNetwork: func(node.Network) {
 			select {
 			case r.restart <- struct{}{}:
@@ -429,7 +476,7 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 		wg.Wait()
 	}()
 	if peerLn != nil {
-		h := peerHandler{JoinServer: node.NewJoinServer(rooms), x: x, g: g}
+		h := peerHandler{JoinServer: node.NewJoinServer(rooms), x: x, g: g, db: node.NewDialBackServer(rooms, prober)}
 		ln := peerLn
 		peerLn = nil // Serve owns it now
 		start(func() {
@@ -442,6 +489,12 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	if netw.State != node.NetworkOff { // off: no scheduler, no join polling, nothing dialled
 		start(func() { node.NewScheduler(x, node.SchedOpts{}).Run(ctx) })
 		start(func() { resumeJoins(ctx, surf) })
+	}
+	if reach != nil {
+		start(func() { reach.Run(ctx) })
+	}
+	if keeper != nil { // removes the mapping as the run ends: net off, another decision, or a stop
+		start(func() { keeper.Run(ctx) })
 	}
 	start(func() { prune(ctx, m) })
 	r.cur.Store(&handlers{
@@ -461,6 +514,67 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	case <-r.restart:
 		return true, nil
 	}
+}
+
+// keeper prepares the port mapping of a run that listens on ln, or says
+// why there is none.
+func (r *run) keeper(ln net.Listener) (*portmap.Keeper, string) {
+	gwf := gatewayLocal
+	if r.o.Gateway != nil {
+		gwf = r.o.Gateway
+	}
+	gw, local, err := gwf()
+	if err != nil {
+		return nil, err.Error()
+	}
+	var m portmap.Mapper = &portmap.Client{Gateway: gw, Local: local}
+	if r.o.Mapper != nil {
+		m = r.o.Mapper(gw, local)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	k := portmap.NewKeeper(m, uint16(port), func(st portmap.State) {
+		if st.Err != "" {
+			slog.Warn("port mapping", "err", st.Err)
+		} else if st.Mapping != nil {
+			slog.Info("port mapping", "protocol", st.Mapping.Protocol, "external", st.Mapping.External.String(),
+				"lifetime", st.Mapping.Lifetime.String())
+		}
+	})
+	return k, ""
+}
+
+// mappedAddr is the mapped external address, to verify by a dial-back
+// before it is advertised.
+func mappedAddr(k *portmap.Keeper) []string {
+	if k == nil {
+		return nil
+	}
+	if m := k.State().Mapping; m != nil && m.External.Addr().IsValid() && m.External.Port() != 0 {
+		return []string{m.External.String()}
+	}
+	return nil
+}
+
+// mappingView is the mapping as status and net check show it.
+func mappingView(k *portmap.Keeper, why string) *node.PortMapping {
+	if k == nil {
+		if why == "" {
+			return nil
+		}
+		return &node.PortMapping{Error: why}
+	}
+	st := k.State()
+	if st.Mapping == nil {
+		if st.Err == "" {
+			return nil // not tried yet
+		}
+		return &node.PortMapping{Error: st.Err}
+	}
+	v := &node.PortMapping{Protocol: st.Mapping.Protocol, External: st.Mapping.External.String()}
+	if !st.Mapping.Expires.IsZero() {
+		v.Expires = st.Mapping.Expires.UTC().Format("2006-01-02T15:04:05.000Z")
+	}
+	return v
 }
 
 // gate counts request handlers in flight. close waits for them and makes
@@ -558,8 +672,17 @@ func prune(ctx context.Context, m *node.Machine) {
 // call inside the gate.
 type peerHandler struct {
 	*node.JoinServer
-	x *node.Exchange
-	g *gate
+	x  *node.Exchange
+	g  *gate
+	db *node.DialBackServer
+}
+
+func (h peerHandler) DialBack(ctx context.Context, from, source string, q *node.DialBackRequest) (*node.DialBackResponse, *node.PullError) {
+	if !h.g.enter() {
+		return nil, &node.PullError{Status: http.StatusServiceUnavailable, Code: node.CodeUnavailable, RetryAfter: time.Second}
+	}
+	defer h.g.leave()
+	return h.db.DialBack(ctx, from, source, q)
 }
 
 func (h peerHandler) Serve(ctx context.Context, from string, q *node.PullRequest) (*node.PullResponse, error) {

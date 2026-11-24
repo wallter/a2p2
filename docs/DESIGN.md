@@ -484,3 +484,90 @@ designed (1,920 streams per 64-machine room after 30 days,
 `TestStreamCostForSixtyFourMachinesOverThirtyDays`); one pull per peer for
 all shared rooms may be needed at 100 rooms; posting policy (T6) is
 deferred to stage 3 and needs a new entry kind [M14].
+
+## 11. Reachability
+
+**Can this machine talk to others, and why not (`a2p2 net check`).** A
+person learning that a laptop drops every inbound connection should not
+have to ask a colleague. `a2p2 net check` reports the networking state,
+whether the listener is bound, the addresses advertised, and for every
+other member of every room each known address tried now: a TCP connection,
+then the pinned TLS handshake, closed without a request, with the outcome
+(reached, refused, timed out, wrong key, not an a2p2 machine, unreachable)
+and the time taken. It ends with one sentence saying what to do. It
+observes and decides nothing; with networking off it dials nothing.
+`a2p2 net check HOST:PORT` and `--invite` test addresses before any room
+exists, from the CLI process under a throwaway key (PROTOCOL 4.7).
+
+**The dial-back.** Only another machine can say whether this one is
+reachable. A member asks a member to connect back to the addresses it
+advertises and hears which of them completed a handshake with its own key
+(PROTOCOL 4.7). The responder dials only for a current member of a shared
+room, only expecting that member's key, sends nothing after the
+handshake, answers no sooner than its deadline unless every address was
+reached, and limits requests per key and for the whole machine, so it
+cannot be pointed at a third party to scan or flood it. The daemon asks
+after each run starts (so after each networking decision) and then
+hourly; `status` and the page show "reachable by peers: yes, no or
+unknown" with when it was checked. The rules are in `node.DialBackServer`
+and `node.Reacher`; the dialling is `peer.Prober`.
+
+**More machines reachable without a third party.** N1 lets a machine that
+cannot accept connections take part through a member that can. Two
+machines behind ordinary home routers have no such member. Four things
+widen who can be reached, none of them a service run by anyone else.
+
+- **Not classic hole punching.** Punching needs a rendezvous machine that
+  both unreachable peers reach at the same time. In a2p2 such a machine is,
+  by construction, a member that already carries their messages, so the
+  direct path would add much code (simultaneous opens, keep-alives, NAT
+  behaviour classes) to save one hop that costs nothing. It is not done.
+- **IPv6.** Many home networks hand out global IPv6 addresses with no NAT,
+  only a firewall that may let a port in. The listener binds both
+  families when its host is unspecified (`0.0.0.0` or `::`): one dual-stack
+  socket. It advertises its IPv4 addresses (not loopback, not link-local)
+  and its global IPv6 addresses, never link-local ones, and a temporary
+  (privacy) address only if the interface has no stable one. Unique-local
+  addresses (`fc00::/7`) are advertised after the others, and a dialler
+  tries one only if it holds an address in the same `/48` itself, so a
+  peer elsewhere never waits on an address it cannot route. Which
+  addresses are temporary is read from the system where it says so
+  (Linux `/proc/net/if_inet6`, the macOS `SIOCGIFAFLAG_IN6` ioctl); where
+  it cannot be read (Windows) every global address counts as stable. At
+  most 8 addresses are advertised: verified external ones first, then
+  IPv4, then global IPv6, then unique-local.
+- **The address others see.** The dial-back answer carries the IP address
+  the responder saw the request come from (`saw`). It is a hint, never an
+  identity: a machine combines a global IP it saw with its listening port
+  into a candidate, asks the members to dial back to that candidate in the
+  same check, and advertises it only while a dial-back to it succeeds. A
+  candidate that fails is not advertised, so a wrong hint costs one
+  connection attempt per check and misleads nobody.
+- **Port mapping, by a person's decision.** `a2p2 net on --map-port` asks
+  the router of the local network to forward the listening port: PCP
+  (RFC 6887) first, NAT-PMP (RFC 6886) if the router answers PCP with
+  version 0, then UPnP IGD (SSDP, then `AddPortMapping` on the gateway's
+  `WANIPConnection` or `WANPPPConnection` service). Only the standard
+  library is used. The gateway is the default route's next hop, read from
+  the system (Linux `/proc/net/route`, the macOS routing table); on Windows
+  mapping reports itself unavailable. A UPnP description or control URL
+  is followed only if its host is the gateway that answered. The mapping
+  asks for two hours and is renewed at half its lifetime while networking
+  is on; it is deleted by `a2p2 net off`, by a networking decision without
+  `--map-port`, and on a clean stop. The external address the router
+  reports becomes a dial-back candidate like a seen address, and is
+  advertised only after a member reaches it. If the router's external
+  address is not the address members see, the router is behind another
+  NAT (carrier-grade NAT or a second router), and `net check` says the
+  mapping cannot help. Mapping is a decision like turning networking on:
+  asked at a terminal, saying that it opens a port on the router to the
+  internet and that only room members get anything from it, and recorded
+  in the networking decision. It is never on by default and no agent tool
+  or hook can ask for it. `status` and `net check` show the protocol, the
+  external address, whether a member reached it, and when the mapping
+  expires.
+
+Interfaces and gateways are read through `internal/daemon` (build-tagged
+per system); the mapping protocols are `internal/daemon/portmap` and every
+test of them runs against fake PCP, NAT-PMP and UPnP responders on
+loopback. No test or check sends anything to a real router.
