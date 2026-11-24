@@ -8,29 +8,29 @@ import (
 // fork signs an entry by author at seq, continuing from prev, as a stolen
 // key or a restored backup would: a second entry at a position the author
 // has already used.
-func (r *room) fork(author string, seq int, prev string, kind Kind, target string, parents ...string) string {
-	e := New(Entry{Author: author, Seq: seq, Prev: prev, Kind: kind, Target: target, Parents: uniq(append(parents, prev))})
+func (r *room) fork(author string, seq int64, prev string, kind entryKind, target string, parents ...string) string {
+	e := newEntry(entry{Author: author, Seq: seq, Prev: prev, Kind: kind, Target: target, Parents: uniq(append(parents, prev))})
 	r.byID[e.ID] = e
 	return e.ID
 }
 
 // machineWith returns a machine for the room of the create entry in es
 // (the test room's create if es has none), having received es.
-func machineWith(es []Entry) *Machine {
-	root := New(Entry{Author: "A", Seq: 1, Kind: Create})
+func machineWith(es []entry) *Machine {
+	root := newEntry(entry{Author: "A", Seq: 1, Kind: kCreate})
 	for _, e := range es {
-		if e.Kind == Create {
+		if e.Kind == kCreate {
 			root = e
 			break
 		}
 	}
-	m := NewMachine(Final, root)
-	m.Receive(es...)
+	m := newMachine(final, root)
+	m.receive(es...)
 	return m
 }
 
 func sameState(a, b State) bool {
-	return reflect.DeepEqual(a.Members, b.Members) && reflect.DeepEqual(a.Admins, b.Admins) && reflect.DeepEqual(a.Admitted, b.Admitted)
+	return reflect.DeepEqual(a.Members, b.Members) && reflect.DeepEqual(a.Admins, b.Admins) && reflect.DeepEqual(a.Admitted, b.Admitted) && reflect.DeepEqual(a.Permissions, b.Permissions) && reflect.DeepEqual(a.Effects, b.Effects)
 }
 
 // Attack 2: the creator's key is stolen and the thief forks from the room's
@@ -43,34 +43,34 @@ func sameState(a, b State) bool {
 func TestStolenCreatorKeyForkFromFirstEntryIsRefusedByEveryMember(t *testing.T) {
 	r, h0 := threeAdmins(t)
 	honest := r.entries(h0...)
-	f2 := r.fork("A", 2, r.root, MakeAdmin, "X", r.root)
-	f3 := r.fork("A", 3, f2, Remove, "B", f2)
-	fx := r.next("X", Remove, "P", f2)
-	forged := []Entry{r.byID[f2], r.byID[f3], r.byID[fx]}
-	want := Final.Resolve(honest)
+	f2 := r.fork("A", 2, r.root, kAdmin, "X", r.root)
+	f3 := r.fork("A", 3, f2, kRemove, "B", f2)
+	fx := r.next("X", kRemove, "P", f2)
+	forged := []entry{r.byID[f2], r.byID[f3], r.byID[fx]}
+	want := final.resolve(honest)
 	var machines []*Machine
 	for range []string{"B", "C", "P"} {
 		m := machineWith(honest)
-		m.Receive(forged...)
+		m.receive(forged...)
 		if !sameState(m.State(), want) {
 			t.Fatalf("a member was fooled: %v", m.State().Admins)
 		}
-		if len(m.Evidence) == 0 {
+		if len(m.Evidence()) == 0 {
 			t.Fatal("no fork evidence kept")
 		}
 		machines = append(machines, m)
 	}
 	// B admits D; D's machine receives what B offers, honest entries first.
 	addD := r.add("B", "D", h0...)
-	machines[0].Receive(r.byID[addD])
-	d := machineWith(machines[0].Offer())
+	machines[0].receive(r.byID[addD])
+	d := machineWith(machines[0].offer())
 	if st := d.State(); !st.members["D"] || st.admins["X"] {
 		t.Fatalf("new member fooled: admins %v members %v", st.Admins, st.Members)
 	}
 	// Only a machine holding nothing but the create entry can be fooled,
 	// and no member is in that position.
-	lone := machineWith([]Entry{r.byID[r.root]})
-	lone.Receive(forged...)
+	lone := machineWith([]entry{r.byID[r.root]})
+	lone.receive(forged...)
 	if !lone.State().admins["X"] {
 		t.Fatal("expected a machine with only the create entry to take the fork")
 	}
@@ -91,25 +91,25 @@ func TestForkInsideSoleAdminPeriodFoolsOnlyMachinesMissingThatEntryUntilSettled(
 	r.admin("A", "C", r.all()...)
 	r.admin("B", "C", r.all()...)
 	honestIDs := r.all()
-	f := r.fork("A", 3, addD, MakeAdmin, "X", addD)
-	fy := r.next("X", Add, "Y", f)
+	f := r.fork("A", 3, addD, kAdmin, "X", addD)
+	fy := r.next("X", kAdd, "Y", f)
 	d := machineWith(dView)
-	d.Receive(r.byID[f], r.byID[fy])
+	d.receive(r.byID[f], r.byID[fy])
 	if !d.State().admins["X"] {
 		t.Fatal("expected D to be fooled")
 	}
 	honest := r.entries(honestIDs...)
 	b := machineWith(honest)
-	d.Receive(honest...)
+	d.receive(honest...)
 	if !d.State().admins["X"] {
 		t.Fatal("D should still hold its first branch")
 	}
 	// Settlement: B and C remove A. B and D exchange everything.
 	rb := r.remove("B", "A", honestIDs...)
 	rc := r.remove("C", "A", honestIDs...)
-	b.Receive(r.byID[rb], r.byID[rc])
-	b.Receive(d.Offer()...)
-	d.Receive(b.Offer()...)
+	b.receive(r.byID[rb], r.byID[rc])
+	b.receive(d.offer()...)
+	d.receive(b.offer()...)
 	sb, sd := b.State(), d.State()
 	if !sameState(sb, sd) {
 		t.Fatalf("not settled: B %v/%v, D %v/%v", sb.Admins, sb.Members, sd.Admins, sd.Members)
@@ -132,21 +132,21 @@ func TestBackupRestoreForkIsSettledByRemovalOfTheForkingAdmin(t *testing.T) {
 	r, h0 := threeAdmins(t)
 	lastB := r.last["B"]
 	addD := r.add("B", "D", h0...)
-	addE := r.fork("B", lastB.Seq+1, lastB.ID, Add, "E", h0...)
+	addE := r.fork("B", lastB.Seq+1, lastB.ID, kAdd, "E", h0...)
 	p1 := machineWith(r.entries(h0...))
 	p2 := machineWith(r.entries(h0...))
-	p1.Receive(r.byID[addD], r.byID[addE])
-	p2.Receive(r.byID[addE], r.byID[addD])
+	p1.receive(r.byID[addD], r.byID[addE])
+	p2.receive(r.byID[addE], r.byID[addD])
 	if s1, s2 := p1.State(), p2.State(); !s1.members["D"] || s1.members["E"] || !s2.members["E"] || s2.members["D"] {
 		t.Fatalf("expected first-seen branches: %v / %v", s1.Members, s2.Members)
 	}
 	ra := r.remove("A", "B", append(h0, addD)...)
 	rc := r.remove("C", "B", append(h0, addE)...)
 	for _, m := range []*Machine{p1, p2} {
-		m.Receive(r.byID[ra], r.byID[rc])
+		m.receive(r.byID[ra], r.byID[rc])
 	}
-	p1.Receive(p2.Offer()...)
-	p2.Receive(p1.Offer()...)
+	p1.receive(p2.offer()...)
+	p2.receive(p1.offer()...)
 	s1, s2 := p1.State(), p2.State()
 	if !sameState(s1, s2) {
 		t.Fatalf("not settled: %v/%v vs %v/%v", s1.Admins, s1.Members, s2.Admins, s2.Members)
@@ -167,16 +167,16 @@ func TestBackupRestoreForkIsSettledByRemovalOfTheForkingAdmin(t *testing.T) {
 func TestForkInTwoAdminRoomIsSettledByTheOtherAdminAlone(t *testing.T) {
 	r, h1, addD, addE := twoAdminFork(t)
 	p1, p2 := machineWith(r.entries(h1...)), machineWith(r.entries(h1...))
-	p1.Receive(r.byID[addD], r.byID[addE])
-	p2.Receive(r.byID[addE], r.byID[addD])
+	p1.receive(r.byID[addD], r.byID[addE])
+	p2.receive(r.byID[addE], r.byID[addD])
 	if s1, s2 := p1.State(), p2.State(); !s1.members["D"] || !s2.members["E"] {
 		t.Fatalf("expected first-seen branches: %v / %v", s1.Members, s2.Members)
 	}
 	ra := r.remove("A", "B", append(h1, addD)...)
-	p1.Receive(r.byID[ra])
-	p2.Receive(r.byID[ra])
-	p1.Receive(p2.Offer()...)
-	p2.Receive(p1.Offer()...)
+	p1.receive(r.byID[ra])
+	p2.receive(r.byID[ra])
+	p1.receive(p2.offer()...)
+	p2.receive(p1.offer()...)
 	s1, s2 := p1.State(), p2.State()
 	if !sameState(s1, s2) {
 		t.Fatalf("not settled: %v/%v vs %v/%v", s1.Admins, s1.Members, s2.Admins, s2.Members)
@@ -190,10 +190,10 @@ func TestForkInTwoAdminRoomIsSettledByTheOtherAdminAlone(t *testing.T) {
 func twoAdminFork(t *testing.T) (r *room, h1 []string, addD, addE string) {
 	r = newRoom(t, "A")
 	r.admin("A", "B")
-	lastB := r.next("B", Add, "P", r.all()...)
+	lastB := r.next("B", kAdd, "P", r.all()...)
 	h1 = r.all()
 	addD = r.add("B", "D", h1...)
-	addE = r.fork("B", 2, lastB, Add, "E", h1...)
+	addE = r.fork("B", 2, lastB, kAdd, "E", h1...)
 	return r, h1, addD, addE
 }
 
@@ -205,7 +205,7 @@ func twoAdminFork(t *testing.T) (r *room, h1 []string, addD, addE string) {
 func TestForkSettledByOneRemoverKeepsTheBranchItHadSeen(t *testing.T) {
 	r, h1, addD, addE := twoAdminFork(t)
 	ra := r.remove("A", "B", append(h1, addD)...)
-	st := r.state(Final)
+	st := r.state(final)
 	wantApplied(t, st, ra)
 	wantApplied(t, st, addD)
 	wantReason(t, st, addE, ReasonAfterCut)
@@ -213,7 +213,7 @@ func TestForkSettledByOneRemoverKeepsTheBranchItHadSeen(t *testing.T) {
 
 	r, h1, addD, addE = twoAdminFork(t)
 	r.remove("A", "B", append(h1, addD, addE)...)
-	st = r.state(Final)
+	st = r.state(final)
 	wantReason(t, st, addD, ReasonAfterCut)
 	wantReason(t, st, addE, ReasonAfterCut)
 	wantList(t, "members", st.Members, "A", "P")
@@ -233,7 +233,7 @@ func TestForkEvidenceNeedsTwoEntriesByOneKeyAtOnePosition(t *testing.T) {
 	ra := r.remove("A", "B", r.all()...)
 	es := r.entries(r.all()...)
 	es = append(es, r.byID[addP], r.byID[addQ], r.byID[ra])
-	st := Final.Resolve(es)
+	st := final.resolve(es)
 	wantReason(t, st, ra, ReasonNeedsSecond)
 	wantList(t, "admins", st.Admins, "A", "B")
 }
@@ -249,11 +249,11 @@ func TestForkByMemberWhoIsNotAnAdminChangesNothing(t *testing.T) {
 	r.add("A", "M", r.all()...)
 	h0 := r.all()
 	m1 := r.add("M", "X", h0...)
-	m2 := r.put(Entry{Author: "M", Seq: 1, Kind: Add, Target: "Y", Parents: h0})
+	m2 := r.put(entry{Author: "M", Seq: 1, Kind: kAdd, Target: "Y", Parents: h0})
 	ab := r.add("A", "Z", append(h0, m2)...)
 	p1, p2 := machineWith(r.entries(h0...)), machineWith(r.entries(h0...))
-	p1.Receive(r.byID[m1], r.byID[m2], r.byID[ab])
-	p2.Receive(r.byID[m2], r.byID[m1], r.byID[ab])
+	p1.receive(r.byID[m1], r.byID[m2], r.byID[ab])
+	p2.receive(r.byID[m2], r.byID[m1], r.byID[ab])
 	s1, s2 := p1.State(), p2.State()
 	if !sameState(s1, s2) || !s1.members["Z"] {
 		t.Fatalf("a member's fork split the machines: %v vs %v", s1.Members, s2.Members)
@@ -270,14 +270,14 @@ func TestReadmittedAdminAfterSettledForkCanGrantAgain(t *testing.T) {
 	r, h0 := threeAdmins(t)
 	lastB := r.last["B"]
 	addD := r.add("B", "D", h0...)
-	addE := r.fork("B", lastB.Seq+1, lastB.ID, Add, "E", h0...)
+	addE := r.fork("B", lastB.Seq+1, lastB.ID, kAdd, "E", h0...)
 	r.remove("A", "B", append(h0, addD)...)
 	r.remove("C", "B", append(h0, addE)...)
 	r.add("A", "B", r.all()...)
 	r.admin("A", "B", r.all()...)
 	r.admin("C", "B", r.all()...)
 	addF := r.add("B", "F", r.all()...)
-	st := r.state(Final)
+	st := r.state(final)
 	wantApplied(t, st, addF)
 	wantList(t, "admins", st.Admins, "A", "B", "C")
 	wantList(t, "members", st.Members, "A", "B", "C", "F", "P")
@@ -297,10 +297,10 @@ func TestForkTurningAnEarlierRemovalIntoAnAdminRemovalKeepsLaterGrants(t *testin
 	e2 := r.remove("A", "B", r.all()...)
 	e3 := r.admin("A", "B", r.all()...)
 	e4 := r.admin("A", "C", r.all()...)
-	e5 := r.next("B", MakeAdmin, "C", r.root, e1, e2, e3)
-	r.fork("A", 2, r.root, MakeAdmin, "B", r.root)
+	e5 := r.next("B", kAdmin, "C", r.root, e1, e2, e3)
+	r.fork("A", 2, r.root, kAdmin, "B", r.root)
 	r.remove("B", "A", r.root, e1, e2, e3, e4, e5)
-	st := r.state(Final)
+	st := r.state(final)
 	wantApplied(t, st, e5)
 	wantList(t, "admins", st.Admins, "B", "C")
 }
@@ -321,14 +321,14 @@ func TestStolenKeyCanSecondAForkingKeysVoidedRemovalAndThenJoinTheRemoval(t *tes
 	h0 := r.all()
 	lastB := r.last["B"]
 	addD := r.add("B", "D", h0...)
-	addE := r.fork("B", lastB.Seq+1, lastB.ID, Add, "E", h0...)
+	addE := r.fork("B", lastB.Seq+1, lastB.ID, kAdd, "E", h0...)
 	r.remove("C", "B", append(h0, addE)...)
 	ra := r.remove("A", "B", append(h0, addD)...)
 	rbD := r.remove("B", "D", append(h0, addD, ra)...)
-	wantReason(t, r.state(Final), rbD, ReasonFork)
+	wantReason(t, r.state(final), rbD, ReasonFork)
 	r.remove("A", "D", append(h0, addD, ra, rbD)...)
 	r.remove("A", "B", append(h0, addD, ra, rbD)...)
-	if r.state(Final).admins["D"] {
+	if r.state(final).admins["D"] {
 		t.Fatal("the limit no longer holds: update known gap 4 and atRest")
 	}
 	t.Skip("KNOWN GAP 4: one key can second a removed admin's voided vote and then revive it by joining the removal")
@@ -362,18 +362,18 @@ func TestOneOpenForkDoesNotHoldBackSettlingAnother(t *testing.T) {
 		h0 := r.all()
 		lastB, lastC := r.last["B"], r.last["C"]
 		b1 := r.add("B", "X", h0...)
-		b2 := r.fork("B", lastB.Seq+1, lastB.ID, Add, "Y", h0...)
+		b2 := r.fork("B", lastB.Seq+1, lastB.ID, kAdd, "Y", h0...)
 		var c1, c2 string
 		if lastC.ID == "" {
 			c1 = r.add("C", "Z", h0...)
-			c2 = r.put(Entry{Author: "C", Seq: 1, Kind: Add, Target: "W", Parents: h0})
+			c2 = r.put(entry{Author: "C", Seq: 1, Kind: kAdd, Target: "W", Parents: h0})
 		} else {
 			c1 = r.add("C", "Z", h0...)
-			c2 = r.fork("C", lastC.Seq+1, lastC.ID, Add, "W", h0...)
+			c2 = r.fork("C", lastC.Seq+1, lastC.ID, kAdd, "W", h0...)
 		}
 		p1, p2 := machineWith(r.entries(h0...)), machineWith(r.entries(h0...))
-		p1.Receive(r.byID[b1], r.byID[c1], r.byID[b2], r.byID[c2])
-		p2.Receive(r.byID[b2], r.byID[c2], r.byID[b1], r.byID[c1])
+		p1.receive(r.byID[b1], r.byID[c1], r.byID[b2], r.byID[c2])
+		p2.receive(r.byID[b2], r.byID[c2], r.byID[b1], r.byID[c1])
 		rmB := r.remove("A", "B", append(h0, b1)...)
 		rmC := r.remove("D", "C", append(h0, c2)...)
 		first, second := rmB, rmC
@@ -383,10 +383,10 @@ func TestOneOpenForkDoesNotHoldBackSettlingAnother(t *testing.T) {
 			firstFork, secondFork = secondFork, firstFork
 		}
 		for _, m := range []*Machine{p1, p2} {
-			m.Receive(r.byID[first])
+			m.receive(r.byID[first])
 		}
-		p1.Receive(p2.Offer()...)
-		p2.Receive(p1.Offer()...)
+		p1.receive(p2.offer()...)
+		p2.receive(p1.offer()...)
 		for i, m := range []*Machine{p1, p2} {
 			if !holds(m, firstFork...) || !holds(m, first) {
 				t.Fatalf("bFirst=%v machine %d: first fork not settled while the other is open", bFirst, i+1)
@@ -396,10 +396,10 @@ func TestOneOpenForkDoesNotHoldBackSettlingAnother(t *testing.T) {
 			}
 		}
 		for _, m := range []*Machine{p1, p2} {
-			m.Receive(r.byID[second])
+			m.receive(r.byID[second])
 		}
-		p1.Receive(p2.Offer()...)
-		p2.Receive(p1.Offer()...)
+		p1.receive(p2.offer()...)
+		p2.receive(p1.offer()...)
 		if !holds(p1, secondFork...) || !holds(p2, secondFork...) || !sameState(p1.State(), p2.State()) {
 			t.Fatalf("bFirst=%v: not settled: %v / %v", bFirst, p1.State().Members, p2.State().Members)
 		}
@@ -416,15 +416,15 @@ func TestOneOpenForkDoesNotHoldBackSettlingAnother(t *testing.T) {
 func TestSettlingRemovalNamesOnlyAcceptedEntries(t *testing.T) {
 	r, h1, addD, addE := twoAdminFork(t)
 	a := machineWith(r.entries(h1...))
-	a.Receive(r.byID[addD], r.byID[addE])
+	a.receive(r.byID[addD], r.byID[addE])
 	if !holds(a, addD) || holds(a, addE) {
 		t.Fatal("expected A to accept D's branch and refuse E's")
 	}
-	rm := r.remove("A", "B", idsOf(a.Entries())...)
-	a.Receive(r.byID[rm])
+	rm := r.remove("A", "B", idsOf(a.entries())...)
+	a.receive(r.byID[rm])
 	other := machineWith(r.entries(h1...))
-	other.Receive(r.byID[addE], r.byID[addD])
-	other.Receive(a.Offer()...)
+	other.receive(r.byID[addE], r.byID[addD])
+	other.receive(a.offer()...)
 	for _, m := range []*Machine{a, other} {
 		st := m.State()
 		wantApplied(t, st, addD)
@@ -434,7 +434,7 @@ func TestSettlingRemovalNamesOnlyAcceptedEntries(t *testing.T) {
 
 	r, h1, addD, addE = twoAdminFork(t)
 	r.remove("A", "B", append(h1, addD, addE)...)
-	st := r.state(Final)
+	st := r.state(final)
 	wantReason(t, st, addD, ReasonAfterCut)
 	wantReason(t, st, addE, ReasonAfterCut)
 	wantList(t, "members", st.Members, "A", "P")
@@ -453,22 +453,22 @@ func TestSettlingRemovalThatNamesAnotherOpenForkWaitsForIt(t *testing.T) {
 	h0 := r.all()
 	lastB := r.last["B"]
 	b1 := r.add("B", "X", h0...)
-	b2 := r.fork("B", lastB.Seq+1, lastB.ID, Add, "Y", h0...)
+	b2 := r.fork("B", lastB.Seq+1, lastB.ID, kAdd, "Y", h0...)
 	c1 := r.add("C", "Z", h0...)
-	c2 := r.put(Entry{Author: "C", Seq: 1, Kind: Add, Target: "W", Parents: h0})
+	c2 := r.put(entry{Author: "C", Seq: 1, Kind: kAdd, Target: "W", Parents: h0})
 	p1, p2 := machineWith(r.entries(h0...)), machineWith(r.entries(h0...))
-	p1.Receive(r.byID[b1], r.byID[c1], r.byID[b2], r.byID[c2])
-	p2.Receive(r.byID[b2], r.byID[c2], r.byID[b1], r.byID[c1])
-	rmB := r.remove("A", "B", idsOf(p1.Entries())...)
-	p1.Receive(r.byID[rmB])
-	p2.Receive(p1.Offer()...)
+	p1.receive(r.byID[b1], r.byID[c1], r.byID[b2], r.byID[c2])
+	p2.receive(r.byID[b2], r.byID[c2], r.byID[b1], r.byID[c1])
+	rmB := r.remove("A", "B", idsOf(p1.entries())...)
+	p1.receive(r.byID[rmB])
+	p2.receive(p1.offer()...)
 	if holds(p2, rmB) {
 		t.Fatal("expected the removal to wait on a machine holding C's other branch")
 	}
-	rmC := r.remove("D", "C", idsOf(p2.Entries())...)
-	p2.Receive(r.byID[rmC])
-	p1.Receive(p2.Offer()...)
-	p2.Receive(p1.Offer()...)
+	rmC := r.remove("D", "C", idsOf(p2.entries())...)
+	p2.receive(r.byID[rmC])
+	p1.receive(p2.offer()...)
+	p2.receive(p1.offer()...)
 	if !holds(p1, b1, b2, c1, c2, rmB, rmC) || !holds(p2, b1, b2, c1, c2, rmB, rmC) || !sameState(p1.State(), p2.State()) {
 		t.Fatalf("not settled: %v / %v", p1.State().Members, p2.State().Members)
 	}

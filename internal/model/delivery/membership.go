@@ -4,7 +4,7 @@ import "sort"
 
 // Membership changes. The truth is a log of changes; each machine applies
 // them one at a time, when told, so views differ until they catch up. How a
-// change travels is modelled in internal/model/members; here it is one step.
+// change travels is modelled in internal/members; here it is one step.
 
 // ChangeKind is what a membership change does.
 type ChangeKind uint8

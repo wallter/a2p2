@@ -21,9 +21,9 @@ var machinesUnderTest = []string{"A", "B", "C", "D"}
 func deep() bool { return os.Getenv("A2P2_MODEL_DEEP") == "1" }
 
 type history struct {
-	es   []Entry // in creation order
+	es   []entry // in creation order
 	key  string
-	last map[string]Entry
+	last map[string]entry
 }
 
 func (h history) ids() []string {
@@ -34,8 +34,8 @@ func (h history) ids() []string {
 	return out
 }
 
-func (h history) with(e Entry) history {
-	n := history{es: append(append([]Entry(nil), h.es...), e), last: map[string]Entry{}}
+func (h history) with(e entry) history {
+	n := history{es: append(append([]entry(nil), h.es...), e), last: map[string]entry{}}
 	for k, v := range h.last {
 		n.last[k] = v
 	}
@@ -48,7 +48,7 @@ func (h history) with(e Entry) history {
 
 // downsets returns every causally closed subset of es that contains must
 // (if not empty) and the create entry.
-func downsets(es []Entry, must string) [][]Entry {
+func downsets(es []entry, must string) [][]entry {
 	idx := map[string]int{}
 	for i, e := range es {
 		idx[e.ID] = i
@@ -59,7 +59,7 @@ func downsets(es []Entry, must string) [][]Entry {
 			need[i] |= 1 << idx[p]
 		}
 	}
-	var out [][]Entry
+	var out [][]entry
 	for mask := uint32(1); mask < 1<<len(es); mask++ {
 		if mask&1 == 0 || (must != "" && mask&(1<<idx[must]) == 0) {
 			continue
@@ -74,7 +74,7 @@ func downsets(es []Entry, must string) [][]Entry {
 		if !ok {
 			continue
 		}
-		var d []Entry
+		var d []entry
 		for i := range es {
 			if mask&(1<<i) != 0 {
 				d = append(d, es[i])
@@ -89,22 +89,22 @@ func downsets(es []Entry, must string) [][]Entry {
 // with one rule set.
 type cache map[string]*State
 
-func (c cache) resolve(rules Rules, es []Entry) State {
+func (c cache) resolve(rules ruleSet, es []entry) State {
 	return rules.resolveShared(es, c, rootOf(es))
 }
 
 // rootOf returns the room's create entry: the first create in es (the
 // generators put the room's create first).
-func rootOf(es []Entry) string {
+func rootOf(es []entry) string {
 	for _, e := range es {
-		if e.Kind == Create {
+		if e.Kind == kCreate {
 			return e.ID
 		}
 	}
 	return ""
 }
 
-func idsOf(es []Entry) []string {
+func idsOf(es []entry) []string {
 	out := make([]string, len(es))
 	for i, e := range es {
 		out[i] = e.ID
@@ -112,8 +112,8 @@ func idsOf(es []Entry) []string {
 	return out
 }
 
-func latestBy(es []Entry, author string) string {
-	best := Entry{}
+func latestBy(es []entry, author string) string {
+	best := entry{}
 	for _, e := range es {
 		if e.Author == author && e.Seq > best.Seq {
 			best = e
@@ -140,8 +140,8 @@ func machinesOf(h history) []string {
 
 // honestNext returns every entry an honest machine could sign next: any
 // view its chain allows and any sensible change there.
-func honestNext(rules Rules, h history, c cache) []Entry {
-	var out []Entry
+func honestNext(rules ruleSet, h history, c cache) []entry {
+	var out []entry
 	ms := machinesOf(h)
 	for _, u := range ms {
 		prev := h.last[u]
@@ -154,21 +154,21 @@ func honestNext(rules Rules, h history, c cache) []Entry {
 				if x == u {
 					continue
 				}
-				base := Entry{Author: u, Seq: prev.Seq + 1, Prev: prev.ID, Parents: idsOf(d), Target: x}
+				base := entry{Author: u, Seq: prev.Seq + 1, Prev: prev.ID, Parents: idsOf(d), Target: x}
 				if !p.members[x] {
 					e := base
-					e.Kind = Add
-					out = append(out, New(e))
+					e.Kind = kAdd
+					out = append(out, newEntry(e))
 				}
 				if !p.admins[x] {
 					e := base
-					e.Kind = MakeAdmin
-					out = append(out, New(e))
+					e.Kind = kAdmin
+					out = append(out, newEntry(e))
 				}
 				if p.members[x] {
 					e := base
-					e.Kind = Remove
-					out = append(out, New(e))
+					e.Kind = kRemove
+					out = append(out, newEntry(e))
 				}
 			}
 		}
@@ -178,7 +178,7 @@ func honestNext(rules Rules, h history, c cache) []Entry {
 
 // extend returns every distinct honest history reached from start with up
 // to n more entries, grouped by number of added entries.
-func extend(rules Rules, start history, n int, c cache) [][]history {
+func extend(rules ruleSet, start history, n int, c cache) [][]history {
 	levels := [][]history{{start}}
 	for i := 0; i < n; i++ {
 		seen := map[string]bool{}
@@ -199,8 +199,8 @@ func extend(rules Rules, start history, n int, c cache) [][]history {
 
 // honestHistories returns every distinct honest history with up to n
 // entries after the create entry, grouped by length.
-func honestHistories(rules Rules, n int, c cache) [][]history {
-	root := New(Entry{Author: "A", Seq: 1, Kind: Create})
+func honestHistories(rules ruleSet, n int, c cache) [][]history {
+	root := newEntry(entry{Author: "A", Seq: 1, Kind: kCreate})
 	return extend(rules, history{}.with(root), n, c)
 }
 
@@ -218,7 +218,7 @@ func histories(t *testing.T) [][]history {
 	if h, ok := histCache[n]; ok {
 		return h
 	}
-	h := honestHistories(Final, n, cache{})
+	h := honestHistories(final, n, cache{})
 	total := 0
 	for _, l := range h {
 		total += len(l)
@@ -228,7 +228,7 @@ func histories(t *testing.T) [][]history {
 	return h
 }
 
-func describe(es []Entry) string {
+func describe(es []entry) string {
 	var b strings.Builder
 	name := map[string]string{}
 	for i, e := range es {
@@ -245,8 +245,8 @@ func describe(es []Entry) string {
 }
 
 // ancestorsOf returns the strict ancestors of every entry.
-func ancestorsOf(es []Entry) map[string]map[string]bool {
-	by := map[string]Entry{}
+func ancestorsOf(es []entry) map[string]map[string]bool {
+	by := map[string]entry{}
 	for _, e := range es {
 		by[e.ID] = e
 	}
@@ -275,8 +275,8 @@ func ancestorsOf(es []Entry) map[string]map[string]bool {
 // checkInvariants checks P2, P5 and P6 on one resolved set.
 // sawFork reports whether past holds two different entries by author at
 // one position.
-func sawFork(es []Entry, past map[string]bool, author string) bool {
-	at := map[int]string{}
+func sawFork(es []entry, past map[string]bool, author string) bool {
+	at := map[int64]string{}
 	for _, e := range es {
 		if e.Author != author || !past[e.ID] {
 			continue
@@ -289,7 +289,60 @@ func sawFork(es []Entry, past map[string]bool, author string) bool {
 	return false
 }
 
-func checkInvariants(es []Entry, st State) error {
+// checkPermissions: one permission per member, from grants of that member
+// that took effect (a grant without effect contributes nothing), merged so
+// the more restrictive applies.
+func checkPermissions(es []entry, st State) error {
+	// Permissions: one per member, from grants of that member that took
+	// effect (a grant without effect contributes nothing), merged so the
+	// more restrictive applies.
+	if len(st.Permissions) != len(st.Members) {
+		return fmt.Errorf("permissions for %d machines, %d members", len(st.Permissions), len(st.Members))
+	}
+	by2 := map[string]entry{}
+	for _, e := range es {
+		by2[e.ID] = e
+	}
+	for _, m := range st.Members {
+		p, ok := st.Permissions[m]
+		if !ok {
+			return fmt.Errorf("member %s has no permission", m)
+		}
+		all := len(p.Grants) > 0
+		heads := map[string]map[string]bool{}
+		for _, g := range p.Grants {
+			e := by2[g]
+			if !st.Effects[g].Applied || e.Target != m || (e.Kind != kAdd && e.Kind != kAdmin) {
+				return fmt.Errorf("permission of %s uses %s, not a grant of it that took effect", m, g)
+			}
+			if !e.History {
+				all = false
+				for a, ids := range e.From {
+					if heads[a] == nil {
+						heads[a] = map[string]bool{}
+					}
+					for _, id := range ids {
+						heads[a][id] = true
+					}
+				}
+			}
+		}
+		if len(p.Grants) > 0 && (p.All != all || p.Closed) {
+			return fmt.Errorf("permission of %s: all=%v closed=%v, grants give all=%v", m, p.All, p.Closed, all)
+		}
+		for a, ids := range p.From {
+			if len(ids) != len(heads[a]) {
+				return fmt.Errorf("permission of %s: frontier for %s is not the union of its grants'", m, a)
+			}
+		}
+		if len(p.From) != len(heads) {
+			return fmt.Errorf("permission of %s: frontier authors differ from its grants'", m)
+		}
+	}
+	return nil
+}
+
+func checkInvariants(es []entry, st State) error {
 	anc := ancestorsOf(es)
 	for _, e := range es {
 		ef, ok := st.Effects[e.ID]
@@ -301,32 +354,32 @@ func checkInvariants(es []Entry, st State) error {
 	// votes from as many distinct removers in the same removal (same
 	// earlier removals of the target seen) as that removal had in all: a
 	// repeated vote by one remover adds nothing.
-	by := map[string]Entry{}
+	by := map[string]entry{}
 	for _, e := range es {
 		by[e.ID] = e
 	}
 	basis := func(id string) string {
-		var past []Entry
+		var past []entry
 		for p := range anc[id] {
 			past = append(past, by[p])
 		}
-		return Resolve(past).removedBy[by[id].Target]
+		return resolveSet(past).removedBy[by[id].Target]
 	}
 	for _, r := range es {
-		if r.Kind != Remove || !st.Effects[r.ID].Applied || !st.members[r.Target] {
+		if r.Kind != kRemove || !st.Effects[r.ID].Applied || !st.members[r.Target] {
 			continue
 		}
-		var group []Entry
+		var group []entry
 		authors := map[string]bool{}
 		for _, v := range es {
-			if v.Kind == Remove && v.Target == r.Target && st.Effects[v.ID].Applied && basis(v.ID) == basis(r.ID) {
+			if v.Kind == kRemove && v.Target == r.Target && st.Effects[v.ID].Applied && basis(v.ID) == basis(r.ID) {
 				group = append(group, v)
 				authors[v.Author] = true
 			}
 		}
 		readmitted := false
 		for _, a := range es {
-			if (a.Kind != Add && a.Kind != MakeAdmin) || a.Target != r.Target || !st.Effects[a.ID].Applied {
+			if (a.Kind != kAdd && a.Kind != kAdmin) || a.Target != r.Target || !st.Effects[a.ID].Applied {
 				continue
 			}
 			seen := map[string]bool{}
@@ -351,7 +404,7 @@ func checkInvariants(es []Entry, st State) error {
 	for _, x := range st.Admins {
 		ok := false
 		for _, e := range es {
-			if (e.Kind == Create && e.Author == x) || (e.Kind == MakeAdmin && e.Target == x && st.Effects[e.ID].Applied) {
+			if (e.Kind == kCreate && e.Author == x) || (e.Kind == kAdmin && e.Target == x && st.Effects[e.ID].Applied) {
 				ok = true
 			}
 		}
@@ -369,10 +422,10 @@ func checkInvariants(es []Entry, st State) error {
 	// whose every admission was voided or never took effect is not.
 	want := map[string]bool{}
 	for _, e := range es {
-		if e.Kind == Create && st.Effects[e.ID].Applied {
+		if e.Kind == kCreate && st.Effects[e.ID].Applied {
 			want[e.Author] = true
 		}
-		if (e.Kind == Add || e.Kind == MakeAdmin) && st.Effects[e.ID].Applied {
+		if (e.Kind == kAdd || e.Kind == kAdmin) && st.Effects[e.ID].Applied {
 			want[e.Target] = true
 		}
 	}
@@ -388,7 +441,7 @@ func checkInvariants(es []Entry, st State) error {
 			return fmt.Errorf("member %s is not in Admitted", m)
 		}
 	}
-	return nil
+	return checkPermissions(es, st)
 }
 
 // P1, P2, P5, P6, P7 over every honest history: same set in any order
@@ -402,17 +455,23 @@ func TestEveryHonestHistoryResolvesSameInAnyOrderAndKeepsInvariants(t *testing.T
 	c := cache{}
 	for _, level := range histories(t) {
 		for _, h := range level {
-			st := Resolve(h.es)
+			st := resolveSet(h.es)
 			if err := checkInvariants(h.es, st); err != nil {
 				t.Fatalf("%v\n%s", err, describe(h.es))
 			}
-			if err := checkLocalEffect(Final, h, c); err != nil {
+			if !checkRenaming(h.es, "1") {
+				t.Fatalf("the result depends on the id function\n%s", describe(h.es))
+			}
+			if !matchesReference(final, h.es) {
+				t.Fatalf("the resolver differs from the reference\n%s", describe(h.es))
+			}
+			if err := checkLocalEffect(final, h, c); err != nil {
 				t.Fatal(err)
 			}
-			shuffled := append([]Entry(nil), h.es...)
+			shuffled := append([]entry(nil), h.es...)
 			rng.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
 			shuffled = append(shuffled, shuffled[0]) // a duplicate
-			if got := Resolve(shuffled); !reflect.DeepEqual(got.Members, st.Members) || !reflect.DeepEqual(got.Admins, st.Admins) || !reflect.DeepEqual(got.Admitted, st.Admitted) || !reflect.DeepEqual(got.Effects, st.Effects) {
+			if got := resolveSet(shuffled); !reflect.DeepEqual(got.Members, st.Members) || !reflect.DeepEqual(got.Admins, st.Admins) || !reflect.DeepEqual(got.Admitted, st.Admitted) || !reflect.DeepEqual(got.Permissions, st.Permissions) || !reflect.DeepEqual(got.Effects, st.Effects) {
 				t.Fatalf("P1: order changed the result (seed 1)\n%s", describe(h.es))
 			}
 		}
@@ -431,15 +490,15 @@ func TestMachinesReceivingSameEntriesInAnyOrderAgree(t *testing.T) {
 		orders = 5
 	}
 	for _, h := range levels[len(levels)-1] {
-		want := Resolve(h.es)
+		want := resolveSet(h.es)
 		for k := 0; k < orders; k++ {
-			es := append([]Entry(nil), h.es...)
+			es := append([]entry(nil), h.es...)
 			rng.Shuffle(len(es), func(i, j int) { es[i], es[j] = es[j], es[i] })
-			m := NewMachine(Final, h.es[0])
+			m := newMachine(final, h.es[0])
 			for _, e := range es {
-				m.Receive(e)
+				m.receive(e)
 			}
-			if got := m.State(); len(m.Entries()) != len(h.es) || !reflect.DeepEqual(got.Members, want.Members) || !reflect.DeepEqual(got.Admins, want.Admins) || !reflect.DeepEqual(got.Admitted, want.Admitted) {
+			if got := m.State(); len(m.entries()) != len(h.es) || !reflect.DeepEqual(got.Members, want.Members) || !reflect.DeepEqual(got.Admins, want.Admins) || !reflect.DeepEqual(got.Admitted, want.Admitted) || !reflect.DeepEqual(got.Permissions, want.Permissions) {
 				t.Fatalf("P1: machine disagrees (seed 2)\n%s", describe(h.es))
 			}
 		}
@@ -449,20 +508,20 @@ func TestMachinesReceivingSameEntriesInAnyOrderAgree(t *testing.T) {
 // attackNext returns every entry key k could sign next on its own chain,
 // with any parents its chain allows, any kind, any target, and a create
 // entry of its own (a second room root).
-func attackNext(h history, k string) []Entry {
+func attackNext(h history, k string) []entry {
 	prev := h.last[k]
-	var out []Entry
-	if c := New(Entry{Author: k, Seq: 1, Kind: Create}); c.ID != rootOf(h.es) {
+	var out []entry
+	if c := newEntry(entry{Author: k, Seq: 1, Kind: kCreate}); c.ID != rootOf(h.es) {
 		out = append(out, c)
 	}
 	targets := append(machinesOf(h), "X")
 	for _, d := range downsets(h.es, prev.ID) {
 		for _, x := range targets {
-			base := Entry{Author: k, Seq: prev.Seq + 1, Prev: prev.ID, Parents: idsOf(d), Target: x}
-			for _, kind := range []Kind{Add, MakeAdmin, Remove} {
+			base := entry{Author: k, Seq: prev.Seq + 1, Prev: prev.ID, Parents: idsOf(d), Target: x}
+			for _, kind := range []entryKind{kAdd, kAdmin, kRemove} {
 				e := base
 				e.Kind = kind
-				out = append(out, New(e))
+				out = append(out, newEntry(e))
 			}
 		}
 	}
@@ -473,11 +532,11 @@ func attackNext(h history, k string) []Entry {
 // already used, continuing from its entry before that position, with any
 // parents that do not include its entries from that position on: a
 // restored backup or a thief re-signing the key's chain.
-func forkNext(h history, k string) []Entry {
-	var out []Entry
+func forkNext(h history, k string) []entry {
+	var out []entry
 	targets := append(machinesOf(h), "X")
 	for _, x := range h.es {
-		if x.Author != k || x.Kind == Create {
+		if x.Author != k || x.Kind == kCreate {
 			continue
 		}
 		for _, d := range downsets(h.es, x.Prev) {
@@ -492,11 +551,11 @@ func forkNext(h history, k string) []Entry {
 				continue
 			}
 			for _, t := range targets {
-				base := Entry{Author: k, Seq: x.Seq, Prev: x.Prev, Parents: idsOf(d), Target: t}
-				for _, kind := range []Kind{Add, MakeAdmin, Remove} {
+				base := entry{Author: k, Seq: x.Seq, Prev: x.Prev, Parents: idsOf(d), Target: t}
+				for _, kind := range []entryKind{kAdd, kAdmin, kRemove} {
 					e := base
 					e.Kind = kind
-					if e = New(e); e.ID != x.ID {
+					if e = newEntry(e); e.ID != x.ID {
 						out = append(out, e)
 					}
 				}
@@ -507,7 +566,7 @@ func forkNext(h history, k string) []Entry {
 }
 
 // withForks is attackNext plus forkNext.
-func withForks(h history, k string) []Entry { return append(attackNext(h, k), forkNext(h, k)...) }
+func withForks(h history, k string) []entry { return append(attackNext(h, k), forkNext(h, k)...) }
 
 // p3Violation reports how extra entries by key k changed the admin set.
 func p3Violation(s0, s1 State, k string) string {
@@ -540,7 +599,7 @@ func p3Violation(s0, s1 State, k string) string {
 func atRest(h history, s State) bool {
 	for _, e := range h.es {
 		r := s.Effects[e.ID].Reason
-		if r == ReasonNeedsSecond || (e.Kind == MakeAdmin && (r == ReasonRemovalWins || r == ReasonAfterCut)) || (e.Kind == Remove && r == ReasonFork) {
+		if r == ReasonNeedsSecond || (e.Kind == kAdmin && (r == ReasonRemovalWins || r == ReasonAfterCut)) || (e.Kind == kRemove && r == ReasonFork) {
 			return false
 		}
 	}
@@ -556,14 +615,14 @@ type p3Result struct {
 // searchP3 tries every attack by one key from every history at rest with
 // three or more admins. A nil shared cache means one cache per history,
 // which keeps memory bounded on large searches.
-func searchP3(rules Rules, levels [][]history, depth int, shared cache) p3Result {
+func searchP3(rules ruleSet, levels [][]history, depth int, shared cache) p3Result {
 	return searchP3With(rules, levels, depth, shared, 3, attackNext, nil)
 }
 
 // searchP3With is searchP3 from rooms of at least minAdmins admins, with
 // the attacker's entries drawn from next. With a non-nil rng it also
 // checks P1 on every attack set: a shuffled copy resolves the same.
-func searchP3With(rules Rules, levels [][]history, depth int, shared cache, minAdmins int, gen func(history, string) []Entry, rng *rand.Rand) p3Result {
+func searchP3With(rules ruleSet, levels [][]history, depth int, shared cache, minAdmins int, gen func(history, string) []entry, rng *rand.Rand) p3Result {
 	var res p3Result
 	for _, level := range levels {
 		for _, h := range level {
@@ -591,10 +650,14 @@ func searchP3With(rules Rules, levels [][]history, depth int, shared cache, minA
 							nh := cur.with(e)
 							res.checked++
 							s1 := c.resolve(rules, nh.es)
+							if res.checked%16 == 0 && !matchesReference(rules, nh.es) {
+								res.example = "the resolver differs from the reference\n" + describe(nh.es)
+								return res
+							}
 							if rng != nil {
-								es := append([]Entry(nil), nh.es...)
+								es := append([]entry(nil), nh.es...)
 								rng.Shuffle(len(es), func(i, j int) { es[i], es[j] = es[j], es[i] })
-								if got := rules.ResolveRoom(rootOf(nh.es), es); !reflect.DeepEqual(got.Admins, s1.Admins) || !reflect.DeepEqual(got.Admitted, s1.Admitted) || !reflect.DeepEqual(got.Members, s1.Members) || !reflect.DeepEqual(got.Effects, s1.Effects) {
+								if got := rules.resolveRoom(rootOf(nh.es), es); !reflect.DeepEqual(got.Admins, s1.Admins) || !reflect.DeepEqual(got.Admitted, s1.Admitted) || !reflect.DeepEqual(got.Permissions, s1.Permissions) || !reflect.DeepEqual(got.Members, s1.Members) || !reflect.DeepEqual(got.Effects, s1.Effects) {
 									res.example = "P1: order changed the result\n" + describe(nh.es)
 									return res
 								}
@@ -630,7 +693,7 @@ func TestOneKeyCannotChangeAdminSetOnceThereAreThreeAdmins(t *testing.T) {
 	if deep() {
 		depth = 2
 	}
-	res := searchP3(Final, histories(t), depth, nil)
+	res := searchP3(final, histories(t), depth, nil)
 	t.Logf("P3: %d attack sets checked at depth %d", res.checked, depth)
 	if res.example != "" {
 		t.Fatalf("P3 violated:\n%s", res.example)
@@ -642,8 +705,8 @@ func TestOneKeyCannotChangeAdminSetOnceThereAreThreeAdmins(t *testing.T) {
 //
 // Requirements: T9
 func TestLeadRulesFailOneKeyCannotChangeAdminSet(t *testing.T) {
-	levels := honestHistories(Lead, 3, cache{})
-	res := searchP3(Lead, levels, 1, nil)
+	levels := honestHistories(lead, 3, cache{})
+	res := searchP3(lead, levels, 1, nil)
 	if res.example == "" {
 		t.Fatal("expected the lead's rules to fail P3")
 	}
@@ -668,7 +731,7 @@ func TestLossOfAnyOneAdminIsSurvivable(t *testing.T) {
 
 // checkLossSurvivable is P4 for one history with exactly three admins.
 func checkLossSurvivable(h history, c cache) error {
-	st := c.resolve(Final, h.es)
+	st := c.resolve(final, h.es)
 	if len(st.Admins) != 3 {
 		return nil
 	}
@@ -680,20 +743,20 @@ func checkLossSurvivable(h history, c cache) error {
 			}
 		}
 		cur := h
-		sign := func(u string, kind Kind, target string) {
+		sign := func(u string, kind entryKind, target string) {
 			prev := cur.last[u]
-			cur = cur.with(New(Entry{Author: u, Seq: prev.Seq + 1, Prev: prev.ID, Parents: cur.ids(), Kind: kind, Target: target}))
+			cur = cur.with(newEntry(entry{Author: u, Seq: prev.Seq + 1, Prev: prev.ID, Parents: cur.ids(), Kind: kind, Target: target}))
 		}
-		sign(live[0], Add, "N")
-		sign(live[0], Remove, "N")
-		if s := c.resolve(Final, cur.es); s.members["N"] {
+		sign(live[0], kAdd, "N")
+		sign(live[0], kRemove, "N")
+		if s := c.resolve(final, cur.es); s.members["N"] {
 			return fmt.Errorf("P4: one admin could not remove a member\n%s", describe(cur.es))
 		}
-		sign(live[0], Remove, lost)
-		sign(live[1], Remove, lost)
-		sign(live[0], MakeAdmin, "R")
-		sign(live[1], MakeAdmin, "R")
-		s := c.resolve(Final, cur.es)
+		sign(live[0], kRemove, lost)
+		sign(live[1], kRemove, lost)
+		sign(live[0], kAdmin, "R")
+		sign(live[1], kAdmin, "R")
+		s := c.resolve(final, cur.es)
 		if len(s.Admins) != 3 || s.members[lost] || !s.admins["R"] {
 			return fmt.Errorf("P4: could not replace %s: admins %v\n%s", lost, s.Admins, describe(cur.es))
 		}
@@ -712,16 +775,22 @@ func TestResolveGivesEveryEntryAReasonOnArbitraryInput(t *testing.T) {
 	const seed = 3
 	rng := rand.New(rand.NewSource(seed))
 	keys := []string{"A", "B", "C", "Z", ""}
-	kinds := []Kind{Create, Add, Remove, MakeAdmin, "bogus"}
+	kinds := []entryKind{kCreate, kAdd, kRemove, kAdmin, "bogus"}
 	n := 3000
 	if deep() {
 		n = 100000
 	}
 	for i := 0; i < n; i++ {
-		var es []Entry
-		es = append(es, New(Entry{Author: "A", Seq: 1, Kind: Create}))
+		var es []entry
+		es = append(es, newEntry(entry{Author: "A", Seq: 1, Kind: kCreate}))
 		for j := 0; j < 1+rng.Intn(8); j++ {
-			e := Entry{Author: keys[rng.Intn(len(keys))], Seq: rng.Intn(4), Kind: kinds[rng.Intn(len(kinds))], Target: keys[rng.Intn(len(keys))]}
+			e := entry{Author: keys[rng.Intn(len(keys))], Seq: int64(rng.Intn(4)), Kind: kinds[rng.Intn(len(kinds))], Target: keys[rng.Intn(len(keys))]}
+			switch rng.Intn(3) {
+			case 0:
+				e.History = true
+			case 1:
+				e.From = map[string][]string{keys[rng.Intn(3)]: {es[rng.Intn(len(es))].ID}}
+			}
 			for k := 0; k < 1+rng.Intn(3); k++ {
 				p := es[rng.Intn(len(es))].ID
 				if rng.Intn(10) == 0 {
@@ -732,7 +801,7 @@ func TestResolveGivesEveryEntryAReasonOnArbitraryInput(t *testing.T) {
 			if rng.Intn(2) == 0 {
 				e.Prev = e.Parents[0]
 			}
-			e = New(e)
+			e = newEntry(e)
 			if rng.Intn(20) == 0 {
 				e.ID = "tampered"
 			}
@@ -741,15 +810,15 @@ func TestResolveGivesEveryEntryAReasonOnArbitraryInput(t *testing.T) {
 		// Sometimes a second create by any key, with entries built on it.
 		var extras []string
 		if rng.Intn(3) == 0 {
-			c := New(Entry{Author: keys[rng.Intn(len(keys)-1)], Seq: 1, Kind: Create})
+			c := newEntry(entry{Author: keys[rng.Intn(len(keys)-1)], Seq: 1, Kind: kCreate})
 			if c.ID != es[0].ID {
 				extras = append(extras, c.ID)
-				es = append(es, c, New(Entry{Author: c.Author, Seq: 2, Prev: c.ID, Kind: Add, Target: "Z", Parents: []string{c.ID, es[0].ID}}))
+				es = append(es, c, newEntry(entry{Author: c.Author, Seq: 2, Prev: c.ID, Kind: kAdd, Target: "Z", Parents: []string{c.ID, es[0].ID}}))
 			}
 		}
 		rootID := es[0].ID
-		st := Resolve(es)
-		pinned := Final.ResolveRoom(rootID, es)
+		st := resolveSet(es)
+		pinned := final.resolveRoom(rootID, es)
 		for _, s := range []State{st, pinned} {
 			for _, e := range es {
 				if ef, ok := s.Effects[e.ID]; !ok || (!ef.Applied && ef.Reason == "") {
@@ -763,21 +832,27 @@ func TestResolveGivesEveryEntryAReasonOnArbitraryInput(t *testing.T) {
 			if pinned.Effects[extras[0]].Reason != ReasonOtherCreate {
 				t.Fatalf("seed %d case %d: second create not refused\n%s", seed, i, describe(es))
 			}
-			var rest []Entry
+			var rest []entry
 			for _, e := range es {
-				if e.ID != extras[0] && !(e.Kind == Add && e.Target == "Z" && e.Prev == extras[0]) {
+				if e.ID != extras[0] && !(e.Kind == kAdd && e.Target == "Z" && e.Prev == extras[0]) {
 					rest = append(rest, e)
 				}
 			}
-			if without := Final.ResolveRoom(es[0].ID, rest); !sameState(pinned, without) {
+			without := final.resolveRoom(es[0].ID, rest)
+			cut, w2 := pinned, without
+			cut.Effects, w2.Effects = nil, nil
+			if !sameState(cut, w2) {
 				t.Fatalf("seed %d case %d: second create changed the room\n%s", seed, i, describe(es))
 			}
 		}
+		if err := checkPermissions(es, pinned); err != nil {
+			t.Fatalf("seed %d case %d: %v\n%s", seed, i, err, describe(es))
+		}
 		rng.Shuffle(len(es), func(i, j int) { es[i], es[j] = es[j], es[i] })
-		if got := Resolve(es); !reflect.DeepEqual(got.Members, st.Members) || !reflect.DeepEqual(got.Admins, st.Admins) || !reflect.DeepEqual(got.Admitted, st.Admitted) || !reflect.DeepEqual(got.Effects, st.Effects) {
+		if got := resolveSet(es); !reflect.DeepEqual(got.Members, st.Members) || !reflect.DeepEqual(got.Admins, st.Admins) || !reflect.DeepEqual(got.Admitted, st.Admitted) || !reflect.DeepEqual(got.Permissions, st.Permissions) || !reflect.DeepEqual(got.Effects, st.Effects) {
 			t.Fatalf("seed %d case %d: P1: order changed the result\n%s", seed, i, describe(es))
 		}
-		if got := Final.ResolveRoom(rootID, es); !reflect.DeepEqual(got, pinned) {
+		if got := final.resolveRoom(rootID, es); !reflect.DeepEqual(got, pinned) {
 			t.Fatalf("seed %d case %d: P1 (pinned): order changed the result\n%s", seed, i, describe(es))
 		}
 	}
@@ -822,7 +897,7 @@ func TestOneKeyCannotChangeAdminSetInLargerRooms(t *testing.T) {
 	if deep() {
 		depth = 2
 	}
-	res := searchP3(Final, [][]history{starts}, depth, nil)
+	res := searchP3(final, [][]history{starts}, depth, nil)
 	t.Logf("P3 (larger rooms): %d attack sets checked at depth %d", res.checked, depth)
 	if res.example != "" {
 		t.Fatalf("P3 violated:\n%s", res.example)
@@ -831,7 +906,7 @@ func TestOneKeyCannotChangeAdminSetInLargerRooms(t *testing.T) {
 
 // hasFork reports whether es holds two different entries by k at one
 // position.
-func hasFork(es []Entry, k string) bool {
+func hasFork(es []entry, k string) bool {
 	all := map[string]bool{}
 	for _, e := range es {
 		all[e.ID] = true
@@ -852,14 +927,14 @@ func hasFork(es []Entry, k string) bool {
 //     received the attack in opposite orders agree.
 func searchForks(levels [][]history, depth, minAdmins int, rng *rand.Rand) p3Result {
 	var res p3Result
-	fail := func(msg string, es []Entry) p3Result {
+	fail := func(msg string, es []entry) p3Result {
 		res.example = msg + "\n" + describe(es)
 		return res
 	}
 	for _, level := range levels {
 		for _, h := range level {
 			c := cache{}
-			s0 := c.resolve(Final, h.es)
+			s0 := c.resolve(final, h.es)
 			if len(s0.Admins) < minAdmins || !atRest(h, s0) {
 				continue
 			}
@@ -875,11 +950,17 @@ func searchForks(levels [][]history, depth, minAdmins int, rng *rand.Rand) p3Res
 						for _, e := range withForks(cur, k) {
 							nh := cur.with(e)
 							res.checked++
-							s1 := c.resolve(Final, nh.es)
-							es := append([]Entry(nil), nh.es...)
+							s1 := c.resolve(final, nh.es)
+							es := append([]entry(nil), nh.es...)
 							rng.Shuffle(len(es), func(i, j int) { es[i], es[j] = es[j], es[i] })
-							if got := Final.ResolveRoom(rootOf(nh.es), es); !reflect.DeepEqual(got.Effects, s1.Effects) || !reflect.DeepEqual(got.Admins, s1.Admins) || !reflect.DeepEqual(got.Admitted, s1.Admitted) || !reflect.DeepEqual(got.Members, s1.Members) {
+							if got := final.resolveRoom(rootOf(nh.es), es); !reflect.DeepEqual(got.Effects, s1.Effects) || !reflect.DeepEqual(got.Admins, s1.Admins) || !reflect.DeepEqual(got.Admitted, s1.Admitted) || !reflect.DeepEqual(got.Permissions, s1.Permissions) || !reflect.DeepEqual(got.Members, s1.Members) {
 								return fail("P1: order changed the result", nh.es)
+							}
+							if res.checked%16 == 0 && !checkRenaming(nh.es, "1") {
+								return fail("the result depends on the id function", nh.es)
+							}
+							if res.checked%4 == 0 && !matchesReference(final, nh.es) {
+								return fail("the resolver differs from the reference", nh.es)
 							}
 							attack := nh.es[len(h.es):]
 							if !hasFork(nh.es, k) {
@@ -889,9 +970,9 @@ func searchForks(levels [][]history, depth, minAdmins int, rng *rand.Rand) p3Res
 							} else {
 								res.forks++
 								m1, m2 := machineWith(h.es), machineWith(h.es)
-								m1.Receive(attack...)
+								m1.receive(attack...)
 								for i := len(attack) - 1; i >= 0; i-- {
-									m2.Receive(attack[i])
+									m2.receive(attack[i])
 								}
 								for _, m := range []*Machine{m1, m2} {
 									if v := p3Violation(s0, m.State(), k); v != "" {
@@ -903,7 +984,7 @@ func searchForks(levels [][]history, depth, minAdmins int, rng *rand.Rand) p3Res
 										continue
 									}
 									rm := settleBy(m1, nh, y, k)
-									s2 := Final.ResolveRoom(rootOf(nh.es), append(append([]Entry(nil), nh.es...), rm))
+									s2 := final.resolveRoom(rootOf(nh.es), append(append([]entry(nil), nh.es...), rm))
 									for _, z := range s0.Admins {
 										if z != k && !s2.admins[z] {
 											return fail("key "+k+": settled by "+y+", removed admin "+z, append(nh.es, rm))
@@ -915,14 +996,14 @@ func searchForks(levels [][]history, depth, minAdmins int, rng *rand.Rand) p3Res
 										}
 									}
 									a, b := machineWith(h.es), machineWith(h.es)
-									a.Receive(attack...)
-									a.Receive(rm)
+									a.receive(attack...)
+									a.receive(rm)
 									for i := len(attack) - 1; i >= 0; i-- {
-										b.Receive(attack[i])
+										b.receive(attack[i])
 									}
-									b.Receive(rm)
-									a.Receive(b.Offer()...)
-									b.Receive(a.Offer()...)
+									b.receive(rm)
+									a.receive(b.offer()...)
+									b.receive(a.offer()...)
 									if !sameState(a.State(), b.State()) {
 										return fail("key "+k+": settled by "+y+", machines disagree", append(nh.es, rm))
 									}
@@ -943,12 +1024,12 @@ func searchForks(levels [][]history, depth, minAdmins int, rng *rand.Rand) p3Res
 
 // settleBy is y's removal of k signed on machine m: having seen what m
 // accepted, so one branch of the fork.
-func settleBy(m *Machine, h history, y, k string) Entry {
-	e := Entry{Author: y, Kind: Remove, Target: k, Seq: 1, Parents: idsOf(m.Entries())}
+func settleBy(m *Machine, h history, y, k string) entry {
+	e := entry{Author: y, Kind: kRemove, Target: k, Seq: 1, Parents: idsOf(m.entries())}
 	if p, ok := h.last[y]; ok {
 		e.Seq, e.Prev = p.Seq+1, p.ID
 	}
-	return New(e)
+	return newEntry(e)
 }
 
 // Rule 12 and P3: a key that forks its own chain makes only itself
@@ -1029,7 +1110,7 @@ func seeds(t *testing.T) map[string]history {
 	h0 = r.all()
 	lastB := r.last["B"]
 	addD := r.add("B", "D", h0...)
-	addE := r.fork("B", lastB.Seq+1, lastB.ID, Add, "E", h0...)
+	addE := r.fork("B", lastB.Seq+1, lastB.ID, kAdd, "E", h0...)
 	r.remove("A", "B", append(h0, addD)...)
 	r.remove("C", "B", append(h0, addE)...)
 	out["fork settled"] = historyOf(r)
@@ -1074,14 +1155,14 @@ func seeds(t *testing.T) map[string]history {
 
 // checkLocalEffect is P7: a change made by admins who have seen the whole
 // history changes the status of its target and of no one else.
-func checkLocalEffect(rules Rules, h history, c cache) error {
+func checkLocalEffect(rules ruleSet, h history, c cache) error {
 	s0 := c.resolve(rules, h.es)
 	if !atRest(h, s0) {
 		return nil
 	}
-	sign := func(cur history, u string, kind Kind, x string) history {
+	sign := func(cur history, u string, kind entryKind, x string) history {
 		prev := cur.last[u]
-		return cur.with(New(Entry{Author: u, Seq: prev.Seq + 1, Prev: prev.ID, Parents: cur.ids(), Kind: kind, Target: x}))
+		return cur.with(newEntry(entry{Author: u, Seq: prev.Seq + 1, Prev: prev.ID, Parents: cur.ids(), Kind: kind, Target: x}))
 	}
 	for _, x := range append(machinesOf(h), "N") {
 		var others []string
@@ -1100,20 +1181,20 @@ func checkLocalEffect(rules Rules, h history, c cache) error {
 		var trials []history
 		switch {
 		case !s0.members[x]:
-			trials = append(trials, sign(h, others[0], Add, x))
+			trials = append(trials, sign(h, others[0], kAdd, x))
 		case !s0.admins[x]:
-			trials = append(trials, sign(h, others[0], Remove, x))
+			trials = append(trials, sign(h, others[0], kRemove, x))
 		}
 		if len(others) >= need && !s0.admins[x] {
-			t := sign(h, others[0], MakeAdmin, x)
+			t := sign(h, others[0], kAdmin, x)
 			if need == 2 {
-				t = sign(t, others[1], MakeAdmin, x)
+				t = sign(t, others[1], kAdmin, x)
 			}
 			trials = append(trials, t)
 		}
 		if s0.admins[x] && len(others) >= 2 {
-			t := sign(h, others[0], Remove, x)
-			trials = append(trials, sign(t, others[1], Remove, x))
+			t := sign(h, others[0], kRemove, x)
+			trials = append(trials, sign(t, others[1], kRemove, x))
 		}
 		for _, t := range trials {
 			s1 := c.resolve(rules, t.es)
@@ -1141,24 +1222,30 @@ func TestSeededRoomsKeepEveryProperty(t *testing.T) {
 	rng := rand.New(rand.NewSource(4))
 	for name, start := range seeds(t) {
 		c := cache{}
-		levels := extend(Final, start, steps, c)
+		levels := extend(final, start, steps, c)
 		n := 0
 		for _, level := range levels {
 			for _, h := range level {
 				n++
-				st := c.resolve(Final, h.es)
+				st := c.resolve(final, h.es)
 				if err := checkInvariants(h.es, st); err != nil {
 					t.Fatalf("%s: %v\n%s", name, err, describe(h.es))
 				}
-				if err := checkLocalEffect(Final, h, c); err != nil {
+				if err := checkLocalEffect(final, h, c); err != nil {
 					t.Fatalf("%s: %v", name, err)
 				}
 				if err := checkLossSurvivable(h, c); err != nil {
 					t.Fatalf("%s: %v", name, err)
 				}
-				es := append([]Entry(nil), h.es...)
+				if !checkRenaming(h.es, "1") {
+					t.Fatalf("%s: the result depends on the id function\n%s", name, describe(h.es))
+				}
+				if !matchesReference(final, h.es) {
+					t.Fatalf("%s: the resolver differs from the reference\n%s", name, describe(h.es))
+				}
+				es := append([]entry(nil), h.es...)
 				rng.Shuffle(len(es), func(i, j int) { es[i], es[j] = es[j], es[i] })
-				if got := Resolve(es); !reflect.DeepEqual(got.Members, st.Members) || !reflect.DeepEqual(got.Admins, st.Admins) || !reflect.DeepEqual(got.Admitted, st.Admitted) {
+				if got := resolveSet(es); !reflect.DeepEqual(got.Members, st.Members) || !reflect.DeepEqual(got.Admins, st.Admins) || !reflect.DeepEqual(got.Admitted, st.Admitted) || !reflect.DeepEqual(got.Permissions, st.Permissions) {
 					t.Fatalf("%s: P1: order changed the result (seed 4)\n%s", name, describe(h.es))
 				}
 			}
@@ -1171,10 +1258,10 @@ func TestSeededRoomsKeepEveryProperty(t *testing.T) {
 		if deep() {
 			attackFrom = levels
 		}
-		res := searchP3(Final, attackFrom, 1, c)
+		res := searchP3(final, attackFrom, 1, c)
 		checked := res.checked
 		if res.example == "" && depth > 1 {
-			res = searchP3(Final, levels[:1], depth, nil)
+			res = searchP3(final, levels[:1], depth, nil)
 			checked += res.checked
 		}
 		t.Logf("%s: %d histories, %d attack sets", name, n, checked)

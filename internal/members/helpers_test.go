@@ -11,19 +11,19 @@ import (
 // parents the test names ("what the author had seen").
 type room struct {
 	t    testing.TB
-	byID map[string]Entry
-	last map[string]Entry
+	byID map[string]entry
+	last map[string]entry
 	root string
 }
 
 func newRoom(t testing.TB, creator string) *room {
-	r := &room{t: t, byID: map[string]Entry{}, last: map[string]Entry{}}
-	r.root = r.put(Entry{Author: creator, Seq: 1, Kind: Create})
+	r := &room{t: t, byID: map[string]entry{}, last: map[string]entry{}}
+	r.root = r.put(entry{Author: creator, Seq: 1, Kind: kCreate})
 	return r
 }
 
-func (r *room) put(e Entry) string {
-	e = New(e)
+func (r *room) put(e entry) string {
+	e = newEntry(e)
 	r.byID[e.ID] = e
 	if cur, ok := r.last[e.Author]; !ok || e.Seq > cur.Seq {
 		r.last[e.Author] = e
@@ -33,8 +33,8 @@ func (r *room) put(e Entry) string {
 
 // next signs the author's next entry, having seen parents (plus its own
 // previous entry, which is always added).
-func (r *room) next(author string, kind Kind, target string, parents ...string) string {
-	e := Entry{Author: author, Kind: kind, Target: target, Seq: 1}
+func (r *room) next(author string, kind entryKind, target string, parents ...string) string {
+	e := entry{Author: author, Kind: kind, Target: target, Seq: 1}
 	if p, ok := r.last[author]; ok {
 		e.Seq, e.Prev = p.Seq+1, p.ID
 		parents = append(parents, p.ID)
@@ -47,15 +47,15 @@ func (r *room) next(author string, kind Kind, target string, parents ...string) 
 }
 
 func (r *room) add(author, target string, seen ...string) string {
-	return r.next(author, Add, target, seen...)
+	return r.next(author, kAdd, target, seen...)
 }
 
 func (r *room) admin(author, target string, seen ...string) string {
-	return r.next(author, MakeAdmin, target, seen...)
+	return r.next(author, kAdmin, target, seen...)
 }
 
 func (r *room) remove(author, target string, seen ...string) string {
-	return r.next(author, Remove, target, seen...)
+	return r.next(author, kRemove, target, seen...)
 }
 
 func (r *room) closure(ids []string) map[string]bool {
@@ -86,18 +86,25 @@ func (r *room) all() []string {
 	return ids
 }
 
-func (r *room) entries(ids ...string) []Entry {
+func (r *room) entries(ids ...string) []entry {
 	if ids == nil {
 		ids = r.all()
 	}
-	var out []Entry
+	var out []entry
 	for id := range r.closure(ids) {
 		out = append(out, r.byID[id])
 	}
 	return out
 }
 
-func (r *room) state(rules Rules, ids ...string) State { return rules.Resolve(r.entries(ids...)) }
+func (r *room) state(rules ruleSet, ids ...string) State {
+	es := r.entries(ids...)
+	st := rules.resolve(es)
+	if ref := rules.refResolveShared(es, map[string]*State{}, ""); !sameState(st, ref) {
+		panic("the resolver differs from the reference:\n" + describe(es))
+	}
+	return st
+}
 
 func uniq(ids []string) []string {
 	m := map[string]bool{}
@@ -147,7 +154,7 @@ func threeAdmins(t testing.TB) (*room, []string) {
 	r.admin("A", "C", r.all()...)
 	r.admin("B", "C", r.all()...)
 	r.add("A", "P", r.all()...)
-	st := r.state(Final)
+	st := r.state(final)
 	wantList(t, "admins", st.Admins, "A", "B", "C")
 	wantList(t, "members", st.Members, "A", "B", "C", "P")
 	return r, r.all()

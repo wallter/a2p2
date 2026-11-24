@@ -1,6 +1,9 @@
 package members
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 // X1 (q10-claude) and sol's first counterexample: an admin is removed while,
 // out of touch, it removes a compromised machine. The removal of the
@@ -16,7 +19,7 @@ func TestRemovedAdminsConcurrentRemovalOfCompromisedMachineStands(t *testing.T) 
 	rb := r.remove("B", "C", h1...)
 	// C, reaching only P, finds K compromised and removes it.
 	rk := r.remove("C", "K", h1...)
-	st := r.state(Final)
+	st := r.state(final)
 	wantApplied(t, st, ra)
 	wantApplied(t, st, rb)
 	wantApplied(t, st, rk)
@@ -37,7 +40,7 @@ func TestLeadRulesAlsoKeepConcurrentRemovalByRemovedAdmin(t *testing.T) {
 	h0 := r.all()
 	r.remove("C", "A", h0...)
 	r.remove("A", "K", h0...)
-	st := r.state(Lead)
+	st := r.state(lead)
 	wantList(t, "admins", st.Admins, "C")
 	wantList(t, "members", st.Members, "C", "P")
 }
@@ -52,14 +55,14 @@ func TestCreatorKeyIsRemovableByTwoOtherAdmins(t *testing.T) {
 	r.remove("B", "A", h0...)
 	r.remove("C", "A", h0...)
 	h1 := r.all()
-	st := r.state(Final)
+	st := r.state(final)
 	wantList(t, "admins", st.Admins, "B", "C")
 	wantList(t, "members", st.Members, "B", "C", "P")
 	// The stolen creator key, after its removal, claims it never saw it.
 	x := r.admin("A", "X", h0...)
 	rmB := r.remove("A", "B", h0...)
 	rmP := r.remove("A", "P", h0...)
-	st = r.state(Final)
+	st = r.state(final)
 	wantReason(t, st, x, ReasonAfterCut)
 	wantReason(t, st, rmB, ReasonNeedsSecond)
 	wantApplied(t, st, rmP) // the nuisance: removals by a removed key still count
@@ -83,13 +86,13 @@ func TestNoRankAnyTwoAdminsRemoveTheThirdNoneAlone(t *testing.T) {
 		}
 		r, h0 := threeAdmins(t)
 		alone := r.remove(others[0], target, h0...)
-		st := r.state(Final)
+		st := r.state(final)
 		wantReason(t, st, alone, ReasonNeedsSecond)
 		if !st.admins[target] {
 			t.Fatalf("%s removed by one admin", target)
 		}
 		r.remove(others[1], target, h0...)
-		st = r.state(Final)
+		st = r.state(final)
 		if st.members[target] {
 			t.Fatalf("%s not removed by two admins", target)
 		}
@@ -107,7 +110,7 @@ func TestCascadeFromVoidAdminVoidsItsGrantsKeepsItsRemovals(t *testing.T) {
 	r.admin("B", "D", r.all()...)
 	r.add("A", "Q", r.all()...)
 	h0 := r.all()
-	wantList(t, "admins", r.state(Final).Admins, "A", "B", "C", "D")
+	wantList(t, "admins", r.state(final).Admins, "A", "B", "C", "D")
 	// A and B remove C, having seen h0.
 	r.remove("A", "C", h0...)
 	r.remove("B", "C", h0...)
@@ -117,7 +120,7 @@ func TestCascadeFromVoidAdminVoidsItsGrantsKeepsItsRemovals(t *testing.T) {
 	h1 := append(append([]string(nil), h0...), gc, gd)
 	rq := r.remove("M", "Q", h1...)
 	an := r.add("M", "N", append(h1, rq)...)
-	st := r.state(Final)
+	st := r.state(final)
 	wantReason(t, st, gc, ReasonAfterCut)
 	wantReason(t, st, gd, ReasonNeedsSecond)
 	wantApplied(t, st, rq)
@@ -136,11 +139,11 @@ func TestLeadRulesLetIdleStolenKeyTakeOverByBackdating(t *testing.T) {
 	r.add("A", "P", r.all()...)
 	old := r.all() // what B had seen: admins A and B
 	r.admin("A", "C", r.all()...)
-	wantList(t, "admins", r.state(Lead).Admins, "A", "B", "C")
+	wantList(t, "admins", r.state(lead).Admins, "A", "B", "C")
 	// B's key is stolen; the thief signs on B's chain as if asleep.
 	ra := r.remove("B", "A", old...)
 	x := r.admin("B", "X", old...)
-	st := r.state(Lead)
+	st := r.state(lead)
 	wantApplied(t, st, x)
 	wantApplied(t, st, ra)
 	// A is out, and A's promotion of C, which B had not seen, is void with
@@ -148,7 +151,7 @@ func TestLeadRulesLetIdleStolenKeyTakeOverByBackdating(t *testing.T) {
 	wantList(t, "lead admins", st.Admins, "B", "X")
 	// The same entries under the final rules: A cannot promote C alone in
 	// the first place, and B's backdated entries need a second admin.
-	st = r.state(Final)
+	st = r.state(final)
 	wantList(t, "admins", st.Admins, "A", "B")
 	wantReason(t, st, x, ReasonNeedsSecond)
 	wantReason(t, st, ra, ReasonNeedsSecond)
@@ -166,18 +169,18 @@ func TestIdleStolenKeyBackdatingCannotChangeAdminSet(t *testing.T) {
 	old := r.all()
 	r.admin("A", "D", r.all()...)
 	r.admin("C", "D", r.all()...)
-	wantList(t, "admins", r.state(Final).Admins, "A", "B", "C", "D")
+	wantList(t, "admins", r.state(final).Admins, "A", "B", "C", "D")
 	rd := r.remove("B", "D", old...)
 	ra := r.remove("B", "A", old...)
 	x := r.admin("B", "X", old...)
-	st := r.state(Final)
+	st := r.state(final)
 	wantReason(t, st, rd, ReasonNeedsSecond)
 	wantReason(t, st, ra, ReasonNeedsSecond)
 	wantReason(t, st, x, ReasonNeedsSecond)
 	wantList(t, "admins", st.Admins, "A", "B", "C", "D")
 	// Judging the target only in the author's own past (lead's C4) lets
 	// the thief remove the new admin alone.
-	st = Rules{SoloLimit: 1, TargetJudgedInOwnPast: true}.Resolve(r.entries())
+	st = ruleSet{SoloLimit: 1, TargetJudgedInOwnPast: true}.resolve(r.entries())
 	if st.members["D"] {
 		t.Fatalf("expected own-past judgement to lose D; admins %v", st.Admins)
 	}
@@ -196,7 +199,7 @@ func TestRemovedAdminKeepsSigningGrantsVoidRemovalsCountOncePerTarget(t *testing
 	r.remove("B", "C", h0...)
 	gx := r.add("C", "X", h0...)
 	rp := r.remove("C", "P", h0...)
-	st := r.state(Final)
+	st := r.state(final)
 	wantReason(t, st, gx, ReasonAfterCut)
 	wantApplied(t, st, rp)
 	wantList(t, "members", st.Members, "A", "B")
@@ -206,7 +209,7 @@ func TestRemovedAdminKeepsSigningGrantsVoidRemovalsCountOncePerTarget(t *testing
 	back := r.add("A", "P", r.all()...)
 	again := r.remove("C", "P", h0...)
 	again2 := r.remove("C", "P", back)
-	st = r.state(Final)
+	st = r.state(final)
 	wantApplied(t, st, back)
 	wantReason(t, st, again, ReasonNotMember)
 	wantReason(t, st, again2, ReasonNotAdmin)
@@ -220,7 +223,7 @@ func TestTwoAdminsAddSameMachineAtOnce(t *testing.T) {
 	r, h0 := threeAdmins(t)
 	a := r.add("A", "D", h0...)
 	b := r.add("B", "D", h0...)
-	st := r.state(Final)
+	st := r.state(final)
 	wantApplied(t, st, a)
 	wantApplied(t, st, b)
 	wantList(t, "members", st.Members, "A", "B", "C", "D", "P")
@@ -228,7 +231,7 @@ func TestTwoAdminsAddSameMachineAtOnce(t *testing.T) {
 	// either add removes it, because a removal beats every add it did not
 	// see as well as those it did, unless an add saw the removal.
 	r.remove("C", "D", a)
-	wantList(t, "members", r.state(Final).Members, "A", "B", "C", "P")
+	wantList(t, "members", r.state(final).Members, "A", "B", "C", "P")
 }
 
 // Attack 7: an add and a removal of the same machine at once. The removal
@@ -239,7 +242,7 @@ func TestConcurrentAddAndRemoveOfSameMachineRemovalWins(t *testing.T) {
 	r, h0 := threeAdmins(t)
 	rm := r.remove("A", "P", h0...)
 	add := r.add("B", "P", h0...) // already a member in B's view: no effect
-	st := r.state(Final)
+	st := r.state(final)
 	wantApplied(t, st, rm)
 	wantReason(t, st, add, ReasonAlreadyMember)
 	wantList(t, "members", st.Members, "A", "B", "C")
@@ -249,14 +252,14 @@ func TestConcurrentAddAndRemoveOfSameMachineRemovalWins(t *testing.T) {
 	g1 := r2.all()
 	rmD := r2.remove("A", "D", g1...)
 	readd := r2.add("C", "D", addD) // C saw only the add: D already a member
-	st = r2.state(Final)
+	st = r2.state(final)
 	wantApplied(t, st, rmD)
 	wantReason(t, st, readd, ReasonAlreadyMember)
 	if st.members["D"] {
 		t.Fatal("removal should win")
 	}
 	knowing := r2.add("C", "D", r2.all()...)
-	st = r2.state(Final)
+	st = r2.state(final)
 	wantApplied(t, st, knowing)
 	if !st.members["D"] {
 		t.Fatal("an add that saw the removal should re-admit")
@@ -272,22 +275,22 @@ func TestMutualRemovalWithTwoThreeAndFourAdmins(t *testing.T) {
 	r.admin("A", "B")
 	h := r.all()
 	x, y := r.remove("A", "B", h...), r.remove("B", "A", h...)
-	st := r.state(Final)
+	st := r.state(final)
 	wantReason(t, st, x, ReasonNeedsSecond)
 	wantReason(t, st, y, ReasonNeedsSecond)
 	wantList(t, "admins", st.Admins, "A", "B")
-	// Lead's rules: both are removed and the room has no admin.
-	wantList(t, "lead admins", r.state(Lead).Admins)
+	// lead's rules: both are removed and the room has no admin.
+	wantList(t, "lead admins", r.state(lead).Admins)
 
 	// Three admins: A and B vote each other out; no vote reaches two.
 	r3, h3 := threeAdmins(t)
 	r3.remove("A", "B", h3...)
 	r3.remove("B", "A", h3...)
-	wantList(t, "admins", r3.state(Final).Admins, "A", "B", "C")
+	wantList(t, "admins", r3.state(final).Admins, "A", "B", "C")
 	// C joins A's side: B is out. A's removal by B alone still lacks a
 	// second vote.
 	r3.remove("C", "B", h3...)
-	wantList(t, "admins", r3.state(Final).Admins, "A", "C")
+	wantList(t, "admins", r3.state(final).Admins, "A", "C")
 
 	// Four admins: A and B remove C while C and D remove A. Both take effect.
 	r4, _ := threeAdmins(t)
@@ -298,7 +301,7 @@ func TestMutualRemovalWithTwoThreeAndFourAdmins(t *testing.T) {
 	r4.remove("B", "C", h4...)
 	r4.remove("C", "A", h4...)
 	r4.remove("D", "A", h4...)
-	st = r4.state(Final)
+	st = r4.state(final)
 	wantList(t, "admins", st.Admins, "B", "D")
 	wantList(t, "members", st.Members, "B", "D", "P")
 }
@@ -313,7 +316,7 @@ func TestLostAdminOfThreeIsReplacedByTheOtherTwo(t *testing.T) {
 	r.remove("B", "C", r.all()...)
 	r.admin("A", "D", r.all()...)
 	r.admin("B", "D", r.all()...)
-	st := r.state(Final)
+	st := r.state(final)
 	wantList(t, "admins", st.Admins, "A", "B", "D")
 	wantList(t, "members", st.Members, "A", "B", "D", "P")
 }
@@ -329,7 +332,7 @@ func TestLostAdminOfTwoLeavesMembersManageableAdminSetFixed(t *testing.T) {
 	rm := r.remove("A", "D", r.all()...)
 	x := r.remove("A", "B", r.all()...)
 	y := r.admin("A", "E", r.all()...)
-	st := r.state(Final)
+	st := r.state(final)
 	wantApplied(t, st, a)
 	wantApplied(t, st, rm)
 	wantReason(t, st, x, ReasonNeedsSecond)
@@ -348,7 +351,7 @@ func TestAllAdminsLostFreezesMembershipNobodyPromoted(t *testing.T) {
 		r.admin("P", "P", h0...),
 		r.remove("P", "A", h0...),
 	}
-	st := r.state(Final)
+	st := r.state(final)
 	for _, id := range ids {
 		wantReason(t, st, id, ReasonNotAdmin)
 	}
@@ -368,7 +371,7 @@ func TestOwnVoteOnOwnRemovalDoesNotCount(t *testing.T) {
 	pending := r.remove("D", "A", r.all()...)
 	vote := r.admin("A", "C", r.all()...)
 	self := r.remove("A", "A", r.all()...)
-	st := r.state(Final)
+	st := r.state(final)
 	wantReason(t, st, self, ReasonSelfVote)
 	wantReason(t, st, pending, ReasonNeedsSecond)
 	wantApplied(t, st, vote)
@@ -397,12 +400,12 @@ func TestStolenKeyCompletingAPendingRemovalDecidesTheTargetsUnseenEntries(t *tes
 		return r, append(h0, pending)
 	}
 	r, _ := build()
-	wantList(t, "admins", r.state(Final).Admins, "A", "B", "C", "D", "E")
+	wantList(t, "admins", r.state(final).Admins, "A", "B", "C", "D", "E")
 	r.remove("B", "C", r.all()...)
-	wantList(t, "honest completion", r.state(Final).Admins, "A", "B", "D", "E")
+	wantList(t, "honest completion", r.state(final).Admins, "A", "B", "D", "E")
 	r2, seenByD := build()
 	r2.remove("B", "C", seenByD...)
-	wantList(t, "stolen completion", r2.state(Final).Admins, "A", "B", "D")
+	wantList(t, "stolen completion", r2.state(final).Admins, "A", "B", "D")
 }
 
 // Limit (known gap 3, found by the deep seeded search): B removes member P
@@ -417,12 +420,12 @@ func TestStolenKeyCanCompleteAPromotionBeatenByAConcurrentRemoval(t *testing.T) 
 	r, h0 := threeAdmins(t)
 	rm := r.remove("B", "P", h0...)
 	c := r.admin("C", "P", h0...)
-	st := r.state(Final)
+	st := r.state(final)
 	wantApplied(t, st, rm)
 	wantReason(t, st, c, ReasonRemovalWins)
 	wantList(t, "members", st.Members, "A", "B", "C")
 	r.admin("A", "P", append(h0, c)...)
-	st = r.state(Final)
+	st = r.state(final)
 	wantReason(t, st, rm, ReasonNeedsSecond)
 	wantList(t, "admins", st.Admins, "A", "B", "C", "P")
 }
@@ -451,7 +454,7 @@ func TestSecondRemovalOfReadmittedAdminDoesNotReopenEarlierPeriod(t *testing.T) 
 	h2 := r.all()
 	r.remove("B", "A", h2...)
 	r.remove("C", "A", h2...)
-	st := r.state(Final)
+	st := r.state(final)
 	wantList(t, "admins", st.Admins, "B", "C")
 	wantList(t, "members", st.Members, "B", "C", "D")
 }
@@ -473,9 +476,9 @@ func TestLateVoteOnCompletedRemovalDoesNotUndoReadmission(t *testing.T) {
 	r.add("B", "C", r.all()...)
 	r.admin("B", "C", r.all()...)
 	r.admin("D", "C", r.all()...)
-	wantList(t, "admins", r.state(Final).Admins, "A", "B", "C", "D")
+	wantList(t, "admins", r.state(final).Admins, "A", "B", "C", "D")
 	r.remove("A", "C", append(h0, first)...)
-	wantList(t, "admins", r.state(Final).Admins, "A", "B", "C", "D")
+	wantList(t, "admins", r.state(final).Admins, "A", "B", "C", "D")
 }
 
 // Second review, finding 1: A and B remove C without having seen C's
@@ -498,13 +501,13 @@ func TestExtraRemovalVoteRevivesOnlyWhatItsSignerCouldGrantItself(t *testing.T) 
 		return r, h0, addE
 	}
 	r, _, addE := build()
-	wantReason(t, r.state(Final), addE, ReasonAfterCut)
+	wantReason(t, r.state(final), addE, ReasonAfterCut)
 	r.remove("D", "C", r.all()...) // late: had seen the removal complete
-	wantReason(t, r.state(Final), addE, ReasonAfterCut)
+	wantReason(t, r.state(final), addE, ReasonAfterCut)
 
 	r2, h0, addE := build()
 	r2.remove("D", "C", append(h0, addE)...)
-	if !r2.state(Final).members["E"] {
+	if !r2.state(final).members["E"] {
 		t.Fatal("expected the concurrent vote to keep E")
 	}
 }
@@ -523,9 +526,9 @@ func TestExtraRemovalVoteCannotUndoACompletedPromotion(t *testing.T) {
 	vc := r.admin("C", "D", r.all()...)
 	rb := r.remove("B", "C", before...)
 	r.remove("D", "C", append(before, vc, rb)...)
-	wantList(t, "admins", r.state(Final).Admins, "A", "B", "D")
+	wantList(t, "admins", r.state(final).Admins, "A", "B", "D")
 	r.remove("A", "C", before...)
-	wantList(t, "admins", r.state(Final).Admins, "A", "B", "D")
+	wantList(t, "admins", r.state(final).Admins, "A", "B", "D")
 }
 
 // One key cannot revive a removed admin's promotion vote and then give the
@@ -544,7 +547,7 @@ func TestOneKeyCannotReviveAPromotionVoteAndSecondIt(t *testing.T) {
 	r.remove("B", "C", h0...)
 	r.remove("D", "C", append(h0, vc)...)
 	vd := r.admin("D", "E", append(h0, vc)...)
-	st := r.state(Final)
+	st := r.state(final)
 	wantReason(t, st, vc, ReasonAfterCut)
 	wantReason(t, st, vd, ReasonNeedsSecond)
 	wantList(t, "admins", st.Admins, "A", "B", "D")
@@ -568,10 +571,10 @@ func TestStolenKeyCanSecondAVoidedPromotionVoteAndThenJoinTheRemoval(t *testing.
 	vc := r.admin("C", "E", h0...)
 	r.remove("A", "C", h0...)
 	r.remove("B", "C", h0...)
-	wantReason(t, r.state(Final), vc, ReasonAfterCut)
+	wantReason(t, r.state(final), vc, ReasonAfterCut)
 	vd := r.admin("D", "E", append(h0, vc)...)
 	r.remove("D", "C", append(h0, vc, vd)...)
-	if !r.state(Final).admins["E"] {
+	if !r.state(final).admins["E"] {
 		t.Fatal("the limit no longer holds: update known gap 4 and atRest")
 	}
 	t.Skip("KNOWN GAP 4: one key can second a voided promotion vote and then revive it by joining the removal")
@@ -591,7 +594,7 @@ func TestExtraRemovalVoteCannotDropWhatARemoverSawTakeEffect(t *testing.T) {
 	r.remove("A", "C", append(h0, addE)...)
 	r.remove("B", "C", h0...)
 	r.remove("D", "C", h0...)
-	if !r.state(Final).members["E"] {
+	if !r.state(final).members["E"] {
 		t.Fatal("D's vote dropped an entry A had seen take effect")
 	}
 }
@@ -605,7 +608,7 @@ func TestSecondRemovalDoesNotReviveGrantVoidedByFirst(t *testing.T) {
 	bad := r.add("A", "X", h0...)
 	r.remove("B", "A", h0...)
 	r.remove("C", "A", h0...)
-	if r.state(Final).members["X"] {
+	if r.state(final).members["X"] {
 		t.Fatal("first removal should void A's addition of X")
 	}
 	r.add("B", "A", r.all()...)
@@ -614,7 +617,7 @@ func TestSecondRemovalDoesNotReviveGrantVoidedByFirst(t *testing.T) {
 	again := r.add("A", "Y", r.all()...)
 	r.remove("B", "A", r.all()...) // these removers have seen bad
 	r.remove("C", "A", r.all()...)
-	st := r.state(Final)
+	st := r.state(final)
 	if st.members["X"] {
 		t.Fatal("second removal revived a grant the first had voided")
 	}
@@ -633,11 +636,11 @@ func TestFirstThreeMachinesBecomeAdminsWithTwoAdminConfirmations(t *testing.T) {
 	r := newRoom(t, "A")
 	b := r.admin("A", "B")
 	c1 := r.admin("A", "C", r.all()...)
-	st := r.state(Final)
+	st := r.state(final)
 	wantApplied(t, st, b)
 	wantReason(t, st, c1, ReasonNeedsSecond)
 	c2 := r.admin("B", "C", r.all()...)
-	st = r.state(Final)
+	st = r.state(final)
 	wantApplied(t, st, c1)
 	wantApplied(t, st, c2)
 	wantList(t, "admins", st.Admins, "A", "B", "C")
@@ -661,17 +664,89 @@ func TestFirstThreeMachinesBecomeAdminsWithTwoAdminConfirmations(t *testing.T) {
 func TestAdmittedCanShrinkWhenMoreEntriesArrive(t *testing.T) {
 	r := newRoom(t, "A")
 	r.add("A", "B")
-	before := r.state(Final)
+	before := r.state(final)
 	wantList(t, "admitted", before.Admitted, "A", "B")
-	r.put(Entry{Author: "A", Seq: 2, Prev: r.root, Kind: Add, Target: "A", Parents: []string{r.root}})
-	wantList(t, "admitted", r.state(Final).Admitted, "A")
+	r.put(entry{Author: "A", Seq: 2, Prev: r.root, Kind: kAdd, Target: "A", Parents: []string{r.root}})
+	wantList(t, "admitted", r.state(final).Admitted, "A")
 
 	r = newRoom(t, "A")
 	h1 := []string{r.root, r.admin("A", "B")}
 	r.add("A", "C", h1...)
 	r.remove("A", "C", r.all()...)
 	addC := r.add("B", "C", h1...)
-	wantList(t, "admitted", r.state(Final).Admitted, "A", "B", "C")
+	wantList(t, "admitted", r.state(final).Admitted, "A", "B", "C")
 	r.remove("B", "C", append(h1, addC)...)
-	wantList(t, "admitted", r.state(Final).Admitted, "A", "B")
+	wantList(t, "admitted", r.state(final).Admitted, "A", "B")
+}
+
+// grant signs an add or admin grant carrying a history permission.
+func (r *room) grant(author string, kind entryKind, target string, history bool, from map[string][]string, parents ...string) string {
+	e := entry{Author: author, Kind: kind, Target: target, Seq: 1, History: history, From: from}
+	if p, ok := r.last[author]; ok {
+		e.Seq, e.Prev = p.Seq+1, p.ID
+		parents = append(parents, p.ID)
+	}
+	e.Parents = uniq(parents)
+	return r.put(e)
+}
+
+// A member's history permission comes from the effective grants of its
+// current membership period; the more restrictive applies. A and B add C
+// concurrently, A with history and B with a frontier: C gets B's frontier.
+// Promoting C later changes nothing. After C is removed and added back,
+// only the new grant counts.
+//
+// Requirements: RM2
+func TestPermissionComesFromCurrentGrantsAndTheMoreRestrictiveApplies(t *testing.T) {
+	r := newRoom(t, "A")
+	h := []string{r.root, r.admin("A", "B")}
+	gA := r.grant("A", kAdd, "C", true, nil, h...)
+	gB := r.grant("B", kAdd, "C", false, map[string][]string{"A": {"a1"}, "B": {"b1"}}, h...)
+	st := r.state(final)
+	p := st.Permissions["C"]
+	if p.All || p.Closed || !reflect.DeepEqual(p.From, map[string][]string{"A": {"a1"}, "B": {"b1"}}) || !reflect.DeepEqual(p.Grants, sortedKeys(map[string]bool{gA: true, gB: true})) {
+		t.Fatalf("got %+v", p)
+	}
+	if !st.Permissions["A"].All {
+		t.Fatalf("creator: %+v", st.Permissions["A"])
+	}
+	// Promotion of an existing member does not change it.
+	r.grant("A", kAdmin, "C", true, nil, r.all()...)
+	r.grant("B", kAdmin, "C", true, nil, r.all()...)
+	st = r.state(final)
+	if !st.admins["C"] || !reflect.DeepEqual(st.Permissions["C"], p) {
+		t.Fatalf("promotion changed the permission: %+v", st.Permissions["C"])
+	}
+	// A new membership period: only its grants count.
+	r.remove("A", "C", r.all()...)
+	r.remove("B", "C", r.all()...)
+	g3 := r.grant("A", kAdd, "C", true, nil, r.all()...)
+	st = r.state(final)
+	if p := st.Permissions["C"]; !p.All || !reflect.DeepEqual(p.Grants, []string{g3}) {
+		t.Fatalf("after re-admission: %+v", p)
+	}
+	// Two grants with history: all.
+	r2 := newRoom(t, "A")
+	h = []string{r2.root, r2.admin("A", "B")}
+	r2.grant("A", kAdd, "C", true, nil, h...)
+	r2.grant("B", kAdd, "C", true, nil, h...)
+	if p := r2.state(final).Permissions["C"]; !p.All {
+		t.Fatalf("two grants with history: %+v", p)
+	}
+}
+
+// A grant without effect contributes nothing: B, not an admin, adds C
+// without history after A added C with history. C keeps A's permission.
+//
+// Requirements: RM2
+func TestGrantWithoutEffectContributesNoPermission(t *testing.T) {
+	r := newRoom(t, "A")
+	r.add("A", "B")
+	g := r.grant("A", kAdd, "C", true, nil, r.all()...)
+	bad := r.grant("B", kAdd, "C", false, map[string][]string{"A": {"a1"}}, []string{r.root}...)
+	st := r.state(final)
+	wantReason(t, st, bad, ReasonNotAdmin)
+	if p := st.Permissions["C"]; !p.All || !reflect.DeepEqual(p.Grants, []string{g}) {
+		t.Fatalf("got %+v", p)
+	}
 }

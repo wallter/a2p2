@@ -1,8 +1,13 @@
 # Membership model: findings
 
 Written 2026-11-23 by the sub-agent that built this package (Claude Opus),
-saved by the project lead. The model is `resolve.go` (the pure function),
-`machine.go` (what one machine accepts) and the tests beside them.
+saved by the project lead. Built as `internal/model/members`; promoted to
+`internal/members` in step 2 (docs/DESIGN-next.md section 9). The rules are
+`resolve.go` (the pure function), `machine.go` (what one machine accepts),
+`adapter.go` (verified `core` entries in, with the signed-bytes id
+injected in place of the model hash) and the tests beside them. In the
+tests and below, `Resolve` and `ResolveRoom` mean the unexported model
+functions; the daemon calls `members.ResolveRoom(root, []*core.Entry)`.
 
 ## Rules as implemented
 
@@ -58,12 +63,39 @@ re-appointed admin could empty the room
     branch stands (`TestSettlingRemovalNamesOnlyAcceptedEntries`). A
     removal that names one branch of another open fork waits on machines
     holding that fork's other branch until it settles
-    (`TestSettlingRemovalThatNamesAnotherOpenForkWaitsForIt`). A machine
-    offers accepted entries in causal order, so replaying them into a fresh
-    machine holds nothing (`TestOfferReplaysIntoAFreshMachineWithNothingHeld`).
+    (`TestSettlingRemovalThatNamesAnotherOpenForkWaitsForIt`). Entries
+    released when a fork settles go through the same chain and position
+    checks as new ones, so a released entry reserves its position
+    (`TestEntriesReleasedBySettlementReserveTheirPositions`). An entry's
+    `prev` is checked against refused entries as well as accepted ones
+    (`TestPrevIsCheckedAgainstRefusedEntries`). Of several entries waiting,
+    the earliest arrival is decided first. `Receive` returns, in the order
+    they were decided, every entry it touched (those released from waiting
+    included) with its disposition (accepted, held, refused, invalid,
+    dropped) and reason, for the store to persist. A machine offers accepted
+    entries in causal order, so replaying them into a fresh machine holds
+    nothing (`TestOfferReplaysIntoAFreshMachineWithNothingHeld`), then held
+    and refused ones in arrival order, so a replay picks the same winner
+    between competing held entries
+    (`TestReplayOfHeldCompetingEntriesPicksTheSameWinner`). Bounds
+    (`TestHeldEntriesAndBranchesAreBounded`): at most 1,024 entries and
+    4 MiB of signed headers wait for missing parents, the oldest dropped
+    first (`dropped`, may be received again); at most 8 entries are kept
+    for one position, further ones dropped. Waiters are indexed by the
+    entry they wait for. Settlement needs every branch at a position, not
+    two: once settled, a machine accepts all of them, and machines that kept
+    different branches would otherwise disagree. So a key that signs more
+    than 8 entries at one position can make machines that saw different
+    first 8 disagree (Inferred; not searched).
 12. Fork evidence is a vote. Two different entries one key signed at one
     position, at least one while it was an admin, count as that key's vote
-    for its own removal as an admin, in the period the fork was signed. The
+    for its own removal as an admin, in the period the fork was signed.
+    Whether an entry has seen that evidence is a property of its own past:
+    does it hold two such entries at one position. It never depends on
+    which pair of a three-way fork is chosen, nor on id order
+    (`TestForkEvidenceSeenDoesNotDependOnIDOrder`; every exhaustive and
+    seeded history, and every sixteenth fork attack, is also resolved under
+    a second id function and compared up to renaming). The
     evidence is part of the set `Resolve` sees, so P1 is unaffected: no
     separate input. One other admin's removal vote then completes the
     removal; evidence alone removes nobody, and the forking key cannot
@@ -83,11 +115,54 @@ re-appointed admin could empty the room
     having seen neither, adds and removes C (B's removal beats A's
     concurrent add). A store must not drop a machine's records only
     because it left `Admitted`.
-14. No timers, and no entry kinds beyond create, add, remove and make admin.
+14. **History permission** (PROTOCOL section 3). `State.Permissions` gives
+    each member the ids of the effective grants of its current membership
+    period (adds, and admin grants that admitted it, that had seen every
+    removal of it that counts; a promotion of an existing member is not
+    one), and merges them: `All` if every one has `history`, otherwise the
+    union per author of the `from` heads of those without, the more
+    restrictive (`TestPermissionComesFromCurrentGrantsAndTheMoreRestrictiveApplies`,
+    `TestGrantWithoutEffectContributesNoPermission`). The caller decides
+    which records a head hides and fails closed on a head it does not
+    hold. `Closed` marks a member with no such grant (its admission had no
+    effect and it is a member through a later promotion): no history.
+15. No timers, and no entry kinds beyond create, add, remove and make admin.
+16. The package checks what it relies on. Signatures are verified when
+    entries enter (`NewMachine`, `Receive`, `ResolveRoom`); an entry signed
+    for another room than the pinned create's is refused (`it is signed for
+    another room`); an empty pin is an error
+    (`TestSignedIngressChecksRoomPinAndSignature`). Sequence numbers are
+    int64 throughout (`TestSequenceNumbersKeepSixtyFourBits`). Core's
+    `*core.Entry` can exist unverified (`ParseEntry`, `EntryFromParts`), so
+    the package verifies itself; a type core returns only after verifying,
+    for example `func (*Entry) Verified() (*VerifiedEntry, error)`, would let
+    the adapter take only that type and drop its own check.
+
+## Cost
+
+The resolver numbers entries once in causal order, keeps each entry's
+ancestors as a bitset, and computes the state of every entry's past once,
+keeping only what later rules read (members, admins, periods, which
+entries had effect). The rules are unchanged: the previous resolver is kept
+in `reference_test.go` as an oracle, and every exhaustive and seeded
+history, every sixteenth one-key attack and every fourth fork attack, and
+every scenario test's state, is compared with it, effects included.
+
+| Benchmark (Apple M5 Pro, `go test -bench`) | Before | After |
+|---|---|---|
+| Resolve a chain of 1,000 | 10.9 s, 6.7 GB | 16 ms, 24 MB |
+| Resolve a chain of 3,000 | not run (minutes) | 122 ms, 218 MB |
+| Receive one entry into a machine of 3,000 | 0.95 ms | 1.2 µs |
+
+The "before" receive figure was taken with a fresh 3,000-entry machine per
+iteration; the benchmark now extends one machine, so it is indicative.
+A full resolve is still quadratic in the log (every entry's past is
+resolved); `State()` pays it on each call, and `Receive` pays it only when
+an accepted or refused removal or promotion may settle an open fork.
 
 ## What holds
 
-Deep run (`A2P2_MODEL_DEEP=1`), passed in 28.4 minutes (attackers may also sign a second create):
+Deep run (`A2P2_MODEL_DEEP=1`), passed in 33.0 minutes with the reference and renaming checks of the Cost section (attackers may also sign a second create):
 
 | Search | Size | Holds |
 |---|---|---|
@@ -117,7 +192,7 @@ change the admin set on a machine holding the room, nor after another
 admin settles the fork, and every such set resolves the same in any order.
 P3 excludes changes still waiting for a second signature
 (gaps 3 and 4), and an unsettled fork, which counts as the forking key's
-signed vote. The package's ordinary run takes 11 s under the race
+signed vote. The package's ordinary run takes about 19 s under the race
 detector.
 
 ## What the search rejected
@@ -220,6 +295,7 @@ has the two-admin weaknesses above.
 | T9 | `TestOneKeyCannotChangeAdminSetOnceThereAreThreeAdmins`, `TestOneKeyCannotChangeAdminSetInLargerRooms`, `TestIdleStolenKeyBackdatingCannotChangeAdminSet`, `TestNoRankAnyTwoAdminsRemoveTheThirdNoneAlone`, `TestCreatorKeyIsRemovableByTwoOtherAdmins`, `TestMutualRemovalWithTwoThreeAndFourAdmins`, `TestOwnVoteOnOwnRemovalDoesNotCount`, `TestSeededRoomsKeepEveryProperty`, `TestOneKeyCannotChangeAdminSetByForkingItsOwnChain`, `TestForkEvidenceNeedsTwoEntriesByOneKeyAtOnePosition`, the fork tests |
 | T5 | `TestRemovedAdminsConcurrentRemovalOfCompromisedMachineStands`, `TestConcurrentAddAndRemoveOfSameMachineRemovalWins`, `TestCascadeFromVoidAdminVoidsItsGrantsKeepsItsRemovals`, `TestRemovedAdminKeepsSigningGrantsVoidRemovalsCountOncePerTarget`, `TestLateVoteOnCompletedRemovalDoesNotUndoReadmission` |
 | T10 | `TestAllAdminsLostFreezesMembershipNobodyPromoted`, `TestLossOfAnyOneAdminIsSurvivable`, `TestLostAdminOfThreeIsReplacedByTheOtherTwo`, `TestLostAdminOfTwoLeavesMembersManageableAdminSetFixed` |
-| A4 | `TestResolveGivesEveryEntryAReasonOnArbitraryInput` |
-| T3 | `TestFirstThreeMachinesBecomeAdminsWithTwoAdminConfirmations` |
-| D6 | `TestBackupRestoreForkIsSettledByRemovalOfTheForkingAdmin`, `TestForkInTwoAdminRoomIsSettledByTheOtherAdminAlone`, `TestForkSettledByOneRemoverKeepsTheBranchItHadSeen`, `TestForkByMemberWhoIsNotAnAdminChangesNothing`, `TestMachinesReceivingSameEntriesInAnyOrderAgree` |
+| A4 | `TestResolveGivesEveryEntryAReasonOnArbitraryInput`, `TestDaemonMachineRefusesEntriesWithoutASignedID`, `TestSignedIngressChecksRoomPinAndSignature`, `TestSequenceNumbersKeepSixtyFourBits`, `TestHeldEntriesAndBranchesAreBounded`, `TestPrevIsCheckedAgainstRefusedEntries` |
+| T3 | `TestFirstThreeMachinesBecomeAdminsWithTwoAdminConfirmations`, `TestSignedBootstrapMakesThreeAdmins` |
+| D6 | `TestBackupRestoreForkIsSettledByRemovalOfTheForkingAdmin`, `TestSignedForkInTwoAdminRoomIsSettledByTheOtherAdmin`, `TestForkInTwoAdminRoomIsSettledByTheOtherAdminAlone`, `TestForkSettledByOneRemoverKeepsTheBranchItHadSeen`, `TestForkByMemberWhoIsNotAnAdminChangesNothing`, `TestMachinesReceivingSameEntriesInAnyOrderAgree`, `TestForkEvidenceSeenDoesNotDependOnIDOrder`, `TestEntriesReleasedBySettlementReserveTheirPositions`, `TestReplayOfHeldCompetingEntriesPicksTheSameWinner` |
+| RM2 | `TestPermissionComesFromCurrentGrantsAndTheMoreRestrictiveApplies`, `TestGrantWithoutEffectContributesNoPermission`, `TestSignedBootstrapMakesThreeAdmins`, `TestPermissionHidesAtOrBeforeTheHeadAndFailsClosed` |

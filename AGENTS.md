@@ -41,8 +41,10 @@ internal/mcpshim  stdio MCP server; stateless, one local API call per tool
 internal/harness  install / uninstall / hook output / doctor per harness
 internal/web      loopback UI
 internal/daemon   assembles the above; finds or starts the daemon
-internal/model    executable models of the NEXT version's rules (members, delivery);
-                  not used by the daemon yet. Each has a FINDINGS.md
+internal/members  who is a member and an admin of a room, from signed log entries
+                  (pure; next version, not used by the daemon yet); FINDINGS.md
+internal/model    executable model of the next version's delivery rules: the oracle
+                  the real code is compared against; never imported by the daemon
 ```
 
 Dependencies point one way: `core` ← `store` ← `node` ← everything else.
@@ -102,6 +104,8 @@ Things that are easy to get wrong:
   that prove it. `make trace` checks it; update the row in the same change
   that adds a requirement or the test for one.
 - `docs/DESIGN.md` — what a2p2 is today (v0.2), guarantees, trust model, surfaces.
+- `docs/DESIGN-next.md`, `docs/PROTOCOL-next.md` — the next version, being
+  built in the steps of DESIGN-next section 9; rules there cite the models.
 - `docs/DECISIONS.md` — append-only decision log with reasons.
 - `docs/TESTING.md` — test layers, fault matrix, acceptance criteria.
 - `docs/research/` — the original brief, audits of prior art, harness facts,

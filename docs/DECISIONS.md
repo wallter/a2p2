@@ -258,3 +258,20 @@ faults that would have been frozen (leading whitespace refused; an explicitly
 empty text field mishandled); both are fixed with vectors
 (`research/decisions/core-formats-review-sol.md`).
 
+## D28. The membership model is the membership code (2026-11-24)
+
+Build step 2. `internal/model/members` moved to `internal/members` and is
+what the daemon will call: the exhaustive searches run on the code that
+ships, not on a copy. The id function is injected (a model hash in the
+searches, the signed-bytes id in the daemon), and the searches now also run
+every history under a second id function, because a review found a result
+that depended on how ids sort. A full resolve of 3,000 entries went from
+minutes to about 0.1 s by numbering entries and keeping what each had seen
+as bit sets; the old resolver is kept as a test-only reference and agrees on
+every history compared. Limits chosen: 1,024 held entries or 4 MiB per room,
+8 entries kept per (key, position). Review:
+`research/decisions/members-package-review-sol.md`.
+
+Still to do in `internal/core`: a type that exists only after signature
+verification, so that `members` cannot be handed an unverified entry.
+

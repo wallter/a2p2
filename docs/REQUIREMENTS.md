@@ -1,7 +1,8 @@
 # Requirements
 
 **Status: draft 0.4, 2026-11-23.** Draft 0.4 applies what the executable
-models in `internal/model` showed (their `FINDINGS.md` files), mainly to
+models showed (`internal/members/FINDINGS.md` and
+`internal/model/delivery/FINDINGS.md`), mainly to
 D3 to D5, D7, T3, T9 and section 6. Section 10 lists what the owner decided
 and what is still open. Written by the project lead (Claude Code) from the owner's
 statements, five research reports, a design panel and a deliberation on the

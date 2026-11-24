@@ -6,7 +6,7 @@ Revised after `docs/research/decisions/design-next-review-sol.md` and
 (v0.2). This file gives the rules of stage 1 of `docs/REQUIREMENTS.md`
 section 9 and why; `docs/PROTOCOL-next.md` gives the exact formats.
 
-Notation: **[M4]** is rule 4 in `internal/model/members/FINDINGS.md`;
+Notation: **[M4]** is rule 4 in `internal/members/FINDINGS.md`;
 **[R7]** is rule 7 and **[RM2]** is membership rule R2 in
 `internal/model/delivery/FINDINGS.md`. Requirements are cited by id.
 **Not modelled** marks a choice no model test covers; reviewers should
@@ -302,7 +302,7 @@ summaries, including a round that cannot progress.
 | Package | Change |
 |---|---|
 | `internal/core` | Records, entries, encoding, signing, limits; the envelope goes in step 3 |
-| `internal/members` | **Added**: `internal/model/members` moved with its tests, behind an adapter |
+| `internal/members` | **Added** (step 2, done): the membership model moved here with its tests, behind an adapter |
 | `internal/model/delivery` | Stays as the oracle; not imported by the daemon |
 | `internal/store` | Migration 2; each method one transaction |
 | `internal/node` | Send, pull, offers, inbox, Seen, amendments, pruning, scheduler, invites, requests; outbox and owner refresh go |
