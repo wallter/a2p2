@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -115,9 +116,13 @@ func writeKeepingMode(path string, b []byte) error {
 		tmp.Close()
 		return err
 	}
-	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return err
+	// Windows has no permission bits to keep (File.Chmod fails there); the
+	// new file takes its directory's access control list.
+	if runtime.GOOS != "windows" {
+		if err := tmp.Chmod(mode); err != nil {
+			tmp.Close()
+			return err
+		}
 	}
 	if err := tmp.Close(); err != nil {
 		return err

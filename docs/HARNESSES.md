@@ -273,6 +273,32 @@ Conclusions drawn from this, and kept:
 - A mailbox is one per harness and project directory (D18); hooks and MCP
   servers are not matched by process tree.
 
+## Windows: from documentation, not run
+
+Collected on 2026-11-24 from each harness's official documentation (the
+pages below); no harness has been run on Windows with a2p2, and no
+harness version is recorded because none was run. `%USERPROFILE%` is
+what Go's `os.UserHomeDir` returns there, so a2p2 looks in the same
+places under it as under `~` elsewhere, except for Hermes.
+
+| Harness | Configuration a2p2 edits on Windows | Hook shell on Windows | What `a2p2 install` does there |
+|---|---|---|---|
+| Claude Code | `%USERPROFILE%\.claude\settings.json`; MCP through `claude mcp add` (code.claude.com/docs/en/settings) | Git Bash if installed, otherwise PowerShell; a hook may name its shell (code.claude.com/docs/en/hooks) | Installs; the hook names the binary with forward slashes as one plain word |
+| Codex CLI | `CODEX_HOME`, default `%USERPROFILE%\.codex` (`config.toml`, `hooks.json`) (learn.chatgpt.com/docs/config-file/config-advanced) | Not documented | Installs, as for Claude Code |
+| Antigravity CLI | Not documented for Windows | Not documented | Refuses, saying so |
+| OpenCode | `%USERPROFILE%\.config\opencode\opencode.json` (the documented `~/.config/opencode`), or under `XDG_CONFIG_HOME` (opencode.ai/docs/config) | No shell: the MCP command is a list | Installs; the path is kept as it is |
+| Hermes Agent | `HERMES_HOME`, default `%LOCALAPPDATA%\hermes` with the Windows installer (hermes-agent.nousresearch.com/docs/getting-started/installation) | No shell: command and arguments | Installs to `config.yaml` there; the path is kept as it is |
+| Pi | `PI_CODING_AGENT_DIR`, default `%USERPROFILE%\.pi\agent` (pi-mono `packages/coding-agent/docs/configuration.md`) | The skill tells the model to use bash; Pi's shell on Windows is not documented | Installs; the skill names the binary as for Claude Code |
+
+Where a hook or the skill names the binary, a shell runs it, and the three
+a hook could meet on Windows (cmd, PowerShell, bash) quote differently. A
+path of letters, digits and `/ . _ - :` is one word as it is in all of
+them, so that is the only form written; any other path is refused with a
+sentence saying where to copy `a2p2.exe` (D-windows). The inferences here
+(`%USERPROFILE%` for `~`, and the Codex and Pi defaults) are from
+documentation that does not name Windows; the first dispatched run on
+Windows, and a real session there, are what would confirm them.
+
 ## Local models: OpenCode, Hermes Agent and Pi
 
 Checked on 2026-11-24, macOS arm64, Ollama 0.40.11 on 127.0.0.1:11434, a

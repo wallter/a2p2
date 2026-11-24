@@ -8,6 +8,17 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- **Windows support, built but not yet run there.** The daemon and the CLI
+  no longer refuse to start on Windows 10 (1803 or later) and 11. The
+  home is created for your user only and refused if others can open it,
+  and every local API call carries a key the daemon writes into the home
+  at each start (D-windows). Releases include `a2p2_windows_amd64.exe`
+  and `a2p2_windows_arm64.exe`. On Windows, `a2p2 install` refuses a
+  binary path with spaces for the harnesses whose hooks run it in a
+  shell, and refuses `agy`. Nothing changes on macOS or Linux.
+
 ## [0.1.0] - 2026-11-24
 
 The first release, a preview: read the limits and the status in the

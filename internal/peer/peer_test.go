@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -288,6 +289,12 @@ func TestLoadIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "identity.key")
+	if runtime.GOOS == "windows" {
+		if b, err := LoadIdentity(dir); err != nil || b.NodeID() != a.NodeID() {
+			t.Fatalf("reload: %v %v", b, err)
+		}
+		t.Skip("Windows has no file modes; the home's access control list guards the key (internal/daemon)")
+	}
 	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
 		t.Fatalf("key file mode: %v %v", st.Mode(), err)
 	}

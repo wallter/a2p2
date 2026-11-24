@@ -30,6 +30,15 @@ stateless MCP shim, CLI and socket offer the same operations (A1).
 Peer text is data (T8). The system provides hooks, a loopback UI and the
 `local` room. Logs omit message bodies.
 
+On Windows (D-windows) the boundary is the same rule by other means. The
+home is created with an access control list that lets only the user in,
+and an existing home that lets anyone else in, or that someone else owns,
+is refused. The socket file inherits that list. At each start the daemon
+also writes a new random key to `local.key` in the home and refuses every
+local API request without it in the `A2P2-Local-Key` header, so only a
+process that can read the home can call the daemon. On macOS and Linux no
+key is written or asked for.
+
 ## 2. Records
 
 A record has a signed header and an optional body [R1]. The four kinds

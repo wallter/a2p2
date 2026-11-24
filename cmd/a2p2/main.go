@@ -14,9 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -301,11 +299,7 @@ func run(ctx context.Context, name string, args []string) (err error) {
 			return err
 		}
 		fmt.Println(st.UI)
-		if runtime.GOOS == "darwin" {
-			_ = exec.Command("open", st.UI).Start()
-		} else {
-			_ = exec.Command("xdg-open", st.UI).Start()
-		}
+		openURL(st.UI) // tty_unix.go, tty_windows.go
 		return nil
 	case "trace":
 		if len(rest) != 1 {

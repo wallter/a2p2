@@ -828,6 +828,12 @@ Responses are JSON with `<`, `>` and `&` written as they are, not
 escaped. CLI `--json` prints the response unchanged; otherwise the CLI
 prints the sentence.
 
+On Windows every call carries the header `A2P2-Local-Key` with the
+contents of `local.key` in the home (48 hex characters, new at each
+daemon start, removed at stop). A call without it, or with another value,
+gets 401 with code `not_allowed` before any handler runs. On macOS and
+Linux the daemon writes no key and ignores the header (D-windows).
+
 | Call | Request | Response |
 |---|---|---|
 | `send` (changed) | `{"agent","room","text","to"?,"reply_to"?,"ask_handled"?,"replaces"?,"choices"?,"thread"?}`; `"human"` in `to` is the person at this machine; `thread: true` with `reply_to` and no `to` addresses the parent's author and every agent of a current member that has posted in the parent's thread as held here, without the sender, at most 32 (the parent's author always kept, then newest post first); the surface writes that list as `to`, so on the wire it is an ordinary addressed reply. Without `thread`, a reply with no `to` goes to the parent's author | `{"id","room","room_label","created","to"?,"to_omitted"?}`; `to` is the addressees as written, omitted for everyone and for `replaces`; `to_omitted` counts thread participants the limit left out |

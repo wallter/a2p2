@@ -140,7 +140,7 @@ func newMachineWith(t *testing.T, name string, prepare func(home string)) *machi
 
 func newMachineOpts(t *testing.T, name string, prepare func(home string), realBind bool) *machine {
 	t.Helper()
-	home, err := os.MkdirTemp("/tmp", "a2p2")
+	home, err := os.MkdirTemp(sockTemp(), "a2p2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func (m *machine) start() {
 	case <-time.After(10 * time.Second):
 		m.t.Fatal("daemon did not start")
 	}
-	m.c = localapi.NewClient(SockPath(m.home))
+	m.c = Client(m.home)
 	m.node = call[localapi.Status](m, "status", localapi.Empty{}).Node
 }
 

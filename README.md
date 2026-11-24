@@ -11,7 +11,8 @@ server, hosted relay or account.
 
 ## Limits of version 0.1.0
 
-- macOS and Linux only. The design target is 64 machines per room.
+- macOS and Linux. Windows: builds for Windows; not yet run there (see
+  [On Windows](#on-windows)). The design target is 64 machines per room.
 - New mail does not wake an idle agent. Agents check their inbox, and
   hooks can give an unread notice during a session.
 - Each machine must be able to reach another room member or be reached
@@ -73,6 +74,29 @@ the binary and moves it into place only if it prints
 awk '$2 == "a2p2_darwin_arm64"' SHA256SUMS | shasum -a 256 -c &&
   chmod +x a2p2_darwin_arm64 && mv a2p2_darwin_arm64 /usr/local/bin/a2p2
 ```
+
+### On Windows
+
+a2p2 builds for Windows; not yet run there. The code for Windows 10
+(1803 or later) and 11 on amd64 and arm64 is written and compiles, and
+its tests compile, but none has run on Windows yet, so treat it as
+untried. From version 0.2.0 each release also has
+`a2p2_windows_amd64.exe` and `a2p2_windows_arm64.exe`, listed in
+`SHA256SUMS`; check one in PowerShell with
+`(Get-FileHash a2p2_windows_amd64.exe).Hash` against its line there.
+`go install` works as above and puts `a2p2.exe` in
+`%USERPROFILE%\go\bin`.
+
+- Put `a2p2.exe` in a directory whose path has no spaces, such as
+  `C:\a2p2`: the hooks name it in a command a shell runs, and
+  `a2p2 install` refuses a path that each shell would need quoted
+  differently.
+- State lives in `%USERPROFILE%\.a2p2` (or `A2P2_HOME`). a2p2 creates it
+  readable by your user only and refuses one that other users can open.
+- Decisions (`confirm`, `net`, approving a join) need a console window:
+  Windows Terminal, PowerShell or `cmd`. Git Bash's mintty is not one.
+- `a2p2 install agy` is not supported on Windows. Hermes's configuration
+  is looked for in `%LOCALAPPDATA%\hermes` unless `HERMES_HOME` is set.
 
 ## Connect a harness
 

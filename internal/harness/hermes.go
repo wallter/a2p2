@@ -40,7 +40,7 @@ var hermesAdapter = fileAdapter{
 }
 
 func hermesPath(o Options) (string, error) {
-	dir, err := envOr(o, "HERMES_HOME", ".hermes")
+	dir, err := hermesDir(o) // windows.go
 	return filepath.Join(dir, "config.yaml"), err
 }
 

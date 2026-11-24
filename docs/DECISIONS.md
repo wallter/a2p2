@@ -984,3 +984,88 @@ Cost: a broken `main` is caught by the next local run or the next pull
 request, not by a push. Accepted: one maintainer, and the release gate is
 strict. Revisit if outside contributions become frequent.
 
+## D47. a2p2 runs on Windows: the home's access list and a local key (2026-11-24)
+
+Windows 10 1803 and later, and Windows 11, on amd64 and arm64, without a
+change on macOS or Linux. Until then the daemon and CLI refused to run
+there (D36). The one hard part was the local trust boundary: on Unix it
+is the socket's mode and a home directory that only its owner can open,
+and on Windows a file's mode means nothing (Go reports 0666 or 0777 and
+`chmod` only sets the read-only attribute).
+
+Choice: keep the AF_UNIX socket in the home, guard the home with an
+access control list, and add a per-start local key. Not a named pipe.
+
+- **The home.** a2p2 creates it with a protected access control list
+  (`O:<user>D:P(A;OICI;FA;;;<user>)`: nothing inherited from the parent,
+  full control for the user only, passed on to everything created
+  inside). An existing home is refused if it is owned by someone else or
+  if any entry allows in anyone but the user, SYSTEM or Administrators
+  (the last two can take any file on the machine, as root can on Unix,
+  so allowing them takes nothing away). This is the Windows form of the
+  0700 and owner checks, and is tested on every system from the
+  descriptor's text (`internal/daemon/acl.go`).
+- **The socket.** Microsoft's AF_UNIX announcement says that "for
+  connecting to a stream socket, the connecting process should have write
+  permission on the socket", and that the socket file is an NTFS reparse
+  point created by `bind`
+  (devblogs.microsoft.com/commandline/af_unix-comes-to-windows, 2017).
+  The file is created in the home and inherits its list, so another user
+  has no write permission on it. That is documentation, not something
+  tested here: no test has a second Windows user try to connect.
+- **The local key, so that safety does not rest on that one sentence.**
+  At each start the daemon writes 24 random bytes in hex to
+  `local.key` in the home (which inherits the same list) and refuses,
+  with `not_allowed` and before any handler runs, every local API request
+  whose `A2P2-Local-Key` header does not match. Every client in a2p2 (the
+  CLI, the MCP shim, the hooks) reads the file at each call. The key is
+  new at every start and removed at stop, like the page's token. A
+  process that can read the home can call the daemon, which is the same
+  rule as on Unix; one that cannot is refused even if it can connect.
+- **Not a named pipe.** A pipe with a security descriptor for the user is
+  the usual Windows answer, but doing it well means overlapped I/O, which
+  in practice means `golang.org/x/sys/windows` or `go-winio` as a direct
+  dependency (I4) or a few hundred lines of raw calls, and a second
+  transport in `localapi` and every client. The socket and the key reuse
+  what exists and add about a hundred lines.
+- **macOS and Linux.** Nothing changes there: `localKeyRequired` is false,
+  no key is written, and the socket's mode and the home's 0700 and owner
+  checks are as before. The key code runs on every system in the tests
+  through a test-only option.
+- **The rest.** The lock is `LockFileEx` on the first byte of `lock`. The
+  background daemon starts with `DETACHED_PROCESS` and
+  `CREATE_NEW_PROCESS_GROUP` (no console window, and Ctrl-C in the
+  caller's console does not reach it), asking to leave the caller's job
+  and starting inside it when the job does not allow that. Decisions
+  (`confirm`, `net`, approving a join) need a console: `GetConsoleMode` on
+  stdin, so mintty and pipes are not one. Ctrl-C in a foreground daemon
+  is `os.Interrupt`, and closing its console is `SIGTERM` in Go; `stop`
+  goes through the local API as before. A socket path of 108 bytes or
+  more is refused with a sentence naming `A2P2_HOME`. `a2p2 ui` opens the
+  page with `rundll32 url.dll,FileProtocolHandler`, which passes the URL
+  with its `#token` unchanged. All of this uses the standard `syscall`
+  package and lazy calls into kernel32 and advapi32: no new dependency.
+- **Installers.** A hook (Claude Code, Codex) and Pi's skill name the
+  binary inside a command that a shell runs, and on Windows that shell
+  differs (Claude Code: Git Bash, or PowerShell without it; Codex: not
+  documented) and each quotes differently. So on Windows the path is
+  written with forward slashes and only if it is one plain word in all of
+  them (letters, digits and `/ . _ - :`); any other path is refused with
+  a sentence saying where to copy the binary, rather than quoted for a
+  guess. OpenCode and Hermes take the command as a list, so their paths
+  are kept as they are. Hermes's home defaults to `%LOCALAPPDATA%\hermes`
+  on Windows, where its Windows installer puts it. `a2p2 install agy`
+  says it is not supported on Windows: the Antigravity CLI's locations
+  and hook shell there are not documented.
+
+Verified on this change: the build, `go vet` (test files included) and
+the compilation of every test binary for windows/amd64 and windows/arm64,
+and every test on macOS. Not verified: any run on Windows. A
+dispatch-only CI job runs `go build`, `go vet` and `go test` on
+`windows-latest`; until it has passed, the README says a2p2 builds for
+Windows and has not yet run there.
+
+**Revisit if** the dispatched run shows that the socket file does not
+inherit the home's list, or if a harness documents its Windows hook
+shell, which would let paths with spaces be quoted for it.
+

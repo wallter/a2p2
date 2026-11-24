@@ -18,9 +18,11 @@ fmt:              ## fail if any file is not gofmt-clean
 vet:
 	$(GO) vet ./...
 
-windows:          ## a2p2 does not run on Windows yet, but it must build and vet there
+windows:          ## build and vet (test files included) for Windows on amd64 and arm64; running there is the dispatch-only CI job
 	GOOS=windows GOARCH=amd64 $(GO) build ./...
 	GOOS=windows GOARCH=amd64 $(GO) vet ./...
+	GOOS=windows GOARCH=arm64 $(GO) build ./...
+	GOOS=windows GOARCH=arm64 $(GO) vet ./...
 
 licences:         ## requirement I4: only allow-listed direct dependencies; prints their licence files
 	scripts/licences.sh
@@ -69,11 +71,11 @@ e2e-local: build  ## OpenCode, Hermes, Pi on local Ollama models: make e2e-local
 review:           ## independent review of uncommitted changes: make review WHO=sol
 	scripts/review.sh $${WHO:-sol}
 
-release:          ## static binaries a2p2_<os>_<arch> and SHA256SUMS in dist/ (VERSION=v1.2.3 to name it)
-	@rm -rf dist && mkdir dist && for t in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64; do \
-	  os=$${t%/*}; arch=$${t#*/}; \
+release:          ## static binaries a2p2_<os>_<arch> (.exe on Windows) and SHA256SUMS in dist/ (VERSION=v1.2.3 to name it)
+	@rm -rf dist && mkdir dist && for t in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/arm64 windows/amd64; do \
+	  os=$${t%/*}; arch=$${t#*/}; ext=""; [ "$$os" = windows ] && ext=.exe; \
 	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags '$(LDFLAGS)' \
-	    -o dist/a2p2_$${os}_$$arch ./cmd/a2p2 || exit 1; done; \
+	    -o dist/a2p2_$${os}_$$arch$$ext ./cmd/a2p2 || exit 1; done; \
 	cd dist && if command -v sha256sum >/dev/null; then sha256sum a2p2_*; else shasum -a 256 a2p2_*; fi > SHA256SUMS
 
 # The same tests on Linux, in a container, without leaving this machine:
