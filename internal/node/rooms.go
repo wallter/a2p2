@@ -613,6 +613,7 @@ func (r *Rooms) ingestWith(ctx context.Context, rl *roomLog, gen int64, wires []
 		}
 		if err == nil {
 			err = hookAt("ingest:apply")
+			b.Now = r.m.now() // the moment of the write: an approval is checked against its invite's expiry then
 		}
 		var n int64
 		switch {

@@ -300,6 +300,9 @@ func Serve(ctx context.Context, ln net.Listener, id *Identity, h Handler, refres
 	mux.Handle("POST "+pathRoom, route(maxSmallBody, func(ctx context.Context, from string, req node.RoomReq) (any, error) {
 		return h.HandleRoom(ctx, from, req)
 	}))
+	if j, ok := h.(JoinHandler); ok {
+		mux.Handle("POST "+pathJoinV2, joinV2Route(j))
+	}
 	protos := new(http.Protocols)
 	protos.SetHTTP1(true) // HTTP/1.1 only: one request per connection at a time, small surface
 	srv := &http.Server{
@@ -526,6 +529,9 @@ func (l *limiter) allow(key string) bool {
 		if len(l.m) >= rateMaxKeys {
 			l.evict(now)
 		}
+		if len(l.m) >= rateMaxKeys {
+			return false // full of live keys: refuse the newest rather than drop one
+		}
 		b = &bucket{tokens: rateBurst, last: now}
 		l.m[key] = b
 	}
@@ -538,18 +544,12 @@ func (l *limiter) allow(key string) bool {
 	return true
 }
 
-// evict keeps the map bounded: first drop buckets that have refilled (they
-// carry no state), and if none have, drop an arbitrary one.
+// evict drops buckets that have refilled: they carry no state. Live
+// buckets are never dropped, so rotating keys cannot reset another's limit.
 func (l *limiter) evict(now time.Time) {
 	for k, b := range l.m {
 		if b.tokens+now.Sub(b.last).Seconds()*ratePerSec >= rateBurst {
 			delete(l.m, k)
 		}
-	}
-	for k := range l.m {
-		if len(l.m) < rateMaxKeys {
-			break
-		}
-		delete(l.m, k)
 	}
 }

@@ -121,6 +121,9 @@ type Request struct {
 	DecidedAt time.Time
 	Entries   string // the entry signed on approval
 	Reason    string // why it failed
+	// Admins is the number of admins the room had when a request that
+	// makes an admin was raised here (0: not recorded).
+	Admins int
 }
 
 // LogRoom is a room as the log path sees it.
@@ -312,6 +315,9 @@ func applyLog(tx *sql.Tx, b LogBatch) (int64, error) {
 			}
 		}
 		if b.Complete != "" {
+			if err := inviteDeadline(tx, b.Complete, b.Now); err != nil {
+				return err
+			}
 			res, err := tx.Exec(`UPDATE requests SET state = ?, decided_at = ?, entries = ?, reason = ''
 				WHERE id = ? AND room = ? AND state = ?`, RequestApproved, ms(b.Now), b.Entries, b.Complete, b.Room, RequestPending)
 			if err != nil {
@@ -615,19 +621,19 @@ func (s *Store) CreateRequest(ctx context.Context, q Request) error {
 }
 
 func insertRequest(tx *sql.Tx, q Request) error {
-	_, err := tx.Exec(`INSERT INTO requests (id, kind, action, room, node, name, role, history, seconds, created_at, state)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)`, q.ID, q.Kind, q.Action, q.Room, q.Node, q.Name, q.Role, q.History, q.Seconds,
-		ms(q.Created), RequestPending)
+	_, err := tx.Exec(`INSERT INTO requests (id, kind, action, room, node, name, role, history, seconds, created_at, state, admins)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, q.ID, q.Kind, q.Action, q.Room, q.Node, q.Name, q.Role, q.History, q.Seconds,
+		ms(q.Created), RequestPending, q.Admins)
 	return err
 }
 
-const requestCols = `id, kind, action, room, node, name, role, history, seconds, created_at, state, decided_at, entries, reason`
+const requestCols = `id, kind, action, room, node, name, role, history, seconds, created_at, state, decided_at, entries, reason, admins`
 
 func scanRequest(sc interface{ Scan(...any) error }) (Request, error) {
 	var q Request
 	var created, decided int64
 	if err := sc.Scan(&q.ID, &q.Kind, &q.Action, &q.Room, &q.Node, &q.Name, &q.Role, &q.History, &q.Seconds,
-		&created, &q.State, &decided, &q.Entries, &q.Reason); err != nil {
+		&created, &q.State, &decided, &q.Entries, &q.Reason, &q.Admins); err != nil {
 		return Request{}, err
 	}
 	q.Created = fromMS(created)
@@ -708,6 +714,8 @@ func (s *Store) LeaveRoom(ctx context.Context, room string, now time.Time) (int6
 			`DELETE FROM log WHERE room = ?`, `DELETE FROM room_members WHERE room = ?`,
 			`DELETE FROM requests WHERE room = ?`,
 			`DELETE FROM observed WHERE room = ?`, `DELETE FROM refusals WHERE room = ?`,
+			`DELETE FROM room_invites WHERE room = ?`,
+			`UPDATE joins SET state = 'left', reason = 'the room was left here' WHERE room = ? AND state = 'accepted'`,
 		} {
 			if _, err := tx.Exec(q, room); err != nil {
 				return err

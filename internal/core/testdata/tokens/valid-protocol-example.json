@@ -1,0 +1,11 @@
+{
+  "note": "valid-protocol-example",
+  "token": "a2p2:KSWT-54VG-HARN-HH1N-C9M1-BVJJ-RG88-Z3MN-VR9J-9VFZ-RQP1-ADMA-BM38@203.0.113.7:7443,[2001:db8::7]:7443",
+  "secret": "9e79a293708ab158c435626815ee52c4",
+  "fingerprint": "423e3a57784c93b7ff17b054da29741a",
+  "addrs": [
+    "203.0.113.7:7443",
+    "[2001:db8::7]:7443"
+  ],
+  "canonical": "a2p2:KSWT-54VG-HARN-HH1N-C9M1-BVJJ-RG88-Z3MN-VR9J-9VFZ-RQP1-ADMA-BM38@203.0.113.7:7443,[2001:db8::7]:7443"
+}

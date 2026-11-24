@@ -8,6 +8,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strconv"
 	"time"
@@ -94,8 +95,24 @@ func (r *Rooms) Info(ctx context.Context, room string) (RoomInfo, error) {
 	if err != nil {
 		return RoomInfo{}, err
 	}
-	info.Requests, err = r.m.st.Requests(ctx, room, store.RequestPending)
-	return info, err
+	qs, err := r.m.st.Requests(ctx, room, store.RequestPending)
+	if err != nil {
+		return RoomInfo{}, err
+	}
+	// A request whose invite has expired can no longer be approved: it is
+	// not shown, although only Requests or Confirm record the expiry.
+	now := r.m.now()
+	for _, q := range qs {
+		inv, err := r.m.st.InviteByRequest(ctx, q.ID)
+		switch {
+		case err == nil && !now.Before(inv.Expires):
+			continue
+		case err != nil && !errors.Is(err, store.ErrNotFound):
+			return RoomInfo{}, err
+		}
+		info.Requests = append(info.Requests, q)
+	}
+	return info, nil
 }
 
 // List returns Info for every room with a log, ordered by id.
@@ -191,6 +208,16 @@ func requestText(q store.Request) string {
 	s := verb + " machine " + short(q.Node)
 	if q.Name != "" {
 		s += " (" + q.Name + ")"
+	}
+	switch {
+	case q.Action == ActionRejoin:
+		s = "let machine " + short(q.Node) + " (" + q.Name + ") fetch the room's log again: already a member, " +
+			"approval returns the log and changes nothing"
+	case q.Kind == string(core.EntryAdd) && q.Action == ActionAdmitAdmin:
+		s += " and make it an admin"
+	}
+	if q.Kind != string(core.EntryRemove) && q.Action != ActionPromote && q.Action != ActionRejoin {
+		s += map[bool]string{true: ", with earlier history", false: ", without earlier history"}[q.History]
 	}
 	if q.Seconds != "" {
 		s += ", seconding another admin's entry"
