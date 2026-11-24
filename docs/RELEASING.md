@@ -37,7 +37,7 @@ Most testing is local, on purpose: it keeps the hosted CI small.
 | Gate | Where | What |
 |---|---|---|
 | `make check` | locally, before every push | fmt, vet, the Windows build gate, licences, the requirement register, the recipes check, the race tests, the launcher's tests |
-| `make prerelease` | locally, before every tag | `make check`, `make lint`, `make vuln`, the same tests on Linux in a container (`make check-linux`), and a short `make chaos` run (real daemons killed and partitioned in containers) |
+| `make prerelease` | locally, before every tag | `make check`, `make lint`, `make vuln`, the same tests on Linux in a container (`make check-linux`), and one `make chaos` run at its default length (real daemons killed and partitioned in containers; a shorter run is reported inconclusive) |
 | `make e2e-local`, `make e2e HARNESS=...` | locally, by hand, before a minor release | real harnesses; these spend model tokens or need local models |
 | CI on GitHub | pull requests that touch code, and on request | one Linux job: `make check` and `make lint` |
 | Release workflow on GitHub | a pushed `v*` tag | `make check`, `make lint`, `make vuln`, the changelog section exists, build, publish |

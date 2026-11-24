@@ -73,12 +73,12 @@ check-linux:      ## go vet and the race tests on Linux in a container (needs Do
 	docker run --rm -v "$(CURDIR)":/src:ro -v a2p2-gomod:/go/pkg/mod -v a2p2-gocache:/root/.cache/go-build \
 	  -w /work $(GO_IMAGE) sh -c 'cp -a /src/. /work/ && rm -rf /work/bin /work/dist /work/.chaos /work/.a2p2-dev /work/.claude && go vet ./... && go test -race -count=1 ./...'
 
-prerelease:       ## the local gate before a tag: check, lint, vuln, Linux in a container, a short chaos run
+prerelease:       ## the local gate before a tag: check, lint, vuln, Linux in a container, one chaos run (its default length: shorter runs are inconclusive)
 	$(MAKE) check
 	$(MAKE) lint
 	$(MAKE) vuln
 	$(MAKE) check-linux
-	$(MAKE) chaos DURATION=$${DURATION:-60}
+	$(MAKE) chaos
 
 clean:
 	rm -rf bin dist
