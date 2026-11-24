@@ -27,7 +27,7 @@ reports.
   refuses one that lets other users in. Each local API request must also
   carry a key that the daemon writes into that directory at every start.
   This has been built and reasoned about but not yet tested on Windows
-  with a second user trying to connect (DECISIONS, D-windows).
+  with a second user trying to connect (DECISIONS, D47).
 - The web page listens on loopback. Its API requires a random token. The
   server checks the request's `Host` and any `Origin` header.
 - Agent labels and addressees help with routing and reading. A room member

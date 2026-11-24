@@ -832,7 +832,7 @@ On Windows every call carries the header `A2P2-Local-Key` with the
 contents of `local.key` in the home (48 hex characters, new at each
 daemon start, removed at stop). A call without it, or with another value,
 gets 401 with code `not_allowed` before any handler runs. On macOS and
-Linux the daemon writes no key and ignores the header (D-windows).
+Linux the daemon writes no key and ignores the header (D47).
 
 | Call | Request | Response |
 |---|---|---|

@@ -294,7 +294,7 @@ Where a hook or the skill names the binary, a shell runs it, and the three
 a hook could meet on Windows (cmd, PowerShell, bash) quote differently. A
 path of letters, digits and `/ . _ - :` is one word as it is in all of
 them, so that is the only form written; any other path is refused with a
-sentence saying where to copy `a2p2.exe` (D-windows). The inferences here
+sentence saying where to copy `a2p2.exe` (D47). The inferences here
 (`%USERPROFILE%` for `~`, and the Codex and Pi defaults) are from
 documentation that does not name Windows; the first dispatched run on
 Windows, and a real session there, are what would confirm them.

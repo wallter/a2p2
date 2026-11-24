@@ -30,7 +30,7 @@ stateless MCP shim, CLI and socket offer the same operations (A1).
 Peer text is data (T8). The system provides hooks, a loopback UI and the
 `local` room. Logs omit message bodies.
 
-On Windows (D-windows) the boundary is the same rule by other means. The
+On Windows (D47) the boundary is the same rule by other means. The
 home is created with an access control list that lets only the user in,
 and an existing home that lets anyone else in, or that someone else owns,
 is refused. The socket file inherits that list. At each start the daemon

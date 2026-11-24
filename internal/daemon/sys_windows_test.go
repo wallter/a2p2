@@ -24,14 +24,24 @@ func TestWindowsNewHomeIsCreatedWithOnlyThisUserInItsAccessControlList(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(sddl, "D:P") || strings.Count(sddl, "(") != 1 || !strings.Contains(sddl, user) {
-		t.Fatalf("home security descriptor %s", sddl)
+	// Owned by the user and one entry, for the user: SDDL may write the
+	// user as a constant (LA for the built-in Administrator), so the
+	// owner and the trustee are compared resolved.
+	o, dacl, _, err := splitSDDL(sddl)
+	es := aces(dacl)
+	if err != nil || !strings.HasPrefix(dacl, "P") || len(es) != 1 || resolveSID(o) != user ||
+		resolveSID(es[0][strings.LastIndexByte(es[0], ';')+1:]) != user {
+		t.Fatalf("home security descriptor %s (user %s)", sddl, user)
 	}
 	// A file created inside inherits it.
 	if err := os.WriteFile(filepath.Join(home, "f"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if fs, err := securityText(filepath.Join(home, "f")); err != nil || checkSDDL(fs, user, []string{user, owner}, "f") != nil {
+	fs, err := securityText(filepath.Join(home, "f"))
+	if err == nil {
+		err = checkSDDL(fs, user, []string{user, owner}, "f", resolveSID)
+	}
+	if err != nil {
 		t.Fatalf("file inside: %s %v", fs, err)
 	}
 }

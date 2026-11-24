@@ -305,7 +305,8 @@ func TestACLICallAsAHarnessAgentKeepsItsHookWorking(t *testing.T) {
 	if err := c.Call(context.Background(), "register", localapi.RegisterReq{Harness: node.CLIHarness, Label: "codex-web"}, &a); err != nil {
 		t.Fatal(err)
 	}
-	if a.Harness != "codex" || a.Cwd != "/work/proj" {
+	// The daemon keeps the directory in the system's spelling (\work\proj on Windows).
+	if a.Harness != "codex" || a.Cwd != filepath.FromSlash("/work/proj") {
 		t.Fatalf("the CLI registration replaced the harness's: %+v", a)
 	}
 	var in localapi.InboxResp

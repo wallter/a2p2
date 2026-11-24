@@ -1564,7 +1564,9 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 // before the replace arrives and becomes a bad reference when it does.
 func TestImplementationAgreesWithTheDeliveryModelOnBodyRepairAcrossMachines(t *testing.T) {
 	h := newHarness(t, map[delivery.MachineID][]string{"M": {"alice"}, "P": {"pat"}, "Q": {"quinn"}})
-	defer h.close()
+	// apply returns a new harness after a write: close the last one (an
+	// open database cannot be removed on Windows).
+	defer func() { h.close() }()
 	for _, o := range []op{
 		{kind: opSkew, machine: "P", n: -10},
 		{kind: opSkew, machine: "Q", n: -10},
