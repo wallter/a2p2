@@ -332,7 +332,11 @@ func Serve(ctx context.Context, ln net.Listener, id *Identity, h Handler, refres
 			},
 		},
 	}
+	// Requests end when ctx does, so that held (waiting) calls return.
+	srv.BaseContext = func(net.Listener) context.Context { return ctx }
+	down := make(chan struct{})
 	go func() {
+		defer close(down)
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -344,6 +348,7 @@ func Serve(ctx context.Context, ln net.Listener, id *Identity, h Handler, refres
 	if err := srv.ServeTLS(newLimitListener(ln, maxConns), "", ""); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+	<-down // ServeTLS returns as Shutdown starts; Shutdown waits for the handlers
 	return nil
 }
 

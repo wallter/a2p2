@@ -31,7 +31,14 @@ main { display: flex; flex-direction: column; min-width: 0; height: 100vh; }
 .qcard { margin: .5rem 0; padding: .6rem; border: 1px solid var(--warn); border-radius: 8px; }
 .qcard .txt { white-space: pre-wrap; overflow-wrap: anywhere; margin: .3rem 0; }
 .qcard .row { display: flex; gap: .4rem; flex-wrap: wrap; }
-.q input { flex: 1; min-width: 8rem; }
+.notice { background: var(--warn); color: #fff; padding: .5rem 1rem; display: flex; gap: .6rem; justify-content: space-between; align-items: center; }
+.warnline { color: var(--warn); margin: .4rem 0; overflow-wrap: anywhere; }
+.noteline { color: var(--muted); font-size: .85rem; margin: 0 0 .5rem; overflow-wrap: anywhere; }
+.mark { border: 1px solid var(--muted); color: var(--muted); border-radius: 4px; padding: 0 .3rem; font-size: .75rem; }
+.mark.adm { border-color: var(--accent); color: var(--accent); }
+.mem { margin: .15rem 0; overflow-wrap: anywhere; }
+.thr { border-top: 1px solid var(--line); padding: .4rem 0; }
+.qcard input { flex: 1; min-width: 8rem; }
 #roomhead { padding: .75rem 1rem; font-weight: 600; border-bottom: 1px solid var(--line); }
 #empty { padding: 1rem; color: var(--muted); }
 #stream { flex: 1; overflow-y: auto; padding: 1rem; }
@@ -59,3 +66,7 @@ dialog td, dialog th { text-align: left; padding: .2rem .4rem; overflow-wrap: an
   main { height: 80vh; }
   #compose .row { flex-wrap: wrap; } #to { max-width: none; width: 100%; }
 }
+.qcard .field { display: flex; gap: .5rem; flex-wrap: wrap; margin: .1rem 0; }
+.qcard .field .k { min-width: 9rem; opacity: .7; }
+.qcard .field .v { overflow-wrap: anywhere; }
+.mono { font-family: ui-monospace, Menlo, Consolas, monospace; letter-spacing: .02em; }

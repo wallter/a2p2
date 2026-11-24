@@ -81,6 +81,10 @@ type Joiner struct {
 
 	mu       sync.Mutex
 	previews map[string]*previewed // by invite hash; holds the token only in memory
+	// following holds one slot per invite hash: one caller at a time
+	// accepts or follows a join, and a caller for another invite never
+	// waits behind it.
+	following map[string]chan struct{}
 }
 
 type previewed struct {
@@ -140,7 +144,34 @@ func NewJoiner(r *Rooms, t JoinTransport, o JoinerOpts) *Joiner {
 			}
 		}
 	}
-	return &Joiner{r: r, t: t, o: o, previews: map[string]*previewed{}}
+	return &Joiner{r: r, t: t, o: o, previews: map[string]*previewed{}, following: map[string]chan struct{}{}}
+}
+
+// hold takes invite h's slot, waiting until it is free or ctx ends; with
+// try it does not wait and reports false if the slot is taken.
+func (j *Joiner) hold(ctx context.Context, h string, try bool) (release func(), ok bool, err error) {
+	j.mu.Lock()
+	c := j.following[h]
+	if c == nil {
+		c = make(chan struct{}, 1)
+		j.following[h] = c
+	}
+	j.mu.Unlock()
+	release = func() { <-c }
+	if try {
+		select {
+		case c <- struct{}{}:
+			return release, true, nil
+		default:
+			return nil, false, nil
+		}
+	}
+	select {
+	case c <- struct{}{}:
+		return release, true, nil
+	case <-ctx.Done():
+		return nil, false, ctx.Err()
+	}
 }
 
 // call sends q to one of addrs after check accepted the server's key, and
@@ -291,6 +322,11 @@ func (j *Joiner) JoinAccept(ctx context.Context, token, preview string, wait tim
 		return JoinOutcome{}, userErr("bad invite token: %v", err)
 	}
 	h := secretHash(tok.Secret)
+	release, _, err := j.hold(ctx, h, false)
+	if err != nil {
+		return JoinOutcome{}, err
+	}
+	defer release()
 	j.mu.Lock()
 	pv := j.previews[h]
 	j.mu.Unlock()
@@ -366,7 +402,12 @@ func (j *Joiner) Resume(ctx context.Context, wait time.Duration) ([]JoinOutcome,
 	}
 	var out []JoinOutcome
 	for _, jn := range js {
+		release, ok, _ := j.hold(ctx, jn.Invite, true)
+		if !ok {
+			continue // an accept is following it now
+		}
 		o, err := j.follow(ctx, jn, wait)
+		release()
 		if err != nil {
 			return out, err
 		}

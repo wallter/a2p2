@@ -3,29 +3,50 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/wallter/a2p2/internal/core"
+	"github.com/wallter/a2p2/internal/localapi"
 	"github.com/wallter/a2p2/internal/node"
 	"github.com/wallter/a2p2/internal/store"
 )
 
 const tok = "test-token-123"
 
-type env struct {
-	srv *httptest.Server
-	n   *node.Node
-	ctx context.Context
+// joinNet carries a join request straight to the admin's join server.
+type joinNet struct {
+	from  string
+	admin **node.JoinServer
+	id    *string
 }
 
-func setup(t *testing.T) env {
+func (n joinNet) Join(ctx context.Context, _ []string, check func(string) error, body []byte) (node.JoinReply, error) {
+	if *n.admin == nil {
+		return node.JoinReply{}, errors.New("unreachable")
+	}
+	if err := check(*n.id); err != nil {
+		return node.JoinReply{}, err
+	}
+	return (*n.admin).Handle(ctx, n.from, "127.0.0.1", body), nil
+}
+
+type env struct {
+	srv  *httptest.Server
+	s    *node.Surface
+	js   *node.JoinServer
+	id   string
+	ctx  context.Context
+	peer *env
+}
+
+func open(t *testing.T, seed byte, peer *env) *env {
 	t.Helper()
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "a2p2.db"))
@@ -33,17 +54,29 @@ func setup(t *testing.T) env {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	n, err := node.New(ctx, st, strings.Repeat("ab", 32), "box", time.Now)
+	m := node.NewMachine(st, ed25519.NewKeyFromSeed(append([]byte{seed}, make([]byte, 31)...)), node.MachineOpts{})
+	rooms, err := node.OpenRooms(ctx, m)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := node.NewMesh(n, nil, func() []string { return nil })
-	srv := httptest.NewServer(Handler(n, m, tok))
-	t.Cleanup(srv.Close)
-	return env{srv, n, ctx}
+	e := &env{ctx: ctx, id: m.ID, js: node.NewJoinServer(rooms), peer: peer}
+	var j *node.Joiner
+	if peer != nil {
+		j = node.NewJoiner(rooms, joinNet{from: m.ID, admin: &peer.js, id: &peer.id}, node.JoinerOpts{Name: "joiner"})
+	}
+	e.s, err = node.OpenSurface(ctx, m, rooms, node.SurfaceOpts{Name: "box", Joiner: j,
+		Addrs: func() []string { return []string{"127.0.0.1:7443"} }, Network: node.Network{State: node.NetworkOn, Listen: "127.0.0.1:7443"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.srv = httptest.NewServer(Handler(e.s, tok))
+	t.Cleanup(e.srv.Close)
+	return e
 }
 
-func (e env) do(t *testing.T, method, path string, body any, mod func(*http.Request)) (int, []byte) {
+func setup(t *testing.T) *env { return open(t, 1, nil) }
+
+func (e *env) do(t *testing.T, method, path string, body any, mod func(*http.Request)) (int, []byte) {
 	t.Helper()
 	var rd io.Reader
 	if body != nil {
@@ -67,13 +100,30 @@ func (e env) do(t *testing.T, method, path string, body any, mod func(*http.Requ
 	return resp.StatusCode, b
 }
 
-func (e env) agent(t *testing.T, label string) string {
+func (e *env) agent(t *testing.T, label string) string {
 	t.Helper()
-	a, err := e.n.Register(e.ctx, "test", label, "")
+	a, err := e.s.Register(e.ctx, "test", label, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	return a.ID
+}
+
+type pageState struct {
+	Status   localapi.Status    `json:"status"`
+	Unread   []localapi.Entry   `json:"unread"`
+	Alerts   []localapi.Alert   `json:"alerts"`
+	Requests []localapi.Request `json:"requests"`
+}
+
+func (e *env) state(t *testing.T) pageState {
+	t.Helper()
+	c, b := e.do(t, "GET", "/api/state", nil, nil)
+	var st pageState
+	if c != 200 || json.Unmarshal(b, &st) != nil {
+		t.Fatalf("state: %d %s", c, b)
+	}
+	return st
 }
 
 func TestStaticAssetsAndHeaders(t *testing.T) {
@@ -123,6 +173,9 @@ func TestAuthHostOrigin(t *testing.T) {
 	if c, _ := e.do(t, "GET", "/api/state", nil, func(r *http.Request) { r.Host = "localhost:1234" }); c != 200 {
 		t.Errorf("localhost host: %d", c)
 	}
+	if c, _ := e.do(t, "POST", "/api/confirm", map[string]any{"id": "x", "approve": true}, func(r *http.Request) { r.Header.Del("Authorization") }); c != 401 {
+		t.Errorf("confirm without token: %d", c)
+	}
 }
 
 func TestMutationShape(t *testing.T) {
@@ -133,6 +186,9 @@ func TestMutationShape(t *testing.T) {
 	}
 	if c, _ := e.do(t, "GET", "/api/send", nil, nil); c < 400 {
 		t.Errorf("GET on mutation route accepted: %d", c)
+	}
+	if c, _ := e.do(t, "GET", "/api/confirm", nil, nil); c < 400 {
+		t.Errorf("GET on confirm accepted: %d", c)
 	}
 	if c, _ := e.do(t, "POST", "/api/send", map[string]string{"text": strings.Repeat("a", maxBody+10)}, nil); c != 413 {
 		t.Errorf("oversized body: %d", c)
@@ -146,76 +202,68 @@ func TestSendAsHuman(t *testing.T) {
 	if c != 200 {
 		t.Fatalf("send: %d %s", c, b)
 	}
-	var m store.Message
+	var m localapi.SendResp
 	json.Unmarshal(b, &m)
-	if m.From != e.n.HumanID() {
-		t.Errorf("from = %q", m.From)
-	}
 	_, hb := e.do(t, "GET", "/api/history?room=local", nil, nil)
-	if !strings.Contains(string(hb), "hello bob") {
+	if !strings.Contains(string(hb), "hello bob") || !strings.Contains(string(hb), e.s.HumanID()) {
 		t.Errorf("history: %s", hb)
 	}
-	in, _ := e.n.Inbox(e.ctx, bob, "", 10, 0)
-	if len(in) != 1 || in[0].Body.Text != "hello bob" {
+	in, _ := e.s.Inbox(e.ctx, bob, "", 0, 0)
+	if len(in.Entries) != 1 || in.Entries[0].Text != "hello bob" || in.Entries[0].From != e.s.HumanID() {
 		t.Errorf("bob inbox: %+v", in)
 	}
 	if c, _ := e.do(t, "GET", "/api/trace?id="+m.ID, nil, nil); c != 200 {
 		t.Errorf("trace: %d", c)
 	}
-}
-
-func TestKindsRefused(t *testing.T) {
-	e := setup(t)
-	for _, k := range []string{"receipt", "question", "bogus"} {
-		if c, _ := e.do(t, "POST", "/api/send", map[string]any{"text": "x", "kind": k}, nil); c != 400 {
-			t.Errorf("kind %q: %d", k, c)
-		}
+	if c, _ := e.do(t, "GET", "/api/thread?id="+m.ID, nil, nil); c != 200 {
+		t.Errorf("thread: %d", c)
 	}
-	if c, _ := e.do(t, "POST", "/api/send", map[string]any{"text": "x", "kind": "answer"}, nil); c != 400 {
-		t.Errorf("answer without reply_to: %d", c)
+	if c, _ := e.do(t, "POST", "/api/send", map[string]any{"text": "x", "room": "nowhere"}, nil); c != 400 {
+		t.Errorf("unknown room: %d", c)
 	}
 }
 
 func TestQuestionAnswerFlow(t *testing.T) {
 	e := setup(t)
 	alice := e.agent(t, "alice")
-	q, err := e.n.Send(e.ctx, node.SendReq{From: alice, Text: "deploy?", Kind: core.KindQuestion, Choices: []string{"yes", "no"}, To: []string{e.n.HumanID()}})
+	q, err := e.s.Send(e.ctx, node.SendInput{Agent: alice, Text: "deploy?", Choices: []string{"yes", "no"}, To: []string{e.s.HumanID()}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, b := e.do(t, "GET", "/api/state", nil, nil)
-	var st struct {
-		Unread []store.Message `json:"unread"`
+	st := e.state(t)
+	if len(st.Unread) != 1 || st.Unread[0].ID != q.ID || len(st.Unread[0].Choices) != 2 {
+		t.Fatalf("unread: %+v", st.Unread)
 	}
-	json.Unmarshal(b, &st)
-	if len(st.Unread) != 1 || st.Unread[0].ID != q.ID {
-		t.Fatalf("unread: %s", b)
-	}
-	if c, b := e.do(t, "POST", "/api/send", map[string]any{"room": q.Room, "text": "yes", "kind": "answer", "reply_to": q.ID}, nil); c != 200 {
+	if c, b := e.do(t, "POST", "/api/send", map[string]any{"text": "yes", "reply_to": q.ID}, nil); c != 200 {
 		t.Fatalf("answer: %d %s", c, b)
 	}
-	e.do(t, "POST", "/api/seen", map[string]any{"ids": []string{q.ID}}, nil)
-	in, _ := e.n.Inbox(e.ctx, alice, "", 10, 0)
-	if len(in) != 1 || in[0].Kind != core.KindAnswer || in[0].ReplyTo != q.ID || in[0].Body.Text != "yes" {
+	u := st.Unread[0]
+	if c, b := e.do(t, "POST", "/api/seen", map[string]any{"entries": []map[string]string{{"key": u.Key, "version": u.Version}}}, nil); c != 200 ||
+		!strings.Contains(string(b), `"ok":true`) {
+		t.Fatalf("seen: %d %s", c, b)
+	}
+	if c, b := e.do(t, "POST", "/api/ack", map[string]any{"id": q.ID}, nil); c != 200 {
+		t.Fatalf("ack: %d %s", c, b)
+	}
+	in, _ := e.s.Inbox(e.ctx, alice, "", 0, 0)
+	if len(in.Entries) != 1 || in.Entries[0].Parent != q.ID || in.Entries[0].Text != "yes" || in.Entries[0].From != e.s.HumanID() {
 		t.Errorf("alice inbox: %+v", in)
 	}
-	_, b = e.do(t, "GET", "/api/state", nil, nil)
-	if strings.Contains(string(b), `"deploy?"`) {
-		t.Errorf("question still unread: %s", b)
+	if st := e.state(t); len(st.Unread) != 0 {
+		t.Errorf("question still unread: %+v", st.Unread)
 	}
 }
 
 func TestHostileStringsAreInert(t *testing.T) {
 	e := setup(t)
 	evil := "<img src=x onerror=alert(1)>"
-	_, _ = e.n.Register(e.ctx, "test", evil, "") // may be refused by label validation; either way inert
-	c, _ := e.do(t, "POST", "/api/send", map[string]any{"room": "local", "text": evil}, nil)
-	if c != 200 {
+	_, _ = e.s.Register(e.ctx, "test", evil, "") // cleaned into a label; either way inert
+	if c, _ := e.do(t, "POST", "/api/send", map[string]any{"room": "local", "text": evil}, nil); c != 200 {
 		t.Fatalf("send: %d", c)
 	}
 	_, b := e.do(t, "GET", "/api/history?room=local", nil, nil)
-	var ms []store.Message
-	if err := json.Unmarshal(b, &ms); err != nil || len(ms) != 1 || ms[0].Body.Text != evil {
+	var h struct{ Entries []localapi.Entry }
+	if err := json.Unmarshal(b, &h); err != nil || len(h.Entries) != 1 || h.Entries[0].Text != evil {
 		t.Fatalf("round trip: %v %s", err, b)
 	}
 	_, b = e.do(t, "GET", "/api/state", nil, nil)
@@ -233,5 +281,74 @@ func TestNoUnsafeDOMSinks(t *testing.T) {
 				t.Errorf("%s contains %q", f, bad)
 			}
 		}
+	}
+}
+
+// joinRequest makes the joiner accept an invite to room, so that a request
+// waits for the admin's person.
+func joinRequest(t *testing.T, admin, joiner *env, room, role string) {
+	t.Helper()
+	inv, err := admin.s.Invite(admin.ctx, room, role, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := joiner.s.JoinPreview(joiner.ctx, inv.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := joiner.s.JoinAccept(joiner.ctx, inv.Token, p.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// origin sets the page's own Origin, as a fetch from the page does.
+func origin(r *http.Request) { r.Header.Set("Origin", "http://"+r.Host) }
+
+func TestPageApprovesAndDeclinesRequestsNamingExactlyWhatIsApproved(t *testing.T) {
+	admin := setup(t)
+	room, err := admin.s.CreateRoom(admin.ctx, "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joiner := open(t, 2, admin)
+	other := open(t, 3, admin)
+	joinRequest(t, admin, joiner, room.ID, node.RoleMember)
+	st := admin.state(t)
+	if len(st.Requests) != 1 || !strings.Contains(st.Requests[0].Text, node.Fingerprint(joiner.id)) ||
+		st.Requests[0].Node != joiner.id || st.Requests[0].Fingerprint != node.Fingerprint(joiner.id) || len(st.Alerts) != 1 {
+		t.Fatalf("requests = %+v alerts = %+v", st.Requests, st.Alerts)
+	}
+	q := st.Requests[0]
+	// A decision needs the page's exact Origin: none, or another, decides nothing.
+	if c, b := admin.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": q.Text}, nil); c != 400 {
+		t.Fatalf("confirm without an Origin: %d %s", c, b)
+	}
+	if c, b := admin.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": q.Text},
+		func(r *http.Request) { r.Header.Set("Origin", "http://127.0.0.1:1") }); c == 200 {
+		t.Fatalf("confirm from another origin: %d %s", c, b)
+	}
+	if c, b := admin.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": "add machine ffffffff"}, origin); c != 400 {
+		t.Fatalf("confirm naming something else: %d %s", c, b)
+	}
+	if c, b := admin.do(t, "POST", "/api/confirm", map[string]any{"id": "nope", "approve": true, "text": q.Text}, origin); c != 400 {
+		t.Fatalf("confirm of nothing: %d %s", c, b)
+	}
+	c, b := admin.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": q.Text}, origin)
+	var cf localapi.ConfirmResp
+	if c != 200 || json.Unmarshal(b, &cf) != nil || cf.State != store.RequestApproved {
+		t.Fatalf("approve: %d %s", c, b)
+	}
+	joinRequest(t, admin, other, room.ID, node.RoleMember)
+	q = admin.state(t).Requests[0]
+	c, b = admin.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": false, "text": q.Text}, origin)
+	if c != 200 || json.Unmarshal(b, &cf) != nil || cf.State != store.RequestDeclined {
+		t.Fatalf("decline: %d %s", c, b)
+	}
+	info, _ := admin.s.RoomList(admin.ctx, room.ID)
+	if len(info[0].Members) != 2 {
+		t.Fatalf("members after approve and decline: %+v", info[0].Members)
+	}
+	if st := admin.state(t); len(st.Requests) != 0 || len(st.Status.Rooms) != 2 {
+		t.Fatalf("after: %+v", st)
 	}
 }
