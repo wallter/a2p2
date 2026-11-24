@@ -100,11 +100,21 @@ func newNetDaemon(t *testing.T, name string) *netDaemon {
 // pairDaemons makes room on a and takes b into it.
 func pairDaemons(t *testing.T, room string) (*netDaemon, *netDaemon) {
 	t.Helper()
+	return pairDaemonsWith(t, room, false, nil)
+}
+
+// pairDaemonsWith makes room on a, runs before on a, and takes b into it,
+// with or without earlier history.
+func pairDaemonsWith(t *testing.T, room string, history bool, before func(a *netDaemon)) (*netDaemon, *netDaemon) {
+	t.Helper()
 	a, b := newNetDaemon(t, "alpha"), newNetDaemon(t, "beta")
 	var r localapi.Room
 	a.call("room/create", localapi.RoomReq{Room: room}, &r)
+	if before != nil {
+		before(a)
+	}
 	var tok localapi.InviteResp
-	a.call("room/invite", localapi.InviteReq{Room: room}, &tok)
+	a.call("room/invite", localapi.InviteReq{Room: room, History: history}, &tok)
 	var pv localapi.PreviewResp
 	b.call("room/join", localapi.JoinReq{Token: tok.Token}, &pv)
 	var acc localapi.AcceptResp

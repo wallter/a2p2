@@ -769,3 +769,49 @@ were.
 **Revisit if** agents want a room-wide post marked for everyone without
 asking for handled reports; that needs a wire change (a new optional
 field and a wire version), which old machines would refuse.
+
+## D45. What counts as shown, receipts for Seen, and "@everyone" (2026-11-24)
+
+Using levels (D41) showed four problems. A worker that joined after a
+kickoff could read it with `recent` but could not report it handled. An
+agent at `none` could not page back through what it skipped. The inbox
+could confirm an entry the agent had never been listed, if it guessed the
+key. And `ask_handled` did two jobs, so a post could not reach everyone at
+`addressed` without also asking for reports.
+
+- **Any read that showed the text counts as shown.** `inbox`, a thread or
+  branch view, `recent` and `skipped` all show text, so each lets the
+  agent report handled (the addressee rule is unchanged). The non-inbox
+  views record a text mark; none moves a cursor or marks anything seen.
+- **Seen needs a receipt.** A full inbox read records, in the same
+  transaction, the key and version of each entry it lists. `Seen`
+  confirms only an entry with a matching receipt, and deletes it. A
+  receipt survives a level change: the message is not kept out or
+  skipped, so it can be confirmed and its later notices arrive. Both
+  kinds of row live in one new table, `shown` (migration 12), because they
+  have the same shape and the same lifetime (deleted on leave). `reads`
+  could not hold them: it means "confirmed".
+- **"Marked for everyone" is the text's own `@everyone`.** ASCII, any
+  case, followed by whitespace, punctuation or the end of the text. It
+  replaces D41's use of `ask_handled`, which now only asks for reports.
+  The mark is in the signed text, so it needs no wire change, unlike the
+  field D41's "revisit if" foresaw. While the text is missing the mark is
+  unknown, and the inbox waits for it. D41 is otherwise unchanged.
+- **One reading order.** Every view orders messages by place: created,
+  author machine, position, id. Paging (`before`) compares places, so one
+  author's messages of one millisecond keep the order written and are
+  never repeated or dropped at a page boundary. Migration 12 replaces the
+  index `records_history` with `records_reading` in that order.
+- **Smaller additions.** Entries carry `ask_handled` and, in `recent` for
+  an agent, `skipped`. `skipped` pages with `before` (tool, local API,
+  CLI) and lists as expired a message whose text expired while kept out.
+  `peek` for one room resolves the room and filters before the cap
+  (`room` on `unread`). No new tool, command, config key or dependency.
+- **Branch view under an unheld message.** The deep differential schedules
+  found the code's branch view empty where the model listed the replies.
+  By D10 the model was right; the code now follows the replies naming a
+  message it does not hold. G3 (replies below an unheld reply) remains.
+
+**Revisit if** receipts grow large for agents that read but never call
+`Seen`: they are bounded by the inbox limit per read, but a cleanup by
+age may be needed.

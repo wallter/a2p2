@@ -234,6 +234,9 @@ func (n *lnode) held(room, id string) (store.Held, bool) {
 func (n *lnode) inbox(room, agent string) []Entry {
 	n.t.Helper()
 	v, err := n.m.Inbox(context.Background(), room, agent)
+	if err == nil { // as the inbox tool lists it: with receipts
+		err = n.m.Showed(context.Background(), room, agent, v.Entries, true)
+	}
 	if err != nil {
 		n.t.Fatal(err)
 	}

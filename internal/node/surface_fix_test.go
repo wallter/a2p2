@@ -198,7 +198,7 @@ func TestV02NoticeFromASchemaOneDatabaseIsShownToAPersonOnceEver(t *testing.T) {
 	if st, _ := e.s.Status(ctx, true); st.Notice != "" {
 		t.Fatalf("shown again after a restart: %q", st.Notice)
 	}
-	if hist, err := e.s.History(ctx, "", "", 0); err != nil || len(hist) != 0 {
+	if hist, err := e.s.History(ctx, "", "", "", 0); err != nil || len(hist) != 0 {
 		t.Fatalf("v0.2 message shown: %+v %v", hist, err)
 	}
 	if rs, _ := e.s.RoomList(ctx, ""); len(rs) != 1 || rs[0].Label != LocalLabel {
@@ -210,10 +210,12 @@ func TestV02NoticeFromASchemaOneDatabaseIsShownToAPersonOnceEver(t *testing.T) {
 	}
 }
 
-func TestHistoryPagesByCreatedAndIDAndABoundaryWithdrawnSinceStillWorks(t *testing.T) {
+// [D4] History pages by (created, author, seq, id): one author's messages
+// of one millisecond come in the order written, whatever their ids.
+func TestHistoryPagesInTheOrderWrittenAndABoundaryWithdrawnSinceStillWorks(t *testing.T) {
 	ctx := context.Background()
 	// Every message is written in the same millisecond: the pages are
-	// told apart by id alone.
+	// told apart by position.
 	e := newSurf(t)
 	at := time.Now().Truncate(time.Millisecond)
 	e.now = func() time.Time { return at }
@@ -223,10 +225,9 @@ func TestHistoryPagesByCreatedAndIDAndABoundaryWithdrawnSinceStillWorks(t *testi
 	for i := 0; i < 5; i++ {
 		ids = append(ids, e.send(SendInput{Agent: alice, Text: "m" + string(rune('0'+i))}).ID)
 	}
-	slices.Sort(ids) // history's order for equal times
 	page := func(before string, n int) []string {
 		t.Helper()
-		es, err := e.s.History(ctx, "", before, n)
+		es, err := e.s.History(ctx, "", "", before, n)
 		if err != nil {
 			t.Fatalf("history before %q: %v", before, err)
 		}
@@ -251,7 +252,7 @@ func TestHistoryPagesByCreatedAndIDAndABoundaryWithdrawnSinceStillWorks(t *testi
 	if got := page(ids[1], 10); strings.Join(got, ",") != ids[0] {
 		t.Fatalf("first page %v", got)
 	}
-	if _, err := e.s.History(ctx, "", strings.Repeat("a", 32), 2); !isUser(err) {
+	if _, err := e.s.History(ctx, "", "", strings.Repeat("a", 32), 2); !isUser(err) {
 		t.Fatalf("unknown boundary: %v", err)
 	}
 }
@@ -366,6 +367,9 @@ func TestQuestionsForThePersonAreListedUntilAnsweredWhateverTheBacklog(t *testin
 	e.send(SendInput{Agent: human, ReplyTo: q1.ID, Text: "main"})
 	qs, _ := e.s.Questions(ctx)
 	i := slices.IndexFunc(qs, func(q Entry) bool { return q.ID == q1.ID })
+	if err := e.s.Listed(ctx, human, qs); err != nil {
+		t.Fatal(err)
+	}
 	if res, err := e.s.Seen(ctx, human, []store.Read{{Key: qs[i].Key, Version: qs[i].Version}}); err != nil || !res[0].Confirmed {
 		t.Fatalf("seen: %+v %v", res, err)
 	}

@@ -96,9 +96,8 @@ var (
 	ErrAckOwn          = refuse(ErrorNotAllowed, "you wrote this message; only its readers report handling it")
 	ErrAckNotAddressed = refuse(ErrorNotAllowed, "this message is not addressed to you and did not ask for handled reports "+
 		"(ask_handled); reply to it instead")
-	ErrAckNotShown = refuse(ErrorNotShown, "you have not been shown this message's text yet: read it with inbox first "+
-		"(a thread or recent view does not count); inbox never shows a message sent before you registered, so "+
-		"reply to that instead")
+	ErrAckNotShown = refuse(ErrorNotShown, "you have not been shown this message's text yet: read it first "+
+		"(inbox, or its thread, recent or skipped view)")
 )
 
 // MachineOpts injects the clock and randomness, so tests are deterministic.
@@ -382,7 +381,7 @@ func (existing) Error() string { return "already reported" }
 
 // Handled reports that agent dealt with message ref. Only an addressee, or
 // anyone but the author on a room-wide post that asked, may report, and
-// only after it confirmed the message's text [R7]. Reporting twice returns
+// only after a read showed it the message's text [R7]. Reporting twice returns
 // the first report.
 func (m *Machine) Handled(ctx context.Context, room, agent, ref string) (Sent, error) {
 	s, err := m.write(ctx, room, agent, func(v *roomView, f *core.RecordFields) error {
@@ -412,13 +411,17 @@ func (m *Machine) Handled(ctx context.Context, room, agent, ref string) (Sent, e
 				return existing{h}
 			}
 		}
-		if _, shown, err := v.rd.Read(agent, room, ref); err != nil || !shown {
-			if err == nil {
-				err = ErrAckNotShown
-			}
+		// Shown its text: confirmed from the inbox, or shown by any read
+		// (an inbox listing, a thread, recent or skipped view) [R7].
+		_, read, err := v.rd.Read(agent, room, ref)
+		if err != nil || read {
 			return err
 		}
-		return nil
+		shown, err := v.rd.ShownText(agent, room, ref)
+		if err == nil && !shown {
+			err = ErrAckNotShown
+		}
+		return err
 	})
 	var ex existing
 	if errors.As(err, &ex) {

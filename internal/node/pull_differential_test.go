@@ -1149,8 +1149,10 @@ func TestRealExchangeAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T) {
 	for k, v := range later {
 		agents[k] = v
 	}
-	r := rand.New(rand.NewPCG(20261124, 5))
-	lr := rand.New(rand.NewPCG(20261124, 13))
+	const seed = 20261124
+	r := rand.New(rand.NewPCG(seed, 5))
+	lr := rand.New(rand.NewPCG(seed, 13))
+	rr := rand.New(rand.NewPCG(seed, 19))
 	c := &counts{}
 	pc := &pxCounts{}
 	total := 0
@@ -1172,6 +1174,9 @@ func TestRealExchangeAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T) {
 				if o, ok := levelOp(lr, m, agents[m]); ok {
 					h = h.apply(o)
 				}
+				if o, ok := readOp(rr, m, agents[m]); ok && !h.stopped {
+					h = h.apply(o)
+				}
 			}
 		}
 		if !h.stopped {
@@ -1182,6 +1187,49 @@ func TestRealExchangeAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T) {
 	(&pxState{c: pc}).report(t, fmt.Sprintf("%d runs of %d steps, steps", runs, steps), time.Since(start), total, c)
 	if c.stopped > 0 {
 		t.Errorf("%d runs stopped at an id-order tie", c.stopped)
+	}
+}
+
+// [D10] The reduced scenarios of a disagreement the deep random schedules
+// found: a machine holds a reply but not its parent (the server withheld
+// it), or holds the parent only as a header (added without history). The
+// branch under the parent lists the reply with the parent marked missing,
+// as the model does; compare() checks every branch view after each step.
+func TestRealExchangeAgreesWithTheDeliveryModelOnTheBranchUnderAnUnheldParent(t *testing.T) {
+	founders, later := pullMachines()
+	for name, ops := range map[string][]op{
+		"parent withheld": {
+			{kind: opSend, machine: "M", agent: "alice"},
+			{kind: opPull, machine: "P", server: "M"},
+			{kind: opReply, machine: "P", agent: "pat", target: 0},
+			{kind: opWithhold, machine: "P", target: 0},
+			{kind: opAdmit, machine: "N", n: 1},
+			{kind: opPull, machine: "N", server: "P"},
+		},
+		"parent only a header": {
+			{kind: opSend, machine: "M", agent: "alice"},
+			{kind: opAdmit, machine: "N"},
+			{kind: opPull, machine: "P", server: "M"},
+			{kind: opReply, machine: "P", agent: "pat", target: 0},
+			{kind: opPull, machine: "N", server: "M"},
+			{kind: opPull, machine: "N", server: "P"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newPullHarness(t, founders, later)
+			for _, o := range ops {
+				h = h.apply(o)
+			}
+			defer h.close()
+			s := h.sims["N"]
+			if s == nil {
+				t.Fatal("N was not admitted")
+			}
+			es, err := s.m.Branch(context.Background(), diffRoom, h.pair[h.msgs[0]])
+			if err != nil || len(es) != 1 || es[0].ParentState != ParentMissing {
+				t.Fatalf("branch under the parent on N: %+v %v", es, err)
+			}
+		})
 	}
 }
 

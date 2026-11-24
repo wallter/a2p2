@@ -4,8 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"math"
 	"time"
+
+	"github.com/wallter/a2p2/internal/core"
 )
 
 // RequestNetwork is the kind of a person's decision on networking: Action
@@ -43,16 +44,32 @@ const schemaHistory = `
 CREATE INDEX records_history ON records (room, kind, created, id);
 `
 
+// Place is where a message sits in the order readers see: (created,
+// author, seq, id), every field signed (shown.go).
+type Place struct {
+	Created time.Time
+	Author  string
+	Seq     int64
+	ID      string
+}
+
+// PlaceOf is r's place.
+func PlaceOf(r *core.Record) Place {
+	f := r.Fields()
+	return Place{Created: f.Created, Author: r.Author(), Seq: f.Seq, ID: r.ID()}
+}
+
 // MessagesBefore returns up to limit message records of room whose text is
-// here, newest first, strictly before the position (created, id); a zero
-// created means from the newest.
-func (rd *Reader) MessagesBefore(room string, created time.Time, id string, limit int) ([]Held, error) {
-	at := int64(math.MaxInt64)
-	if !created.IsZero() {
-		at = ms(created)
+// here, newest first, strictly before place p; a zero p means from the
+// newest.
+func (rd *Reader) MessagesBefore(room string, p Place, limit int) ([]Held, error) {
+	if p.Created.IsZero() {
+		return rd.query(`WHERE room = ? AND kind = 'message' AND reason = ?
+			ORDER BY created DESC, author DESC, seq DESC, id DESC LIMIT ?`, room, ReasonLive, limit)
 	}
-	return rd.query(`WHERE room = ? AND kind = 'message' AND reason = ? AND (created < ? OR (created = ? AND id < ?))
-		ORDER BY created DESC, id DESC LIMIT ?`, room, ReasonLive, at, at, id, limit)
+	return rd.query(`WHERE room = ? AND kind = 'message' AND reason = ? AND (created, author, seq, id) < (?, ?, ?, ?)
+		ORDER BY created DESC, author DESC, seq DESC, id DESC LIMIT ?`, room, ReasonLive,
+		ms(p.Created), p.Author, p.Seq, p.ID, limit)
 }
 
 // MissingRecord is a record whose text has been missing here since before

@@ -430,6 +430,12 @@ func printEntry(w io.Writer, e localapi.Entry) {
 	if e.Late {
 		head += " [late]"
 	}
+	if e.AskHandled {
+		head += " [asks for handled reports]"
+	}
+	if e.Skipped {
+		head += " [skipped by your level]"
+	}
 	fmt.Fprintf(w, "%s  %s\n", clock(e.Created), head)
 	if e.Text != "" {
 		fmt.Fprintf(w, "    %s\n", strings.ReplaceAll(e.Text, "\n", "\n    "))
@@ -1119,14 +1125,13 @@ func history(c *cmd, args []string) error {
 	if err := c.fs.Parse(args); err != nil {
 		return errUsage
 	}
-	req := localapi.HistoryReq{Room: *roomName, Limit: *n, Before: *before}
-	if *skipped {
-		me, err := c.who()
-		if err != nil {
-			return err
-		}
-		req.Agent, req.Skipped = me, true
+	// As the acting agent: entries its level kept out are marked, and it
+	// may then report one it was shown handled.
+	me, err := c.who()
+	if err != nil {
+		return err
 	}
+	req := localapi.HistoryReq{Agent: me, Room: *roomName, Limit: *n, Before: *before, Skipped: *skipped}
 	var res localapi.Entries
 	return c.call("history", req, &res, func() {
 		if len(res.Entries) == 0 {

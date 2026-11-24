@@ -175,7 +175,7 @@ func (m *Machine) decide(g *agentState, agent string, h *held, heads map[Machine
 	var e *Entry
 	switch r.Kind {
 	case Message:
-		if !relevant(r, m.ID, agent) || g.keptOut(r) || g.seen[string(r.ID)] || g.seen["x:"+string(r.ID)] {
+		if !relevant(r, m.ID, agent) || g.keptOut(h) || g.seen[string(r.ID)] || g.seen["x:"+string(r.ID)] {
 			return nil, nil
 		}
 		if m.handledByAgent(r.ID, agent) {
@@ -366,9 +366,21 @@ func (w *World) Inbox(id MachineID, agent string) (View, error) {
 	return View{Entries: append(es, e...), Waiting: gaps}, nil
 }
 
-// Seen confirms entries the agent was shown. It is the only thing that marks
-// anything seen.
-func (w *World) Seen(id MachineID, agent string, entries []Entry) error {
+// List is Inbox as an agent reads it: it shows the agent its inbox and
+// keeps a receipt of each entry listed (key and version), which Seen
+// requires, and notes the messages whose text it showed, which the agent
+// may then report handled. It moves no cursor and marks nothing seen.
+func (w *World) List(id MachineID, agent string) (View, error) {
+	v, err := w.Inbox(id, agent)
+	if err != nil {
+		return v, err
+	}
+	return v, w.Listed(id, agent, v.Entries)
+}
+
+// Listed is List's second half: it keeps a receipt of each of es, which an
+// inbox listing showed agent, and notes the messages whose text they show.
+func (w *World) Listed(id MachineID, agent string, es []Entry) error {
 	m, err := w.awake(id)
 	if err != nil {
 		return err
@@ -377,7 +389,62 @@ func (w *World) Seen(id MachineID, agent string, entries []Entry) error {
 	if g == nil {
 		return ErrNoMachine
 	}
-	for _, e := range entries {
+	for _, e := range es {
+		g.receipts[e.Key] = e.Version
+	}
+	g.noteShown(es)
+	return nil
+}
+
+// noteShown notes the messages whose text es showed.
+func (g *agentState) noteShown(es []Entry) {
+	for _, e := range es {
+		if e.Kind == Shown || e.Kind == ReplacedNotice {
+			g.shown[e.Message] = true
+		}
+	}
+}
+
+// Seen confirms what Confirm accepts.
+func (w *World) Seen(id MachineID, agent string, entries []Entry) error {
+	_, err := w.Confirm(id, agent, entries)
+	return err
+}
+
+// Confirm confirms entries the agent was shown, and says which it
+// accepted: an entry counts only if a full inbox listing (List) showed it
+// with that key and version, and the inbox shows it so now, with a listed
+// message never kept out by a level changed since. It is the only thing
+// that marks anything seen.
+func (w *World) Confirm(id MachineID, agent string, entries []Entry) ([]bool, error) {
+	m, err := w.awake(id)
+	if err != nil {
+		return nil, err
+	}
+	g := m.st.agents[agent]
+	if g == nil {
+		return nil, ErrNoMachine
+	}
+	v, err := w.Inbox(id, agent)
+	if err != nil {
+		return nil, err
+	}
+	now := v.Entries
+	ok := make([]bool, len(entries))
+	var accept []Entry
+	for i, e := range entries {
+		if v, listed := g.receipts[e.Key]; !listed || v != e.Version {
+			continue
+		}
+		for _, x := range now {
+			if x.Key == e.Key && x.Version == e.Version {
+				ok[i] = true
+				accept = append(accept, x)
+				break
+			}
+		}
+	}
+	for _, e := range accept {
 		g.seen[e.Key] = true
 		switch e.Kind {
 		case Shown:
@@ -391,6 +458,24 @@ func (w *World) Seen(id MachineID, agent string, entries []Entry) error {
 	}
 	_, pos, _ := m.walk(g, agent, true)
 	g.cursor = pos
+	return ok, nil
+}
+
+// Showed records that a read other than Inbox (a thread, branch, recent or
+// skipped view) returned entries es to agent on machine id: an agent shown
+// a message's text that way may report it handled, as if its inbox had
+// shown it. It moves no cursor and marks nothing seen, so the inbox shows
+// exactly what it showed before.
+func (w *World) Showed(id MachineID, agent string, es []Entry) error {
+	m, err := w.awake(id)
+	if err != nil {
+		return err
+	}
+	g := m.st.agents[agent]
+	if g == nil {
+		return ErrNoMachine
+	}
+	g.noteShown(es)
 	return nil
 }
 
@@ -465,12 +550,24 @@ func (m *Machine) threadEntry(h *held) *Entry {
 	return nil
 }
 
+// sortEntries orders a view of messages for a reader: by created time;
+// messages of one time by author, so that an author's own are in the
+// order written (their position) and the order does not depend on the
+// machine or the read; then by id, which only orders one author's
+// messages at one time and one position in two streams (after a restore).
+// Every field is signed, so every machine orders alike.
 func sortEntries(es []Entry) {
 	sort.Slice(es, func(i, j int) bool {
-		if es[i].Created != es[j].Created {
-			return es[i].Created < es[j].Created
+		a, b := es[i], es[j]
+		switch {
+		case a.Created != b.Created:
+			return a.Created < b.Created
+		case a.Pos.Stream.Author != b.Pos.Stream.Author:
+			return a.Pos.Stream.Author < b.Pos.Stream.Author
+		case a.Pos.Seq != b.Pos.Seq:
+			return a.Pos.Seq < b.Pos.Seq
 		}
-		return es[i].Record < es[j].Record
+		return a.Record < b.Record
 	})
 }
 

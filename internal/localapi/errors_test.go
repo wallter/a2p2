@@ -54,7 +54,7 @@ func TestEveryRefusalCarriesAStableCodeAndWhetherRetryingCanHelp(t *testing.T) {
 		{"ack", j(AckReq{Agent: bob, ID: strings.Repeat("0", 32)}), node.ErrorNotFound, false, "no message"},
 		{"ack", j(AckReq{Agent: bob, ID: plain}), node.ErrorNotAllowed, false, "not addressed to you"},
 		{"ack", j(AckReq{Agent: alice, ID: direct}), node.ErrorNotAllowed, false, "you wrote this message"},
-		{"ack", j(AckReq{Agent: bob, ID: direct}), node.ErrorNotShown, false, "read it with inbox first"},
+		{"ack", j(AckReq{Agent: bob, ID: direct}), node.ErrorNotShown, false, "read it first"},
 		{"inbox", j(InboxReq{Agent: "ghost@" + a.id[:8]}), node.ErrorNotRegistered, true, "not registered"},
 		{"send", j(SendReq{Agent: alice, Text: strings.Repeat("x", 20000)}), node.ErrorTooLarge, false, "too long"},
 		{"room/invite", j(InviteReq{Room: "local"}), node.ErrorNotAllowed, false, "local room"},

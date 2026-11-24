@@ -284,6 +284,7 @@ const (
 	opPull     // machine pulls from server
 	opInject   // a record the model cannot express is placed (implementation only)
 	opLevel    // agent sets its level (n: delivery.Level)
+	opRead     // agent reads a thread view (n 0) or skipped (n 1), marking what it showed
 	opMore     // the real exchange's operations follow (pull_differential_test.go)
 )
 
@@ -351,6 +352,11 @@ func (o op) String() string {
 		return fmt.Sprintf("%s inject %d #%d", o.machine, o.n, o.target)
 	case opLevel:
 		return fmt.Sprintf("%s/%s level %s", o.machine, o.agent, delivery.Level(o.n))
+	case opRead:
+		if o.n == 0 {
+			return fmt.Sprintf("%s/%s reads thread #%d", o.machine, o.agent, o.target)
+		}
+		return fmt.Sprintf("%s/%s reads skipped", o.machine, o.agent)
 	}
 	return o.moreString()
 }
@@ -524,6 +530,9 @@ func (h *harness) do(o op, variant int) {
 	text := func(prefix string) string {
 		h.texts++
 		t := fmt.Sprintf("%s %d", prefix, h.texts)
+		if h.texts%3 == 0 { // marked for everyone: level addressed lets it in
+			t = "@everyone " + t
+		}
 		if variant > 1 {
 			t += fmt.Sprintf(" (%d)", variant)
 		}
@@ -585,8 +594,10 @@ func (h *harness) do(o op, variant int) {
 		}
 		h.wrote(o.machine, rid, merr, sent, ierr)
 	case opShow:
-		mv, iv := h.inbox(o.machine, o.agent)
+		mv, iv := h.list(o.machine, o.agent)
 		h.shown[agentKey{o.machine, o.agent}] = listing{mv.Entries, iv.Entries}
+	case opRead:
+		h.read(o)
 	case opSeenPart, opSeenAll:
 		h.seen(o)
 	case opCrash:
@@ -656,15 +667,29 @@ func (h *harness) do(o op, variant int) {
 	}
 }
 
-// seen confirms what was shown (or lists and confirms) on both sides. The
-// implementation accepts exactly the entries the model's inbox would show
-// now, key and version alike; the model is then given those.
+// list is the inbox as an agent reads it on both sides: listed, compared,
+// and a receipt kept of each entry (the model's List, Machine.Showed).
+func (h *harness) list(m delivery.MachineID, agent string) (delivery.View, InboxView) {
+	h.t.Helper()
+	mv, iv := h.inbox(m, agent)
+	if err := h.w.Listed(m, agent, mv.Entries); err != nil {
+		h.fail("model listed: %v", err)
+	}
+	if err := h.sims[m].m.Showed(context.Background(), diffRoom, agent, iv.Entries, true); err != nil {
+		h.fail("implementation showed: %v", err)
+	}
+	return mv, iv
+}
+
+// seen confirms what was shown (or lists and confirms) on both sides. Each
+// side accepts an entry only if a listing showed it with that key and
+// version and the inbox shows it so now; both must accept the same.
 func (h *harness) seen(o op) {
 	h.t.Helper()
 	k := agentKey{o.machine, o.agent}
 	l, ok := h.shown[k]
 	if o.kind == opSeenAll || !ok {
-		mv, iv := h.inbox(o.machine, o.agent)
+		mv, iv := h.list(o.machine, o.agent)
 		l = listing{mv.Entries, iv.Entries}
 	}
 	delete(h.shown, k)
@@ -672,32 +697,74 @@ func (h *harness) seen(o op) {
 	if o.kind == opSeenPart && o.n < n {
 		n = o.n
 	}
-	now, _ := h.inbox(o.machine, o.agent)
 	var reads []store.Read
-	var accept []delivery.Entry
-	want := make([]bool, n)
 	for i := 0; i < n; i++ {
 		reads = append(reads, store.Read{Key: l.impl[i].Key, Version: l.impl[i].Version})
-		for _, e := range now.Entries {
-			if e.Key == l.model[i].Key && e.Version == l.model[i].Version {
-				want[i] = true
-				accept = append(accept, e)
-				break
-			}
-		}
 	}
 	res, ierr := h.sims[o.machine].m.Seen(context.Background(), diffRoom, o.agent, reads)
 	if ierr != nil {
 		h.fail("implementation seen: %v", ierr)
 	}
+	want, err := h.w.Confirm(o.machine, o.agent, l.model[:n])
+	if err != nil {
+		h.fail("model seen: %v", err)
+	}
 	for i := range want {
 		if res[i].Confirmed != want[i] {
-			h.fail("seen %s: implementation confirmed=%v (%s), the model's inbox shows it now: %v",
+			h.fail("seen %s: implementation confirmed=%v (%s), the model %v",
 				h.key(reads[i].Key), res[i].Confirmed, res[i].Reason, want[i])
 		}
 	}
-	if err := h.w.Seen(o.machine, o.agent, accept); err != nil {
-		h.fail("model seen: %v", err)
+}
+
+// read is a read other than the inbox on both sides (o.n: 0 the thread or
+// branch view of the target, as the thread tool picks it; 1 skipped): the
+// views are compared, and what they showed is recorded, so that the agent
+// may report a message whose text it was shown handled.
+func (h *harness) read(o op) {
+	h.t.Helper()
+	ctx := context.Background()
+	s := h.sims[o.machine]
+	var me []delivery.Entry
+	var ie []Entry
+	var err error
+	what := "skipped"
+	if o.n == 0 {
+		mid, iid, ok := h.target(o.target)
+		if !ok {
+			return
+		}
+		what = "thread view"
+		var root string
+		if err := s.st.View(ctx, func(rd *store.Reader) error {
+			x, ok, err := rd.Record(diffRoom, iid)
+			if ok {
+				root = x.Record.Fields().Thread
+			}
+			return err
+		}); err != nil {
+			h.t.Fatal(err)
+		}
+		if root == "" { // a root, or not held (lost to a restore)
+			me = h.w.Thread(o.machine, mid)
+			ie, err = s.m.Thread(ctx, diffRoom, iid)
+		} else {
+			me = h.w.Branch(o.machine, mid)
+			ie, err = s.m.Branch(ctx, diffRoom, iid)
+		}
+	} else {
+		me = slices.DeleteFunc(h.w.Skipped(o.machine, o.agent), func(e delivery.Entry) bool { return h.before(o.machine, o.agent, e.Pos) })
+		ie, err = s.m.Skipped(ctx, diffRoom, o.agent)
+	}
+	if err != nil {
+		h.fail("implementation %s: %v", what, err)
+	}
+	h.sameEntries(what+" read by "+string(o.machine)+"/"+o.agent, me, ie)
+	if err := h.w.Showed(o.machine, o.agent, me); err != nil {
+		h.fail("model showed: %v", err)
+	}
+	if err := s.m.Showed(ctx, diffRoom, o.agent, ie, false); err != nil {
+		h.fail("implementation showed: %v", err)
 	}
 }
 
@@ -1284,6 +1351,7 @@ func alphabet() []op {
 		{kind: opInject, machine: m, n: injBadThread, target: 0},
 		{kind: opLevel, machine: m, agent: "bob", n: int(delivery.Addressed)},
 		{kind: opLevel, machine: m, agent: "bob", n: int(delivery.All)},
+		{kind: opRead, machine: m, agent: "bob", target: -1},
 	}
 }
 
@@ -1312,6 +1380,16 @@ func levelOp(r *rand.Rand, m delivery.MachineID, agents []string) (op, bool) {
 		return op{}, false
 	}
 	return op{kind: opLevel, machine: m, agent: agents[r.IntN(len(agents))], n: r.IntN(3), same: true}, true
+}
+
+// readOp draws, now and then, a thread or skipped read by one of agents on
+// m. Like levelOp it has its own source, so that the other operations of a
+// seeded schedule stay what they were.
+func readOp(r *rand.Rand, m delivery.MachineID, agents []string) (op, bool) {
+	if r.IntN(8) != 0 {
+		return op{}, false
+	}
+	return op{kind: opRead, machine: m, agent: agents[r.IntN(len(agents))], n: r.IntN(2), target: r.IntN(6) - 3, same: true}, true
 }
 
 // randomOp draws one operation over machine m with agents; peers are the
@@ -1420,6 +1498,7 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 	}
 	r := rand.New(rand.NewPCG(20261123, 3))
 	lr := rand.New(rand.NewPCG(20261124, 11))
+	rr := rand.New(rand.NewPCG(20261124, 17))
 	c := &counts{}
 	total := 0
 	for i := 0; i < runs; i++ {
@@ -1430,6 +1509,9 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 			h = h.apply(randomOp(r, "M", agents, nil, []int{0, 0, -40 * 24, 2 * 24}))
 			total++
 			if o, ok := levelOp(lr, "M", agents); ok {
+				h = h.apply(o)
+			}
+			if o, ok := readOp(rr, "M", agents); ok {
 				h = h.apply(o)
 			}
 		}
@@ -1448,6 +1530,9 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 			h = h.apply(randomOp(r, m, machines[m], peers, []int{0, -10, 10}))
 			total++
 			if o, ok := levelOp(lr, m, machines[m]); ok {
+				h = h.apply(o)
+			}
+			if o, ok := readOp(rr, m, machines[m]); ok {
 				h = h.apply(o)
 			}
 		}

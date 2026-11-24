@@ -93,16 +93,26 @@ type agentState struct {
 	// holds the messages a level change marked skipped.
 	level Level
 	skip  map[RecordID]bool
+	// receipts holds what full inbox listings showed the agent (List):
+	// entry key -> the version listed. Seen confirms only what has one.
+	receipts map[string]RecordID
+	// shown holds the messages whose text a read showed the agent: an
+	// inbox listing (List) or a thread, branch, recent or skipped view
+	// (Showed). The agent may report them handled. It is not seen and
+	// moves no cursor.
+	shown map[RecordID]bool
 }
 
 func newAgent(start map[StreamID]int) *agentState {
 	return &agentState{
-		start:   copyInts(start),
-		cursor:  copyInts(start),
-		seen:    map[string]bool{},
-		seenMsg: map[RecordID]RecordID{},
-		heads:   map[MachineID][]RecordID{},
-		skip:    map[RecordID]bool{},
+		start:    copyInts(start),
+		cursor:   copyInts(start),
+		seen:     map[string]bool{},
+		seenMsg:  map[RecordID]RecordID{},
+		heads:    map[MachineID][]RecordID{},
+		skip:     map[RecordID]bool{},
+		shown:    map[RecordID]bool{},
+		receipts: map[string]RecordID{},
 	}
 }
 
@@ -122,6 +132,14 @@ func (a *agentState) clone() *agentState {
 	b.skip = make(map[RecordID]bool, len(a.skip))
 	for k, v := range a.skip {
 		b.skip[k] = v
+	}
+	b.receipts = make(map[string]RecordID, len(a.receipts))
+	for k, v := range a.receipts {
+		b.receipts[k] = v
+	}
+	b.shown = make(map[RecordID]bool, len(a.shown))
+	for k, v := range a.shown {
+		b.shown[k] = v
 	}
 	return &b
 }

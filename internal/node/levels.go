@@ -8,14 +8,21 @@ package node
 //   - all: every message for the agent, as before levels existed (the
 //     default).
 //   - addressed: messages naming the agent in to, and room-wide posts marked
-//     for everyone, which are those that ask for handled reports
-//     (ask_handled; the signed formats are frozen, D27).
+//     for everyone: their text begins with "@everyone" (core.MarkedForEveryone;
+//     D-reading, replacing D41's use of ask_handled, which now only asks for
+//     handled reports). While a room-wide post's text is missing here its
+//     mark is not known: it counts as let in, and the walk waits for the
+//     text. Text that is gone (expired, withdrawn, not admitted) marks
+//     nothing.
 //   - none: no message reaches the inbox until the agent asks (Skipped).
 //
-// Notices about messages the agent was shown are never filtered (D9). When
-// the level changes, every message held then that the old level kept out
-// and the new one lets in is marked skipped, so raising a level never
-// floods the live inbox with the past; Skipped lists them.
+// Notices about messages the agent was shown are never filtered (D9), nor
+// is a message a full inbox listing showed (a receipt, store/shown.go): a
+// level change never takes back what the inbox listed. When the level
+// changes, every message held then that the old level kept out and the new
+// one lets in is marked skipped, so raising a level never floods the live
+// inbox with the past; Skipped lists them, and those whose text expired
+// before the agent was shown it as expired (D7).
 
 import (
 	"context"
@@ -24,22 +31,48 @@ import (
 	"github.com/wallter/a2p2/internal/store"
 )
 
+// marked says whether message r is marked for everyone, and whether that
+// is known here: not while its text is missing.
+func marked(r *rec) (bool, bool) {
+	switch r.reason {
+	case store.ReasonLive:
+		return core.MarkedForEveryone(r.f.Text), true
+	case store.ReasonMissing:
+		return false, false
+	}
+	return false, true // the text is gone: nothing marks it
+}
+
 // admits says whether level lets message r, already relevant to the agent,
-// into its inbox.
+// into its inbox. A room-wide post whose mark is not known yet is let in
+// at addressed: the walk waits for its text.
 func admits(level string, r *rec) bool {
 	switch level {
 	case store.LevelAddressed:
-		return len(r.f.To) > 0 || r.f.AskHandled
+		if len(r.f.To) > 0 {
+			return true
+		}
+		m, known := marked(r)
+		return m || !known
 	case store.LevelNone:
 		return false
 	}
 	return true
 }
 
+// listed says whether a full inbox listing showed the agent message r (its
+// entry or its expired notice) and it has not confirmed it since.
+func (g *agentState) listed(r *rec) bool {
+	_, a := g.receipts[r.id]
+	_, b := g.receipts["x:"+r.id]
+	return a || b
+}
+
 // keptOut says whether message r, relevant to the agent, is kept out of its
-// live inbox by its level, now or since the level last changed.
+// live inbox by its level, now or since the level last changed. A message
+// an inbox listing showed is never kept out.
 func (g *agentState) keptOut(r *rec) bool {
-	return !admits(g.level, r) || g.skip[r.id]
+	return !g.listed(r) && (!admits(g.level, r) || g.skip[r.id])
 }
 
 // unconfirmed says whether the agent has neither confirmed message r nor
@@ -86,6 +119,20 @@ func (v *roomView) forAgent(g *agentState, agent string, fn func(*rec) error) er
 	return nil
 }
 
+// skippedFor says whether message r is one Skipped lists for the agent:
+// relevant to it, after its time began, kept out by its level and not
+// confirmed.
+func (v *roomView) skippedFor(g *agentState, agent string, r *rec) (bool, error) {
+	k := r.stream()
+	if r.f.Kind != core.KindMessage || !relevant(r, v.self, agent) || !g.keptOut(r) || r.f.Seq <= g.start[k] {
+		return false, nil
+	}
+	if u, err := v.unseeded(g, k); err != nil || u {
+		return false, err
+	}
+	return v.unconfirmed(g, agent, r)
+}
+
 // Level returns agent's level in room.
 func (m *Machine) Level(ctx context.Context, room, agent string) (string, error) {
 	var l string
@@ -130,7 +177,7 @@ func (m *Machine) SetLevel(ctx context.Context, room, agent, level string) error
 		}
 		p := store.LevelPlan{Level: level}
 		err = v.forAgent(g, agent, func(r *rec) error {
-			if !admits(g.level, r) && admits(level, r) {
+			if !g.listed(r) && !admits(g.level, r) && admits(level, r) {
 				p.Skip = append(p.Skip, r.id)
 			}
 			return nil
@@ -143,9 +190,10 @@ func (m *Machine) SetLevel(ctx context.Context, room, agent, level string) error
 	return err
 }
 
-// Skipped returns, oldest first, the messages for agent in room whose text
-// is here and that its level kept out of its inbox and it has not
-// confirmed (U3). It marks nothing.
+// Skipped returns, oldest first, the messages for agent in room that its
+// level kept out of its inbox and it has not confirmed (U3): with their
+// text, or as expired when the text expired before the agent was shown it
+// (D7). It marks nothing.
 func (m *Machine) Skipped(ctx context.Context, room, agent string) ([]Entry, error) {
 	var out []Entry
 	err := m.view(ctx, room, func(v *roomView) error {
@@ -157,7 +205,7 @@ func (m *Machine) Skipped(ctx context.Context, room, agent string) ([]Entry, err
 			return err
 		}
 		return v.forAgent(g, agent, func(r *rec) error {
-			if !g.keptOut(r) || r.reason != store.ReasonLive || r.f.Kind != core.KindMessage {
+			if !g.keptOut(r) || r.f.Kind != core.KindMessage {
 				return nil
 			}
 			e, err := v.threadEntry(r)
