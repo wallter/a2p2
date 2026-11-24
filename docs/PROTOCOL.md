@@ -1203,10 +1203,10 @@ id or code, and a one-line note.
 4. A frontier head that is not held hides everything by that author.
 5. Integers capped at 2^53−1; `links` ≤ 100; `from` ≤ 16 heads per author.
 
-## 10. Attachments (0.2 draft)
+## 10. Attachments
 
-Not built. Formats for [DESIGN section 12](DESIGN.md#12-attachments-02-draft)
-and rules [F1] to [F12] of the delivery model. `v` stays 2. Additions: one
+Formats for [DESIGN section 12](DESIGN.md#12-attachments)
+and rules [F1] to [F12] of the delivery model. Added in 0.2.0. `v` stays 2. Additions: one
 header field (10.1), the manifest (10.2), the file route with `GET` and
 `PUT` (10.3, 10.5), and one top-level field in the pull response (10.4).
 
@@ -1424,10 +1424,15 @@ handle that it is a regular file, and copies and hashes from that handle.
 The path shown is the one the system reports for the open handle, with C0,
 C1, U+200E, U+200F, U+061C, U+202A to U+202E and U+2066 to U+2069 written
 as `\u{…}`. A copy's name is the manifest's `name` sanitised as before
-(NFC; outside letters, digits, space and `._-+()` becomes `_`; no leading
+(not Unicode-normalised; outside letters, digits, space and `._-+()`
+becomes `_`, so a combining mark becomes `_`; no leading
 or trailing dots or spaces; Windows reserved names prefixed; 200 bytes;
 `O_EXCL` through an `os.Root`; ` (2)` for a clash). A copy is deleted with
 its message if it is still at its path with the same size and hash.
+
+Staged bytes are counted from the pending request's draft, and a request
+being staged holds an in-memory reservation; no `files` row is made for
+them.
 
 Storing [F10]: bytes are written under a temporary name
 (`.a2p2-tmp-<random>` in the same directory), synced, renamed, and the
@@ -1435,9 +1440,18 @@ directory synced, before the row that makes them live commits. A send's
 record, its `file_sets` row and its `files` and `file_for` rows commit in
 one transaction after its bytes are safe; if they are not, the send is
 not published and the request still waits. A copy's row commits first,
-marked `writing`, then the copy is written the same way and the row marked
-done. Deletion is by rows: the transaction that drops a row queues its
-path in `file_trash`; the queue runs after commit and skips, and removes
+marked `writing`; the copy is written under a temporary name, synced,
+then published as a hard link to its final name (which never replaces an
+existing file, on any system), and the row is marked done. A file system
+without hard links cannot take copies. On Windows a directory cannot be
+synced from Go: a2p2 relies on NTFS's metadata journal there and repairs
+at start what a crash can lose. Deletion is by rows and runs in its own sweep (`SweepFiles`) after each
+pull, each replace or withdraw written here, each background tick and at
+start, not inside the record's transaction. Serving, fetching, uploading
+and publishing a copy each ask the rules again from rows when they act,
+and a response or upload asks before every read of at most 64 KiB, so a
+sweep that has not run yet widens nothing. The sweep drops the rows that
+the rules no longer allow and queues their paths in `file_trash`; the queue runs after commit and skips, and removes
 from the queue, any path a live row names again (bytes acquired again for
 another message are never unlinked). A start runs the queue, removes every
 `.a2p2-tmp-` file, every file under `blobs/` with no row and every copy
@@ -1449,14 +1463,14 @@ still `writing`.
 |---|---|---|
 | `file_sets` | `room`, `record`, `manifest` (the header's hash), `ok`; filled when a record is stored and by the migration from records already held | (`room`,`record`) |
 | `file_items` | `room`, `record`, `n`, `sha256`, `name`, `size`, `type`; filled when the manifest is verified | (`room`,`record`,`n`) |
-| `files` | `room`, `sha256`, `size`, `state` (`held`, `staged`) | (`room`,`sha256`) |
-| `file_parts` | `room`, `msg`, `sha256`, `size` (reserved), `have` | (`room`,`msg`,`sha256`) |
+| `files` | `room`, `sha256`, `size`, `state` (`held`) | (`room`,`sha256`) |
+| `file_parts` | `room`, `msg`, `sha256`, `size` (reserved), `have`, `at` | (`room`,`msg`,`sha256`) |
 | `file_for` | `room`, `sha256`, `msg`, `how` (`sent`, `received`, `local`: usable here, never served) | (`room`,`sha256`,`msg`) |
 | `file_obs` | `room`, `msg`, `sha256`, `peer`, `answer`, `at` | (`room`,`msg`,`sha256`,`peer`) |
-| `file_wants` | `room`, `msg`, `version`, `sha256`, `author`, `size` (reserved), `at`, `tries`, `lapsed_at`; a want or a carry job (10.4, 10.5) | (`room`,`msg`,`sha256`) |
+| `file_wants` | `room`, `msg`, `version`, `sha256`, `author`, `size` (reserved), `at`, `tries`, `lapsed_at`, `list` (the want is for a manifest), `sent_at` (when it last went out, to pace repeats); a want or a carry job (10.4, 10.5) | (`room`,`msg`,`sha256`) |
 | `file_lists` | `room`, `record`, `state` (`invalid`, `unavailable`), `fails`, `next_at` | (`room`,`record`) |
-| `file_copies` | `room`, `msg`, `sha256`, `agent`, `path`, `state` | (`room`,`path`) |
-| `file_trash` | `path`, `at` | `path` |
+| `file_copies` | `room`, `msg`, `sha256`, `agent`, `path`, `state`, `size`, `tmp` (so a start removes only files a row shows a2p2 wrote) | (`room`,`path`) |
+| `file_trash` | `path`, `at`, `kind`, `room`, `msg`, `sha256`, `size` (so the queue can tell whether a live row names the path again and whether a copy is still the file written) | `path` |
 | `room_files` | `room`, `mode`, `decided_at` | `room` |
 | `requests` | adds `draft` (text, to, reply_to, replaces, files) and `terms` | |
 
@@ -1524,62 +1538,28 @@ Model tests (`internal/model/delivery/attach_test.go`):
 checked against the sender's view and the true grants when it happens,
 and every upload came from the author).
 
-Code tests to add with the build: the scenarios above in `internal/node`
-over the in-memory transport, a differential test against the model,
-`TestARecordWithFilesIsStoredAndRelayedByteForByteByAnOldVersionNode`,
-`TestAnOldVersionPullerIgnoresWant`, `TestWantsFitInsideTheAnswerSizeLimit`,
-`TestAFetchedNameCannotLeaveTheRoomsDirectoryOrOverwrite`,
-`TestToolsGolden` and `TestToolDefinitionsFitTheTokenBudget` at 3,979
-bytes. Fault-matrix rows in TESTING.md and TRACE rows (L1 `met`; D7, D9,
-T3, T5, P3, U4, A2, N1) change when the code exists.
+Code tests are in `internal/node` (`files_test.go`, `files_compat_test.go`,
+`files_differential_test.go`, `files_memnet_test.go`, `files_review_test.go`),
+`internal/store` (`files_test.go`, `stage_unix_test.go`) and
+`internal/mcpshim` (`TestToolsGolden`, `TestToolDefinitionsFitTheTokenBudget`
+at 3,979 bytes). The scenarios above run there over the in-memory
+transport and are compared with the model by a differential test. Fault
+matrix rows are in [TESTING.md](TESTING.md) and rows in
+[TRACE.md](TRACE.md).
 
-### 10.11 What the build must test
+### 10.11 Properties of the implementation
 
-These are properties of the implementation, not of the model; each is
-listed once with the test the build adds.
+These are properties of the code, not of the model; each is listed once
+with the test that holds it.
 
 | Property | Test |
 |---|---|
 | Every refusal on the file route is the same status and body, and takes the same time class whatever its reason | `TestEveryNotHeldAnswerIsTheSameBytesAndTimingClass` |
 | A response or upload in progress stops when the sender commits a withdraw, replacement, removal, narrower grant or void that ends it | `TestARevocationStopsATransferInProgress` |
 | Staging opens the path once, refuses a non-regular file after opening (a FIFO, a device, a directory), and copies from that handle | `TestStagingCopiesFromTheHandleItOpenedAndRefusesAFifo` |
-| The approval display shows the resolved path in full with controls and bidirectional characters escaped, and the replaced message | `TestTheRequestEscapesBidiCharactersInThePathAndNamesTheReplacedMessage` |
+| The approval display shows the resolved path in full with controls and bidirectional characters escaped, and the replaced message | `TestTheRequestEscapesBidiCharactersInThePathAndNamesTheReplacedMessage`, added with the surfaces (10.6) |
 | One transfer per peer per direction, 8 in all | `TestFileTransfersAreLimitedPerPeerAndInAll` |
 | 120 seconds per response and 64 KiB/s over 30 seconds | `TestASlowTransferIsCut` |
 | Offsets are parsed and checked before arithmetic | `TestAnOffsetPastTheSizeIsRefusedBeforeArithmetic` |
 | File transfers never delay pulls | `TestPullsAreAnsweredWhileFilesTransfer` |
 | Bytes and directory synced before the row; a send published only with its bytes; temporary files swept at start | `TestAStartRemovesTemporaryFilesAndFilesWithoutRows` |
-
-### 10.12 Decision input
-
-Each of these needs a DECISIONS entry when it is built.
-
-- **Header field `files` and the manifest.** Needed because L1 must name
-  files without telling machines that may not read the text (T3). One
-  hash, because 0.1.0 keeps unknown top-level header fields and refuses
-  anything else, and a wire version bump would split every mixed room.
-- **The file route, `GET` and `PUT /p/v2/file/…`.** Needed because bytes
-  are too large for the pull exchange and are fetched per message; `PUT`
-  because in the owner's room the author often cannot be dialled (N1).
-  `HEAD` is not added: dated answers to `GET` already say who holds what.
-- **`want` in the pull response.** Needed so a machine nobody can dial
-  learns what to upload, over the connection it already makes. Sent only
-  to the message's author, so it discloses nothing and needs no holder
-  evidence. 0.1.0 ignores it, so it needs no version change.
-- **The per-room setting `off`, `carry`, `keep`.** One setting, not a
-  config key: it is per room, a person's choice changed while running, and
-  shown with the room, so it is a table (`room_files`) behind one local API
-  call (`room/files`) and one CLI command (`a2p2 room files`). `carry` is
-  the default because a member already carries the room's text for
-  others, and without it a room of laptops and one listener cannot move a
-  file at all.
-- **Tool arguments `send.files` and `inbox.fetch`.** Needed because agents
-  sharing files is the point of L1; paid for by dropping default-valued
-  annotation hints, 3,979 bytes in all.
-- **Local API `fetch`, CLI `send --file` and `fetch`, the `Entry` kind
-  `request`, and the `send_files` request kind.** Needed for a person to
-  confirm and for an agent to learn the outcome without polling.
-- **Migration 13**, the tables of 10.8. Needed because file state, wants
-  and carry jobs, manifest states, observations per message, copies and
-  the trash queue must survive a restart and be deleted in the same
-  transaction as the text they follow.

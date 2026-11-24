@@ -19,6 +19,14 @@ reports.
 - Anyone with a valid unused invite can present it. A person on the admin
   machine still approves the joining machine and the terms. Keep invites
   private and verify the joining machine's fingerprint before approval.
+- Files follow the permission of the text they belong to: a machine serves
+  a file only to a current member that may read that message, and deletes
+  it when the message goes. A person confirms the exact bytes of a file an
+  agent sends, as a guard rail only: an agent running as your user can call
+  `confirm` or paste the contents as text. a2p2 verifies a fetched file's
+  hash and never opens, unpacks or runs it; treat it as data from another
+  machine, and take care with whatever program opens it. A member that
+  fetched a file keeps it after removal.
 - The daemon's Unix socket is in a private directory. Any program running
   as your OS user can use the socket and read your machine's state.
   Messages are stored unencrypted in `a2p2.db` in the state directory.
