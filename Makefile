@@ -9,8 +9,10 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 build:            ## build bin/a2p2
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/a2p2
 
+# -timeout: internal/node takes about four minutes under the race detector
+# here and more than Go's default ten on a two-core hosted runner.
 test:             ## unit, property and integration tests with the race detector
-	$(GO) test -race -count=1 ./...
+	$(GO) test -race -count=1 -timeout 30m ./...
 
 fmt:              ## fail if any file is not gofmt-clean
 	@out=$$(gofmt -l cmd internal); [ -z "$$out" ] || { echo "gofmt needed:"; echo "$$out"; exit 1; }
@@ -85,7 +87,7 @@ release:          ## static binaries a2p2_<os>_<arch> (.exe on Windows) and SHA2
 GO_IMAGE ?= golang:$(shell awk '/^go /{print $$2}' go.mod)
 check-linux:      ## go vet and the race tests on Linux in a container (needs Docker)
 	docker run --rm -v "$(CURDIR)":/src:ro -v a2p2-gomod:/go/pkg/mod -v a2p2-gocache:/root/.cache/go-build \
-	  -w /work $(GO_IMAGE) sh -c 'cp -a /src/. /work/ && rm -rf /work/bin /work/dist /work/.chaos /work/.a2p2-dev /work/.claude && go vet ./... && go test -race -count=1 ./...'
+	  -w /work $(GO_IMAGE) sh -c 'cp -a /src/. /work/ && rm -rf /work/bin /work/dist /work/.chaos /work/.a2p2-dev /work/.claude && go vet ./... && go test -race -count=1 -timeout 30m ./...'
 
 prerelease:       ## the local gate before a tag: check, lint, vuln, Linux in a container, one chaos run (its default length: shorter runs are inconclusive)
 	$(MAKE) check
