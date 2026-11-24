@@ -24,10 +24,13 @@ func (s *Store) RecordDecision(ctx context.Context, q Request) error {
 	})
 }
 
-// LatestDecision is the most recent approved request of kind, if any.
+// LatestDecision is the approved request of kind recorded last, if any:
+// by the order the writes committed (SQLite's rowid, which grows with each
+// insert and which nothing here renumbers: no VACUUM), not by a clock that
+// can go back or an id.
 func (s *Store) LatestDecision(ctx context.Context, kind string) (Request, bool, error) {
 	q, err := scanRequest(s.db.QueryRowContext(ctx, `SELECT `+requestCols+` FROM requests
-		WHERE kind = ? AND state = ? ORDER BY decided_at DESC, created_at DESC, id DESC LIMIT 1`, kind, RequestApproved))
+		WHERE kind = ? AND state = ? ORDER BY rowid DESC LIMIT 1`, kind, RequestApproved))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Request{}, false, nil
 	}
@@ -60,12 +63,19 @@ type MissingRecord struct {
 	Created time.Time
 }
 
-// MissingBefore lists up to limit records whose text is missing here and
-// that were written before t, oldest first.
-func (s *Store) MissingBefore(ctx context.Context, t time.Time, limit int) ([]MissingRecord, error) {
+// MissingBetween lists up to limit records whose text is missing here and
+// that were written at or after from and before to, oldest first by
+// (created, id), strictly after the record after (zero: from the start).
+// from is how a caller leaves out text past retention by its clock before
+// a prune has marked it expired.
+func (s *Store) MissingBetween(ctx context.Context, from, to time.Time, after MissingRecord, limit int) ([]MissingRecord, error) {
+	lo, id := ms(from), ""
+	if !after.Created.IsZero() {
+		lo, id = ms(after.Created), after.ID
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT room, id, created FROM records
-		WHERE reason IN ('live', 'missing') AND created < ? AND reason = 'missing' ORDER BY created, id LIMIT ?`,
-		ms(t), limit)
+		WHERE reason = 'missing' AND created >= ? AND created < ? AND (created > ? OR (created = ? AND id > ?))
+		ORDER BY created, id LIMIT ?`, ms(from), ms(to), lo, lo, id, limit)
 	if err != nil {
 		return nil, err
 	}

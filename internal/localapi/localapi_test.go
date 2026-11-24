@@ -234,7 +234,8 @@ func TestEveryLocalCallRoundTripsAndRefusesAUserError(t *testing.T) {
 	if st.Network.State != node.NetworkOn || st.Waiting != 1 {
 		t.Fatalf("status network %+v waiting %d", st.Network, st.Waiting)
 	}
-	// net records a person's decision; it applies at the next start.
+	// net records a person's decision; the daemon applies it (OnNetwork,
+	// not set here, so status shows it decided and not yet applied).
 	userError(t, a.c, "net", NetReq{State: "sideways"})
 	userError(t, a.c, "net", NetReq{State: "on", Listen: "nowhere"})
 	nr := call[NetResp](t, a.c, "net", NetReq{State: "outbound"})
@@ -243,6 +244,10 @@ func TestEveryLocalCallRoundTripsAndRefusesAUserError(t *testing.T) {
 	}
 	if n, err := node.LoadNetwork(context.Background(), a.st); err != nil || n.Request != nr.Request {
 		t.Fatalf("recorded %+v %v", n, err)
+	}
+	if st := call[Status](t, a.c, "status", Empty{}); st.Network.State != node.NetworkOutbound ||
+		st.Network.Applied != node.NetworkOn || st.Network.Reason != "being applied" {
+		t.Fatalf("decided, not applied: %+v", st.Network)
 	}
 	call[Empty](t, a.c, "stop", Empty{})
 	if err := a.c.Call(context.Background(), "nosuch", nil, nil); err == nil {

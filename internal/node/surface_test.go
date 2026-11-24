@@ -22,6 +22,7 @@ type surfEnv struct {
 	net   Network
 	tr    JoinTransport
 	addrs []string
+	now   func() time.Time // nil: the real clock
 }
 
 func newSurf(t *testing.T) *surfEnv {
@@ -41,7 +42,7 @@ func (e *surfEnv) open() {
 	}
 	e.st = st
 	e.t.Cleanup(func() { st.Close() })
-	m := NewMachine(st, e.key, MachineOpts{})
+	m := NewMachine(st, e.key, MachineOpts{Now: e.now})
 	r, err := OpenRooms(context.Background(), m)
 	if err != nil {
 		e.t.Fatal(err)

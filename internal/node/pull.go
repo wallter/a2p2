@@ -1108,6 +1108,7 @@ type PullStats struct {
 type refusal struct {
 	full, muted bool
 	own, heard  []string
+	since       time.Time // the first not_member of this run of refusals
 }
 
 // seenSums is a peer's sum, and this machine's, after a round with it
@@ -1384,6 +1385,22 @@ func (x *Exchange) muted(room, peer string, own []string) bool {
 	return rf != nil && rf.muted
 }
 
+// NotMemberSince lists the peers that refused this machine as not a member
+// of room twice running (and so are not asked again until a log changes),
+// each with when the first of those refusals came. Read-only: for the
+// surfaces' "may have been removed" display.
+func (x *Exchange) NotMemberSince(room string) map[string]time.Time {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	out := map[string]time.Time{}
+	for key, rf := range x.refused {
+		if key[0] == room && rf.muted {
+			out[key[1]] = rf.since
+		}
+	}
+	return out
+}
+
 // answered records how the peer answered request q (4.4): any not_member
 // forgets what was observed of the peer's log; the first, the next
 // request sends the accepted log from the start; refused that too, the
@@ -1396,9 +1413,9 @@ func (x *Exchange) answered(ctx context.Context, room, peer string, gen int64, q
 		delete(x.refused, key)
 	case !isNotMember(err):
 	case rf == nil:
-		x.refused[key] = &refusal{full: true}
+		x.refused[key] = &refusal{full: true, since: x.r.m.now()}
 	case rf.full:
-		x.refused[key] = &refusal{muted: true, own: q.Log.Heads, heard: x.heard[key]}
+		x.refused[key] = &refusal{muted: true, own: q.Log.Heads, heard: x.heard[key], since: rf.since}
 	}
 	x.mu.Unlock()
 	if !isNotMember(err) {

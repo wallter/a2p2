@@ -180,3 +180,5 @@ dialog td, dialog th { text-align: left; border-bottom: 1px solid var(--line); p
   #needs { grid-area: 2 / 2; width: clamp(20rem, 29vw, 29rem); border: 0; border-left: 1px solid var(--line); overflow-y: auto; }
   #stream { flex: 1; min-height: 0; }
 }
+.meta .actions { margin-left: auto; display: inline-flex; gap: .5rem; white-space: nowrap; }
+.sub.warn { color: var(--warn); }

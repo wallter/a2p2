@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 // notice: the one-time upgrade notice, kept for the life of the page because
 // the server returns it only once. onscreen: key -> version of every entry as
 // rendered; only that is ever confirmed. qShown: the same for question cards.
-const S = { st: null, unread: [], questions: [], qKeys: new Set(), waiting: 0, alerts: [], requests: [], room: null, msgs: [], older: [], notes: [], more: true, reply: null, sigs: {}, toSig: "", gen: 0, shown: null, toRoom: null, outcome: "", notice: "", risky: new Set(), onscreen: new Map(), qShown: new Map() };
+const S = { st: null, unread: [], questions: [], qKeys: new Set(), waiting: 0, alerts: [], requests: [], room: null, msgs: [], older: [], notes: [], more: true, reply: null, sigs: {}, toSig: "", gen: 0, shown: null, toRoom: null, outcome: "", notice: "", risky: new Set(), onscreen: new Map(), qShown: new Map(), notesShown: new Map(), boundary: "" };
 let token = "";
 try { token = sessionStorage.getItem("a2p2.token") || ""; } catch (e) { /* storage blocked */ }
 if (location.hash.length > 1) {
@@ -80,17 +80,18 @@ const NETWORK_WORDS = {
 function renderSide() {
   const ul = $("rooms");
   const choices = rooms().map((r) => [r.id, roomLabel(r.id), unreadFor(r.id).length,
-    (r.members || []).length, (r.admins || []).includes(S.st.node)]);
+    (r.members || []).length, !!r.may_be_removed]);
   const sig = JSON.stringify([S.room, choices]);
   if (sig !== S.sigs.rooms) {
     S.sigs.rooms = sig;
     const focused = ul.contains(document.activeElement) ? document.activeElement.dataset.room : null;
     ul.replaceChildren();
-    for (const [id, label, unread, count, admin] of choices) {
+    for (const [id, label, unread, count, removed] of choices) {
       const b = btn("", "room-choice", () => openRoom(id));
       b.dataset.room = id;
       if (id === S.room) b.setAttribute("aria-current", "true");
-      b.append(el("span", "l", label, el("span", "sub", count + (count === 1 ? " machine" : " machines") + " · " + (admin ? "admin" : "member"))));
+      b.append(el("span", "l", label, el("span", "sub" + (removed ? " warn" : ""),
+        removed ? REMOVED : count === 1 ? "this machine only" : count + " machines")));
       if (unread) {
         const badge = el("span", "badge", unread);
         badge.setAttribute("aria-label", unread + " unread");
@@ -111,10 +112,13 @@ function renderSide() {
     box.append(el("h2", "", "Members of " + r.label));
     for (const m of r.members || []) {
       const adm = m.admin || (r.admins || []).includes(m.node);
-      box.append(el("div", "mem", m.name || "Machine", " ", el("span", "muted", fp(m.node)), " ", adm ? el("span", "mark adm", "admin") : null));
+      // A machine with no name (a room's creator, seen from elsewhere) shows its short id once.
+      const shared = (r.members || []).length > 1;
+      box.append(el("div", "mem", m.name || fp(m.node), m.name ? " " : null, m.name ? el("span", "muted", fp(m.node)) : null,
+        " ", adm && shared ? el("span", "mark adm", "admin") : null));
     }
     for (const p of r.pending || []) box.append(el("div", "sub", "pending " + p.kind + " " + p.state + (p.reason ? ": " + p.reason : "")));
-    if (r.limits && r.limits.length) {
+    if (r.limits && r.limits.length && r.id !== S.st.local) { // the local room is never shared
       const details = el("details", "", el("summary", "", "Room limits"), ...r.limits.map((l) => el("p", "sub", l)));
       details.open = !!keepOpen;
       box.append(details);
@@ -133,7 +137,7 @@ function renderSide() {
   box.append(el("h2", "", "Other machines"));
   if (!(S.st.peers || []).length) box.append(el("div", "sub", "No other machines yet."));
   for (const p of S.st.peers || []) {
-    box.append(el("div", "", p.name || "Machine", " ", el("span", "muted", fp(p.node))),
+    box.append(el("div", "", p.name || fp(p.node), p.name ? " " : null, p.name ? el("span", "muted", fp(p.node)) : null),
       el("div", "sub", p.last_heard ? "heard " + ago(p.last_heard) : "not heard from yet"));
   }
   box.append(el("h2", "", "Local agents"));
@@ -141,14 +145,22 @@ function renderSide() {
 }
 
 // ---- banner and needs you ----
+// The notice is reported shown only once it is drawn; it stays on screen
+// for the life of the page, since the server stops returning it then.
+let noticeAcked = false;
 function renderNotice() {
-  if (S.st.notice) S.notice = S.st.notice; // later polls return none; keep it
+  if (S.st.notice) S.notice = S.st.notice;
   const n = $("notice");
-  if (n.dataset.t === S.notice) return;
-  n.dataset.t = S.notice;
-  n.replaceChildren();
-  n.hidden = !S.notice;
-  if (S.notice) n.append(el("span", "", S.notice));
+  if (n.dataset.t !== S.notice) {
+    n.dataset.t = S.notice;
+    n.replaceChildren();
+    n.hidden = !S.notice;
+    if (S.notice) n.append(el("span", "", S.notice));
+  }
+  if (S.notice && !noticeAcked && !n.hidden && n.isConnected) {
+    noticeAcked = true;
+    requestAnimationFrame(() => api("/api/notice-shown", {}).catch(() => { noticeAcked = false; }));
+  }
 }
 function requestCard(r, row) {
   // These are the exact terms compared by the daemon when the person decides.
@@ -309,13 +321,24 @@ function renderStream(force) {
   box.replaceChildren();
   for (const m of list) {
     const meta = entryMeta(m);
-    meta.append(btn("Reply", "link", () => setReply(m)), btn("Thread", "link", () => openThread(m.thread || m.id)), btn("Trace", "link", () => openTrace(m.id)));
+    meta.append(el("span", "actions", btn("Reply", "link", () => setReply(m)), btn("Thread", "link", () => openThread(m.thread || m.id)),
+      btn("Trace", "link", () => openTrace(m.id))));
     const d = el("div", "msg" + (m.from === S.st.human ? " mine" : ""), meta, el("div", "body", m.text));
     box.append(d);
   }
-  for (const n of notes) box.append(el("div", "noteline", n.kind + ": " + fmt(n.created) + ", message " + fp(n.id)));
+  // A notice is drawn with what it says: a replacement with its new text,
+  // so that confirming it confirms text the person saw.
+  S.notesShown = new Map();
+  for (const n of notes) {
+    const what = { replaced: " changed message ", withdrawn: " withdrew message ", expired: ": the text expired of message " }[n.kind] || " " + n.kind + " ";
+    const line = el("div", "noteline", (n.from || "") + what + fp(n.id) + " (" + fmt(n.created) + ")");
+    if (n.kind === "replaced" && n.text) line.append(el("div", "body", n.text));
+    box.append(line);
+    S.notesShown.set(n.key, n.version);
+  }
   $("older").hidden = !S.more || !S.msgs.length;
   $("empty").hidden = !S.room || list.length > 0 || notes.length > 0 || all().length > 0;
+  $("install-tip").hidden = (S.st.agents || []).some((a) => a.id !== S.st.human);
   if (atBottom) sc.scrollTop = sc.scrollHeight;
 }
 function updateCompose() {
@@ -324,9 +347,14 @@ function updateCompose() {
   const b = $("compose").querySelector("button[type=submit]");
   b.disabled = !ready;
 }
+// node.MaybeRemovedText
+const REMOVED = "this machine may have been removed from this room; ask an admin";
 function renderHead() {
   const r = room();
   $("roomhead").textContent = r ? roomLabel(r.id) + (S.waiting ? " (fetching " + S.waiting + " more)" : "") : "";
+  const note = $("roomnote");
+  note.hidden = !(r && r.may_be_removed);
+  if (note.textContent !== REMOVED) note.textContent = REMOVED;
   updateCompose();
   if (S.toRoom !== S.room) { S.toRoom = S.room; $("to").value = ""; }
   const senders = new Set();
@@ -359,18 +387,21 @@ async function openTrace(id) {
   try {
     const t = await api("/api/trace?id=" + encodeURIComponent(id));
     const ct = el("table"), ht = el("table");
-    ct.append(el("tr", "", ...["Machine", "Copy observed", "Member now"].map((h) => el("th", "", h))));
+    ct.append(el("tr", "", ...["Machine", "Observed", "Member now"].map((h) => el("th", "", h))));
     for (const c of t.copies || []) ct.append(el("tr", "", el("td", "", fp(c.node)), el("td", "", fmt(c.at)), el("td", "", c.member ? "yes" : "no")));
     ht.append(el("tr", "", ...["Agent", "When"].map((h) => el("th", "", h))));
     for (const h of t.handled || []) ht.append(el("tr", "", el("td", "", h.agent), el("td", "", fmt(h.at))));
+    // The same words as a2p2 trace (cmd/a2p2, textWords and copyReportWords).
     const textState = {
-      live: "available here", missing: "waiting for a copy", not_admitted: "outside this machine's permitted history",
-      withdrawn: "withdrawn by the author", expired: "expired",
+      live: "available on this machine", missing: "waiting for a copy",
+      not_admitted: "outside this machine's permitted room history",
+      withdrawn: "withdrawn by its author", expired: "expired (text is kept 30 days)",
     }[t.reason] || t.reason;
     showDialog(el("h2", "", "Message " + fp(id)),
-      el("p", "", t.saved ? "Signed header saved on this machine." : "Signed header unavailable."),
-      el("p", "", "Message text: " + textState + "."),
-      el("h2", "", "Copies"), (t.copies || []).length ? ct : el("div", "sub", "No other machine has reported a copy."),
+      el("p", "", "Header: " + (t.saved ? "saved on this machine" : "not held on this machine") + ". Text: " + textState + "."),
+      el("h2", "", "Copy reports"),
+      el("p", "sub", "These are the machines that reported holding the author's messages up to this one, as this machine observed."),
+      (t.copies || []).length ? ct : el("div", "sub", "None yet."),
       el("h2", "", "Handled"), (t.handled || []).length ? ht : el("div", "sub", "No handling reports yet."));
   } catch (e) { showDialog(el("h2", "", "Could not open message trace"), el("p", "", e.message)); }
 }
@@ -385,7 +416,7 @@ async function openThread(id) {
 }
 
 // ---- data flow ----
-const loadHistory = (rid, extra) => api("/api/history?room=" + encodeURIComponent(rid) + "&limit=100" + (extra || ""));
+const loadHistory = (rid, extra, limit) => api("/api/history?room=" + encodeURIComponent(rid) + "&limit=" + (limit || 100) + (extra || ""));
 // switchTo makes id the current room and discards everything shown for the
 // previous one; responses still in flight for it are dropped by generation.
 function switchTo(id) {
@@ -419,7 +450,21 @@ async function refresh(force) {
     if (rid) {
       const h = await loadHistory(rid);
       if (gen !== S.gen) { again = true; return; } // room changed while loading: drop it
-      reconcile(h.entries || [], rid);
+      const page = h.entries || [];
+      // Cached older pages are fetched again from the newest page's
+      // boundary, so text replaced, withdrawn or expired since leaves them.
+      let older = [], more = page.length >= 100;
+      if (more && S.older.length) {
+        const want = Math.min(S.older.length, 400);
+        const o = await loadHistory(rid, "&before=" + encodeURIComponent(page[0].id), want);
+        if (gen !== S.gen) { again = true; return; }
+        older = o.entries || [];
+        more = older.length < want ? false : S.more;
+      }
+      S.more = more;
+      S.msgs = page;
+      S.older = older;
+      S.boundary = page.length ? page[0].id : "";
       S.shown = rid;
       // Ordinary mail of this room: notices are kept for display, and
       // everything is confirmed only as rendered. Questions are never here.
@@ -432,7 +477,7 @@ async function refresh(force) {
       renderStream(force);
       const mine = ord.filter((m) => m.kind === "message"
         ? S.onscreen.get(m.key) === m.version
-        : S.notes.some((x) => x.key === m.key && x.version === m.version));
+        : S.notesShown.get(m.key) === m.version);
       if (mine.length) {
         await confirmSeen(mine);
         if (gen !== S.gen) { again = true; return; }
@@ -453,29 +498,14 @@ async function refresh(force) {
     if (again) { again = false; refresh(true); }
   }
 }
-// reconcile makes the newest page authoritative and repairs the cached older
-// pages: an entry the newest page now holds is dropped from them, and the cache
-// is discarded (and reloaded on demand) when it may have a gap or hold text
-// that was replaced or withdrawn.
-function reconcile(page, rid) {
-  const ids = new Set(page.map((m) => m.id));
-  const prev = new Set(S.msgs.map((m) => m.id));
-  let older = S.older.filter((m) => !ids.has(m.id));
-  const touched = S.unread.some((u) => u.room === rid && older.some((o) => o.id === u.id));
-  const gap = prev.size > 0 && page.length >= 100 && !page.some((m) => prev.has(m.id));
-  if (page.length < 100) { older = []; S.more = false; } // the page holds the whole history
-  else if (touched || gap) { older = []; S.more = true; }
-  S.older = older;
-  S.msgs = page;
-}
-
 $("older").addEventListener("click", async () => {
   const first = all().find((m) => m.id);
   if (!first || S.shown !== S.room) return;
-  const gen = S.gen, rid = S.room;
+  const gen = S.gen, rid = S.room, boundary = S.boundary;
   try {
     const page = ((await loadHistory(rid, "&before=" + encodeURIComponent(first.id))).entries) || [];
-    if (gen !== S.gen) return;
+    // Dropped if the room or the newest page's boundary changed meanwhile.
+    if (gen !== S.gen || boundary !== S.boundary || first !== all().find((m) => m.id)) return;
     S.older = page.concat(S.older);
     if (page.length < 100) S.more = false;
     renderStream(true);

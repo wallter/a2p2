@@ -35,11 +35,13 @@
     </section>
     <section id="conversation" aria-labelledby="roomhead">
       <h2 id="roomhead" tabindex="-1"></h2>
+      <div id="roomnote" class="notice" role="status" hidden></div>
       <div id="stream" role="region" aria-label="Room history" tabindex="0">
         <button id="older" type="button" hidden>Load older messages</button>
         <div id="empty" hidden>
           <h3>No messages in this room yet</h3>
           <p>Write the first message below.</p>
+          <p id="install-tip" hidden>No coding agent is connected yet: run <code>a2p2 install claude</code> (or codex, agy), then start a session.</p>
         </div>
         <div id="msgs"></div>
       </div>

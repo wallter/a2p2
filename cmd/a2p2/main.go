@@ -338,8 +338,20 @@ func cliError(err *localapi.Error) error {
 	case strings.HasSuffix(err.Msg, " is not an agent id (label@node, as in peers)"):
 		id := strings.TrimSuffix(err.Msg, " is not an agent id (label@node, as in peers)")
 		return &localapi.Error{User: true, Msg: id + " needs a full agent ID, such as human@1a2b3c4d. Run a2p2 room list ROOM for machine IDs"}
-	case strings.HasPrefix(err.Msg, "not an invite:"):
-		return &localapi.Error{User: true, Msg: "invalid invite (" + strings.TrimPrefix(err.Msg, "not an invite: ") + "). Run a2p2 join and paste the full invite, starting with a2p2:"}
+	case strings.HasPrefix(err.Msg, "not an invite:"), strings.HasPrefix(err.Msg, "bad invite token:"):
+		return &localapi.Error{User: true, Msg: "that invite is not valid: it may be cut short or mistyped. " +
+			"Paste the whole invite, starting with a2p2:, or ask for a new one"}
+	case strings.HasSuffix(err.Msg, " is not an agent of a machine in this room"):
+		return &localapi.Error{User: true, Msg: strings.TrimSuffix(err.Msg, " is not an agent of a machine in this room") +
+			" is not on a machine in this room. Run a2p2 room list ROOM to see its machines"}
+	case strings.HasPrefix(err.Msg, "no member ") && strings.HasSuffix(err.Msg, " in the room"):
+		return fmt.Errorf("%w. Run a2p2 room list ROOM to see its machines", err)
+	case err.Msg == "no such request":
+		return &localapi.Error{User: true, Msg: "no request with that ID is waiting. Run a2p2 confirm to list them"}
+	case err.Msg == "ask_handled is only for a post to everyone":
+		return &localapi.Error{User: true, Msg: "--ask-handled is only for a message to everyone; leave out --to"}
+	case err.Msg == "everyone is the only addressee when given":
+		return &localapi.Error{User: true, Msg: "--to everyone cannot be combined with other --to names"}
 	case err.Msg == members.ReasonAlreadyAdmin:
 		return &localapi.Error{User: true, Msg: "this machine already lists that member as an admin. Run a2p2 room list ROOM to see the members"}
 	case err.Msg == node.ErrNotHeld.Error():
@@ -426,13 +438,23 @@ func addressText(addr string) string {
 
 func status(c *cmd) error {
 	var st localapi.Status
+	defer func() {
+		// Printed (as text or JSON): a person has seen the notice.
+		if st.Notice != "" && c.cl != nil {
+			_ = c.cl.Call(c.ctx, "status", localapi.StatusReq{NoticeShown: true}, nil)
+		}
+	}()
 	return c.call("status", localapi.StatusReq{ShowNotice: true}, &st, func() {
 		if st.Notice != "" {
 			fmt.Println("NOTICE   " + st.Notice)
 		}
 		fmt.Printf("machine  %s (%s)  a2p2 %s  pid %d\n", st.Name, short(st.Node), st.Version, st.PID)
-		switch st.Network.State {
-		case "on":
+		switch {
+		case st.Network.Reason == "being applied":
+			fmt.Printf("network  %s decided, being applied (still %s)\n", st.Network.State, st.Network.Applied)
+		case st.Network.Applied != "":
+			fmt.Printf("network  %s, %s\n", st.Network.State, st.Network.Reason)
+		case st.Network.State == "on":
 			fmt.Printf("network  on, listening on %s\n", addressText(st.Network.Listen))
 			if len(st.Listen) > 0 {
 				addresses := make([]string, 0, len(st.Listen))
@@ -441,7 +463,7 @@ func status(c *cmd) error {
 				}
 				fmt.Println("         advertised:", strings.Join(addresses, ", "))
 			}
-		case "outbound":
+		case st.Network.State == "outbound":
 			fmt.Println("network  outbound only, accepts no incoming connections")
 		default:
 			fmt.Println("network  off, this machine only. To connect to other machines, run a2p2 net on.")
@@ -460,7 +482,10 @@ func status(c *cmd) error {
 			if labels[name] > 1 {
 				name += " (" + r.ID + ")"
 			}
-			fmt.Printf("  %-20s machines: %d  admins: %d\n", name, len(r.Members), len(r.Admins))
+			fmt.Printf("  %-20s machines: %d\n", name, len(r.Members))
+			if r.MayBeRemoved {
+				fmt.Println("    " + node.MaybeRemovedText)
+			}
 		}
 		fmt.Println("agents on this machine")
 		if len(st.Agents) == 0 {
@@ -484,42 +509,51 @@ func status(c *cmd) error {
 
 func trace(c *cmd, id string) error {
 	var t localapi.TraceResp
-	return c.call("trace", localapi.IDReq{ID: id}, &t, func() {
-		reason := t.Reason
-		switch reason {
-		case store.ReasonLive:
-			reason = "available on this machine"
-		case store.ReasonNotAdmitted:
-			reason = "outside this machine's permitted room history"
-		case store.ReasonMissing:
-			reason = "waiting for a copy"
+	return c.call("trace", localapi.IDReq{ID: id}, &t, func() { printTrace(os.Stdout, t) })
+}
+
+// The words for a copy report and for the state of a message's text; the
+// page (app.js, openTrace) uses the same ones.
+const copyReportWords = "machines that reported holding the author's messages up to this one, as this machine observed"
+
+var textWords = map[string]string{
+	store.ReasonLive:        "available on this machine",
+	store.ReasonMissing:     "waiting for a copy",
+	store.ReasonNotAdmitted: "outside this machine's permitted room history",
+	store.ReasonWithdrawn:   "withdrawn by its author",
+	store.ReasonExpired:     "expired (text is kept 30 days)",
+}
+
+func printTrace(w io.Writer, t localapi.TraceResp) {
+	reason := t.Reason
+	if s, ok := textWords[reason]; ok {
+		reason = s
+	}
+	header := "saved on this machine"
+	if !t.Saved {
+		header = "not held on this machine"
+	}
+	fmt.Fprintf(w, "message  %s\nroom     %s\nheader   %s\ntext     %s\n", t.ID, t.Room, header, reason)
+	if len(t.Copies) == 0 {
+		fmt.Fprintln(w, "copy reports: none yet")
+	} else {
+		fmt.Fprintln(w, "copy reports ("+copyReportWords+"):")
+	}
+	for _, cp := range t.Copies {
+		member := "member now"
+		if !cp.Member {
+			member = "not a member now"
 		}
-		fmt.Printf("message  %s\nroom     %s\nheader   saved on this machine\ntext     %s\n", t.ID, t.Room, reason)
-		if len(t.Copies) == 0 {
-			fmt.Println("copies: no other machine has reported a copy here")
-		} else {
-			fmt.Println("copy reports observed by this machine:")
-		}
-		for _, cp := range t.Copies {
-			member := "current member"
-			if !cp.Member {
-				member = "not a member now"
-			}
-			fmt.Printf("  %s (%s), observed %s\n", short(cp.Node), member, clock(cp.At))
-		}
-		if len(t.Copies) > 0 {
-			fmt.Println("  Each report covers the author's messages through this position at the time shown.")
-			fmt.Println("  It cannot distinguish two messages signed at the same position.")
-		}
-		if len(t.Handled) == 0 {
-			fmt.Println("handled: no report yet")
-		} else {
-			fmt.Println("handled reports (time signed by the agent's machine):")
-		}
-		for _, h := range t.Handled {
-			fmt.Printf("  by %s at %s\n", h.Agent, clock(h.At))
-		}
-	})
+		fmt.Fprintf(w, "  %s (%s), observed %s\n", short(cp.Node), member, clock(cp.At))
+	}
+	if len(t.Handled) == 0 {
+		fmt.Fprintln(w, "handled: no report yet")
+	} else {
+		fmt.Fprintln(w, "handled reports (time signed by the agent's machine):")
+	}
+	for _, h := range t.Handled {
+		fmt.Fprintf(w, "  by %s at %s\n", h.Agent, clock(h.At))
+	}
 }
 
 // join previews an invite, asks the person at this terminal, accepts, and
@@ -618,6 +652,9 @@ func room(c *cmd, args []string) error {
 					fmt.Println()
 				}
 				fmt.Printf("Room %s  %s\n", r.Label, r.ID)
+				if r.MayBeRemoved {
+					fmt.Println("  " + node.MaybeRemovedText)
+				}
 				for _, m := range r.Members {
 					role := "member"
 					if m.Admin {
@@ -638,8 +675,12 @@ func room(c *cmd, args []string) error {
 					}
 					fmt.Printf("  conflicting membership entries from %s at position %d (%s)\n", short(f.Author), f.Seq, state)
 				}
-				for _, l := range r.Limits {
-					fmt.Printf("  limit: %s\n", l)
+				// The limits of a shared room are for whoever asks about it by
+				// name; a room of this machine alone has none worth showing.
+				if req.Room != "" && len(r.Members) > 1 {
+					for _, l := range r.Limits {
+						fmt.Printf("  limit: %s\n", l)
+					}
 				}
 			}
 		})
@@ -794,13 +835,26 @@ func alerts(c *cmd, args []string) error {
 			fmt.Println("No alerts.")
 		}
 		for _, a := range res.Alerts {
-			if a.Kind == node.AlertRequest {
-				fmt.Printf("Request %s\n  %s\n  Review with a2p2 confirm %s\n", a.ID, a.Text, a.ID)
-			} else {
-				fmt.Printf("%s %s in room %s\n  %s\n", a.Kind, a.ID, a.Room, a.Text)
-			}
+			printAlert(os.Stdout, a)
 		}
 	})
+}
+
+// printAlert shows one alert with the command that deals with it.
+func printAlert(w io.Writer, a localapi.Alert) {
+	switch a.Kind {
+	case node.AlertRequest:
+		fmt.Fprintf(w, "Request %s\n  %s\n  Review with a2p2 confirm %s\n", a.ID, a.Text, a.ID)
+	case node.AlertQuestion:
+		fmt.Fprintf(w, "Question %s in room %s\n  %s\n  Answer with a2p2 send --room %s --reply-to %s TEXT\n",
+			a.ID, a.Room, a.Text, a.Room, a.ID)
+	case node.AlertNetwork:
+		fmt.Fprintf(w, "Networking\n  %s\n  Choose another address with a2p2 net on ADDR, or run a2p2 net off\n", a.Text)
+	case node.AlertRemoved:
+		fmt.Fprintf(w, "Room %s\n  %s\n", a.Room, a.Text)
+	default:
+		fmt.Fprintf(w, "%s %s in room %s\n  %s\n", a.Kind, a.ID, a.Room, a.Text)
+	}
 }
 
 // netCmd is a person's networking decision: shown exactly, asked at a
@@ -846,7 +900,7 @@ func netCmd(c *cmd, args []string) error {
 		"on":       "This machine will listen on " + addressText(req.Listen) + ". Anyone who can reach this address can connect. Only room members can fetch room messages. This machine will also connect out.",
 	}[req.State]
 	fmt.Fprintln(os.Stderr, what)
-	fmt.Fprintln(os.Stderr, "Applying this change will restart the daemon.")
+	fmt.Fprintln(os.Stderr, "The daemon applies it as soon as it is recorded.")
 	if ask("Apply this? Type yes: ") != "yes" {
 		return errors.New("nothing changed")
 	}
@@ -859,12 +913,15 @@ func netCmd(c *cmd, args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "recorded as decision %s\n", res.Request)
-	_ = cl.Call(c.ctx, "stop", nil, nil) // restart to apply
-	if !daemon.WaitStopped(c.home, 20*time.Second) {
-		return errors.New("the daemon did not stop; the decision applies when it next starts")
+	// The daemon applies it by itself; wait to show the result.
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+		var st localapi.Status
+		if cl.Call(c.ctx, "status", localapi.StatusReq{}, &st) == nil && st.Network.Request == res.Request &&
+			st.Network.Reason != "being applied" {
+			return status(c)
+		}
 	}
-	c.cl = nil
-	return status(c)
+	return errors.New("the decision is recorded; the daemon has not applied it yet. Run a2p2 status to check")
 }
 
 func doctor(c *cmd, args []string) error {

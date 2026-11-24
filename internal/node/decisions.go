@@ -63,7 +63,8 @@ func (s *Surface) Waiting(ctx context.Context) ([]RequestView, error) {
 
 // Questions lists what agents asked this machine's person and the person
 // has not yet confirmed: unread messages addressed to the human by name, or
-// carrying choices. Unlike the inbox it is not capped by older mail, so a
+// carrying choices; a replacement of one is a question too, with its new
+// text. Unlike the inbox it is not capped by older mail, so a
 // new question is never buried; the page confirms one only after it is
 // answered or dismissed.
 func (s *Surface) Questions(ctx context.Context) ([]Entry, error) {
@@ -79,7 +80,8 @@ func (s *Surface) Questions(ctx context.Context) ([]Entry, error) {
 			return nil, err
 		}
 		for _, e := range v.Entries {
-			if e.Kind == EntryMessage && e.From != s.HumanID() && (len(e.Choices) > 0 || slices.Contains(e.To, human)) {
+			asked := e.Kind == EntryMessage || e.Kind == EntryReplaced
+			if asked && e.From != s.HumanID() && (len(e.Choices) > 0 || slices.Contains(e.To, human)) {
 				out = append(out, e)
 			}
 		}

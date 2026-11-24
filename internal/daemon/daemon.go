@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -146,13 +147,16 @@ func advertised(cfg Config, ln net.Listener) []string {
 
 // RunOpts are for tests: what Run takes from its caller instead of making.
 type RunOpts struct {
-	// PeerListener, if set, is used as the peer listener when networking
-	// is on, instead of listening on the decided address. Run closes it.
-	PeerListener net.Listener
-	// Ready, if set, is called once every listener serves.
+	// Listen, if set, makes the peer listener of each run with networking
+	// on, instead of listening on the decided address.
+	Listen func(addr string) (net.Listener, error)
+	// Ready, if set, is called once every listener serves, the first time.
 	Ready func()
-	// Exchange, if set, is given the pull exchange once it exists.
+	// Exchange, if set, is given each run's pull exchange once it exists.
 	Exchange func(*node.Exchange)
+	// Handler, if set, is called as a local API or page request enters
+	// its handler (enter) and as it leaves.
+	Handler func(path string, enter bool)
 }
 
 // Run is the daemon. It returns when ctx ends or a stop is requested.
@@ -160,14 +164,26 @@ func Run(ctx context.Context, home, version string) error {
 	return RunWith(ctx, home, version, RunOpts{})
 }
 
-// RunWith is Run with test options.
+// CheckUIAddr accepts only a literal loopback address with a port, such as
+// 127.0.0.1:7422 or [::1]:7422: it is checked before anything is bound or
+// any name is looked up, so the page is never reachable from elsewhere.
+func CheckUIAddr(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	ip := net.ParseIP(host)
+	if err != nil || port == "" || ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("the page listens only on a loopback IP address with a port, such as %s; not %q "+
+			"(fix \"ui\" in config.json)", DefaultUI, addr)
+	}
+	return nil
+}
+
+// RunWith is Run with test options. The home's lock, key, database, the
+// page's listener and token, and the local socket last the whole process.
+// The machine itself (rooms, surfaces, pull and join, and networking) is a
+// run inside it, started again in place when a person records a
+// networking decision, so the decision applies at once whether or not the
+// command that recorded it is still there.
 func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
-	peerLn := o.PeerListener
-	defer func() {
-		if peerLn != nil && err != nil {
-			peerLn.Close()
-		}
-	}()
 	if err := PrepareHome(home); err != nil {
 		return err
 	}
@@ -189,6 +205,13 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	}
 	cfg.Name, _, _ = strings.Cut(cfg.Name, ".") // "host.local" -> "host"
 	cfg.Name = core.CleanLabel(cfg.Name)
+	uiAddr := cfg.UI
+	if uiAddr == "" {
+		uiAddr = DefaultUI
+	}
+	if err := CheckUIAddr(uiAddr); err != nil {
+		return err
+	}
 	syscall.Umask(0o077) // everything the daemon creates is private to this user
 	id, err := peer.LoadIdentity(home)
 	if err != nil {
@@ -201,128 +224,39 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	// Closed last of all, after every handler and loop has returned.
 	defer st.Close()
 
-	// Records, the room log, pull and join (DESIGN-next section 9).
-	m := node.NewMachine(st, id.Key, node.MachineOpts{})
-	rooms, err := node.OpenRooms(ctx, m)
-	if err != nil {
-		return err
-	}
-	if err := m.Prune(ctx); err != nil {
-		return err
-	}
-	// Networking is what a person last decided (a2p2 net, recorded in
-	// requests); with no decision it is off. The config file's listen
-	// address is only the default a2p2 net on offers.
-	netw, err := node.LoadNetwork(ctx, st)
-	if err != nil {
-		return err
-	}
-	if netw.State != node.NetworkOn {
-		if peerLn != nil {
-			peerLn.Close()
-		}
-		peerLn = nil
-	} else if peerLn == nil {
-		if peerLn, err = net.Listen("tcp4", netw.Listen); err != nil {
-			return fmt.Errorf("peer listener on %s: %w", netw.Listen, err)
-		}
-	}
-	addrs := advertised(cfg, peerLn)
-	if len(addrs) > node.MaxAddrs {
-		addrs = addrs[:node.MaxAddrs]
-	}
-	// Peers' addresses as last stored (peer_addrs): a machine that does
-	// not listen can reach its peers again after a restart. What joins,
-	// invites and pulls teach the book it saves itself.
-	book, err := node.LoadAddrBook(ctx, st)
-	if err != nil {
-		return err
-	}
-	pulls := peer.NewPullClient(id, book)
-	defer pulls.Close()
-	x := node.NewExchange(rooms, pulls, node.ExchangeOpts{Book: book, Addrs: addrs})
-	if o.Exchange != nil {
-		o.Exchange(x)
-	}
-	joiner := node.NewJoiner(rooms, peer.NewJoinClient(id), node.JoinerOpts{Name: cfg.Name, Addrs: addrs})
-	surf, err := node.OpenSurface(ctx, m, rooms, node.SurfaceOpts{Name: cfg.Name, Joiner: joiner, Book: book,
-		Addrs: func() []string { return addrs }, Network: netw})
-	if err != nil {
-		return err
-	}
-	if n, err := surf.Notice(ctx, false); err == nil && n != "" {
-		slog.Warn(n) // not recorded as shown: a person sees it through status or the page
-	}
-
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
-	// gate lets every request handler finish before the store closes, and
-	// refuses the ones that start after.
-	g := &gate{}
-	var wg sync.WaitGroup
-	run := func(fn func()) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			fn()
-		}()
-	}
-	if peerLn != nil {
-		h := peerHandler{JoinServer: node.NewJoinServer(rooms), x: x, g: g}
-		ln := peerLn
-		peerLn = nil // Serve owns it now
-		run(func() {
-			if err := peer.Serve(ctx, ln, id, h); err != nil && ctx.Err() == nil {
-				slog.Error("peer listener stopped", "err", err)
-			}
-		})
-	}
-	if netw.State != node.NetworkOff { // off: no scheduler, no join polling, nothing dialled
-		run(func() { node.NewScheduler(x, node.SchedOpts{}).Run(ctx) })
-		run(func() { resumeJoins(ctx, surf) })
-	}
-	run(func() { prune(ctx, m) })
-	// shutdown, deferred before the listeners below: cancel every request
-	// and loop, drain the handlers, wait for the loops; the store closes
-	// after (deferred first).
+	// The handlers of the current run; swapped when a run starts.
+	var cur atomic.Pointer[handlers]
+	cur.Store(&handlers{ui: stopping, api: stopping})
 	var servers []*http.Server
 	defer func() {
-		// Held (waiting) pulls end at once: peer.Serve cancels every
-		// request in progress when ctx ends, before its grace period.
-		stop()
 		shut, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		for _, srv := range servers {
 			_ = srv.Shutdown(shut)
 			srv.Close() // waiting reads that outlived the grace period
 		}
-		g.close()
-		wg.Wait()
 		slog.Info("a2p2 daemon stopped")
 	}()
 	base := func(net.Listener) context.Context { return ctx } // requests end when the daemon stops
 
-	// Web UI: loopback only, token required. If the port is taken, pick any.
+	// Web UI: loopback only (checked above), token required. If the port
+	// is taken, any port on the same address.
 	token, err := newToken()
 	if err != nil {
 		return err
 	}
-	uiAddr := cfg.UI
-	if uiAddr == "" {
-		uiAddr = DefaultUI
-	}
-	uiLn, err := net.Listen("tcp4", uiAddr)
+	uiLn, err := net.Listen("tcp", uiAddr)
 	if err != nil {
-		if uiLn, err = net.Listen("tcp4", "127.0.0.1:0"); err != nil {
+		host, _, _ := net.SplitHostPort(uiAddr)
+		if uiLn, err = net.Listen("tcp", net.JoinHostPort(host, "0")); err != nil {
 			return fmt.Errorf("ui listener: %w", err)
 		}
 	}
-	if !uiLn.Addr().(*net.TCPAddr).IP.IsLoopback() {
-		uiLn.Close()
-		return fmt.Errorf("the UI must listen on a loopback address, not %s", uiLn.Addr())
-	}
 	uiURL := fmt.Sprintf("http://%s/#%s", uiLn.Addr(), token)
-	uiSrv := &http.Server{Handler: g.wrap(web.Handler(surf, token)), ReadHeaderTimeout: 5 * time.Second, BaseContext: base}
+	uiSrv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { cur.Load().ui.ServeHTTP(w, r) }),
+		ReadHeaderTimeout: 5 * time.Second, BaseContext: base}
 	servers = append(servers, uiSrv)
 	go uiSrv.Serve(uiLn)
 
@@ -337,24 +271,192 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 		return fmt.Errorf("local socket: %w", err)
 	}
 	defer os.Remove(sock)
-	apiSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, BaseContext: base, Handler: g.wrap(localapi.Handler(surf, localapi.Info{
-		Version: version, UIURL: func() string { return uiURL }, PID: os.Getpid(), Stop: stop,
-	}))}
+	apiSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, BaseContext: base,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { cur.Load().api.ServeHTTP(w, r) })}
 	servers = append(servers, apiSrv)
 	go apiSrv.Serve(apiLn)
 
-	slog.Info("a2p2 daemon started", "node", core.ShortNode(m.ID), "name", cfg.Name, "home", home,
-		"ui", uiLn.Addr().String(), "network", netw.State, "listen", addrs, "version", version)
-	if o.Ready != nil {
-		o.Ready()
+	ready := o.Ready
+	for {
+		restart := make(chan struct{}, 1)
+		r := &run{home: home, version: version, cfg: cfg, id: id, st: st, o: o, cur: &cur, token: token,
+			uiURL: uiURL, uiAddr: uiLn.Addr().String(), stop: stop, restart: restart}
+		again, err := r.serve(ctx, ready)
+		if err != nil || !again || ctx.Err() != nil {
+			return err
+		}
+		ready = nil
+		slog.Info("a2p2 daemon applies a networking decision")
 	}
-	<-ctx.Done()
-	return nil
+}
+
+// handlers serve the page and the local API for one run.
+type handlers struct{ ui, api http.Handler }
+
+var stopping = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	http.Error(w, "the a2p2 daemon is starting or stopping; try again", http.StatusServiceUnavailable)
+})
+
+// run is one run of the machine inside the daemon process.
+type run struct {
+	home, version string
+	cfg           Config
+	id            *peer.Identity
+	st            *store.Store
+	o             RunOpts
+	cur           *atomic.Pointer[handlers]
+	token, uiURL  string
+	uiAddr        string
+	stop          func()
+	restart       chan struct{}
+
+	mu    sync.Mutex
+	fault string // why networking on does not listen; empty when it does
+}
+
+func (r *run) setFault(s string) {
+	r.mu.Lock()
+	r.fault = s
+	r.mu.Unlock()
+}
+
+func (r *run) getFault() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.fault
+}
+
+// serve runs the machine until the daemon stops (false) or a networking
+// decision is recorded (true: run again to apply it).
+func (r *run) serve(parent context.Context, ready func()) (again bool, err error) {
+	st, o := r.st, r.o
+	// Records, the room log, pull and join (DESIGN-next section 9).
+	m := node.NewMachine(st, r.id.Key, node.MachineOpts{})
+	rooms, err := node.OpenRooms(parent, m)
+	if err != nil {
+		return false, err
+	}
+	if err := m.Prune(parent); err != nil {
+		return false, err
+	}
+	// Networking is what a person last decided (a2p2 net, recorded in
+	// requests); with no decision it is off. The config file's listen
+	// address is only the default a2p2 net on offers. An address that
+	// cannot be bound leaves the machine running, connecting out, and
+	// saying why it does not listen.
+	netw, err := node.LoadNetwork(parent, st)
+	if err != nil {
+		return false, err
+	}
+	var peerLn net.Listener
+	if netw.State == node.NetworkOn {
+		listen := func(addr string) (net.Listener, error) { return net.Listen("tcp4", addr) }
+		if o.Listen != nil {
+			listen = o.Listen
+		}
+		if peerLn, err = listen(netw.Listen); err != nil {
+			r.setFault("not listening: " + err.Error())
+			slog.Error("peer listener", "listen", netw.Listen, "err", err)
+			peerLn = nil
+		}
+	}
+	defer func() {
+		if peerLn != nil {
+			peerLn.Close()
+		}
+	}()
+	addrs := advertised(r.cfg, peerLn)
+	if len(addrs) > node.MaxAddrs {
+		addrs = addrs[:node.MaxAddrs]
+	}
+	// Peers' addresses as last stored (peer_addrs): a machine that does
+	// not listen can reach its peers again after a restart. What joins,
+	// invites and pulls teach the book it saves itself.
+	book, err := node.LoadAddrBook(parent, st)
+	if err != nil {
+		return false, err
+	}
+	pulls := peer.NewPullClient(r.id, book)
+	defer pulls.Close()
+	x := node.NewExchange(rooms, pulls, node.ExchangeOpts{Book: book, Addrs: addrs})
+	if o.Exchange != nil {
+		o.Exchange(x)
+	}
+	joiner := node.NewJoiner(rooms, peer.NewJoinClient(r.id), node.JoinerOpts{Name: r.cfg.Name, Addrs: addrs})
+	surf, err := node.OpenSurface(parent, m, rooms, node.SurfaceOpts{Name: r.cfg.Name, Joiner: joiner, Book: book,
+		Addrs: func() []string { return addrs }, Network: netw, NetworkFault: r.getFault, NotMember: x.NotMemberSince,
+		OnNetwork: func(node.Network) {
+			select {
+			case r.restart <- struct{}{}:
+			default:
+			}
+		}})
+	if err != nil {
+		return false, err
+	}
+
+	ctx, stop := context.WithCancel(parent)
+	defer stop()
+	// gate lets every request handler of this run finish before the run
+	// ends (and the store closes after the last), and refuses the ones
+	// that start after; a handler's request ends when the run does.
+	g := &gate{ctx: ctx, hook: o.Handler}
+	var wg sync.WaitGroup
+	start := func(fn func()) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fn()
+		}()
+	}
+	defer func() {
+		// Held (waiting) pulls end at once: peer.Serve cancels every
+		// request in progress when ctx ends, before its grace period.
+		stop()
+		r.cur.Store(&handlers{ui: stopping, api: stopping})
+		g.close()
+		wg.Wait()
+	}()
+	if peerLn != nil {
+		h := peerHandler{JoinServer: node.NewJoinServer(rooms), x: x, g: g}
+		ln := peerLn
+		peerLn = nil // Serve owns it now
+		start(func() {
+			if err := peer.Serve(ctx, ln, r.id, h); err != nil && ctx.Err() == nil {
+				r.setFault("not listening: the listener stopped: " + err.Error())
+				slog.Error("peer listener stopped", "err", err)
+			}
+		})
+	}
+	if netw.State != node.NetworkOff { // off: no scheduler, no join polling, nothing dialled
+		start(func() { node.NewScheduler(x, node.SchedOpts{}).Run(ctx) })
+		start(func() { resumeJoins(ctx, surf) })
+	}
+	start(func() { prune(ctx, m) })
+	r.cur.Store(&handlers{
+		ui: g.wrap(web.Handler(surf, r.token)),
+		api: g.wrap(localapi.Handler(surf, localapi.Info{
+			Version: r.version, UIURL: func() string { return r.uiURL }, PID: os.Getpid(), Stop: r.stop,
+		})),
+	})
+	slog.Info("a2p2 daemon started", "node", core.ShortNode(m.ID), "name", r.cfg.Name, "home", r.home,
+		"ui", r.uiAddr, "network", netw.State, "listen", addrs, "fault", r.getFault(), "version", r.version)
+	if ready != nil {
+		ready()
+	}
+	select {
+	case <-ctx.Done():
+		return false, nil
+	case <-r.restart:
+		return true, nil
+	}
 }
 
 // gate counts request handlers in flight. close waits for them and makes
 // every later one fail, so that none touches the store after it closes.
 type gate struct {
+	ctx    context.Context // the run's: a request in flight ends with it
+	hook   func(path string, enter bool)
 	mu     sync.RWMutex
 	closed bool
 }
@@ -383,6 +485,16 @@ func (g *gate) wrap(h http.Handler) http.Handler {
 			return
 		}
 		defer g.leave()
+		if g.hook != nil {
+			g.hook(r.URL.Path, true)
+			defer g.hook(r.URL.Path, false)
+		}
+		if g.ctx != nil {
+			ctx, cancel := context.WithCancel(r.Context())
+			defer cancel()
+			defer context.AfterFunc(g.ctx, cancel)()
+			r = r.WithContext(ctx)
+		}
 		h.ServeHTTP(w, r)
 	})
 }

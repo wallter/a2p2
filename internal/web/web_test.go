@@ -407,3 +407,28 @@ func TestPageAsksASecondApprovalBeforeSigningWhenNotCaughtUp(t *testing.T) {
 		t.Fatal("the page does not show node.NotCaughtUpWarning before sending not_caught_up_ok")
 	}
 }
+
+// The page names a copy report and a text state in the words a2p2 trace
+// uses (cmd/a2p2 copyReportWords and textWords, asserted there).
+func TestPageTraceUsesTheCLIWords(t *testing.T) {
+	b, _ := assets.ReadFile("static/app.js")
+	for _, want := range []string{
+		"machines that reported holding the author's messages up to this one, as this machine observed",
+		"available on this machine", "waiting for a copy", "outside this machine's permitted room history",
+		"withdrawn by its author", "expired (text is kept 30 days)",
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("app.js lacks %q", want)
+		}
+	}
+}
+
+// The browser's request for an icon is answered empty, not 404, with the
+// page's headers.
+func TestTheIconRequestIsAnsweredEmpty(t *testing.T) {
+	e := setup(t)
+	code, body := e.do(t, "GET", "/favicon.ico", nil, nil)
+	if code != http.StatusNoContent || len(body) != 0 {
+		t.Fatalf("favicon: %d %q", code, body)
+	}
+}

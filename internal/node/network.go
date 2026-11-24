@@ -9,7 +9,7 @@ import (
 )
 
 // The three networking states of a machine (N1). A person chooses one;
-// the daemon applies it at its next start.
+// the daemon applies it as soon as it is recorded.
 const (
 	// NetworkOff: no listener, no scheduler, no join polling, no dialling.
 	NetworkOff = "off"
@@ -29,8 +29,8 @@ type Network struct {
 	Request string
 }
 
-// LoadNetwork reads the latest networking decision; with none, networking
-// is off. Nothing else turns it on: not a config file, not an agent tool.
+// LoadNetwork reads the latest networking decision, by the order the
+// decisions were recorded; with none, networking is off. Nothing else turns it on: not a config file, not an agent tool.
 func LoadNetwork(ctx context.Context, st *store.Store) (Network, error) {
 	q, ok, err := st.LatestDecision(ctx, store.RequestNetwork)
 	if err != nil || !ok {
@@ -58,8 +58,8 @@ func NetworkText(n Network) string {
 
 // SetNetwork records a person's networking decision. It is reached only
 // from the local API's net call, which has the same authority as confirm:
-// no agent tool or hook calls it. The daemon applies it when it next
-// starts.
+// no agent tool or hook calls it. Once it is recorded the daemon applies
+// it at once (OnNetwork), not depending on the caller.
 func (s *Surface) SetNetwork(ctx context.Context, n Network) (Network, error) {
 	switch n.State {
 	case NetworkOff, NetworkOutbound:
@@ -79,6 +79,9 @@ func (s *Surface) SetNetwork(ctx context.Context, n Network) (Network, error) {
 		return Network{}, err
 	}
 	n.Request = q.ID
+	if s.onNet != nil {
+		s.onNet(n)
+	}
 	return n, nil
 }
 
