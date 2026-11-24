@@ -113,6 +113,12 @@ func (n *lnode) pull(room string, from *lnode) []EntryResult {
 	if err != nil {
 		n.t.Fatal(err)
 	}
+	// As an exchange with from would: caught up if every head from has
+	// accepted is accepted here (maySign).
+	from.r.mu.Lock()
+	heads := acceptedHeads(from.r.rooms[room])
+	from.r.mu.Unlock()
+	n.r.caughtUp(room, from.id, 0, heads)
 	return res
 }
 
@@ -570,8 +576,8 @@ func TestRestartReplaysTheLogToTheSameStateAndDecidesLaterEntriesTheSame(t *test
 		t.Fatalf("after restart: %+v", afterInfo)
 	}
 	// Settling after the restart: same as the control machine. The
-	// restarted b has to have pulled the room's log before it signs
-	// (maySign); this stands in for that pull.
+	// restarted b has to have caught up with the room's log before it
+	// signs (maySign); this stands in for that pull.
 	b.r.rooms[room].pulled = true
 	for _, n := range []*lnode{b, ctl} {
 		n.change(room, Change{Kind: core.EntryRemove, Target: a.id})

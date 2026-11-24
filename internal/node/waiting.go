@@ -23,11 +23,22 @@ func (x *Exchange) hold(ctx context.Context, peer string, q *PullRequest, b *bui
 	key := [2]string{q.Room, peer}
 	mine := make(chan struct{})
 	x.mu.Lock()
+	if x.isClosed() {
+		x.mu.Unlock()
+		return nil, pullErr(503, CodeUnavailable, "closing")
+	}
 	if old := x.waiting[key]; old != nil {
 		close(old) // replaced: the older one is released now
 	}
 	x.waiting[key] = mine
+	for _, c := range x.nextHold[key] {
+		close(c)
+	}
+	delete(x.nextHold, key)
 	x.mu.Unlock()
+	if f, _ := ctx.Value(holdNoticeKey{}).(func()); f != nil {
+		f() // the HTTP layer gives up this request's concurrency slot
+	}
 	defer func() {
 		x.mu.Lock()
 		if x.waiting[key] == mine {
@@ -53,9 +64,49 @@ func (x *Exchange) hold(ctx context.Context, peer string, q *PullRequest, b *bui
 			return b, nil
 		case <-mine:
 			return b, nil
+		case <-x.closed:
+			return nil, pullErr(503, CodeUnavailable, "closing")
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
+	}
+}
+
+type holdNoticeKey struct{}
+
+// WithHoldNotice returns ctx carrying f, which Serve calls once if the
+// request it serves enters a hold (a waiting pull held at this server):
+// the HTTP layer counts a request against its concurrency limit until
+// then only.
+func WithHoldNotice(ctx context.Context, f func()) context.Context {
+	return context.WithValue(ctx, holdNoticeKey{}, f)
+}
+
+// NextHold returns a channel closed when the next hold of a request from
+// peer for room is registered: what a test waits on instead of sleeping.
+func (x *Exchange) NextHold(room, peer string) <-chan struct{} {
+	c := make(chan struct{})
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	key := [2]string{room, peer}
+	x.nextHold[key] = append(x.nextHold[key], c)
+	return c
+}
+
+// Close releases every held request at once, refused 503 unavailable,
+// and refuses every request after it the same way. The daemon calls it
+// when it begins to shut down, before it waits for the listener's
+// requests to end (a held request would otherwise last its whole wait).
+func (x *Exchange) Close() {
+	x.closing.Do(func() { close(x.closed) })
+}
+
+func (x *Exchange) isClosed() bool {
+	select {
+	case <-x.closed:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -118,14 +169,70 @@ func (x *Exchange) learnPeers(room, from string, ps []PullPeer) {
 	x.r.mu.Unlock()
 	now := x.r.m.now()
 	for _, p := range ps {
-		if !core.ValidNode(p.Node) || p.Node == x.r.m.ID || p.Node == from || !slices.Contains(members, p.Node) ||
-			len(p.Addrs) > MaxAddrs {
+		if p.Node == x.r.m.ID || p.Node == from || !slices.Contains(members, p.Node) {
 			continue
 		}
-		var seen time.Time
-		if t, err := time.Parse(timeFormat, p.Seen); err == nil && len(p.Seen) == len(timeFormat) && !t.After(now) {
-			seen = t
+		seen, _ := peerSeen(p.Seen)
+		if seen.After(now) {
+			seen = now
 		}
 		x.book.Learn(p.Node, p.Addrs, seen)
 	}
+}
+
+// askPeersEvery bounds how often one peer is asked for the room's peers
+// while this machine has an address for every current member.
+const askPeersEvery = time.Hour
+
+// wantPeers says whether an opening request to peer for rl asks for the
+// room's peers: whenever this machine has no address for some other
+// current member, and otherwise at most once an hour per peer. A member
+// that does not listen never has an address, so a room with one is asked
+// about on every opening request: the cost is the bytes of the list
+// (at most MaxPeersListed entries). r.mu is held.
+func (x *Exchange) wantPeers(rl *roomLog, peer string, now time.Time) bool {
+	if x.book == nil {
+		return false
+	}
+	missing := false
+	for _, n := range rl.st.Members {
+		if n != x.r.m.ID && n != peer && len(x.book.Addrs(n)) == 0 {
+			missing = true
+		}
+	}
+	key := [2]string{rl.id, peer}
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	last, ok := x.asked[key]
+	if !missing && ok && now.Sub(last) < askPeersEvery && !now.Before(last) {
+		return false
+	}
+	x.asked[key] = now
+	return true
+}
+
+// validPeer checks one entry of a response's peers (PROTOCOL-next 4.2):
+// a node id, 1 to MaxAddrs addresses of 1 to MaxAddrBytes bytes, and a
+// time of section 0 if seen is there. A malformed one refuses the
+// response.
+func validPeer(p PullPeer) bool {
+	if !core.ValidNode(p.Node) || len(p.Addrs) == 0 || len(p.Addrs) > MaxAddrs {
+		return false
+	}
+	for _, a := range p.Addrs {
+		if a == "" || len(a) > MaxAddrBytes {
+			return false
+		}
+	}
+	_, ok := peerSeen(p.Seen)
+	return ok
+}
+
+// peerSeen parses a peer's seen; empty is the zero time.
+func peerSeen(s string) (time.Time, bool) {
+	if s == "" {
+		return time.Time{}, true
+	}
+	t, err := time.Parse(timeFormat, s)
+	return t, err == nil && t.UTC().Format(timeFormat) == s
 }

@@ -119,7 +119,9 @@ func TestAnAuthorVoidedBetweenBuildAndReleaseIsNotSent(t *testing.T) {
 }
 
 // [RM2] The server leaves the room and joins it again between build and
-// release: nothing built in the old generation is released.
+// release: nothing built in the old generation is released. Joined again
+// from its creation only, b is no member of the new generation, and
+// membership is checked first (step 5b fix, item 9): not_member.
 func TestALeaveAndRejoinBetweenBuildAndReleaseReleasesNothingOfTheOldGeneration(t *testing.T) {
 	a, b, _, room := pairWithHistory(t)
 	id := a.send(room, "alice", "x")
@@ -134,7 +136,7 @@ func TestALeaveAndRejoinBetweenBuildAndReleaseReleasesNothingOfTheOldGeneration(
 	})
 	_, err := b.pullFrom(room, a, PullOpts{})
 	var pe *PullError
-	if *fired != 1 || !errors.As(err, &pe) || pe.Code != CodeUnavailable {
+	if *fired != 1 || !errors.As(err, &pe) || pe.Code != CodeNotMember {
 		t.Fatalf("pull: fired %d, %v", *fired, err)
 	}
 	if _, ok := b.held(room, id); ok {

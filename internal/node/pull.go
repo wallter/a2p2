@@ -83,6 +83,13 @@ type Exchange struct {
 	// waiting is, per room and peer, the held response now waiting; a new
 	// one closes its channel, which releases it (waiting.go).
 	waiting map[[2]string]chan struct{}
+	// asked is, per room and peer, when its peers were last asked for.
+	asked map[[2]string]time.Time
+	// nextHold is, per room and peer, the channels to close at the next
+	// hold registered (NextHold); closed, by Close: no more holds.
+	nextHold map[[2]string][]chan struct{}
+	closed   chan struct{}
+	closing  sync.Once
 
 	// Test hooks. atRelease runs where a held response is released (step
 	// 10 of PROTOCOL-next 4.4; step 5b holds there); withhold makes a
@@ -96,7 +103,8 @@ func NewExchange(r *Rooms, t PullTransport, o ExchangeOpts) *Exchange {
 	x := &Exchange{r: r, t: t, pageLimit: o.PageLimit, offerLimit: o.OfferLimit, refused: map[[2]string]*refusal{},
 		heard: map[[2]string][]string{}, seen: map[[2]string]seenSums{}, latest: map[[2]string]int64{},
 		evidence: map[[2]string]map[string]bool{}, pages: map[[2]string]*pageMemory{},
-		book: o.Book, addrs: slices.Clone(o.Addrs), after: o.After, waiting: map[[2]string]chan struct{}{}}
+		book: o.Book, addrs: slices.Clone(o.Addrs), after: o.After, waiting: map[[2]string]chan struct{}{},
+		asked: map[[2]string]time.Time{}, nextHold: map[[2]string][]chan struct{}{}, closed: make(chan struct{})}
 	if x.after == nil {
 		x.after = time.After
 	}
@@ -697,6 +705,18 @@ type built struct {
 	items    []pageItem
 	blocked  map[streamKey]bool // streams left out of the page
 	unlisted []string           // evidence sent the peer could hold unlisted
+	held     bool               // released after a hold: built again
+}
+
+// expiresBy says whether text chosen for the page has passed its
+// retention time by now.
+func (b *built) expiresBy(now time.Time) bool {
+	for _, it := range b.items {
+		if it.text && hasText(it.r.f.Kind) && store.TextExpired(it.r.f.Created, now) {
+			return true
+		}
+	}
+	return false
 }
 
 // Answers to an opening request.
@@ -743,6 +763,9 @@ func (x *Exchange) Serve(ctx context.Context, peer string, q *PullRequest) (*Pul
 	if !core.ValidNode(peer) || peer == x.r.m.ID {
 		return nil, notMember()
 	}
+	if x.isClosed() {
+		return nil, pullErr(503, CodeUnavailable, "closing")
+	}
 	b, err := x.serve(ctx, peer, q)
 	if err != nil {
 		return nil, err
@@ -752,6 +775,7 @@ func (x *Exchange) Serve(ctx context.Context, peer string, q *PullRequest) (*Pul
 		if b, err = x.hold(ctx, peer, q, b); err != nil {
 			return nil, err
 		}
+		b.held = true
 	}
 	if x.atRelease != nil {
 		x.atRelease(q.Room, peer, q)
@@ -783,7 +807,7 @@ func (x *Exchange) serve(ctx context.Context, peer string, q *PullRequest) (*bui
 	if rl == nil {
 		return nil, notMember()
 	}
-	x.hear(q.Room, peer, q.Log.Heads)
+	x.hear(q.Room, peer, q.Log.Heads, slices.Contains(rl.st.Members, peer))
 	now := r.m.now()
 	if x.book != nil && len(q.Addrs) > 0 && slices.Contains(rl.st.Members, peer) {
 		x.book.Replace(peer, q.Addrs, now) // its own word on where it is, from the authenticated peer
@@ -988,20 +1012,15 @@ func (x *Exchange) release(ctx context.Context, peer string, q *PullRequest, b *
 	defer r.mu.Unlock()
 	rl := r.rooms[q.Room]
 	switch {
-	case rl == nil:
-		return nil, notMember()
+	case rl == nil, !slices.Contains(rl.st.Members, peer):
+		return nil, notMember() // membership first, in whatever generation is held now
 	case rl != b.rl || rl.gen != b.gen:
 		return nil, pullErr(503, CodeUnavailable, "room changed")
-	case !slices.Contains(rl.st.Members, peer):
-		return nil, notMember()
 	}
-	expired := false
-	for _, it := range b.items {
-		if it.text && hasText(it.r.f.Kind) && store.TextExpired(it.r.f.Created, r.m.now()) {
-			expired = true
-		}
-	}
-	if r.m.st.Changes() != b.ver || expired {
+	if b.held || r.m.st.Changes() != b.ver || b.expiresBy(r.m.now()) {
+		// Built again: after a hold always (text can pass its retention
+		// time with nothing written), otherwise if anything was written
+		// or text on the page has expired since it was built.
 		sv := b.sv
 		sv.ok = false
 		nb, err := x.respond(ctx, rl, peer, q, sv)
@@ -1016,7 +1035,8 @@ func (x *Exchange) release(ctx context.Context, peer string, q *PullRequest, b *
 		resp.Page = append(resp.Page, json.RawMessage(it.wire()))
 	}
 	resp.Peers = nil
-	if q.Sum != "" && !resp.Same && x.book != nil {
+	if q.Sum != "" && q.Peers && x.book != nil {
+		// Asked for: in a same answer as in a digests one, never otherwise.
 		// Other members with addresses, within the response limit.
 		var others []string
 		for _, n := range rl.st.Members {
@@ -1076,6 +1096,9 @@ type PullStats struct {
 	Stalled   int  // continuations ended because they did not advance
 	TooLarge  int  // authors whose detail alone did not fit in a request
 	Capped    bool
+
+	// heads are the log heads the peer advertised in its last response.
+	heads []string
 }
 
 // refusal is how a peer last refused this machine as not a member: full,
@@ -1126,22 +1149,39 @@ func (x *Exchange) Pull(ctx context.Context, room, peer string, o PullOpts) (Pul
 			return st, err
 		}
 		if !progress {
-			x.pulled(room, gen)
+			x.pulled(room, peer, gen, st.heads)
 			return st, nil
 		}
 	}
 	// Only a peer changing all the time gets here: counted, not an error.
 	st.Capped = true
-	x.pulled(room, gen)
+	x.pulled(room, peer, gen, st.heads)
 	return st, nil
 }
 
-func (x *Exchange) pulled(room string, gen int64) {
-	x.r.mu.Lock()
-	defer x.r.mu.Unlock()
-	if rl := x.r.rooms[room]; rl != nil && rl.gen == gen {
-		rl.pulled = true
+// pulled marks the room caught up (maySign) after an exchange with peer,
+// a current member, in which every log head it advertised last is
+// accepted here: a peer that names newer heads and does not hand them
+// over, or hands over entries that are not accepted, unlocks nothing.
+func (x *Exchange) pulled(room, peer string, gen int64, heads []string) {
+	x.r.caughtUp(room, peer, gen, heads)
+}
+
+// caughtUp marks room caught up with peer's log if peer is a current
+// member and every one of heads (what it advertised) is accepted here.
+func (r *Rooms) caughtUp(room, peer string, gen int64, heads []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rl := r.rooms[room]
+	if rl == nil || gen != 0 && rl.gen != gen || len(heads) == 0 || !slices.Contains(rl.st.Members, peer) {
+		return
 	}
+	for _, h := range heads {
+		if rl.state[h].State != store.LogAccepted {
+			return
+		}
+	}
+	rl.pulled = true
 }
 
 // prepared is one request and what it was built from.
@@ -1203,6 +1243,7 @@ func (x *Exchange) prepare(ctx context.Context, room, peer string, gen int64, ch
 				q.Seen = s.server
 			}
 			q.Addrs = x.addrs
+			q.Peers = x.wantPeers(rl, peer, p.at)
 		} else {
 			q.Snap, q.Detail = snap, map[string][]store.StreamDetail{}
 			for _, a := range chunk {
@@ -1321,17 +1362,26 @@ func (x *Exchange) ownSummary(ctx context.Context, room string, gen int64) (summ
 }
 
 // refusalOf is the refusal state for key, nil if none or no longer in
-// force: a muted one ends when this machine's log heads, or those last
-// heard from the peer, are no longer what they were.
+// force: a muted one ends when this machine's log heads are no longer
+// what they were, or (hear) when a request from the peer, a current
+// member, shows log heads other than those heard when it was muted. The
+// one place the scheduler and the exchange both read.
 func (x *Exchange) refusalOf(key [2]string, heads []string) *refusal {
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	rf := x.refused[key]
-	if rf != nil && rf.muted && (!sameSet(rf.own, heads) || !sameSet(rf.heard, x.heard[key])) {
+	if rf != nil && rf.muted && !sameSet(rf.own, heads) {
 		delete(x.refused, key)
 		return nil
 	}
 	return rf
+}
+
+// muted says whether peer refused this machine twice running for room
+// and neither side's log heads have changed since (own: this machine's).
+func (x *Exchange) muted(room, peer string, own []string) bool {
+	rf := x.refusalOf([2]string{room, peer}, own)
+	return rf != nil && rf.muted
 }
 
 // answered records how the peer answered request q (4.4): any not_member
@@ -1359,15 +1409,43 @@ func (x *Exchange) answered(ctx context.Context, room, peer string, gen int64, q
 }
 
 // hear records the log heads of a request from peer; when they change,
-// the evidence it could not list is sent again.
-func (x *Exchange) hear(room, peer string, heads []string) {
+// the evidence it could not list is sent again; and if peer is a current
+// member that this machine muted with other heads heard, it is muted no
+// longer and the room's loops are woken to pull from it again.
+func (x *Exchange) hear(room, peer string, heads []string, member bool) {
 	x.mu.Lock()
-	defer x.mu.Unlock()
 	key := [2]string{room, peer}
 	if !sameSet(x.heard[key], heads) {
 		delete(x.evidence, key)
 	}
 	x.heard[key] = slices.Clone(heads)
+	wake := false
+	if rf := x.refused[key]; member && rf != nil && rf.muted && !sameSet(rf.heard, heads) {
+		delete(x.refused, key)
+		wake = true
+	}
+	x.mu.Unlock()
+	if wake {
+		x.r.m.wakes.touch(room)
+	}
+}
+
+// keepBook drops from the address book every node that is not a member
+// of a room held here.
+func (x *Exchange) keepBook() {
+	if x.book == nil {
+		return
+	}
+	r := x.r
+	r.mu.Lock()
+	members := map[string]bool{}
+	for _, rl := range r.rooms {
+		for _, n := range rl.st.Members {
+			members[n] = true
+		}
+	}
+	r.mu.Unlock()
+	x.book.Keep(func(n string) bool { return members[n] })
 }
 
 // evidenceFor is the server's evidence filter for peer: evidence the peer
@@ -1571,6 +1649,7 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 			}
 		}
 		peerLog = &store.PeerLog{Heads: resp.Log.Heads, Extra: resp.Log.Extra}
+		st.heads = resp.Log.Heads
 		a, err := x.apply(ctx, room, peer, gen, p, resp)
 		if err != nil {
 			return a, false, err
@@ -1780,8 +1859,15 @@ func checkResponse(resp *PullResponse, q *PullRequest) error {
 		return bad("log")
 	case len(resp.Page) > MaxPageRecords:
 		return bad("page")
-	case len(resp.Peers) > MaxPeersListed:
+	case len(resp.Log.Heads) == 0:
+		return bad("log heads")
+	case len(resp.Peers) > MaxPeersListed, resp.Peers != nil && !q.Peers:
 		return bad("peers")
+	}
+	for _, p := range resp.Peers {
+		if !validPeer(p) {
+			return bad("peer")
+		}
 	}
 	if q.Sum != "" {
 		switch {

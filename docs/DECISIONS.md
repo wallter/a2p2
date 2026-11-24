@@ -417,3 +417,45 @@ Added after the re-review (`research/decisions/step4b-rereview-sol.md`):
 - Not done: pruning the joiner's used-invite rows (it would reopen the
   leave-then-old-token case) and binding an invite to a membership period.
 
+## D33. The pull endpoint, waiting pulls, the scheduler and addresses (2026-11-24)
+
+Build step 5b, beside the v0.2 code: `POST /p/v2/pull` in `peer/pull.go`
+over the existing pinned mutual TLS, now also offering HTTP/2; held
+responses (`node/waiting.go`, `wake.go`); the scheduler (`node/sched.go`:
+two anchors per room, one stable and one rotating); the address book.
+Measured over loopback with the race detector on: a message reaches the
+other two of three machines in about 15 ms; an idle room costs two
+requests a minute per machine.
+
+New table, and why it is needed now: `peer_addrs` (migration 8). The
+address book was first kept in memory; a machine that does not accept
+connections would then know nobody after a restart and could never be
+reached by anyone, so it would be cut off for good.
+
+New on the wire: `peers: true` in an opening request. Addresses used to
+travel only with a digests answer, so a machine whose answers were all
+`same` never learned of another member's address.
+
+Choices made in review (`research/decisions/step5b-review-sol.md`):
+- **Caught up means covered.** A room counts as pulled since start only
+  after an exchange with a current member in which every log head that
+  member advertised is accepted here. Receiving entries alone does not
+  count.
+- **A person can override the gate.** If no other member can be reached, a
+  confirmation fails with `not_caught_up`; the person may approve again
+  with an explicit override, which is recorded with the request. Without
+  it an admin whose peers are all gone could never remove them. With it, a
+  person who has restored this machine from a backup can cause the fork
+  the gate exists to prevent; the warning says so.
+- **A waiting pull answered at once is a failure** for back-off, so a
+  faulty peer cannot draw requests in a tight loop (about 11 requests in
+  the first 8.5 minutes, then one every 4 to 6 minutes per room).
+- **Addresses.** A node's own report of its addresses outranks what others
+  say; at most 8 per node; one that has failed for a day and five attempts
+  is dropped; dials to addresses never verified by a pinned handshake
+  share one budget for the daemon.
+- **Limits before work.** The size and rate checks come before the body is
+  read; a request holds a concurrency slot until it actually waits.
+- **Not done:** no wake-up when text expires during a hold; the answer is
+  worked out again when the hold ends, at most 60 s later.
+

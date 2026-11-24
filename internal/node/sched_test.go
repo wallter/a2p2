@@ -14,74 +14,22 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/wallter/a2p2/internal/core"
 	"github.com/wallter/a2p2/internal/store"
 )
 
-// fakeClock is a clock whose timers fire only when the test moves it.
-type fakeClock struct {
-	mu     sync.Mutex
-	now    time.Time
-	timers []fakeTimer
-	made   int // timers made, to tell activity
-}
+// The scheduler tests run in a synctest bubble: time.Now and time.After
+// are the bubble's fake clock, which moves only when every goroutine of the
+// test is blocked, so fake minutes pass in real milliseconds and "nothing
+// is moving" is synctest.Wait, not a wall-clock pause.
+type fakeClock struct{}
 
-type fakeTimer struct {
-	at time.Time
-	c  chan time.Time
-}
-
-func newFakeClock() *fakeClock { return &fakeClock{now: time.Date(2026, 4, 1, 9, 0, 0, 0, time.UTC)} }
-
-func (c *fakeClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-func (c *fakeClock) After(d time.Duration) <-chan time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.made++
-	ch := make(chan time.Time, 1)
-	if d <= 0 {
-		ch <- c.now
-		return ch
-	}
-	c.timers = append(c.timers, fakeTimer{at: c.now.Add(d), c: ch})
-	return ch
-}
-
-// next moves the clock to the earliest timer and fires every timer due
-// then; false if there is none or it is beyond limit.
-func (c *fakeClock) next(limit time.Time) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.timers) == 0 {
-		return false
-	}
-	slices.SortStableFunc(c.timers, func(a, b fakeTimer) int { return a.at.Compare(b.at) })
-	at := c.timers[0].at
-	if at.After(limit) {
-		return false
-	}
-	c.now = at
-	i := 0
-	for i < len(c.timers) && !c.timers[i].at.After(at) {
-		c.timers[i].c <- at
-		i++
-	}
-	c.timers = c.timers[i:]
-	return true
-}
-
-func (c *fakeClock) activity() (int, int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.made, len(c.timers)
-}
+func newFakeClock() *fakeClock                            { return &fakeClock{} }
+func (*fakeClock) Now() time.Time                         { return time.Now() }
+func (*fakeClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
 
 // sent is one request as a requester sent it.
 type sent struct {
@@ -98,6 +46,9 @@ type recNet struct {
 	mu    sync.Mutex
 	log   []sent
 	done  int
+	// limit, above 0, stalls every request after that many (until its
+	// context ends), so a scheduler that spins cannot spin for ever.
+	limit int
 }
 
 func (n *recNet) link(from string) PullTransport { return &recLink{n, n.memNet.link(from), from} }
@@ -111,7 +62,12 @@ type recLink struct {
 func (l *recLink) Pull(ctx context.Context, peer string, q *PullRequest) (*PullResponse, error) {
 	l.n.mu.Lock()
 	l.n.log = append(l.n.log, sent{from: l.from, to: peer, room: q.Room, wait: q.WaitMS, offer: len(q.Offer), at: l.n.clock.Now()})
+	over := l.n.limit > 0 && len(l.n.log) > l.n.limit
 	l.n.mu.Unlock()
+	if over {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	defer func() {
 		l.n.mu.Lock()
 		l.n.done++
@@ -126,41 +82,19 @@ func (n *recNet) sent() []sent {
 	return slices.Clone(n.log)
 }
 
-// settle waits until nothing has moved for 25 ms of real time: no request
-// sent or finished, no timer made.
+// settle waits until every goroutine of the test is blocked: nothing can
+// move without the clock.
 func (n *recNet) settle(t *testing.T) {
 	t.Helper()
-	state := func() [4]int {
-		made, pending := n.clock.activity()
-		n.mu.Lock()
-		defer n.mu.Unlock()
-		return [4]int{made, pending, len(n.log), n.done}
-	}
-	last, quiet := state(), 0
-	for start := time.Now(); quiet < 5; {
-		if time.Since(start) > 10*time.Second {
-			t.Fatal("never settled")
-		}
-		time.Sleep(5 * time.Millisecond)
-		if s := state(); s == last {
-			quiet++
-		} else {
-			last, quiet = s, 0
-		}
-	}
+	synctest.Wait()
 }
 
-// run moves the clock timer by timer for d, settling between timers.
+// run lets d of fake time pass, every timer due in it firing in order.
 func (n *recNet) run(t *testing.T, d time.Duration) {
 	t.Helper()
-	n.settle(t)
-	limit := n.clock.Now().Add(d)
-	for n.clock.next(limit) {
-		n.settle(t)
-	}
-	n.clock.mu.Lock()
-	n.clock.now = limit
-	n.clock.mu.Unlock()
+	synctest.Wait()
+	time.Sleep(d)
+	synctest.Wait()
 }
 
 // snode is a machine on the fake clock with its exchange on a recNet.
@@ -283,33 +217,35 @@ func from(log []sent, id string) []sent {
 //
 // Requirements: D2, D6
 func TestSchedulerStartsWithShortPullsOfEveryRoomFromTwoMembers(t *testing.T) {
-	net := newRecNet()
-	a, b, c, d := newSNode(t, "a", net), newSNode(t, "b", net), newSNode(t, "c", net), newSNode(t, "d", net)
-	room := sgroup(t, a, b, c, d)
-	schedule(t, net, a)
-	net.settle(t)
-	log := from(net.sent(), a.id)
-	first := slices.IndexFunc(log, func(s sent) bool { return s.wait > 0 })
-	if first < 0 {
-		t.Fatalf("no waiting pull: %+v", log)
-	}
-	peers := map[string]bool{}
-	for _, s := range log[:first] {
-		if s.room != room || s.wait != 0 {
-			t.Fatalf("start request: %+v", s)
+	synctest.Test(t, func(t *testing.T) {
+		net := newRecNet()
+		a, b, c, d := newSNode(t, "a", net), newSNode(t, "b", net), newSNode(t, "c", net), newSNode(t, "d", net)
+		room := sgroup(t, a, b, c, d)
+		schedule(t, net, a)
+		net.settle(t)
+		log := from(net.sent(), a.id)
+		first := slices.IndexFunc(log, func(s sent) bool { return s.wait > 0 })
+		if first < 0 {
+			t.Fatalf("no waiting pull: %+v", log)
 		}
-		peers[s.to] = true
-	}
-	if len(peers) != 2 {
-		t.Fatalf("start pulls went to %d members, want 2: %+v", len(peers), log[:first])
-	}
-	waits := map[string]int64{}
-	for _, s := range log[first:] {
-		waits[s.to] = s.wait
-	}
-	if len(waits) != 2 {
-		t.Fatalf("waiting pulls to %d anchors, want 2: %+v", len(waits), log[first:])
-	}
+		peers := map[string]bool{}
+		for _, s := range log[:first] {
+			if s.room != room || s.wait != 0 {
+				t.Fatalf("start request: %+v", s)
+			}
+			peers[s.to] = true
+		}
+		if len(peers) != 2 {
+			t.Fatalf("start pulls went to %d members, want 2: %+v", len(peers), log[:first])
+		}
+		waits := map[string]int64{}
+		for _, s := range log[first:] {
+			waits[s.to] = s.wait
+		}
+		if len(waits) != 2 {
+			t.Fatalf("waiting pulls to %d anchors, want 2: %+v", len(waits), log[first:])
+		}
+	})
 }
 
 // DESIGN-next 4, steady state: the rotating anchor goes through every
@@ -318,50 +254,52 @@ func TestSchedulerStartsWithShortPullsOfEveryRoomFromTwoMembers(t *testing.T) {
 //
 // Requirements: D2, D6, N2
 func TestSchedulerRotatesTheSecondAnchorThroughEveryMemberPastAFailure(t *testing.T) {
-	net := newRecNet()
-	a := newSNode(t, "a", net)
-	var others []*snode
-	for _, name := range []string{"b", "c", "d", "e"} {
-		others = append(others, newSNode(t, name, net))
-	}
-	sgroup(t, a, others...)
-	down := others[2]
-	net.memNet.mu.Lock()
-	net.down[down.id] = true
-	net.memNet.mu.Unlock()
-	schedule(t, net, a)
-	net.run(t, 10*time.Minute)
-	log := from(net.sent(), a.id)
-	probed := map[string]bool{}
-	stable := map[string]int{}
-	for _, s := range log {
-		switch s.wait {
-		case SchedProbe.Milliseconds():
-			probed[s.to] = true
-		case SchedWait.Milliseconds():
-			stable[s.to]++
+	synctest.Test(t, func(t *testing.T) {
+		net := newRecNet()
+		a := newSNode(t, "a", net)
+		var others []*snode
+		for _, name := range []string{"b", "c", "d", "e"} {
+			others = append(others, newSNode(t, name, net))
 		}
-	}
-	for _, o := range others {
-		if !probed[o.id] && stable[o.id] == 0 {
-			t.Errorf("%s was never an anchor", o.name)
+		sgroup(t, a, others...)
+		down := others[2]
+		net.memNet.mu.Lock()
+		net.down[down.id] = true
+		net.memNet.mu.Unlock()
+		schedule(t, net, a)
+		net.run(t, 10*time.Minute)
+		log := from(net.sent(), a.id)
+		probed := map[string]bool{}
+		stable := map[string]int{}
+		for _, s := range log {
+			switch s.wait {
+			case SchedProbe.Milliseconds():
+				probed[s.to] = true
+			case SchedWait.Milliseconds():
+				stable[s.to]++
+			}
 		}
-	}
-	if !probed[down.id] {
-		t.Error("the unreachable member was never tried")
-	}
-	var downAt []time.Time
-	for _, s := range log {
-		if s.to == down.id {
-			downAt = append(downAt, s.at)
+		for _, o := range others {
+			if !probed[o.id] && stable[o.id] == 0 {
+				t.Errorf("%s was never an anchor", o.name)
+			}
 		}
-	}
-	for i := 1; i < len(downAt); i++ {
-		if downAt[i].Sub(downAt[i-1]) < time.Second {
-			t.Fatalf("the unreachable member was tried again after %v", downAt[i].Sub(downAt[i-1]))
+		if !probed[down.id] {
+			t.Error("the unreachable member was never tried")
 		}
-	}
-	t.Logf("requests from a over 10 idle minutes with one member down: %d; probes %d", len(log), len(probed))
+		var downAt []time.Time
+		for _, s := range log {
+			if s.to == down.id {
+				downAt = append(downAt, s.at)
+			}
+		}
+		for i := 1; i < len(downAt); i++ {
+			if downAt[i].Sub(downAt[i-1]) < time.Second {
+				t.Fatalf("the unreachable member was tried again after %v", downAt[i].Sub(downAt[i-1]))
+			}
+		}
+		t.Logf("requests from a over 10 idle minutes with one member down: %d; probes %d", len(log), len(probed))
+	})
 }
 
 // PROTOCOL-next 4.6: a sleeping peer is tried 1 s, 2 s, 4 s ... apart up
@@ -370,44 +308,46 @@ func TestSchedulerRotatesTheSecondAnchorThroughEveryMemberPastAFailure(t *testin
 //
 // Requirements: P5, D6
 func TestSchedulerBacksOffASleepingPeerAndStartsAgainWhenItAnswers(t *testing.T) {
-	net := newRecNet()
-	a, b := newSNode(t, "a", net), newSNode(t, "b", net)
-	sgroup(t, a, b)
-	setDown := func(v bool) {
-		net.memNet.mu.Lock()
-		net.down[b.id] = v
-		net.memNet.mu.Unlock()
-	}
-	setDown(true)
-	schedule(t, net, a)
-	net.run(t, 30*time.Minute)
-	log := from(net.sent(), a.id)
-	want := []time.Duration{1, 2, 4, 8, 16, 32, 64, 128, 256, 300, 300, 300, 300}
-	if len(log) != len(want)+1 {
-		t.Fatalf("%d attempts in 30 minutes, the schedule allows %d: %+v", len(log), len(want)+1, log)
-	}
-	for i, w := range want {
-		if got := log[i+1].at.Sub(log[i].at); got != w*time.Second {
-			t.Fatalf("gap %d: %v, want %v", i, got, w*time.Second)
+	synctest.Test(t, func(t *testing.T) {
+		net := newRecNet()
+		a, b := newSNode(t, "a", net), newSNode(t, "b", net)
+		sgroup(t, a, b)
+		setDown := func(v bool) {
+			net.memNet.mu.Lock()
+			net.down[b.id] = v
+			net.memNet.mu.Unlock()
 		}
-	}
-	setDown(false)
-	net.run(t, 5*time.Minute+time.Second)
-	n := len(from(net.sent(), a.id))
-	if n <= len(log) {
-		t.Fatal("not tried again after waking")
-	}
-	setDown(true)
-	// The waiting pull in progress ends; the next attempt fails, and the
-	// one after it is 1 s later.
-	net.run(t, 2*time.Minute)
-	after := from(net.sent(), a.id)[n:]
-	if len(after) < 2 {
-		t.Fatalf("attempts after it slept again: %+v", after)
-	}
-	if g := after[1].at.Sub(after[0].at); g != time.Second {
-		t.Fatalf("the back-off did not start again: first gap %v", g)
-	}
+		setDown(true)
+		schedule(t, net, a)
+		net.run(t, 30*time.Minute)
+		log := from(net.sent(), a.id)
+		want := []time.Duration{1, 2, 4, 8, 16, 32, 64, 128, 256, 300, 300, 300, 300}
+		if len(log) != len(want)+1 {
+			t.Fatalf("%d attempts in 30 minutes, the schedule allows %d: %+v", len(log), len(want)+1, log)
+		}
+		for i, w := range want {
+			if got := log[i+1].at.Sub(log[i].at); got != w*time.Second {
+				t.Fatalf("gap %d: %v, want %v", i, got, w*time.Second)
+			}
+		}
+		setDown(false)
+		net.run(t, 5*time.Minute+time.Second)
+		n := len(from(net.sent(), a.id))
+		if n <= len(log) {
+			t.Fatal("not tried again after waking")
+		}
+		setDown(true)
+		// The waiting pull in progress ends; the next attempt fails, and the
+		// one after it is 1 s later.
+		net.run(t, 2*time.Minute)
+		after := from(net.sent(), a.id)[n:]
+		if len(after) < 2 {
+			t.Fatalf("attempts after it slept again: %+v", after)
+		}
+		if g := after[1].at.Sub(after[0].at); g != time.Second {
+			t.Fatalf("the back-off did not start again: first gap %v", g)
+		}
+	})
 }
 
 // DESIGN-next 4: a local write abandons the waiting pulls and issues them
@@ -416,50 +356,54 @@ func TestSchedulerBacksOffASleepingPeerAndStartsAgainWhenItAnswers(t *testing.T)
 //
 // Requirements: D2, N1
 func TestALocalWriteReissuesTheWaitingPullsAtOnceWithAnOffer(t *testing.T) {
-	net := newRecNet()
-	a, b, c := newSNode(t, "a", net), newSNode(t, "b", net), newSNode(t, "c", net)
-	room := sgroup(t, a, b, c)
-	schedule(t, net, a)
-	net.settle(t)
-	before := len(net.sent())
-	at := net.clock.Now()
-	id := a.send(room, "news")
-	net.settle(t)
-	if !b.holds(room, id) || !c.holds(room, id) {
-		t.Fatalf("offered on: b %v c %v", b.holds(room, id), c.holds(room, id))
-	}
-	offered := map[string]bool{}
-	for _, s := range net.sent()[before:] {
-		if s.offer > 0 {
-			offered[s.to] = true
+	synctest.Test(t, func(t *testing.T) {
+		net := newRecNet()
+		a, b, c := newSNode(t, "a", net), newSNode(t, "b", net), newSNode(t, "c", net)
+		room := sgroup(t, a, b, c)
+		schedule(t, net, a)
+		net.settle(t)
+		before := len(net.sent())
+		at := net.clock.Now()
+		id := a.send(room, "news")
+		net.settle(t)
+		if !b.holds(room, id) || !c.holds(room, id) {
+			t.Fatalf("offered on: b %v c %v", b.holds(room, id), c.holds(room, id))
 		}
-	}
-	if !offered[b.id] || !offered[c.id] || !net.clock.Now().Equal(at) {
-		t.Fatalf("offers to b %v c %v; time passed %v", offered[b.id], offered[c.id], net.clock.Now().Sub(at))
-	}
+		offered := map[string]bool{}
+		for _, s := range net.sent()[before:] {
+			if s.offer > 0 {
+				offered[s.to] = true
+			}
+		}
+		if !offered[b.id] || !offered[c.id] || !net.clock.Now().Equal(at) {
+			t.Fatalf("offers to b %v c %v; time passed %v", offered[b.id], offered[c.id], net.clock.Now().Sub(at))
+		}
+	})
 }
 
 // No pull of a room this machine has left, ever again.
 //
 // Requirements: P5
 func TestNoPullsAtAllForARoomThisMachineHasLeft(t *testing.T) {
-	net := newRecNet()
-	a, b := newSNode(t, "a", net), newSNode(t, "b", net)
-	room := sgroup(t, a, b)
-	schedule(t, net, a)
-	net.run(t, 3*time.Minute)
-	if len(from(net.sent(), a.id)) == 0 {
-		t.Fatal("no pulls before leaving")
-	}
-	if err := a.r.Leave(context.Background(), room); err != nil {
-		t.Fatal(err)
-	}
-	net.settle(t)
-	n := len(net.sent())
-	net.run(t, 30*time.Minute)
-	if extra := net.sent()[n:]; len(extra) > 0 {
-		t.Fatalf("%d pulls after leaving: %+v", len(extra), extra)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		net := newRecNet()
+		a, b := newSNode(t, "a", net), newSNode(t, "b", net)
+		room := sgroup(t, a, b)
+		schedule(t, net, a)
+		net.run(t, 3*time.Minute)
+		if len(from(net.sent(), a.id)) == 0 {
+			t.Fatal("no pulls before leaving")
+		}
+		if err := a.r.Leave(context.Background(), room); err != nil {
+			t.Fatal(err)
+		}
+		net.settle(t)
+		n := len(net.sent())
+		net.run(t, 30*time.Minute)
+		if extra := net.sent()[n:]; len(extra) > 0 {
+			t.Fatalf("%d pulls after leaving: %+v", len(extra), extra)
+		}
+	})
 }
 
 // What an idle room costs: three machines, each with its two anchors,
@@ -467,18 +411,20 @@ func TestNoPullsAtAllForARoomThisMachineHasLeft(t *testing.T) {
 //
 // Requirements: P5
 func TestAnIdleRoomCostsAFewRequestsPerMachinePerMinute(t *testing.T) {
-	net := newRecNet()
-	a, b, c := newSNode(t, "a", net), newSNode(t, "b", net), newSNode(t, "c", net)
-	sgroup(t, a, b, c)
-	schedule(t, net, a, b, c)
-	net.run(t, time.Minute)
-	n := len(net.sent())
-	net.run(t, 30*time.Minute)
-	per := float64(len(net.sent())-n) / 3 / 30
-	t.Logf("requests per idle minute per room per machine: %.2f", per)
-	if per > 4 {
-		t.Fatalf("%.2f requests per idle minute", per)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		net := newRecNet()
+		a, b, c := newSNode(t, "a", net), newSNode(t, "b", net), newSNode(t, "c", net)
+		sgroup(t, a, b, c)
+		schedule(t, net, a, b, c)
+		net.run(t, time.Minute)
+		n := len(net.sent())
+		net.run(t, 30*time.Minute)
+		per := float64(len(net.sent())-n) / 3 / 30
+		t.Logf("requests per idle minute per room per machine: %.2f", per)
+		if per > 4 {
+			t.Fatalf("%.2f requests per idle minute", per)
+		}
+	})
 }
 
 // DESIGN-next 3: a daemon restored from an older copy signs nothing for a
@@ -504,8 +450,7 @@ func TestARestoredDaemonSignsNothingForARoomUntilItHasPulledItsLog(t *testing.T)
 	q := a.propose(room, Change{Kind: core.EntryAdd, Target: junkNode(1), Name: "j", History: true})
 	signs := a.r.signs
 	_, err := a.r.Confirm(context.Background(), q.ID, true)
-	var ue *UserError
-	if !errors.As(err, &ue) || ue.Msg != ReasonNotPulled || a.r.signs != signs {
+	if !errors.Is(err, ErrNotCaughtUp) || a.r.signs != signs {
 		t.Fatalf("before pulling: %v, signed %d", err, a.r.signs-signs)
 	}
 	a.mustPull(room, b, PullOpts{})
@@ -525,46 +470,58 @@ func TestARestoredDaemonSignsNothingForARoomUntilItHasPulledItsLog(t *testing.T)
 //
 // Requirements: T5, P5
 func TestTheSchedulerFollowsEachRefusalAsItsStatusSays(t *testing.T) {
-	net := newRecNet()
-	a, b, c := newSNode(t, "a", net), newSNode(t, "b", net), newSNode(t, "c", net)
-	room := sgroup(t, a, b, c)
-	s := NewScheduler(a.x, SchedOpts{Now: net.clock.Now, After: net.clock.After, Jitter: func() float64 { return 0.5 }})
-	has := func(p string) bool { return slices.Contains(s.eligible(room), p) }
-	s.failed(room, b.id, notMember())
-	if !has(b.id) {
-		t.Fatal("not tried again after the first 403")
-	}
-	s.failed(room, b.id, notMember())
-	if has(b.id) {
-		t.Fatal("tried again after the second 403")
-	}
-	// The room log changes here: b is tried again.
-	q, err := a.r.Propose(context.Background(), room, Change{Kind: core.EntryAdmin, Target: c.id})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := a.r.Confirm(context.Background(), q.ID, true); err != nil {
-		t.Fatal(err)
-	}
-	if !has(b.id) {
-		t.Fatal("still muted after the log changed")
-	}
-	s.failed(room, c.id, pullErr(413, CodeTooLarge, ""))
-	if got := s.offerOf(room, c.id); got != MaxOfferRecords/2 || !has(c.id) {
-		t.Fatalf("after a 413: offer %d, eligible %v", got, has(c.id))
-	}
-	s.failed(room, c.id, pullErr(413, CodeTooLarge, ""))
-	if got := s.offerOf(room, c.id); got != MaxOfferRecords/4 {
-		t.Fatalf("after a second 413: offer %d", got)
-	}
-	busy := pullErr(429, CodeRateLimited, "")
-	busy.RetryAfter = 7 * time.Second
-	s.failed(room, c.id, busy)
-	if until := s.peers[[2]string{room, c.id}].until.Sub(net.clock.Now()); until != 7*time.Second {
-		t.Fatalf("429 waits %v", until)
-	}
-	s.failed(room, b.id, errUnreachable)
-	if until := s.peers[[2]string{room, b.id}].until.Sub(net.clock.Now()); until < time.Second {
-		t.Fatalf("an unreachable peer backs off %v", until)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		net := newRecNet()
+		a, b, c := newSNode(t, "a", net), newSNode(t, "b", net), newSNode(t, "c", net)
+		room := sgroup(t, a, b, c)
+		s := NewScheduler(a.x, SchedOpts{Now: net.clock.Now, After: net.clock.After, Jitter: func() float64 { return 0.5 }})
+		has := func(p string) bool { return slices.Contains(s.eligible(room), p) }
+		// As an exchange that b refuses: the exchange keeps the refusal.
+		gen, _ := a.r.Gen(room)
+		_, heads := s.roomNow(room)
+		refuse := func() {
+			q := &PullRequest{Room: room, Log: PullLog{Heads: heads}}
+			if err := a.x.answered(context.Background(), room, b.id, gen, q, notMember()); err != nil {
+				t.Fatal(err)
+			}
+			s.failed(room, b.id, notMember())
+		}
+		refuse()
+		if !has(b.id) {
+			t.Fatal("not tried again after the first 403")
+		}
+		refuse()
+		if has(b.id) {
+			t.Fatal("tried again after the second 403")
+		}
+		// The room log changes here: b is tried again.
+		q, err := a.r.Propose(context.Background(), room, Change{Kind: core.EntryAdmin, Target: c.id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.r.Confirm(context.Background(), q.ID, true); err != nil {
+			t.Fatal(err)
+		}
+		if !has(b.id) {
+			t.Fatal("still muted after the log changed")
+		}
+		s.failed(room, c.id, pullErr(413, CodeTooLarge, ""))
+		if got := s.offerOf(room, c.id); got != MaxOfferRecords/2 || !has(c.id) {
+			t.Fatalf("after a 413: offer %d, eligible %v", got, has(c.id))
+		}
+		s.failed(room, c.id, pullErr(413, CodeTooLarge, ""))
+		if got := s.offerOf(room, c.id); got != MaxOfferRecords/4 {
+			t.Fatalf("after a second 413: offer %d", got)
+		}
+		busy := pullErr(429, CodeRateLimited, "")
+		busy.RetryAfter = 7 * time.Second
+		s.failed(room, c.id, busy)
+		if until := s.peers[[2]string{room, c.id}].until.Sub(net.clock.Now()); until != 7*time.Second {
+			t.Fatalf("429 waits %v", until)
+		}
+		s.failed(room, b.id, errUnreachable)
+		if until := s.peers[[2]string{room, b.id}].until.Sub(net.clock.Now()); until < time.Second {
+			t.Fatalf("an unreachable peer backs off %v", until)
+		}
+	})
 }

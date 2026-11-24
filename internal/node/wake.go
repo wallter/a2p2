@@ -17,8 +17,20 @@ const roomSet = ""
 // roomWakes hands out, per room, a channel closed at the next change of
 // that room. The zero value is ready to use.
 type roomWakes struct {
-	mu sync.Mutex
-	ch map[string]chan struct{}
+	mu  sync.Mutex
+	ch  map[string]chan struct{}
+	seq map[string]uint64 // touches per room
+	all uint64            // touches of every room
+}
+
+// sub is wait, and the number of touches of room so far: a caller that
+// remembers it can tell later whether room changed since, though it took
+// no channel in between (the scheduler's mark of a write not yet offered).
+func (w *roomWakes) sub(room string) (<-chan struct{}, uint64) {
+	c := w.wait(room)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return c, w.seq[room] + w.all
 }
 
 // wait returns a channel closed by the next touch of room. A caller takes
@@ -42,7 +54,11 @@ func (w *roomWakes) wait(room string) <-chan struct{} {
 func (w *roomWakes) touch(rooms ...string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.seq == nil {
+		w.seq = map[string]uint64{}
+	}
 	for _, room := range rooms {
+		w.seq[room]++
 		if c := w.ch[room]; c != nil {
 			close(c)
 			delete(w.ch, room)
@@ -55,6 +71,7 @@ func (w *roomWakes) touch(rooms ...string) {
 func (w *roomWakes) touchAll() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.all++
 	for room, c := range w.ch {
 		close(c)
 		delete(w.ch, room)

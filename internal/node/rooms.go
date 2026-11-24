@@ -106,9 +106,10 @@ type roomLog struct {
 	st                  members.State
 	perm                string // own membership and permission, to see it change
 	cache               map[string]store.RoomMember
-	// pulled: this room's log has been pulled from another member since
-	// the daemon started, or the room was created or pinned in this run
-	// (DESIGN-next section 3). See maySign.
+	// pulled: since the daemon started, this machine has caught up with
+	// the room's log from a current member (an exchange whose advertised
+	// heads are all accepted here, or a completed join), or it created
+	// the room (DESIGN-next section 3). See maySign.
 	pulled bool
 }
 
@@ -331,6 +332,11 @@ func (r *Rooms) CreateRoom(ctx context.Context, label string) (string, error) {
 	if err := r.pin(ctx, v); err != nil {
 		return "", err
 	}
+	r.mu.Lock()
+	if rl := r.rooms[id]; rl != nil {
+		rl.pulled = true // created here in this run: exempt (maySign)
+	}
+	r.mu.Unlock()
 	return id, nil
 }
 
@@ -410,9 +416,6 @@ func (r *Rooms) pinWith(ctx context.Context, v *core.VerifiedEntry, create func(
 	}
 	rl.state[v.ID()] = bare
 	rl.gen = gen
-	// Created here, or pinned to be joined (its log comes from the admin
-	// machine next): exempt from pulling before signing (maySign).
-	rl.pulled = true
 	r.rooms[f.Room] = rl
 	r.m.wakes.touch(f.Room, roomSet)
 	return gen, nil
@@ -532,17 +535,14 @@ func (r *Rooms) Receive(ctx context.Context, room string, gen int64, wires ...[]
 	if gen != 0 && gen != rl.gen {
 		return nil, ErrStaleGeneration
 	}
-	res, err := r.ingest(ctx, rl, gen, wires, nil)
-	if err == nil {
-		// Entries handed over by another machine (the join's delivery of
-		// the log): the room's log counts as pulled (maySign).
-		rl.pulled = true
-	}
-	return res, err
+	return r.ingest(ctx, rl, gen, wires, nil)
 }
 
 // completion is the request a batch approves.
-type completion struct{ request, entry string }
+type completion struct {
+	request, entry string
+	notCaughtUp    bool // approved with ConfirmOpts.NotCaughtUpOK
+}
 
 func (r *Rooms) ingest(ctx context.Context, rl *roomLog, gen int64, wires [][]byte, done *completion) ([]EntryResult, error) {
 	return r.ingestWith(ctx, rl, gen, wires, done, nil)
@@ -778,7 +778,7 @@ func (r *Rooms) stage(ctx context.Context, rl *roomLog, gen int64, batch []*core
 	}
 	b.Requests = reqs
 	if done != nil {
-		b.Complete, b.Entries = done.request, done.entry
+		b.Complete, b.Entries, b.NotCaughtUp = done.request, done.entry, done.notCaughtUp
 	}
 	perm := r.permKey(st)
 	if p, member := st.Permissions[r.m.ID]; member && perm != rl.perm {

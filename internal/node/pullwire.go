@@ -69,6 +69,9 @@ type PullRequest struct {
 	OfferMore bool                            `json:"offer_more,omitempty"`
 	Addrs     []string                        `json:"addrs,omitempty"`
 	WaitMS    int64                           `json:"wait_ms,omitempty"`
+	// Peers asks the server to list other members' addresses in its
+	// answer (opening requests only).
+	Peers bool `json:"peers,omitempty"`
 }
 
 // PullLog is the log part of a request or response.
@@ -218,8 +221,10 @@ func checkDetail(d []store.StreamDetail) error {
 				return fmt.Errorf("detail w")
 			}
 		}
-		if s.W != nil && !slices.IsSorted(s.W) {
-			return fmt.Errorf("detail w order")
+		for i := 1; i < len(s.W); i++ {
+			if s.W[i] <= s.W[i-1] {
+				return fmt.Errorf("detail w order")
+			}
 		}
 	}
 	return nil
@@ -294,6 +299,8 @@ func (q *PullRequest) validate() *PullError {
 		return badRequest("addrs")
 	case q.WaitMS < 0 || q.WaitMS > MaxWaitMS:
 		return badRequest("wait_ms")
+	case q.Sum == "" && (q.WaitMS != 0 || q.Peers):
+		return badRequest("wait_ms and peers go with sum")
 	}
 	for a, d := range q.Detail {
 		if !core.ValidNode(a) || d == nil || checkDetail(d) != nil {

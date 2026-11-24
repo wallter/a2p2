@@ -264,7 +264,10 @@ and continues with:
 | `peers` | `true`, only with `sum`: asks for `peers` in the answer. Sent when the requester has no address for some current member, and otherwise at most once an hour per peer | |
 | `wait_ms` | 0 to 60,000; only with `sum` | |
 
-Exactly one of `sum`, or `snap` with `detail`, is present. Request ≤ 1 MiB,
+Exactly one of `sum`, or `snap` with `detail`, is present. A continuing
+request carries neither `wait_ms` nor `peers`. Keys are spelled exactly at
+every depth; `nb` and `w` are left out when empty and are strictly
+increasing; an integer is unsigned digits (no `-0`). Request ≤ 1 MiB,
 counted over the whole encoded message.
 
 ### 4.2 Response (200)
@@ -307,7 +310,8 @@ and to a continuing request
 | `more` | page cut at a limit | |
 | `peers` | other members with addresses; only when the request asked, with a `same` answer or a digests answer | ≤ 64 |
 
-Response ≤ 4 MiB, counted over the whole encoded message. A requester
+Every response carries `log.heads`. A malformed `peers` entry refuses the
+whole response. Response ≤ 4 MiB, counted over the whole encoded message. A requester
 refuses, and counts, a response whose shape does not fit its request.
 
 ### 4.3 Summary exchange
@@ -755,7 +759,7 @@ shows the preview, asks on the terminal, then waits unless `--no-wait`),
 | `registrations` | `agent`, `room`, `at` (when an agent's cursors were first set) | (`agent`,`room`) |
 | `room_invites` (named apart from v0.2's `invites` while both exist) | `secret_hash`, `room`, `role`, `history`, `created_at`, `expires_at`, `bound_key`, `name`, `addrs`, `state` (`issued`, `previewed`, `accepted`, `expired`, `revoked`; signed and declined are read from the request), `request`, `reason`, `shown_member`, `shown_role`, `shown_history` (the terms the last preview showed) | `secret_hash` |
 | `joins` (joiner side) | `invite` (SHA-256 of the secret), `room`, `label`, `create_id`, `role`, `history`, `member`, `admin` (full key), `addrs`, `gen`, `expires_at`, `state`, `reason`, `created_at`, `updated_at`; written before `accept` is sent and kept afterwards, so an invite is used once | `invite` |
-| `requests` | `id`, `kind`, `action` (admit, admit as admin, promote, remove, second, rejoin), `room`, `node`, `name`, `role`, `history`, `created_at`, `state`, `decided_at`, `entries`, `admins` (how many admins the room had when a request that makes an admin was raised; if that has changed at approval the request fails) | `id` |
+| `requests` | `id`, `kind`, `not_caught_up` (the person approved although this machine had not checked the room's log with another member since starting), `action` (admit, admit as admin, promote, remove, second, rejoin), `room`, `node`, `name`, `role`, `history`, `created_at`, `state`, `decided_at`, `entries`, `admins` (how many admins the room had when a request that makes an admin was raised; if that has changed at approval the request fails) | `id` |
 | `meta` | `key`, `value`; `v02_dropped_notice` shown once | `key` |
 
 Migration 4 adds `observed` and `refusals`, migration 5 `streams.known_from`

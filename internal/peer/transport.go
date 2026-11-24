@@ -304,7 +304,7 @@ func Serve(ctx context.Context, ln net.Listener, id *Identity, h Handler, refres
 		mux.Handle("POST "+pathJoinV2, joinV2Route(j))
 	}
 	if p, ok := h.(PullHandler); ok {
-		mux.Handle("POST "+pathPullV2, newPullServer(p))
+		mux.Handle("POST "+pathPullV2, newPullServer(ctx, p))
 	}
 	protos := new(http.Protocols)
 	protos.SetHTTP1(true) // v0.2 clients: HTTP/1.1, one request per connection at a time
@@ -482,10 +482,17 @@ func guard(lim *limiter, next http.Handler) http.Handler {
 		start, from := time.Now(), requestNode(r)
 		sw := &statusWriter{ResponseWriter: w, code: http.StatusOK}
 		switch {
+		case from == "" && r.URL.Path == pathPullV2:
+			pullRefuse(sw, &node.PullError{Status: http.StatusForbidden, Code: node.CodeNotMember})
 		case from == "": // unreachable with RequireAnyClientCert; refuse rather than trust
 			http.Error(sw, "no client identity", http.StatusForbidden)
 		case r.URL.Path != pathJoinV2 && !lim.allow(from): // the join route limits by source address instead
-			http.Error(sw, "slow down", http.StatusTooManyRequests)
+			if r.URL.Path == pathPullV2 { // the pull exchange's refusals are its own (PROTOCOL-next 4.5)
+				pullRefuse(sw, &node.PullError{Status: http.StatusTooManyRequests, Code: node.CodeRateLimited,
+					RetryAfter: time.Second})
+			} else {
+				http.Error(sw, "slow down", http.StatusTooManyRequests)
+			}
 		default:
 			next.ServeHTTP(sw, r)
 		}

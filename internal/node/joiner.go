@@ -601,6 +601,9 @@ func (j *Joiner) verify(jn store.Join, pg *paging, heads []string) (JoinOutcome,
 	if !slices.Contains(st.Members, self) {
 		return JoinOutcome{}, ReasonJoinNotMember
 	}
+	// Every head of the admin machine's last page is accepted here: the
+	// room's log is caught up (maySign).
+	rl.pulled = true
 	o := JoinOutcome{State: JoinStateSigned, Room: jn.Room, Role: RoleMember, History: st.Permissions[self].All}
 	if slices.Contains(st.Admins, self) {
 		o.Role = RoleAdmin
