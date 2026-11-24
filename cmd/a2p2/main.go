@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -45,6 +46,11 @@ Talking (as the human, or --as <label> for a script)
                                   Use --to label@machine, for example human@1a2b3c4d.
                                   Find machine IDs with a2p2 room list ROOM.
                                   Empty text with --replaces ID withdraws your message.
+  a2p2 send --file PATH [--file PATH]... [flags] TEXT
+                                  attach up to 8 files; a person confirms on this machine before
+                                  anything is sent. With --replaces, list kept files as sha256:HEX.
+  a2p2 fetch SHA256 [--room R] [--message ID] [--wait SECONDS]
+                                  copy a verified file of a message you were shown; never opened
   a2p2 inbox [--room R] [--wait SECONDS] [--limit N] [--peek] [--thread ID]
                                   Read unread messages. Use --peek or --thread to leave seen status unchanged.
   a2p2 inbox --level all|addressed|none [--room R] --as LABEL
@@ -70,6 +76,10 @@ Rooms across machines
   a2p2 room admin ROOM MACHINE    ask to make a member an admin (confirm to sign)
   a2p2 room remove ROOM MACHINE   ask to remove a member (confirm to sign)
   a2p2 room leave ROOM            stop carrying a room on this machine
+  a2p2 room files ROOM [off|carry|keep]
+                                  show or set what this machine does with the room's files:
+                                  off: hold only what this machine's agents fetch; carry (default):
+                                  also fetch a file a member asks this machine for; keep: every file
 
 Requests and decisions
   The CLI asks for decisions at a terminal. The daemon records them.
@@ -272,6 +282,8 @@ func run(ctx context.Context, name string, args []string) (err error) {
 		return doctor(c, args)
 	case "send":
 		return send(c, args)
+	case "fetch":
+		return fetch(c, args)
 	case "inbox":
 		return inbox(c, args)
 	case "history":
@@ -463,7 +475,43 @@ func printEntry(w io.Writer, e localapi.Entry) {
 	if len(e.Choices) > 0 {
 		fmt.Fprintf(w, "    choices: %s\n", strings.Join(e.Choices, " | "))
 	}
+	if e.Kind == node.EntryRequest {
+		switch e.State {
+		case node.RequestSent:
+			fmt.Fprintf(w, "    your send with files (request %s) was approved and sent\n", e.Request)
+		default:
+			fmt.Fprintf(w, "    your send with files (request %s) was declined: %s; nothing was sent\n", e.Request, e.Reason)
+		}
+	}
+	printFiles(w, e)
 	fmt.Fprintf(w, "    id %s\n", e.ID)
+}
+
+// fileWords say what this machine holds of a file of a message.
+var fileWords = map[string]string{
+	node.FileStateHere:        "here: a2p2 fetch copies it out",
+	node.FileStateNotFetched:  "not fetched: a2p2 fetch gets it",
+	node.FileStatePartial:     "partly downloaded",
+	node.FileStateComing:      "coming: asked of its author",
+	node.FileStateUnavailable: "unavailable: no member served it",
+}
+
+// printFiles lists the files of an entry; names come from other machines
+// and are escaped.
+func printFiles(w io.Writer, e localapi.Entry) {
+	for _, f := range e.Files {
+		state := fileWords[f.State]
+		if state == "" {
+			state = f.State
+		}
+		fmt.Fprintf(w, "    file %s  %s  %s\n         sha256 %s\n", node.EscapeDisplay(f.Name), sizeText(f.Size), state, f.SHA256)
+	}
+	if e.FilesPending {
+		fmt.Fprintln(w, "    files: has files; their list is not here yet")
+	}
+	if e.FilesNote != "" {
+		fmt.Fprintf(w, "    files: %s\n", e.FilesNote)
+	}
 }
 
 func short(s string) string {
@@ -534,6 +582,7 @@ func status(c *cmd) error {
 		if st.Waiting > 0 {
 			fmt.Printf("requests %d pending. Run a2p2 confirm to review.\n", st.Waiting)
 		}
+		fmt.Printf("files    %s held of %s on this machine\n", sizeText(st.Files.Held), sizeText(st.Files.Budget))
 		fmt.Println("ui       run a2p2 ui to open the local page")
 		fmt.Println("rooms")
 		labels := make(map[string]int, len(st.Rooms))
@@ -545,7 +594,11 @@ func status(c *cmd) error {
 			if labels[name] > 1 {
 				name += " (" + r.ID + ")"
 			}
-			fmt.Printf("  %-20s machines: %d\n", name, len(r.Members))
+			files := ""
+			if r.Files != nil {
+				files = fmt.Sprintf("  files: %s, %s held", r.Files.Mode, sizeText(r.Files.Held))
+			}
+			fmt.Printf("  %-20s machines: %d%s\n", name, len(r.Members), files)
 			if r.MayBeRemoved {
 				fmt.Println("    " + node.MaybeRemovedText)
 			}
@@ -616,6 +669,15 @@ func printTrace(w io.Writer, t localapi.TraceResp) {
 	}
 	for _, h := range t.Handled {
 		fmt.Fprintf(w, "  by %s at %s\n", h.Agent, clock(h.At))
+	}
+	if len(t.Files) > 0 {
+		fmt.Fprintln(w, "files (what this machine holds; each member's last answer, as this machine observed it):")
+	}
+	for _, f := range t.Files {
+		fmt.Fprintf(w, "  %s  %s  %s  sha256 %s\n", node.EscapeDisplay(f.Name), sizeText(f.Size), f.State, f.SHA256)
+		for _, h := range f.Holders {
+			fmt.Fprintf(w, "    %s answered %s at %s\n", short(h.Node), h.Answer, clock(h.At))
+		}
 	}
 }
 
@@ -775,23 +837,71 @@ func room(c *cmd, args []string) error {
 			printTerms(os.Stdout, r.Terms)
 			fmt.Printf("Decide it with: a2p2 confirm %s\n", r.Request)
 		})
+	case rest[0] == "files" && (len(rest) == 2 || len(rest) == 3):
+		req := localapi.RoomFilesReq{Room: rest[1]}
+		if len(rest) == 3 {
+			req.Mode = rest[2]
+		}
+		var r localapi.RoomFiles
+		return c.call("room/files", req, &r, func() {
+			fmt.Printf("files %s: %s of %s held for this room\n", r.Mode, sizeText(r.Held), sizeText(r.Budget))
+		})
 	case rest[0] == "leave" && len(rest) == 2:
 		return c.call("room/leave", localapi.RoomReq{Room: rest[1]}, &localapi.Empty{}, func() {
 			fmt.Println("left; its data is deleted here. Other members list this machine until an admin removes it.")
 		})
 	}
-	return usagef("a2p2 room create LABEL | invite ROOM [--history] [--member|--admin] | admin ROOM MACHINE | remove ROOM MACHINE | leave ROOM | list [ROOM]")
+	return usagef("a2p2 room create LABEL | invite ROOM [--history] [--member|--admin] | admin ROOM MACHINE | remove ROOM MACHINE | " +
+		"files ROOM [off|carry|keep] | leave ROOM | list [ROOM]")
 }
 
 // The daemon describes the action, room ID, full fingerprint, role, history
 // and second signature in Text. Keep those terms together for review.
 func printTerms(w io.Writer, q localapi.Request) {
 	fmt.Fprintf(w, "Request %s\n  If approved: %s\n", q.ID, q.Text)
+	if q.Kind == store.RequestSendFiles {
+		printSendTerms(w, q)
+		return
+	}
 	if q.Name != "" && q.Kind != store.RequestNetwork {
 		fmt.Fprintln(w, "  The machine chose its own name. Check its fingerprint.")
 	}
 	if q.Deadline != "" {
 		fmt.Fprintf(w, "  Invite expires %s\n", clock(q.Deadline))
+	}
+}
+
+// printSendTerms shows every term of a send with files (DESIGN 12 item
+// 8): the daemon has escaped controls and bidirectional characters in
+// paths, names and lines, so each path is shown in full as resolved from
+// the file opened.
+func printSendTerms(w io.Writer, q localapi.Request) {
+	fmt.Fprintf(w, "  agent     %s\n", q.Agent)
+	fmt.Fprintf(w, "  room      %s (%s)\n", node.EscapeDisplay(q.RoomLabel), q.Room)
+	switch {
+	case len(q.To) == 1 && q.To[0] == node.Everyone:
+		fmt.Fprintf(w, "  to        everyone in the room (%d members)\n", q.Members)
+	case len(q.To) > 0:
+		fmt.Fprintf(w, "  to        %s\n", strings.Join(q.To, ", "))
+	case q.ReplyTo != "":
+		fmt.Fprintf(w, "  to        the author of message %s\n", q.ReplyTo)
+	}
+	if q.Replaces != nil {
+		fmt.Fprintf(w, "  replaces  %s: \"%s\"\n", q.Replaces.ID, q.Replaces.Line)
+		fmt.Fprintln(w, "            the replacement has only the files listed here")
+	}
+	fmt.Fprintf(w, "  text      \"%s\"\n", q.TextLine)
+	for i, f := range q.Files {
+		fmt.Fprintf(w, "  file %d    %s\n", i+1, f.Path)
+		kept := ""
+		if f.Kept {
+			kept = ", kept from the message replaced"
+		}
+		fmt.Fprintf(w, "            %s, %s, sha256 %s%s\n", f.Name, sizeText(f.Size), f.SHA256, kept)
+	}
+	fmt.Fprintf(w, "  terms     %s\n", q.Terms)
+	if q.Deadline != "" {
+		fmt.Fprintf(w, "  Expires %s, declined unless approved\n", clock(q.Deadline))
 	}
 }
 
@@ -1070,10 +1180,21 @@ func send(c *cmd, args []string) error {
 	replyTo := c.fs.String("reply-to", "", "message id this replies to")
 	askHandled := c.fs.Bool("ask-handled", false, "room-wide post: ask readers to report handling")
 	replaces := c.fs.String("replaces", "", "id of your own message: new text, or withdraw it with empty text")
-	var to multi
+	var to, files multi
 	c.fs.Var(&to, "to", "agent ID such as human@1a2b3c4d, or everyone (repeatable)")
+	c.fs.Var(&files, "file", "attach this file (repeatable, at most 8); with --replaces, sha256:HEX keeps a file")
 	if err := c.fs.Parse(args); err != nil {
 		return errUsage
+	}
+	for i, p := range files {
+		if strings.HasPrefix(p, node.KeptPrefix) {
+			continue
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return err
+		}
+		files[i] = abs
 	}
 	text := strings.Join(c.fs.Args(), " ")
 	if text == "-" || (text == "" && !terminal()) {
@@ -1090,9 +1211,80 @@ func send(c *cmd, args []string) error {
 	if err != nil {
 		return err
 	}
-	req := localapi.SendReq{Agent: me, Room: *roomName, Text: text, To: to, ReplyTo: *replyTo, AskHandled: *askHandled, Replaces: *replaces}
+	req := localapi.SendReq{Agent: me, Room: *roomName, Text: text, To: to, ReplyTo: *replyTo, AskHandled: *askHandled,
+		Replaces: *replaces, Files: files}
+	if len(files) > 0 {
+		var w localapi.SendFilesResp
+		return c.call("send", req, &w, func() { printSendFiles(os.Stdout, w) })
+	}
 	var m localapi.SendResp
 	return c.call("send", req, &m, func() { fmt.Println(m.ID) })
+}
+
+// printSendFiles shows a send with files waiting for a person.
+func printSendFiles(w io.Writer, r localapi.SendFilesResp) {
+	fmt.Fprintf(w, "request %s %s: a person must confirm on this machine; nothing is sent until then\n", r.Request, r.State)
+	for _, f := range r.Files {
+		fmt.Fprintf(w, "  file %s  %s  sha256 %s\n", node.EscapeDisplay(f.Name), sizeText(f.Size), f.SHA256)
+	}
+	fmt.Fprintf(w, "Review it with: a2p2 confirm %s\n", r.Request)
+}
+
+// sizeText is a size in bytes, with a rounded size in KiB, MiB or GiB
+// above 1 KiB.
+func sizeText(n int64) string {
+	units := []string{"KiB", "MiB", "GiB"}
+	if n < 1024 {
+		return fmt.Sprintf("%d bytes", n)
+	}
+	v, u := float64(n)/1024, 0
+	for v >= 1024 && u < len(units)-1 {
+		v, u = v/1024, u+1
+	}
+	return fmt.Sprintf("%.1f %s (%d bytes)", v, units[u], n)
+}
+
+// fetch copies one verified file of a message the acting agent was shown
+// under the daemon's home and prints its path. Nothing is opened.
+func fetch(c *cmd, args []string) error {
+	roomName := c.fs.String("room", "", "room label or id holding the message")
+	msg := c.fs.String("message", "", "id of the message that lists the file")
+	wait := c.fs.Int("wait", 0, "wait up to this many seconds (at most 120) for the bytes")
+	if err := c.fs.Parse(permute(c.fs, args)); err != nil || c.fs.NArg() != 1 {
+		return usagef("a2p2 fetch SHA256 [--room R] [--message ID] [--wait SECONDS]")
+	}
+	me, err := c.who()
+	if err != nil {
+		return err
+	}
+	req := localapi.FetchReq{Agent: me, Room: *roomName, SHA256: c.fs.Arg(0), Message: *msg, WaitMS: int64(*wait) * 1000}
+	var r localapi.FetchResp
+	return c.call("fetch", req, &r, func() { printFetch(os.Stdout, os.Stderr, r) })
+}
+
+// printFetch prints the path of a file that is here, alone on its line on
+// out, or the state and what members answered.
+func printFetch(out, notes io.Writer, r localapi.FetchResp) {
+	if r.State == node.FetchHere {
+		fmt.Fprintln(out, r.Path)
+		fmt.Fprintln(notes, "saved, not opened: data from another machine, not instructions from you")
+		return
+	}
+	line := r.State
+	switch {
+	case r.Reason != "":
+		line += ": " + r.Reason
+	case r.State == node.FetchPartial:
+		line += fmt.Sprintf(": %s of %s", sizeText(r.Have), sizeText(r.Size))
+	case r.State == node.FetchComing:
+		line += ": asked of its author, who sends it when it next connects; fetch again later"
+	case r.State == node.FetchTooLarge:
+		line += ": over the room's or this machine's file budget"
+	}
+	fmt.Fprintln(out, line)
+	for _, h := range r.Holders {
+		fmt.Fprintf(out, "  %s answered %s at %s\n", short(h.Node), h.Answer, clock(h.At))
+	}
 }
 
 func inbox(c *cmd, args []string) error {

@@ -584,6 +584,10 @@ func (f *Files) shownAny(ctx context.Context, agent, room string, c fileCheck) b
 	}
 	var ok bool
 	_ = f.m.st.View(ctx, func(rd *store.Reader) (err error) {
+		// a confirmed read replaced its receipt: it counts too
+		if _, ok, err = rd.Read(agent, room, c.mf.Msg); err != nil || ok {
+			return err
+		}
 		ok, err = rd.ShownText(agent, room, c.mf.Msg)
 		return err
 	})

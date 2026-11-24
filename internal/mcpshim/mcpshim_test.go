@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wallter/a2p2/internal/daemon"
 	"github.com/wallter/a2p2/internal/localapi"
@@ -169,20 +171,74 @@ func protocolTools(t *testing.T) []byte {
 	return []byte(s[j:k])
 }
 
-func TestToolsGolden(t *testing.T) {
-	cs := connect(t, startDaemon(t), "a")
-	res, err := cs.ListTools(context.Background(), nil)
+// rawTransport records the results a client reads, as the server wrote
+// them: the SDK's own decoding would write default hints back.
+type rawTransport struct {
+	mcp.Transport
+	mu      sync.Mutex
+	results []json.RawMessage
+}
+
+func (r *rawTransport) Connect(ctx context.Context) (mcp.Connection, error) {
+	c, err := r.Transport.Connect(ctx)
+	return rawConn{c, r}, err
+}
+
+type rawConn struct {
+	mcp.Connection
+	r *rawTransport
+}
+
+func (c rawConn) Read(ctx context.Context) (jsonrpc.Message, error) {
+	m, err := c.Connection.Read(ctx)
+	if res, ok := m.(*jsonrpc.Response); ok {
+		c.r.mu.Lock()
+		c.r.results = append(c.r.results, res.Result)
+		c.r.mu.Unlock()
+	}
+	return m, err
+}
+
+// toolsOnTheWire lists the tools and returns them as the server sent them.
+func toolsOnTheWire(t *testing.T, c *localapi.Client) []map[string]any {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ct, st := mcp.NewInMemoryTransports()
+	go NewServer(c, "test", "a", "/work/a", "v0").Run(ctx, st)
+	rt := &rawTransport{Transport: ct}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "1"}, nil).Connect(ctx, rt, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer cs.Close()
+	if _, err := cs.ListTools(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	for _, raw := range rt.results {
+		var res struct {
+			Tools []map[string]any `json:"tools"`
+		}
+		if json.Unmarshal(raw, &res) == nil && len(res.Tools) > 0 {
+			return res.Tools
+		}
+	}
+	t.Fatal("no tools/list result read")
+	return nil
+}
+
+func TestToolsGolden(t *testing.T) {
+	tools := toolsOnTheWire(t, startDaemon(t))
 	var names []string
-	for _, tl := range res.Tools {
-		names = append(names, tl.Name)
+	for _, tl := range tools {
+		names = append(names, tl["name"].(string))
 	}
 	if strings.Join(names, " ") != "ack ask_human inbox peers reply send whoami" {
 		t.Fatalf("tools = %v", names)
 	}
-	got, _ := json.MarshalIndent(res.Tools, "", "  ")
+	got, _ := json.MarshalIndent(tools, "", "  ")
 	got = append(got, '\n')
 	path := filepath.Join("testdata", "tools.json")
 	if *update {

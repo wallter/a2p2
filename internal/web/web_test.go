@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -87,6 +92,71 @@ func openOn(t *testing.T, st *store.Store, seed byte, peer *env) *env {
 }
 
 func setup(t *testing.T) *env { return open(t, 1, nil) }
+
+// setupFiles is one machine with attachments, a room "team" and an agent
+// alice, as the daemon assembles them (node.NewFiles before OpenSurface).
+func setupFiles(t *testing.T) (*env, string) {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "a2p2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	m := node.NewMachine(st, ed25519.NewKeyFromSeed(append([]byte{9}, make([]byte, 31)...)), node.MachineOpts{})
+	rooms, err := node.OpenRooms(ctx, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := node.NewFiles(rooms, nil, node.FilesOpts{})
+	if err := files.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	e := &env{ctx: ctx, id: m.ID, st: st, seed: 9}
+	if e.s, err = node.OpenSurface(ctx, m, rooms, node.SurfaceOpts{Name: "box"}); err != nil {
+		t.Fatal(err)
+	}
+	e.srv = httptest.NewServer(Handler(e.s, tok))
+	t.Cleanup(e.srv.Close)
+	if _, err := e.s.CreateRoom(ctx, "team"); err != nil {
+		t.Fatal(err)
+	}
+	return e, e.agent(t, "alice")
+}
+
+// sendFile has alice send body as a file named name to room team and
+// returns the request the person is asked to decide, as the page loads it.
+func (e *env) sendFile(t *testing.T, alice, name, body string) localapi.Request {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.s.SendFiles(e.ctx, node.SendInput{Agent: alice, Room: "team", Text: "the log\nmore"}, []string{p}); err != nil {
+		t.Fatal(err)
+	}
+	st := e.state(t)
+	if len(st.Requests) != 1 {
+		t.Fatalf("requests on the page: %+v", st.Requests)
+	}
+	return st.Requests[0]
+}
+
+// approve decides q from the page and returns the message written.
+func (e *env) approve(t *testing.T, q localapi.Request) string {
+	t.Helper()
+	c, b := e.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": q.Text}, origin)
+	var cf localapi.ConfirmResp
+	if c != 200 || json.Unmarshal(b, &cf) != nil || cf.State != store.RequestApproved || cf.Effect == "" {
+		t.Fatalf("approve: %d %s", c, b)
+	}
+	return cf.Effect
+}
+
+func shaOf(body string) string {
+	h := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(h[:])
+}
 
 func (e *env) do(t *testing.T, method, path string, body any, mod func(*http.Request)) (int, []byte) {
 	t.Helper()
@@ -532,5 +602,219 @@ func TestPageShowsAgentLevelsAndThePersonReadsEverything(t *testing.T) {
 	}
 	if in, _ := e.s.Inbox(e.ctx, bob, "", 0, 0); len(in.Entries) != 0 {
 		t.Fatalf("bob at none was shown %+v", in.Entries)
+	}
+}
+
+// get is a GET with the page's token that also returns the headers.
+func (e *env) get(t *testing.T, path string) (*http.Response, []byte) {
+	t.Helper()
+	req, _ := http.NewRequest("GET", e.srv.URL+path, nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp, b
+}
+
+func fileURL(room, msg, sha string) string {
+	return "/api/file?" + url.Values{"room": {room}, "msg": {msg}, "sha": {sha}}.Encode()
+}
+
+// The new routes keep every check of the others: the token, the Host and
+// the Origin.
+func TestFileRoutesRefuseWithoutTokenWithForeignOriginAndBadHost(t *testing.T) {
+	e, alice := setupFiles(t)
+	body := "abc"
+	msg := e.approve(t, e.sendFile(t, alice, "a.txt", body))
+	routes := []struct {
+		method, path string
+		body         any
+	}{
+		{"GET", fileURL("team", msg, shaOf(body)), nil},
+		{"POST", "/api/room-files", map[string]string{"room": "team", "mode": "keep"}},
+	}
+	for _, rt := range routes {
+		if c, b := e.do(t, rt.method, rt.path, rt.body, func(r *http.Request) { r.Header.Del("Authorization") }); c != 401 || bytes.Contains(b, []byte(body)) {
+			t.Errorf("%s without a token: %d", rt.path, c)
+		}
+		if c, _ := e.do(t, rt.method, rt.path, rt.body, func(r *http.Request) { r.Header.Set("Authorization", "Bearer nope") }); c != 401 {
+			t.Errorf("%s with a wrong token: %d", rt.path, c)
+		}
+		if c, _ := e.do(t, rt.method, rt.path, rt.body, func(r *http.Request) { r.Header.Set("Origin", "http://evil.example") }); c != 403 {
+			t.Errorf("%s from a foreign origin: %d", rt.path, c)
+		}
+		if c, _ := e.do(t, rt.method, rt.path, rt.body, func(r *http.Request) { r.Host = "evil.example:80" }); c != 403 {
+			t.Errorf("%s with a bad host: %d", rt.path, c)
+		}
+	}
+	// A setting changed with the token but not from the page's exact Origin is refused.
+	if c, b := e.do(t, "POST", "/api/room-files", map[string]string{"room": "team", "mode": "keep"}, nil); c != 400 {
+		t.Errorf("room-files without the page's Origin: %d %s", c, b)
+	}
+	if rf, _ := e.s.RoomFiles(e.ctx, "team", ""); rf.Mode != store.FilesCarry {
+		t.Errorf("a refused request changed the setting to %s", rf.Mode)
+	}
+}
+
+// L1, P3: the page lists an agent's send with files with every term the
+// CLI shows, and approving it there writes the message with its file.
+func TestThePageListsASendWithFilesWithEveryTermAndApprovesIt(t *testing.T) {
+	e, alice := setupFiles(t)
+	body := "line one\nline two\n"
+	q := e.sendFile(t, alice, "build.log", body)
+	if q.Kind != store.RequestSendFiles || q.Agent != alice || q.RoomLabel != "team" || q.TextLine != "the log" ||
+		len(q.To) != 1 || q.To[0] != node.Everyone || q.Members != 1 || len(q.Terms) != 64 || len(q.Files) != 1 {
+		t.Fatalf("request = %+v", q)
+	}
+	if f := q.Files[0]; !filepath.IsAbs(f.Path) || !strings.HasSuffix(f.Path, "build.log") || f.Name != "build.log" ||
+		f.Size != int64(len(body)) || f.SHA256 != shaOf(body) {
+		t.Fatalf("request file = %+v", f)
+	}
+	msg := e.approve(t, q)
+	if st := e.state(t); len(st.Requests) != 0 {
+		t.Fatalf("a decided request is still listed: %+v", st.Requests)
+	}
+	_, hb := e.do(t, "GET", "/api/history?room=team", nil, nil)
+	var h struct{ Entries []localapi.Entry }
+	if err := json.Unmarshal(hb, &h); err != nil || len(h.Entries) != 1 || h.Entries[0].ID != msg || len(h.Entries[0].Files) != 1 {
+		t.Fatalf("history: %v %s", err, hb)
+	}
+	if f := h.Entries[0].Files[0]; f.Name != "build.log" || f.Size != int64(len(body)) || f.SHA256 != shaOf(body) || f.State != node.FileStateHere {
+		t.Fatalf("history file = %+v", f)
+	}
+	// The page shows the same terms as a2p2 confirm (cmd/a2p2 printSendTerms).
+	js, _ := assets.ReadFile("static/app.js")
+	for _, want := range []string{`r.kind === "send_files"`, "everyone in the room (", "the author of message ",
+		"the replacement has only the files listed here", "kept from the message replaced", "r.terms", "f.path", "f.sha256",
+		"declined unless approved"} {
+		if !strings.Contains(string(js), want) {
+			t.Errorf("app.js lacks %q", want)
+		}
+	}
+}
+
+// F3, PROTOCOL 10.8: a file here is handed to the person as an attachment
+// with a safe type and exactly its bytes, never to be rendered.
+func TestTheFileRouteServesAHereFileAsAnAttachmentWithItsExactBytes(t *testing.T) {
+	e, alice := setupFiles(t)
+	body := "<html><script>alert(1)</script>\x00\xff"
+	msg := e.approve(t, e.sendFile(t, alice, "résumé page.html", body))
+	resp, b := e.get(t, fileURL("team", msg, shaOf(body)))
+	if resp.StatusCode != 200 || string(b) != body {
+		t.Fatalf("file: %d %q", resp.StatusCode, b)
+	}
+	for k, v := range map[string]string{
+		"Content-Type":            "application/octet-stream",
+		"Content-Disposition":     "attachment; filename*=UTF-8''r%C3%A9sum%C3%A9%20page.html",
+		"X-Content-Type-Options":  "nosniff",
+		"Content-Security-Policy": "default-src 'none'; sandbox",
+		"Content-Length":          strconv.Itoa(len(body)),
+	} {
+		if got := resp.Header.Get(k); got != v {
+			t.Errorf("%s = %q, want %q", k, got, v)
+		}
+	}
+	// Without the message, the file is found by its hash alone.
+	if resp, b := e.get(t, fileURL("", "", shaOf(body))); resp.StatusCode != 200 || string(b) != body {
+		t.Fatalf("by hash: %d %q", resp.StatusCode, b)
+	}
+	// A copy changed on disk since it was verified is not served.
+	res, err := e.s.Fetch(e.ctx, e.s.HumanID(), "team", shaOf(body), msg, 0)
+	if err != nil || res.State != node.FetchHere {
+		t.Fatalf("fetch: %+v %v", res, err)
+	}
+	if err := os.WriteFile(res.Path, []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if resp, b := e.get(t, fileURL("team", msg, shaOf(body))); resp.StatusCode != 409 || bytes.Contains(b, []byte("tampered")) ||
+		resp.Header.Get("Content-Type") != "application/json" {
+		t.Fatalf("a changed copy: %d %s", resp.StatusCode, b)
+	}
+}
+
+// F1, PROTOCOL 10.6: a file whose state is not here is not served; the
+// page is told the state. A file no message lists is refused.
+func TestTheFileRouteDoesNotServeAFileThatIsNotHere(t *testing.T) {
+	e, alice := setupFiles(t)
+	body := "old bytes"
+	msg := e.approve(t, e.sendFile(t, alice, "a.txt", body))
+	// A replacement without files: the file belongs to a version that lost.
+	if _, err := e.s.Send(e.ctx, node.SendInput{Agent: alice, Replaces: msg, Text: "no file now"}); err != nil {
+		t.Fatal(err)
+	}
+	resp, b := e.get(t, fileURL("team", msg, shaOf(body)))
+	var fr localapi.FetchResp
+	if resp.StatusCode != 409 || resp.Header.Get("Content-Type") != "application/json" || json.Unmarshal(b, &fr) != nil ||
+		fr.State != node.FetchGone || fr.Path != "" || bytes.Contains(b, []byte(body)) {
+		t.Fatalf("a replaced file: %d %s", resp.StatusCode, b)
+	}
+	if resp, b := e.get(t, fileURL("team", msg, shaOf("never sent"))); resp.StatusCode != 400 || resp.Header.Get("Content-Disposition") != "" {
+		t.Fatalf("a file no message lists: %d %s", resp.StatusCode, b)
+	}
+	if resp, _ := e.get(t, fileURL("team", msg, "nothex")); resp.StatusCode != 400 {
+		t.Fatalf("a bad hash: %d", resp.StatusCode)
+	}
+}
+
+// The room's files setting is shown from state and changed from the page.
+func TestThePageReadsAndSetsTheRoomsFilesSetting(t *testing.T) {
+	e, alice := setupFiles(t)
+	team := func() *localapi.RoomFiles {
+		for _, r := range e.state(t).Status.Rooms {
+			if r.Label == "team" {
+				return r.Files
+			}
+		}
+		return nil
+	}
+	if f := team(); f == nil || f.Mode != store.FilesCarry || f.Budget <= 0 || f.Held != 0 {
+		t.Fatalf("state files = %+v", f)
+	}
+	c, b := e.do(t, "POST", "/api/room-files", map[string]string{"room": "team", "mode": "keep"}, origin)
+	var rf localapi.RoomFiles
+	if c != 200 || json.Unmarshal(b, &rf) != nil || rf.Mode != store.FilesKeep || rf.Budget <= 0 {
+		t.Fatalf("set keep: %d %s", c, b)
+	}
+	if c, b := e.do(t, "POST", "/api/room-files", map[string]string{"room": "team"}, nil); c != 200 || !strings.Contains(string(b), `"mode":"keep"`) {
+		t.Fatalf("read: %d %s", c, b)
+	}
+	// Staged bytes count while the send waits for the person.
+	e.sendFile(t, alice, "a.txt", "abc")
+	if f := team(); f == nil || f.Mode != store.FilesKeep || f.Held != 3 {
+		t.Fatalf("state files after a send = %+v", f)
+	}
+	if c, _ := e.do(t, "POST", "/api/room-files", map[string]string{"room": "team", "mode": "always"}, origin); c != 400 {
+		t.Fatalf("a bad mode: %d", c)
+	}
+	if c, _ := e.do(t, "POST", "/api/room-files", map[string]string{"room": "nowhere", "mode": "off"}, origin); c != 400 {
+		t.Fatalf("an unknown room: %d", c)
+	}
+}
+
+// PROTOCOL 10.8: the name a download offers has no quotes, controls,
+// format characters or slashes, and is percent-encoded for filename*.
+func TestADownloadNameIsSanitisedAndPercentEncoded(t *testing.T) {
+	for in, want := range map[string]string{
+		"report.txt":             "report.txt",
+		`a"b'c.txt`:              "a_b_c.txt",
+		"../../etc/passwd":       "_.._etc_passwd",
+		`dir\file:x`:             "dir_file_x",
+		"line\nbreak\x00.txt":    "line_break_.txt",
+		"report\u202etxt.exe":    "report_txt.exe",
+		" .hidden. ":             "hidden",
+		"":                       "file",
+		"...":                    "file",
+		"bad\xffbyte":            "bad_byte",
+		strings.Repeat("é", 150): strings.Repeat("é", 100),
+	} {
+		if got := safeName(in); got != want {
+			t.Errorf("safeName(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := percentName("a b;é\"%.txt"); got != "a%20b%3B%C3%A9%22%25.txt" {
+		t.Errorf("percentName = %q", got)
 	}
 }

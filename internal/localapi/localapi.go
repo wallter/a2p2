@@ -51,6 +51,80 @@ type (
 		// Thread, with reply_to and no to: also address every agent that
 		// has posted in the thread (the reply tool).
 		Thread bool `json:"thread,omitempty"`
+		// Files (1 to 8): absolute paths, or "sha256:<hex>" for a file of
+		// the version replaced, kept by listing it again. With files
+		// nothing is written: a request waits for this machine's person
+		// and the answer is a SendFilesResp (PROTOCOL 10.6). With
+		// replaces, no files means the replacement has none.
+		Files []string `json:"files,omitempty"`
+	}
+	// SendFilesResp is the answer to a send with files: the request a
+	// person decides, and the files as staged.
+	SendFilesResp struct {
+		Request   string     `json:"request"`
+		State     string     `json:"state"`
+		Room      string     `json:"room"`
+		RoomLabel string     `json:"room_label"`
+		To        []string   `json:"to,omitempty"`
+		Replaces  string     `json:"replaces,omitempty"`
+		Files     []FileInfo `json:"files"`
+	}
+	// FileInfo is one file of a send or a message.
+	FileInfo struct {
+		Name   string `json:"name"`
+		Size   int64  `json:"size"`
+		SHA256 string `json:"sha256"`
+		Type   string `json:"type,omitempty"`
+	}
+	// FetchReq asks for the bytes of one file of a message this agent was
+	// shown (PROTOCOL 10.6). wait_ms is at most 120,000.
+	FetchReq struct {
+		Agent   string `json:"agent"`
+		Room    string `json:"room,omitempty"`
+		SHA256  string `json:"sha256"`
+		Message string `json:"message,omitempty"`
+		WaitMS  int64  `json:"wait_ms,omitempty"`
+	}
+	// FetchResp: state is here (with path), partial, coming, fetching,
+	// unavailable, gone (with reason) or too_large. The file at path is
+	// data from another machine; a2p2 never opens it.
+	FetchResp struct {
+		State   string   `json:"state"`
+		Room    string   `json:"room,omitempty"`
+		Message string   `json:"message,omitempty"`
+		Name    string   `json:"name,omitempty"`
+		Path    string   `json:"path,omitempty"`
+		Size    int64    `json:"size"`
+		Have    int64    `json:"have,omitempty"`
+		From    string   `json:"from,omitempty"`
+		Reason  string   `json:"reason,omitempty"`
+		Holders []Holder `json:"holders,omitempty"`
+	}
+	// Holder is one member's last answer about a file, at the time this
+	// machine observed it.
+	Holder struct {
+		Node   string `json:"node"`
+		At     string `json:"at"`
+		Answer string `json:"answer"`
+	}
+	// RoomFilesReq reads a room's files setting and, with mode (off, carry
+	// or keep), first sets it: a person's decision, in no agent tool.
+	RoomFilesReq struct {
+		Room string `json:"room"`
+		Mode string `json:"mode,omitempty"`
+	}
+	// RoomFiles: held is the bytes the room's files take here (held,
+	// partial, staged, copied and reserved), budget the room's limit.
+	RoomFiles struct {
+		Room   string `json:"room"`
+		Mode   string `json:"mode"`
+		Held   int64  `json:"held"`
+		Budget int64  `json:"budget"`
+	}
+	// FilesUsage is what files take on this machine, and its limit.
+	FilesUsage struct {
+		Held   int64 `json:"held"`
+		Budget int64 `json:"budget"`
 	}
 	// SendResp: to is the message's addressees as written, empty for
 	// everyone (and for a replace or withdraw, which keep the original's).
@@ -92,6 +166,26 @@ type (
 		// Skipped: in a history page read by an agent, its level kept
 		// this message out of its inbox and it has not confirmed it.
 		Skipped bool `json:"skipped,omitempty"`
+		// Files are the files of the version shown, with this machine's
+		// state of each (here, not_fetched, partial, coming, unavailable);
+		// files_pending: it has files whose list is not here yet;
+		// files_note: why the list will not come (PROTOCOL 10.2).
+		Files        []EntryFile `json:"files,omitempty"`
+		FilesPending bool        `json:"files_pending,omitempty"`
+		FilesNote    string      `json:"files_note,omitempty"`
+		// Request and State, in an entry of kind request: this agent's
+		// send with files was sent (id is the message) or declined
+		// (reason says why).
+		Request string `json:"request,omitempty"`
+		State   string `json:"state,omitempty"`
+		Reason  string `json:"reason,omitempty"`
+	}
+	EntryFile struct {
+		SHA256 string `json:"sha256"`
+		Name   string `json:"name"`
+		Size   int64  `json:"size"`
+		Type   string `json:"type,omitempty"`
+		State  string `json:"state"`
 	}
 	Wait struct {
 		Room   string `json:"room"`
@@ -198,6 +292,16 @@ type (
 		Reason  string    `json:"reason"`
 		Copies  []Copy    `json:"copies"`
 		Handled []Handled `json:"handled"`
+		// Files are the files of the winning version, with what this
+		// machine holds of each and each member's last answer.
+		Files []TraceFile `json:"files,omitempty"`
+	}
+	TraceFile struct {
+		SHA256  string   `json:"sha256"`
+		Name    string   `json:"name"`
+		Size    int64    `json:"size"`
+		State   string   `json:"state"`
+		Holders []Holder `json:"holders"`
 	}
 	WaitReq struct {
 		WaitMS int64 `json:"wait_ms,omitempty"`
@@ -231,6 +335,32 @@ type (
 		Deadline    string `json:"deadline,omitempty"`
 		// Text says exactly what approving it does.
 		Text string `json:"text"`
+		// For kind send_files (PROTOCOL 10.6): the agent that asked, the
+		// recipients (to, or ["everyone"] with members, the room's
+		// member count), the message replaced, the first line of the text,
+		// the files with each path as resolved from the file opened and
+		// escaped (10.8), and terms, the SHA-256 the approval covers.
+		Agent    string        `json:"agent,omitempty"`
+		To       []string      `json:"to,omitempty"`
+		Members  int           `json:"members,omitempty"`
+		ReplyTo  string        `json:"reply_to,omitempty"`
+		Replaces *Replaced     `json:"replaces,omitempty"`
+		TextLine string        `json:"text_line,omitempty"`
+		Files    []RequestFile `json:"files,omitempty"`
+		Terms    string        `json:"terms,omitempty"`
+	}
+	Replaced struct {
+		ID   string `json:"id"`
+		Line string `json:"line"`
+	}
+	RequestFile struct {
+		Path   string `json:"path"`
+		Name   string `json:"name"`
+		Size   int64  `json:"size"`
+		SHA256 string `json:"sha256"`
+		Type   string `json:"type,omitempty"`
+		// Kept: kept from the version replaced (path is sha256:<hex>).
+		Kept bool `json:"kept,omitempty"`
 	}
 	RequestsResp struct {
 		Requests []Request `json:"requests"`
@@ -389,6 +519,8 @@ type (
 		// Agents are the agents of members seen writing here, newest
 		// first (status only).
 		Agents []Writer `json:"agents,omitempty"`
+		// Files is the room's files setting and use (status only).
+		Files *RoomFiles `json:"files,omitempty"`
 	}
 	Writer struct {
 		Agent    string `json:"agent"`
@@ -458,6 +590,9 @@ type (
 		Reach node.Reach `json:"reach"`
 		// Mapping is the router's port mapping, when a person asked for one.
 		Mapping *node.PortMapping `json:"mapping,omitempty"`
+		// Files is what attachments take on this machine (each room's is
+		// in its files).
+		Files FilesUsage `json:"files"`
 	}
 	Empty struct{}
 )
@@ -527,9 +662,41 @@ func EntryOf(e node.Entry) Entry {
 	out := Entry{Key: e.Key, Version: e.Version, Kind: e.Kind, ID: e.ID, Room: e.Room, RoomLabel: e.RoomLabel,
 		From: e.From, FromNode: e.FromNode, AuthorRemoved: e.AuthorRemoved, Parent: e.Parent, Thread: e.Thread,
 		ParentState: e.ParentState, Late: e.Late, Created: Time(e.Created), Text: e.Text, Choices: e.Choices,
-		AskHandled: e.AskHandled, Skipped: e.Skipped}
+		AskHandled: e.AskHandled, Skipped: e.Skipped, FilesPending: e.FilesPending, FilesNote: e.FilesNote,
+		Request: e.Request, State: e.RequestState, Reason: e.RequestReason}
 	for _, a := range e.To {
 		out.To = append(out.To, node.AgentID(a))
+	}
+	for _, f := range e.Files {
+		out.Files = append(out.Files, EntryFile{SHA256: f.SHA256, Name: f.Name, Size: f.Size, Type: f.Type, State: f.State})
+	}
+	return out
+}
+
+// FetchOf renders a fetch's answer.
+func FetchOf(r node.FetchResult) FetchResp {
+	out := FetchResp{State: r.State, Room: r.Room, Message: r.Message, Name: r.Name, Path: r.Path, Size: r.Size,
+		Have: r.Have, From: r.From, Reason: r.Reason}
+	for _, h := range r.Holders {
+		out.Holders = append(out.Holders, Holder{Node: h.Node, At: h.At, Answer: h.Answer})
+	}
+	return out
+}
+
+// RoomFilesOf renders a room's files setting.
+func RoomFilesOf(v node.RoomFilesView) RoomFiles {
+	return RoomFiles{Room: v.Room, Mode: v.Mode, Held: v.Held, Budget: v.Budget}
+}
+
+// SendFilesOf renders the answer to a send with files.
+func SendFilesOf(r node.FileSent) SendFilesResp {
+	out := SendFilesResp{Request: r.Request, State: r.State, Room: r.Room, RoomLabel: r.Label, Replaces: r.Replaces,
+		Files: []FileInfo{}}
+	for _, a := range r.To {
+		out.To = append(out.To, node.AgentID(a))
+	}
+	for _, f := range r.Files {
+		out.Files = append(out.Files, FileInfo{Name: f.Name, Size: f.Size, SHA256: f.SHA256, Type: f.Type})
 	}
 	return out
 }
@@ -572,9 +739,22 @@ func roomsOf(rs []node.RoomInfo) []Room {
 
 // RequestOf renders a request for a person.
 func RequestOf(q node.RequestView) Request {
-	return Request{ID: q.ID, Kind: q.Kind, Action: q.Action, Room: q.Room, RoomLabel: q.RoomLabel, Node: q.Machine,
+	out := Request{ID: q.ID, Kind: q.Kind, Action: q.Action, Room: q.Room, RoomLabel: q.RoomLabel, Node: q.Machine,
 		Fingerprint: q.Fingerprint, Name: q.Name, Role: q.Role, History: q.History, Seconding: q.Seconding,
 		Created: Time(q.Created), Deadline: Time(q.Deadline), Text: q.Text}
+	if s := q.Send; s != nil {
+		out.Agent, out.To, out.ReplyTo, out.TextLine, out.Terms = s.Agent, s.To, s.Parent, s.TextLine, s.Terms
+		if s.Everyone {
+			out.To, out.Members = []string{node.Everyone}, s.Members
+		}
+		if s.Replaces != "" {
+			out.Replaces = &Replaced{ID: s.Replaces, Line: s.ReplacesLine}
+		}
+		for _, f := range s.Files {
+			out.Files = append(out.Files, RequestFile{Path: f.Path, Name: f.Name, Size: f.Size, SHA256: f.SHA256, Type: f.Type, Kept: f.Kept})
+		}
+	}
+	return out
 }
 
 // NetworkOf renders a networking state.
@@ -596,6 +776,13 @@ func TraceOf(t node.TraceView) TraceResp {
 	for _, h := range t.Handled {
 		out.Handled = append(out.Handled, Handled{Agent: h.Agent, At: Time(h.At)})
 	}
+	for _, f := range t.Files {
+		tf := TraceFile{SHA256: f.SHA256, Name: f.Name, Size: f.Size, State: f.State, Holders: []Holder{}}
+		for _, h := range f.Holders {
+			tf.Holders = append(tf.Holders, Holder{Node: h.Node, At: h.At, Answer: h.Answer})
+		}
+		out.Files = append(out.Files, tf)
+	}
 	return out
 }
 
@@ -614,9 +801,14 @@ func StatusOf(st node.StatusView, listen []string, info Info) Status {
 	if out.Levels == nil {
 		out.Levels = []store.AgentLevel{}
 	}
+	out.Files = FilesUsage{Held: st.Files.Held, Budget: st.Files.Budget}
 	for i := range out.Rooms {
 		for _, w := range st.Writers[out.Rooms[i].ID] {
 			out.Rooms[i].Agents = append(out.Rooms[i].Agents, Writer{Agent: w.Agent, LastSeen: Time(w.Last)})
+		}
+		if f, ok := st.RoomFiles[out.Rooms[i].ID]; ok {
+			rf := RoomFilesOf(f)
+			out.Rooms[i].Files = &rf
 		}
 	}
 	if out.Listen == nil {
@@ -654,14 +846,34 @@ func Handler(s *node.Surface, info Info) http.Handler {
 	handle(mux, "register", func(ctx context.Context, r RegisterReq) (store.Agent, error) {
 		return s.Register(ctx, r.Harness, r.Label, r.Cwd)
 	})
-	handle(mux, "send", func(ctx context.Context, r SendReq) (SendResp, error) {
-		m, err := s.Send(ctx, node.SendInput{Agent: r.Agent, Room: r.Room, Text: r.Text, To: r.To, ReplyTo: r.ReplyTo,
-			AskHandled: r.AskHandled, Replaces: r.Replaces, Choices: r.Choices, Thread: r.Thread})
+	handle(mux, "send", func(ctx context.Context, r SendReq) (any, error) {
+		in := node.SendInput{Agent: r.Agent, Room: r.Room, Text: r.Text, To: r.To, ReplyTo: r.ReplyTo,
+			AskHandled: r.AskHandled, Replaces: r.Replaces, Choices: r.Choices, Thread: r.Thread}
+		if len(r.Files) > 0 {
+			f, err := s.SendFiles(ctx, in, r.Files)
+			return SendFilesOf(f), err
+		}
+		m, err := s.Send(ctx, in)
 		out := SendResp{ID: m.ID, Room: m.Room, RoomLabel: m.Label, Created: Time(m.Created), ToOmitted: m.ToOmitted}
 		for _, a := range m.To {
 			out.To = append(out.To, node.AgentID(a))
 		}
 		return out, err
+	})
+	// fetch is an agent's request for one file's bytes, copied for it
+	// under the daemon's home and never opened (PROTOCOL 10.6).
+	handle(mux, "fetch", func(ctx context.Context, r FetchReq) (FetchResp, error) {
+		if r.WaitMS < 0 || r.WaitMS > core.MaxFetchWaitMS {
+			return FetchResp{}, userErr("wait_ms is 0 to 120000")
+		}
+		res, err := s.Fetch(ctx, r.Agent, r.Room, r.SHA256, r.Message, time.Duration(r.WaitMS)*time.Millisecond)
+		return FetchOf(res), err
+	})
+	// room/files is a person's setting for a room's files: off, carry or
+	// keep. Like net, no agent tool or hook calls it.
+	handle(mux, "room/files", func(ctx context.Context, r RoomFilesReq) (RoomFiles, error) {
+		v, err := s.RoomFiles(ctx, r.Room, r.Mode)
+		return RoomFilesOf(v), err
 	})
 	handle(mux, "inbox", func(ctx context.Context, r InboxReq) (InboxResp, error) {
 		wait, err := waitOf(r.WaitMS)

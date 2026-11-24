@@ -56,7 +56,7 @@ code { background: var(--bg); padding: .1rem .3rem; border-radius: .2rem; }
 #app, main, #conversation, #side, #needs, #stream { min-width: 0; }
 #side, #needs, #compose, dialog { background: var(--panel); }
 #side { padding: 1rem; }
-#rooms-title, #node h2 {
+#rooms-title, #node h2, #roomfiles h2 {
   margin: 1.25rem 0 .45rem;
   font-size: .82rem;
   color: var(--muted);
@@ -182,3 +182,10 @@ dialog td, dialog th { text-align: left; border-bottom: 1px solid var(--line); p
 }
 .meta .actions { margin-left: auto; display: inline-flex; gap: .5rem; white-space: nowrap; }
 .sub.warn { color: var(--warn); }
+.terms { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .2rem .75rem; margin: .45rem 0; font-size: .9rem; }
+.terms dt { color: var(--muted); }
+.terms dd { margin: 0; min-width: 0; }
+.terms .path, .files .fname { font-family: ui-monospace, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+.files { list-style: none; margin: .3rem 0 0; padding: 0; }
+.files li { padding: .15rem 0; }
+#roomfiles .row { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-top: .45rem; }

@@ -61,20 +61,25 @@ func (v *roomView) fileState(e *Entry, ver *rec) {
 		return
 	}
 	for _, it := range items {
-		ef := EntryFile{SHA256: it.SHA256, Name: it.Name, Size: it.Size, Type: it.Type, State: FileStateNotFetched}
-		how, _ := v.rd.HeldFor(v.room, it.SHA256, e.ID)
-		_, part, _ := v.rd.FilePart(v.room, e.ID, it.SHA256)
-		w, want, _ := v.rd.FileWant(v.room, e.ID, it.SHA256)
-		switch {
-		case how != "":
-			ef.State = FileStateHere
-		case part:
-			ef.State = FileStatePartial
-		case want && w.Lapsed.IsZero():
-			ef.State = FileStateComing
-		case want:
-			ef.State = FileStateUnavailable
-		}
+		ef := EntryFile{SHA256: it.SHA256, Name: it.Name, Size: it.Size, Type: it.Type, State: itemState(v.rd, v.room, e.ID, it.SHA256)}
 		e.Files = append(e.Files, ef)
 	}
+}
+
+// itemState is what this machine holds of file sha of message msg.
+func itemState(rd *store.Reader, room, msg, sha string) string {
+	how, _ := rd.HeldFor(room, sha, msg)
+	_, part, _ := rd.FilePart(room, msg, sha)
+	w, want, _ := rd.FileWant(room, msg, sha)
+	switch {
+	case how != "":
+		return FileStateHere
+	case part:
+		return FileStatePartial
+	case want && w.Lapsed.IsZero():
+		return FileStateComing
+	case want:
+		return FileStateUnavailable
+	}
+	return FileStateNotFetched
 }

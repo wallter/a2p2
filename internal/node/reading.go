@@ -86,6 +86,11 @@ type Entry struct {
 	Files        []EntryFile
 	FilesPending bool
 	FilesNote    string
+	// Request, RequestState and RequestReason, in an entry of kind
+	// request: the send with files asked for, sent or declined, and why.
+	Request       string
+	RequestState  string
+	RequestReason string
 }
 
 // Wait is a stream the inbox cannot pass yet (PROTOCOL Wait).
@@ -248,7 +253,10 @@ func (m *Machine) Showed(ctx context.Context, room, agent string, es []Entry, in
 		switch {
 		case inbox:
 			rows = append(rows, store.Shown{Key: e.Key, Version: e.Version, Msg: e.ID})
-		case e.Kind == EntryMessage && e.Version != "" && mayHandle(e, m.ID, agent):
+		// A message with files is marked too, so that the agent may fetch
+		// what it was shown (Files.Fetch asks for the version); reporting
+		// it handled still needs mayHandle (Handled checks CanHandle first).
+		case e.Kind == EntryMessage && e.Version != "" && (mayHandle(e, m.ID, agent) || len(e.Files) > 0 || e.FilesPending):
 			rows = append(rows, store.Shown{Key: store.TextMarkKey(e.ID), Version: e.Version, Msg: e.ID})
 		}
 	}
