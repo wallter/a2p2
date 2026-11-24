@@ -35,6 +35,7 @@ type Options struct {
 	Run      func(name string, args ...string) error // runs a harness CLI (nil = exec)
 	LookPath func(file string) (string, error)       // nil = exec.LookPath
 	StateDir string                                  // where install records live ("" = $A2P2_HOME/installs or ~/.a2p2/installs)
+	OS       string                                  // the system to install for ("" = runtime.GOOS; tests set "windows")
 }
 
 type spec struct {
@@ -360,6 +361,9 @@ func prefix(o Options) string {
 // Install registers a2p2 with a harness and returns a human-readable report.
 // The CLI runs first; the hook file is read and rewritten as late as possible.
 func Install(name string, o Options) (string, error) {
+	if err := forOS(name, &o); err != nil { // windows.go
+		return "", err
+	}
 	if a, ok := adapters[name]; ok {
 		return a.install(name, o)
 	}
@@ -587,6 +591,8 @@ func Doctor(o Options) []Check {
 		if _, err := o.lookPath(specs[name].cli); err != nil {
 			continue
 		}
+		o := o
+		_ = forOS(name, &o) // the binary as install writes it (windows.go)
 		hook := Check{Name: name + " hook", Fix: "a2p2 install " + name}
 		reg := Check{Name: name + " MCP server", Fix: "a2p2 install " + name}
 		var found string
@@ -636,6 +642,8 @@ func Doctor(o Options) []Check {
 	for _, name := range Names[len(hookNames):] {
 		if a := adapters[name]; a.cli != "" {
 			if _, err := o.lookPath(a.cli); err == nil {
+				o := o
+				_ = forOS(name, &o)
 				out = append(out, a.doctor(name, o))
 			}
 		}

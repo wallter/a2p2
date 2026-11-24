@@ -3,7 +3,8 @@ name: ci
 # before a release, including the Linux suite in a container
 # (`make prerelease`). Here: one Linux job for pull requests that touch
 # code, and on request. Nothing runs on a push to main; macOS is covered
-# by local development and the release checklist.
+# by local development and the release checklist. A Windows job runs only
+# on request (workflow_dispatch).
 on:
   pull_request:
     paths:
@@ -34,3 +35,36 @@ jobs:
       - run: make check
       # staticcheck at a pinned version, downloaded by `go run`.
       - run: make lint
+  # Windows, only when a person runs this workflow by hand (Actions, ci, Run
+  # workflow): never on a pull request. The log prints every test only when
+  # a package fails, and lists the tests skipped on Windows.
+  windows:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: the system
+        run: cmd //c ver && go version && go env GOOS GOARCH TEMP && sc query afunix || true
+      - run: go build ./...
+      - run: go vet ./...
+      - name: go test ./... (verbose output only for failing packages)
+        run: |
+          fail=0
+          for p in $(go list ./...); do
+            if go test -count=1 -timeout 20m -v "$p" > out.txt 2>&1; then
+              echo "ok   $p"
+            else
+              fail=1
+              echo "FAIL $p (full output follows)"
+              cat out.txt
+            fi
+            grep -A1 -e '--- SKIP' out.txt | sed 's/^/    /' || true
+          done
+          exit $fail

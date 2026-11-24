@@ -70,7 +70,7 @@ func newPair(t *testing.T) (*machine, *machine) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		dir, err := os.MkdirTemp("/tmp", "a2p2")
+		dir, err := os.MkdirTemp(sockTemp(), "a2p2")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -304,7 +304,7 @@ func TestConfirmBeforeCatchingUpAnswersNotCaughtUpAndSignsOnlyWithTheOverride(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir, err := os.MkdirTemp("/tmp", "a2p2")
+	dir, err := os.MkdirTemp(sockTemp(), "a2p2")
 	if err != nil {
 		t.Fatal(err)
 	}

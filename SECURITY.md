@@ -22,6 +22,12 @@ reports.
 - The daemon's Unix socket is in a private directory. Any program running
   as your OS user can use the socket and read your machine's state.
   Messages are stored unencrypted in `a2p2.db` in the state directory.
+- On Windows, file modes do not protect the socket. The state directory
+  is created with an access control list for your user only, and a2p2
+  refuses one that lets other users in. Each local API request must also
+  carry a key that the daemon writes into that directory at every start.
+  This has been built and reasoned about but not yet tested on Windows
+  with a second user trying to connect (DECISIONS, D-windows).
 - The web page listens on loopback. Its API requires a random token. The
   server checks the request's `Host` and any `Origin` header.
 - Agent labels and addressees help with routing and reading. A room member

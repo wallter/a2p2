@@ -39,7 +39,7 @@ func (d *netDaemon) start() {
 	case <-time.After(10 * time.Second):
 		d.t.Fatal("daemon did not start")
 	}
-	d.c = localapi.NewClient(daemon.SockPath(d.home))
+	d.c = daemon.Client(d.home)
 	var st localapi.Status
 	if err := d.c.Call(context.Background(), "status", nil, &st); err != nil {
 		d.t.Fatal(err)
@@ -67,7 +67,7 @@ func (d *netDaemon) call(name string, req, resp any) {
 
 func newNetDaemon(t *testing.T, name string) *netDaemon {
 	t.Helper()
-	home, err := os.MkdirTemp("/tmp", "a2p2")
+	home, err := os.MkdirTemp(sockTemp(), "a2p2")
 	if err != nil {
 		t.Fatal(err)
 	}

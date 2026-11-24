@@ -59,7 +59,7 @@ func Home() string {
 // that other users could read or that belongs to someone else: the socket in
 // it grants full control of the node.
 func PrepareHome(home string) error {
-	if err := os.MkdirAll(home, 0o700); err != nil {
+	if err := makeHome(home); err != nil {
 		return err
 	}
 	return CheckHome(home)
@@ -76,13 +76,7 @@ func CheckHome(home string) error {
 	if !fi.IsDir() {
 		return fmt.Errorf("%s is not a directory (symlinks are not followed)", home)
 	}
-	if err := checkOwner(fi, home); err != nil {
-		return err
-	}
-	if fi.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("%s is accessible to other users (mode %o); run: chmod 700 %s", home, fi.Mode().Perm(), home)
-	}
-	return nil
+	return checkPrivate(fi, home) // sys_unix.go, sys_windows.go
 }
 
 func LoadConfig(home string) (Config, error) {
@@ -156,6 +150,8 @@ type RunOpts struct {
 	// Handler, if set, is called as a local API or page request enters
 	// its handler (enter) and as it leaves.
 	Handler func(path string, enter bool)
+	// LocalKey requires the local key (localkey.go) as on Windows.
+	LocalKey bool
 }
 
 // Run is the daemon. It returns when ctx ends or a stop is requested.
@@ -274,15 +270,22 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	// file is stale and safe to remove.
 	sock := sockPath(home)
 	_ = os.Remove(sock)
-	old := umask(0o177)
-	apiLn, err := net.Listen("unix", sock)
-	umask(old)
+	var api http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { cur.Load().api.ServeHTTP(w, r) })
+	_ = os.Remove(localKeyPath(home))
+	if localKeyRequired || o.LocalKey { // Windows: localkey.go
+		key, err := writeLocalKey(home)
+		if err != nil {
+			return fmt.Errorf("local key: %w", err)
+		}
+		defer os.Remove(localKeyPath(home))
+		api = requireKey(key, api)
+	}
+	apiLn, err := listenLocal(sock)
 	if err != nil {
 		return fmt.Errorf("local socket: %w", err)
 	}
 	defer os.Remove(sock)
-	apiSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, BaseContext: base,
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { cur.Load().api.ServeHTTP(w, r) })}
+	apiSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, BaseContext: base, Handler: api}
 	servers = append(servers, apiSrv)
 	go apiSrv.Serve(apiLn)
 
@@ -584,7 +587,7 @@ func Connect(ctx context.Context, home string) (*localapi.Client, error) {
 	if err := PrepareHome(home); err != nil {
 		return nil, err
 	}
-	c := localapi.NewClient(sockPath(home))
+	c := Client(home)
 	if ping(ctx, c) == nil {
 		return c, nil
 	}
@@ -600,8 +603,8 @@ func Connect(ctx context.Context, home string) (*localapi.Client, error) {
 	cmd := exec.Command(exe, "daemon")
 	cmd.Env = append(os.Environ(), "A2P2_HOME="+home)
 	cmd.Stdout, cmd.Stderr = logf, logf
-	detach(cmd) // survive the caller's terminal
-	if err := cmd.Start(); err != nil {
+	if cmd, err = startDetached(cmd); err != nil { // survive the caller's terminal
+
 		return nil, fmt.Errorf("start daemon: %w", err)
 	}
 	go cmd.Wait()
@@ -645,6 +648,6 @@ func ping(ctx context.Context, c *localapi.Client) error {
 
 // Running reports whether a daemon is serving home, without starting one.
 func Running(ctx context.Context, home string) (*localapi.Client, bool) {
-	c := localapi.NewClient(sockPath(home))
+	c := Client(home)
 	return c, CheckHome(home) == nil && ping(ctx, c) == nil
 }

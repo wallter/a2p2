@@ -121,7 +121,7 @@ func TestThePageListensOnlyOnALiteralLoopbackAddress(t *testing.T) {
 	// The daemon refuses before it binds anything: the address stays free.
 	addr := freePort(t)
 	_, port, _ := net.SplitHostPort(addr)
-	home, err := os.MkdirTemp("/tmp", "a2p2")
+	home, err := os.MkdirTemp(sockTemp(), "a2p2")
 	if err != nil {
 		t.Fatal(err)
 	}

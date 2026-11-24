@@ -264,6 +264,7 @@ func TestOpenCodeAndPiRefuseWhatTheyCannotEditExactly(t *testing.T) {
 // refused before anything is written or run; a symlink to an existing
 // file is followed, and the link stays. Same rule for all six.
 func TestConfigSymlinksAreFollowedAndDanglingOnesRefused(t *testing.T) {
+	skipWithoutSymlinks(t)
 	for _, name := range Names {
 		o, r := setup(t)
 		p := hookPath(name, o)

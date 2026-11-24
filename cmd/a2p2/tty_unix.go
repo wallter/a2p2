@@ -4,6 +4,8 @@ package main
 
 import (
 	"os"
+	"os/exec"
+	"runtime"
 	"syscall"
 	"unsafe"
 )
@@ -14,4 +16,13 @@ func isTerminal() bool {
 	var t syscall.Termios
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, os.Stdin.Fd(), uintptr(ioctlGetTermios), uintptr(unsafe.Pointer(&t)))
 	return errno == 0
+}
+
+// openURL opens url in the default browser.
+func openURL(url string) {
+	if runtime.GOOS == "darwin" {
+		_ = exec.Command("open", url).Start()
+	} else {
+		_ = exec.Command("xdg-open", url).Start()
+	}
 }
