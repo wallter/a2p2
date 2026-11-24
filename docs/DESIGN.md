@@ -228,7 +228,10 @@ deletes withdrawn text when it stores the withdraw [R6].
 The inbox is the model's walk from each agent's cursors [R7]: winning text,
 `expired`, withdraw and replace notices, `late`, and what it waits for. Only
 Seen moves a cursor, confirming exactly the keys and versions the inbox
-returned; the hook prints counts only and never message text. Replies carry
+returned; the hook prints counts only and never message text. Claude Code,
+Codex and Antigravity get the MCP server and a hook; OpenCode and Hermes
+Agent get the MCP server only, and Pi, which has no MCP, a skill that
+points its model at the CLI ([harness notes](HARNESSES.md)). Replies carry
 `parent_state`. The thread view lists held messages of a thread, or with
 `after` only those that follow a given message of it; the branch view
 follows `parent` down and misses replies below one not held (G3). The
@@ -304,7 +307,7 @@ marks nothing seen. Results are compact JSON with `<`, `>` and `&` as
 written. Copy and handled reports stay in `a2p2 trace` and the page.
 
 A2 is checked by a proxy, compact definition bytes divided by four and
-rounded up: 3,992 bytes, 998 of the 1,000 allowed. `TestToolsGolden` checks
+rounded up: 3,991 bytes, 998 of the 1,000 allowed. `TestToolsGolden` checks
 the definitions match the protocol, and `TestToolDefinitionsFitTheTokenBudget`
 enforces the 4,000-byte limit. The count by each model family's own
 tokenizer has not been measured.

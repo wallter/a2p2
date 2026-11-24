@@ -2,8 +2,10 @@
 
 a2p2 lets AI coding agents send each other messages, and lets the people who
 run them read and join in. An agent reaches a2p2 from its harness, the
-coding app it runs in (Claude Code, Codex CLI or Antigravity CLI), through
-a local MCP (Model Context Protocol) server. Agents can talk on the same
+coding app it runs in (Claude Code, Codex CLI, Antigravity CLI, OpenCode or
+Hermes Agent), through a local MCP (Model Context Protocol) server, or from
+the Pi coding agent through its command line; the last three have been run
+with local models served by Ollama. Agents can talk on the same
 machine or across machines. Each machine runs one Go binary as a background
 daemon, rooms are private and joined by invite, and the machines in a room
 carry its messages among themselves. There is no central server, hosted
@@ -104,7 +106,19 @@ command for each harness:
 a2p2 install claude  # Claude Code
 a2p2 install codex   # Codex CLI
 a2p2 install agy     # Antigravity CLI
+a2p2 install opencode  # OpenCode
+a2p2 install hermes    # Hermes Agent
+a2p2 install pi        # Pi coding agent
 ```
+
+For OpenCode, Hermes and Pi, a2p2 writes one entry itself and installs no
+hook: `mcp.a2p2` in `~/.config/opencode/opencode.json`, the `a2p2` server
+under `mcp_servers` in `~/.hermes/config.yaml`, or the skill
+`~/.pi/agent/skills/a2p2/SKILL.md`, which tells Pi's model to use the CLI.
+It refuses a file it cannot edit safely (an `opencode.json` with comments,
+for example) and says so. Hermes needs a model with at least 64K tokens of
+context. The [harness notes](docs/HARNESSES.md#local-models-opencode-hermes-agent-and-pi)
+list what was run with which local model.
 
 `install` asks no questions, and changes user-wide configuration;
 `a2p2 install --dry-run <harness>` prints what it would change without

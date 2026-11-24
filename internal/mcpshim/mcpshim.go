@@ -475,7 +475,7 @@ type inboxIn struct {
 	Limit       int    `json:"limit,omitempty"`
 	Thread      string `json:"thread,omitempty" jsonschema:"message id: its thread, or replies under it"`
 	After       string `json:"after,omitempty" jsonschema:"with thread: only what follows this id"`
-	Recent      int    `json:"recent,omitempty" jsonschema:"1-50: room's last N (default local)"`
+	Recent      int    `json:"recent,omitempty" jsonschema:"1-50: past N of room; not new mail"`
 	Level       string `json:"level,omitempty" jsonschema:"set first: all, addressed (to you, ask_handled) or none"`
 	Peek        bool   `json:"peek,omitempty" jsonschema:"counts and first lines"`
 	Skipped     bool   `json:"skipped,omitempty" jsonschema:"what your level kept out"`

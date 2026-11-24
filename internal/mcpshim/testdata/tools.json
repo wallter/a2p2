@@ -81,7 +81,7 @@
           "type": "boolean"
         },
         "recent": {
-          "description": "1-50: room's last N (default local)",
+          "description": "1-50: past N of room; not new mail",
           "type": "integer"
         },
         "room": {

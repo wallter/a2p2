@@ -155,7 +155,7 @@ func tree(t *testing.T, root string) map[string]string {
 // and its markers are all gone, and a file or directory it created is
 // removed. Both an empty home and one with the harness's files present.
 func TestUninstallLeavesTheWholeHomeAsItWasBeforeInstall(t *testing.T) {
-	for _, name := range Names {
+	for _, name := range hookNames {
 		for _, seeded := range []bool{false, true} {
 			o, _ := setup(t)
 			o.Run = fakeCLI(o.HomeDir)
@@ -342,7 +342,7 @@ func TestHookOutputNeverContainsMessageTextWhateverItSays(t *testing.T) {
 		}
 	}
 	in := map[string]string{"claude": `{"cwd":"/work/proj"}`, "codex": `{"cwd":"/work/proj"}`, "agy": `{"workspacePaths":["/work/proj"]}`}
-	for _, name := range Names {
+	for _, name := range hookNames {
 		for _, ev := range []string{specs[name].first, "Stop"} {
 			var out bytes.Buffer
 			if err := Hook(context.Background(), c, name, ev, strings.NewReader(in[name]), &out); err != nil {

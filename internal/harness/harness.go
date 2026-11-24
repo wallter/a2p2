@@ -18,8 +18,12 @@ import (
 	"strings"
 )
 
-// Names lists supported harnesses.
-var Names = []string{"claude", "codex", "agy"}
+// Names lists supported harnesses: first those registered through their own
+// CLI with an unread-notice hook (hookNames), then those whose one
+// configuration file a2p2 edits itself (adapters, in config.go).
+var Names = append(append([]string{}, hookNames...), "opencode", "hermes", "pi")
+
+var hookNames = []string{"claude", "codex", "agy"}
 
 // Options control install/uninstall. Paths default to the real config
 // locations; tests override HomeDir, Run and LookPath.
@@ -331,54 +335,7 @@ func (h *hookFile) write(record bool) error {
 	if err != nil {
 		return err
 	}
-	path := h.realPath()
-	_, bakErr := os.Stat(path + bakSuffix)
-	_, newErr := os.Stat(path + newSuffix)
-	first := record && errors.Is(bakErr, os.ErrNotExist) && errors.Is(newErr, os.ErrNotExist)
-	if first && !h.existed {
-		var made []string // directories this write creates, deepest first
-		for d := filepath.Dir(path); ; d = filepath.Dir(d) {
-			if _, err := os.Stat(d); err == nil || d == filepath.Dir(d) {
-				break
-			}
-			made = append(made, d)
-		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(path+newSuffix, []byte(strings.Join(made, "\n")), 0o600); err != nil {
-			return err
-		}
-	}
-	if first && h.existed {
-		if err := os.WriteFile(path+bakSuffix, h.orig, 0o600); err != nil {
-			return err
-		}
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	mode := os.FileMode(0o600)
-	if st, err := os.Stat(path); err == nil {
-		mode = st.Mode().Perm()
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".a2p2-*.tmp")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
+	return saveRecorded(h.realPath(), h.existed, h.orig, b, record)
 }
 
 func hookEvents(sp spec) []string { return []string{sp.first, "Stop"} }
@@ -402,6 +359,9 @@ func prefix(o Options) string {
 // Install registers a2p2 with a harness and returns a human-readable report.
 // The CLI runs first; the hook file is read and rewritten as late as possible.
 func Install(name string, o Options) (string, error) {
+	if a, ok := adapters[name]; ok {
+		return a.install(name, o)
+	}
 	h, err := loadHooks(name, o) // validate early; re-read below
 	if err != nil {
 		return "", err
@@ -467,6 +427,9 @@ func Install(name string, o Options) (string, error) {
 // Uninstall removes exactly what Install added, and the records Install
 // kept to undo it, so the home is as it was (I2).
 func Uninstall(name string, o Options) (string, error) {
+	if a, ok := adapters[name]; ok {
+		return a.uninstall(o)
+	}
 	h, err := loadHooks(name, o) // validate before touching anything
 	if err != nil {
 		return "", err
@@ -525,62 +488,13 @@ func Uninstall(name string, o Options) (string, error) {
 }
 
 // restore finishes an uninstall of the hook file once a2p2's entries are
-// gone (see bakSuffix): it writes back the original bytes when nothing
-// else changed, or deletes the file a2p2 created when only a2p2's entries
-// were in it, and removes the records. It returns lines for the report.
+// gone (see bakSuffix and restoreRecorded). It returns lines for the report.
 func (h *hookFile) restore(dry bool) ([]string, error) {
-	path := h.realPath()
 	cur, err := h.encode()
 	if err != nil {
 		return nil, err
 	}
-	var rep []string
-	orig, err := os.ReadFile(path + bakSuffix)
-	switch {
-	case err == nil:
-		if same(orig, cur) {
-			rep = append(rep, prefixed(dry, "restore "+h.path+" from "+h.path+bakSuffix))
-			if !dry {
-				if err := writeKeepingMode(path, orig); err != nil {
-					return nil, err
-				}
-			}
-		}
-		rep = append(rep, prefixed(dry, "remove "+h.path+bakSuffix))
-		if !dry {
-			if err := os.Remove(path + bakSuffix); err != nil {
-				return nil, err
-			}
-		}
-	case !errors.Is(err, os.ErrNotExist):
-		return nil, err
-	}
-	made, err := os.ReadFile(path + newSuffix)
-	switch {
-	case err == nil:
-		if !dry {
-			if err := os.Remove(path + newSuffix); err != nil {
-				return nil, err
-			}
-		}
-		if len(h.doc) == 0 {
-			rep = append(rep, prefixed(dry, "remove "+h.path+", which a2p2 created"))
-			if !dry {
-				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return nil, err
-				}
-				// Deepest first; a directory that holds anything else stays.
-				for _, d := range strings.Split(string(made), "\n") {
-					if d != "" {
-						_ = os.Remove(d)
-					}
-				}
-			}
-		}
-	case !errors.Is(err, os.ErrNotExist):
-		return nil, err
-	}
-	return rep, nil
+	return restoreRecorded(h.realPath(), cur, len(h.doc) == 0, same, dry)
 }
 
 func prefixed(dry bool, s string) string {
@@ -617,7 +531,7 @@ type Check struct {
 // install says which half is missing. It never runs a model or a harness.
 func Doctor(o Options) []Check {
 	var out []Check
-	for _, name := range Names {
+	for _, name := range hookNames {
 		if _, err := o.lookPath(specs[name].cli); err != nil {
 			continue
 		}
@@ -666,6 +580,13 @@ func Doctor(o Options) []Check {
 			reg.OK, reg.Info, reg.Fix = true, "MCP server registered with "+name, ""
 		}
 		out = append(out, hook, reg)
+	}
+	for _, name := range Names[len(hookNames):] {
+		if a := adapters[name]; a.cli != "" {
+			if _, err := o.lookPath(a.cli); err == nil {
+				out = append(out, a.doctor(name, o))
+			}
+		}
 	}
 	return out
 }
