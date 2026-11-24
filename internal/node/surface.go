@@ -44,10 +44,12 @@ const (
 	maxFirstLines     = 10
 )
 
-// NoticeV02 is shown to a person once ever, over a database that holds
-// v0.2 state (PROTOCOL-next section 8).
-const NoticeV02 = "This machine's database holds messages or rooms from a2p2 v0.2. This version ignores them: " +
-	"they stay in the database file but are not read, shown or sent. Pair your machines again with a2p2 room invite."
+// NoticeV02 is shown to a person once ever, after the upgrade removed the
+// v0.2 messages and rooms the database held (migration 10; PROTOCOL-next
+// section 8).
+const NoticeV02 = "This upgrade removed the messages and rooms this machine held from the earlier version of " +
+	"a2p2 (v0.2); they cannot be read any more. Make your rooms again with a2p2 room create, and pair your " +
+	"machines again with a2p2 room invite."
 
 // SurfaceOpts configures a Surface.
 type SurfaceOpts struct {
@@ -344,9 +346,26 @@ func (s *Surface) Requests(ctx context.Context) ([]store.Request, error) { retur
 
 // Confirm decides a request. No agent tool or hook reaches it (P3); any
 // program running as this user can still call the socket that does.
-func (s *Surface) Confirm(ctx context.Context, id string, approve bool) (Confirmation, error) {
-	return s.r.Confirm(ctx, id, approve)
+//
+// An approval that would sign before this machine has checked the room's
+// log with another member since it started is not decided: it answers
+// state failed with reason not_caught_up, the request stays pending, and
+// the surface shows the risk and may repeat with notCaughtUpOK, the
+// person's second, explicit approval, which is recorded (PROTOCOL-next 7).
+func (s *Surface) Confirm(ctx context.Context, id string, approve, notCaughtUpOK bool) (Confirmation, error) {
+	c, err := s.r.ConfirmWith(ctx, id, approve, ConfirmOpts{NotCaughtUpOK: notCaughtUpOK})
+	if errors.Is(err, ErrNotCaughtUp) {
+		return Confirmation{ID: id, State: store.RequestFailed, Reason: ReasonNotCaughtUp}, nil
+	}
+	return c, err
 }
+
+// NotCaughtUpWarning is what a surface shows before asking for the
+// second approval after a confirm answered not_caught_up.
+const NotCaughtUpWarning = "This machine has not checked the room's log with another member since it started. " +
+	"If it was restored from a backup, approving now can damage the room's admin record (two different entries " +
+	"signed at one position, a fork). Approve again only if every other member is gone or you are sure this " +
+	"machine holds the room's latest log."
 
 // ---- joining ----
 
@@ -406,7 +425,9 @@ func (s *Surface) ResumeJoins(ctx context.Context, wait time.Duration) ([]JoinOu
 }
 
 // SeedBook learns the admin machines' addresses from the joins recorded
-// here (the address book is in memory; a restart relearns from them).
+// here, through the book (which stores them when the daemon loaded it
+// with LoadAddrBook): an admin the book dropped while the join waited, as
+// not yet a member, is learned again once the join completes.
 func (s *Surface) SeedBook(ctx context.Context) error {
 	if s.book == nil {
 		return nil

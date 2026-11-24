@@ -193,6 +193,9 @@ type (
 	ConfirmReq struct {
 		ID      string `json:"id"`
 		Approve bool   `json:"approve"`
+		// NotCaughtUpOK is the person's second approval after a first
+		// answered reason not_caught_up; it is recorded with the request.
+		NotCaughtUpOK bool `json:"not_caught_up_ok,omitempty"`
 	}
 	ConfirmResp struct {
 		ID      string   `json:"id"`
@@ -602,7 +605,7 @@ func Handler(s *node.Surface, info Info) http.Handler {
 		return out, err
 	})
 	handle(mux, "confirm", func(ctx context.Context, r ConfirmReq) (ConfirmResp, error) {
-		c, err := s.Confirm(ctx, r.ID, r.Approve)
+		c, err := s.Confirm(ctx, r.ID, r.Approve, r.NotCaughtUpOK)
 		return ConfirmResp{ID: c.ID, State: c.State, Reason: c.Reason, Entries: c.Entries, Effect: c.Effect}, err
 	})
 	handle(mux, "room/create", func(ctx context.Context, r RoomReq) (Room, error) {

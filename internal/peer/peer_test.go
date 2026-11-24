@@ -12,13 +12,11 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
-	"errors"
 	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,12 +25,7 @@ import (
 
 	"github.com/wallter/a2p2/internal/core"
 	"github.com/wallter/a2p2/internal/node"
-	"github.com/wallter/a2p2/internal/store"
 )
-
-func init() {
-	node.RetryBase, node.RetryMax, node.Tick = 2*time.Millisecond, 20*time.Millisecond, 3*time.Millisecond
-}
 
 var bg = context.Background()
 
@@ -46,7 +39,7 @@ func newID(t *testing.T) *Identity {
 }
 
 // serve runs Serve on a loopback listener (optionally wrapped) until the test ends.
-func serve(t *testing.T, id *Identity, h Handler, refresh func(string), wrap func(net.Listener) net.Listener) string {
+func serve(t *testing.T, id *Identity, h Handler, wrap func(net.Listener) net.Listener) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -58,7 +51,7 @@ func serve(t *testing.T, id *Identity, h Handler, refresh func(string), wrap fun
 	}
 	ctx, cancel := context.WithCancel(bg)
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, ln, id, h, refresh) }()
+	go func() { done <- Serve(ctx, ln, id, h) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -68,202 +61,78 @@ func serve(t *testing.T, id *Identity, h Handler, refresh func(string), wrap fun
 	return addr
 }
 
-// ---- real nodes ----
-
-type realNode struct {
-	id   *Identity
-	n    *node.Node
-	m    *node.Mesh
-	st   *store.Store
-	addr string
-}
-
-func startNode(t *testing.T, name string, wrap func(net.Listener) net.Listener) *realNode {
-	t.Helper()
-	id := newID(t)
-	st, err := store.Open(filepath.Join(t.TempDir(), "a2p2.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	n, err := node.New(bg, st, id.NodeID(), name, time.Now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rn := &realNode{id: id, n: n, st: st}
-	rn.m = node.NewMesh(n, NewTransport(id), func() []string { return []string{rn.addr} })
-	rn.addr = serve(t, id, n, func(room string) { go rn.m.Refresh(bg, room) }, wrap)
-	ctx, cancel := context.WithCancel(bg)
-	done := make(chan struct{})
-	go func() { rn.m.Run(ctx); close(done) }()
-	t.Cleanup(func() { cancel(); <-done; st.Close() }) // runs before the listener's cleanup
-	return rn
-}
-
-func (r *realNode) member() store.Member {
-	return store.Member{Node: r.id.NodeID(), Name: "x", Addrs: []string{r.addr}}
-}
-
-func (r *realNode) agent(t *testing.T, label string) string {
-	t.Helper()
-	a, err := r.n.Register(bg, "test", label, "/tmp/"+label)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return a.ID
-}
-
-func (r *realNode) state(t *testing.T, msg, to string) string {
-	ds, err := r.st.Deliveries(bg, msg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, d := range ds {
-		if d.Node == to {
-			return d.State
-		}
-	}
-	return ""
-}
-
-func joinAll(t *testing.T, owner *realNode, others ...*realNode) store.Room {
-	t.Helper()
-	room, err := owner.n.CreateRoom(bg, "team", []string{owner.addr})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, o := range others {
-		tok, _, err := owner.n.Invite(bg, room.ID, []string{owner.addr})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := o.m.Join(bg, tok); err != nil {
-			t.Fatalf("join: %v", err)
-		}
-	}
-	for _, o := range others {
-		o.m.Refresh(bg, room.ID)
-	}
-	return room
-}
-
-func eventually(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(3 * time.Millisecond) {
-		if cond() {
-			return
-		}
-	}
-	t.Fatalf("timed out waiting for: %s", what)
-}
-
-func handled(r *realNode, msg, agent string) bool {
-	tr, _ := r.n.Trace(bg, msg)
-	for _, k := range tr.Marks {
-		if k.Agent == agent && k.State == core.ReceiptHandled {
-			return true
-		}
-	}
-	return false
-}
-
-func sendAndAck(t *testing.T, from *realNode, room string, to ...*realNode) {
-	t.Helper()
-	alice := from.agent(t, "alice")
-	bobs := []string{} // registered first: new agents do not inherit history as unread
-	for _, r := range to {
-		bobs = append(bobs, r.agent(t, "bob"))
-	}
-	m, err := from.n.Send(bg, node.SendReq{From: alice, Room: room, Text: "hello over tls"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, r := range to {
-		eventually(t, "stored", func() bool { return from.state(t, m.ID, r.id.NodeID()) == store.Stored })
-		bob := bobs[i]
-		in, _ := r.n.Inbox(bg, bob, "", 10, 0)
-		if len(in) != 1 || in[0].Body.Text != "hello over tls" || in[0].FromNode != from.id.NodeID() {
-			t.Fatalf("inbox = %+v", in)
-		}
-		if err := r.n.Ack(bg, bob, m.ID); err != nil {
-			t.Fatal(err)
-		}
-		eventually(t, "handled receipt", func() bool { return handled(from, m.ID, bob) })
-	}
-}
-
-func TestTwoNodesDeliverAndReceipt(t *testing.T) {
-	a, b := startNode(t, "a", nil), startNode(t, "b", nil)
-	room := joinAll(t, a, b)
-	sendAndAck(t, a, room.ID, b)
-}
-
-func TestThreeNodesNonOwnerSends(t *testing.T) {
-	a, b, c := startNode(t, "a", nil), startNode(t, "b", nil), startNode(t, "c", nil)
-	room := joinAll(t, a, b, c)
-	sendAndAck(t, b, room.ID, a, c) // b -> c never involves the owner
-}
-
 // ---- a fake handler that counts calls ----
 
+// countH answers every pull with a bare same and every join with 200 {},
+// counting the calls and remembering who the transport said made them.
 type countH struct {
 	calls atomic.Int64
 	from  atomic.Value
-	err   error
 }
 
-func (h *countH) Receive(_ context.Context, from string, req node.DeliverReq, _ func(string)) []node.Result {
+func (h *countH) Serve(_ context.Context, from string, q *node.PullRequest) (*node.PullResponse, error) {
 	h.calls.Add(1)
 	h.from.Store(from)
-	return []node.Result{}
-}
-func (h *countH) HandleJoin(_ context.Context, from string, _ node.JoinReq) (store.Room, error) {
-	h.calls.Add(1)
-	h.from.Store(from)
-	return store.Room{ID: "r"}, h.err
-}
-func (h *countH) HandleRoom(_ context.Context, from string, _ node.RoomReq) (store.Room, error) {
-	h.calls.Add(1)
-	h.from.Store(from)
-	return store.Room{ID: "r"}, h.err
+	return &node.PullResponse{V: node.PullVersion, Same: true, Log: node.PullLog{Heads: q.Log.Heads}}, nil
 }
 
+func (h *countH) Handle(_ context.Context, from, _ string, _ []byte) node.JoinReply {
+	h.calls.Add(1)
+	h.from.Store(from)
+	return node.JoinReply{Status: http.StatusOK, Body: []byte(`{}`)}
+}
+
+// opening is a well-formed opening pull request for tRoom.
+func opening() *node.PullRequest {
+	return &node.PullRequest{V: node.PullVersion, Room: tRoom, Sum: strings.Repeat("0", 64), Log: node.PullLog{Heads: []string{tHead}}}
+}
+
+// The requester pins the server's key: a server holding another key gets
+// a handshake and no request. With the right key, malformed addresses are
+// skipped, and the server sees the requester's key from TLS.
+//
+// Requirements: T2
 func TestPinningRefusesWrongServerKey(t *testing.T) {
 	h := &countH{}
 	y := newID(t)
-	addr := serve(t, y, h, nil, nil)
-	tr := NewTransport(newID(t))
+	addr := serve(t, y, h, nil)
+	client := newID(t)
+	book := node.NewAddrBook()
+	cl := NewPullClient(client, book)
+	t.Cleanup(cl.Close)
 	x := newID(t).NodeID()
-	if _, err := tr.Deliver(bg, store.Member{Node: x, Addrs: []string{addr}}, node.DeliverReq{}); err == nil {
-		t.Fatal("connected to a server holding the wrong key")
+	book.Replace(x, []string{addr}, time.Now())
+	if _, err := cl.Pull(bg, x, opening()); err == nil || !strings.Contains(err.Error(), "expected node") {
+		t.Fatalf("connected to a server holding the wrong key: %v", err)
 	}
 	if h.calls.Load() != 0 {
 		t.Fatal("request reached the handler despite failed pinning")
 	}
-	// Same server, right expectation; malformed addresses are skipped.
-	if _, err := tr.Room(bg, store.Member{Node: y.NodeID(), Addrs: []string{"nope", "h:x", ":1", addr}}, node.RoomReq{}); err != nil {
+	book.Replace(y.NodeID(), []string{"nope", "h:x", ":1", addr}, time.Now())
+	if _, err := cl.Pull(bg, y.NodeID(), opening()); err != nil {
 		t.Fatalf("pinned to the right key: %v", err)
 	}
-	if h.from.Load() != tr.id.NodeID() {
+	if h.from.Load() != client.NodeID() {
 		t.Fatalf("handler saw node %v", h.from.Load())
 	}
 }
 
-func TestStatusMapping(t *testing.T) {
+// The requester's node id is the key of its TLS certificate, whatever it
+// sends: two keys posting the same bytes are seen as themselves.
+//
+// Requirements: T2
+func TestFromNodeComesFromTLS(t *testing.T) {
 	h := &countH{}
-	srv := newID(t)
-	m := store.Member{Node: srv.NodeID(), Addrs: []string{serve(t, srv, h, nil, nil)}}
-	tr := NewTransport(newID(t))
-	h.err = node.ErrForbidden
-	if _, err := tr.Join(bg, m, node.JoinReq{}); !errors.Is(err, node.ErrForbidden) {
-		t.Errorf("403: %v", err)
-	}
-	h.err = &node.UserError{Msg: "room is full"}
-	if _, err := tr.Join(bg, m, node.JoinReq{}); err == nil || !strings.Contains(err.Error(), "room is full") {
-		t.Errorf("400: %v", err)
-	}
-	h.err = errors.New("disk /secret/path exploded")
-	if _, err := tr.Join(bg, m, node.JoinReq{}); err == nil || strings.Contains(err.Error(), "secret") {
-		t.Errorf("500 leaked or missing: %v", err)
+	addr := serve(t, newID(t), h, nil)
+	for i := 0; i < 2; i++ {
+		pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+		c := rawClient(certFor(t, pub, priv, hex.EncodeToString(pub)))
+		if code, err := post(c, addr, pathPullV2, string(mustBody(t, opening()))); err != nil || code != 200 {
+			t.Fatalf("pull: %d %v", code, err)
+		}
+		if got := h.from.Load(); got != hex.EncodeToString(pub) {
+			t.Fatalf("handler saw %v, want the certificate's key", got)
+		}
 	}
 }
 
@@ -294,105 +163,62 @@ func post(c *http.Client, addr, path, body string) (int, error) {
 	return resp.StatusCode, nil
 }
 
+// Requirements: T7
 func TestServerRejectsBadClientCerts(t *testing.T) {
 	h := &countH{}
-	addr := serve(t, newID(t), h, nil, nil)
+	addr := serve(t, newID(t), h, nil)
 	rk, _ := rsa.GenerateKey(rand.Reader, 2048)
 	ek, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	edPub, edPriv, _ := ed25519.GenerateKey(rand.Reader)
+	body := string(mustBody(t, opening()))
 	for name, c := range map[string]*http.Client{
 		"rsa":         rawClient(certFor(t, &rk.PublicKey, rk, "x")),
 		"ecdsa":       rawClient(certFor(t, &ek.PublicKey, ek, "x")),
 		"cn mismatch": rawClient(certFor(t, edPub, edPriv, newID(t).NodeID())),
 		"no cert":     rawClient(),
 	} {
-		if code, err := post(c, addr, pathRoom, `{}`); err == nil {
-			t.Errorf("%s: accepted with status %d", name, code)
+		for _, path := range []string{pathPullV2, pathJoinV2} {
+			if code, err := post(c, addr, path, body); err == nil {
+				t.Errorf("%s on %s: accepted with status %d", name, path, code)
+			}
 		}
 	}
 	if h.calls.Load() != 0 {
 		t.Fatal("a rejected client reached the handler")
 	}
 	good := rawClient(certFor(t, edPub, edPriv, hex.EncodeToString(edPub)))
-	if code, err := post(good, addr, pathRoom, `{}`); err != nil || code != 200 {
+	if code, err := post(good, addr, pathPullV2, body); err != nil || code != 200 {
 		t.Fatalf("valid node cert refused: %d %v", code, err)
 	}
 }
 
+// Only POST to the two v2 routes is served; the v0.2 routes are gone.
+//
+// Requirements: T8
 func TestServerRefusesOversizeAndBadRoutes(t *testing.T) {
 	h := &countH{}
-	addr := serve(t, newID(t), h, nil, nil)
+	addr := serve(t, newID(t), h, nil)
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	c := rawClient(certFor(t, pub, priv, hex.EncodeToString(pub)))
-	big := `{"secret":"` + strings.Repeat("a", 20<<10) + `"}`
-	if code, err := post(c, addr, pathJoin, big); err != nil || (code != 413 && code != 400) {
-		t.Errorf("oversize join: %d %v", code, err)
+	for _, path := range []string{pathPullV2, pathJoinV2} {
+		resp, err := c.Get("https://" + addr + path)
+		if err != nil || resp.StatusCode == 200 {
+			t.Errorf("GET %s accepted: %v", path, err)
+		} else {
+			resp.Body.Close()
+		}
 	}
-	resp, err := c.Get("https://" + addr + pathDeliver)
-	if err != nil || resp.StatusCode == 200 {
-		t.Errorf("GET accepted: %v", err)
-	} else {
-		resp.Body.Close()
+	for _, path := range []string{"/p/v1/deliver", "/p/v1/join", "/p/v1/room", "/p/v2/nope"} {
+		if code, err := post(c, addr, path, `{}`); err != nil || code != 404 {
+			t.Errorf("%s: %d %v", path, code, err)
+		}
 	}
-	if code, err := post(c, addr, "/p/v1/nope", `{}`); err != nil || code != 404 {
-		t.Errorf("unknown path: %d %v", code, err)
+	big := `{"v":2,"room":"` + strings.Repeat("a", int(maxPullBody)) + `"}`
+	if code, err := post(c, addr, pathPullV2, big); err != nil || code != 413 {
+		t.Errorf("oversize pull: %d %v", code, err)
 	}
 	if h.calls.Load() != 0 {
 		t.Fatal("handler called for a refused request")
-	}
-}
-
-// ---- strangers and spoofing ----
-
-func envelope(fromNode, fromLabelNode, room, text string) core.Envelope {
-	return core.Envelope{V: core.ProtocolVersion, ID: core.NewID(time.Now()), Room: room, FromNode: fromNode,
-		From: core.AgentID("mallory", fromLabelNode), Kind: core.KindMessage, Seq: 1,
-		CreatedAt: time.Now(), Body: core.Body{Text: text}}
-}
-
-func TestStrangerIsRefused(t *testing.T) {
-	a, b := startNode(t, "a", nil), startNode(t, "b", nil)
-	room := joinAll(t, a, b)
-	s := newID(t)
-	tr := NewTransport(s) // valid node cert, but not a member of anything
-	res, err := tr.Deliver(bg, a.member(), node.DeliverReq{Envelopes: []core.Envelope{
-		envelope(s.NodeID(), s.NodeID(), room.ID, "let me in"),
-		envelope(b.id.NodeID(), b.id.NodeID(), room.ID, "i am b"), // claims to be a member
-	}})
-	if err != nil || len(res) != 2 {
-		t.Fatalf("deliver: %v %v", res, err)
-	}
-	for _, r := range res {
-		if r.Status != node.ResRejected {
-			t.Errorf("stranger envelope %s: %+v", r.ID, r)
-		}
-	}
-	if _, err := tr.Room(bg, a.member(), node.RoomReq{Room: room.ID}); !errors.Is(err, node.ErrForbidden) {
-		t.Errorf("room: %v", err)
-	}
-	if _, err := tr.Join(bg, a.member(), node.JoinReq{Secret: "wrong"}); !errors.Is(err, node.ErrForbidden) {
-		t.Errorf("join: %v", err)
-	}
-}
-
-func TestFromNodeComesFromTLS(t *testing.T) {
-	a, b, c := startNode(t, "a", nil), startNode(t, "b", nil), startNode(t, "c", nil)
-	room := joinAll(t, a, b, c)
-	tr := NewTransport(b.id) // b speaks, claiming in the payload to be c
-	spoof := envelope(c.id.NodeID(), c.id.NodeID(), room.ID, "i am c")
-	relabel := envelope(c.id.NodeID(), b.id.NodeID(), room.ID, "still b")
-	res, err := tr.Deliver(bg, a.member(), node.DeliverReq{Envelopes: []core.Envelope{spoof, relabel}})
-	if err != nil || len(res) != 2 {
-		t.Fatalf("deliver: %v %v", res, err)
-	}
-	if res[0].Status != node.ResRejected {
-		t.Errorf("spoofed sender accepted: %+v", res[0])
-	}
-	if res[1].Status != node.ResStored {
-		t.Fatalf("relabelled: %+v", res[1])
-	}
-	if got, _ := a.st.Get(bg, relabel.ID); got.FromNode != b.id.NodeID() {
-		t.Errorf("stored as from %s, want b", core.ShortNode(got.FromNode))
 	}
 }
 
@@ -426,62 +252,30 @@ func (c recConn) Read(b []byte) (int, error) {
 }
 func (c recConn) Write(b []byte) (int, error) { c.l.record(b); return c.Conn.Write(b) }
 
+// A message pulled over the wire is not visible in it: neither its text,
+// its room id nor the exchange's field names.
+//
+// Requirements: T7
 func TestWireIsEncrypted(t *testing.T) {
 	rec := &recLn{}
-	a := startNode(t, "a", nil)
-	b := startNode(t, "b", func(ln net.Listener) net.Listener { rec.Listener = ln; return rec })
-	room := joinAll(t, a, b)
+	a := newPM(t, "alice", true, func(ln net.Listener) net.Listener { rec.Listener = ln; return rec })
+	b := newPM(t, "bob", false)
+	room := group(t, a, b)
 	const secret = "PURPLE-ELEPHANT-7731"
-	alice := a.agent(t, "alice")
-	m, err := a.n.Send(bg, node.SendReq{From: alice, Room: room.ID, Text: secret})
-	if err != nil {
-		t.Fatal(err)
+	id := a.send(room, secret, false)
+	b.mustPull(room, a, node.PullOpts{})
+	if !b.holds(room, id) {
+		t.Fatal("the message did not cross")
 	}
-	eventually(t, "stored on b", func() bool { return a.state(t, m.ID, b.id.NodeID()) == store.Stored })
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	if rec.buf.Len() < 1000 {
 		t.Fatalf("recorder saw only %d bytes", rec.buf.Len())
 	}
-	for _, needle := range []string{secret, room.ID, "envelopes"} {
+	for _, needle := range []string{secret, room, `"records"`, `"log"`} {
 		if bytes.Contains(rec.buf.Bytes(), []byte(needle)) {
 			t.Errorf("%q visible on the wire", needle)
 		}
-	}
-}
-
-// ---- rate limit ----
-
-func TestRateLimitTripsAndRecovers(t *testing.T) {
-	h := &countH{}
-	srv := newID(t)
-	m := store.Member{Node: srv.NodeID(), Addrs: []string{serve(t, srv, h, nil, nil)}}
-	tr := NewTransport(newID(t))
-	tripped := false
-	for i := 0; i < 2000 && !tripped; i++ {
-		_, err := tr.Room(bg, m, node.RoomReq{})
-		tripped = err != nil && strings.Contains(err.Error(), "429")
-	}
-	if !tripped {
-		t.Fatal("burst never hit the rate limit")
-	}
-	time.Sleep(100 * time.Millisecond) // ~5 tokens at 50/s
-	if _, err := tr.Room(bg, m, node.RoomReq{}); err != nil {
-		t.Fatalf("did not recover: %v", err)
-	}
-	other := NewTransport(newID(t)) // another node has its own bucket
-	if _, err := other.Room(bg, m, node.RoomReq{}); err != nil {
-		t.Fatalf("limit leaked across nodes: %v", err)
-	}
-}
-
-func TestLimiterBoundsKeys(t *testing.T) {
-	l := newLimiter()
-	for i := 0; i < 3*rateMaxKeys; i++ {
-		l.allow(string(rune(i)))
-	}
-	if len(l.m) > rateMaxKeys {
-		t.Fatalf("limiter holds %d keys", len(l.m))
 	}
 }
 
@@ -511,6 +305,7 @@ func TestLoadIdentity(t *testing.T) {
 	}
 }
 
+// Requirements: T2
 func TestCertIsNodeID(t *testing.T) {
 	id := newID(t)
 	c, err := selfSigned(id)
@@ -522,51 +317,12 @@ func TestCertIsNodeID(t *testing.T) {
 	}
 }
 
-func TestDeliverBatchLimitBeforeDecode(t *testing.T) {
-	h := &countH{}
-	addr := serve(t, newID(t), h, nil, nil)
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	c := rawClient(certFor(t, pub, priv, hex.EncodeToString(pub)))
-	body := func(n int) string {
-		return `{"envelopes":[` + strings.TrimSuffix(strings.Repeat("{},", n), ",") + `]}`
-	}
-	for _, n := range []int{core.MaxBatch + 1, 100000} {
-		start := time.Now()
-		if code, err := post(c, addr, pathDeliver, body(n)); err != nil || (code != 400 && code != 413) {
-			t.Errorf("%d envelopes: %d %v", n, code, err)
-		}
-		if d := time.Since(start); d > 2*time.Second {
-			t.Errorf("%d envelopes took %v", n, d)
-		}
-	}
-	var vs []string
-	for i := 0; i <= maxVersions; i++ {
-		vs = append(vs, `"r`+strconv.Itoa(i)+`":1`)
-	}
-	if code, err := post(c, addr, pathDeliver, `{"envelopes":[],"versions":{`+strings.Join(vs, ",")+`}}`); err != nil || code != 400 {
-		t.Errorf("many versions: %d %v", code, err)
-	}
-	big := `{"envelopes":[{"text":"` + strings.Repeat("a", core.MaxEnvelope) + `"}]}`
-	if code, err := post(c, addr, pathDeliver, big); err != nil || code != 400 {
-		t.Errorf("big envelope: %d %v", code, err)
-	}
-	if h.calls.Load() != 0 {
-		t.Fatal("handler called for an over-limit request")
-	}
-	if code, err := post(c, addr, pathDeliver, body(core.MaxBatch)); err != nil || code != 200 {
-		t.Fatalf("max batch refused: %d %v", code, err)
-	}
-	if h.calls.Load() != 1 {
-		t.Fatal("handler not called for a valid batch")
-	}
-}
-
+// Connections that never finish a handshake hold at most maxConns slots;
+// once they close, requests are served again.
 func TestConnectionLimit(t *testing.T) {
-	old := maxConns
-	maxConns = 3
-	defer func() { maxConns = old }()
+	set(t, &maxConns, 3)
 	h := &countH{}
-	addr := serve(t, newID(t), h, nil, nil)
+	addr := serve(t, newID(t), h, nil)
 	var idle []net.Conn
 	for i := 0; i < maxConns; i++ {
 		c, err := net.Dial("tcp", addr)
@@ -578,15 +334,46 @@ func TestConnectionLimit(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	c := rawClient(certFor(t, pub, priv, hex.EncodeToString(pub)))
 	c.Timeout = 700 * time.Millisecond
-	if code, err := post(c, addr, pathRoom, `{}`); err == nil {
+	body := string(mustBody(t, opening()))
+	if code, err := post(c, addr, pathPullV2, body); err == nil {
 		t.Fatalf("served while at the connection limit: %d", code)
 	}
 	for _, ic := range idle {
 		ic.Close()
 	}
 	c.Timeout = 5 * time.Second
-	eventually(t, "request served after slots free", func() bool {
-		code, err := post(c, addr, pathRoom, `{}`)
-		return err == nil && code == 200
-	})
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if code, err := post(c, addr, pathPullV2, body); err == nil && code == 200 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no request served after the slots freed")
+		}
+	}
+}
+
+// A peer over its rate is refused, recovers as its bucket refills, and
+// another peer's bucket is its own.
+func TestRateLimitTripsAndRecovers(t *testing.T) {
+	addr := serve(t, newID(t), &countH{}, nil)
+	client := func() *http.Client {
+		pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+		return rawClient(certFor(t, pub, priv, hex.EncodeToString(pub)))
+	}
+	c, body := client(), string(mustBody(t, opening()))
+	tripped := false
+	for i := 0; i < 2000 && !tripped; i++ {
+		code, err := post(c, addr, pathPullV2, body)
+		tripped = err == nil && code == 429
+	}
+	if !tripped {
+		t.Fatal("burst never hit the rate limit")
+	}
+	time.Sleep(200 * time.Millisecond) // a few tokens at 20 a second
+	if code, err := post(c, addr, pathPullV2, body); err != nil || code != 200 {
+		t.Fatalf("did not recover: %d %v", code, err)
+	}
+	if code, err := post(client(), addr, pathPullV2, body); err != nil || code != 200 {
+		t.Fatalf("limit leaked across nodes: %d %v", code, err)
+	}
 }

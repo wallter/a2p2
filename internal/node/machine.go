@@ -1,10 +1,14 @@
+// Package node is the daemon's behaviour: signed records and how they are
+// read (Machine), the room log, requests and invites (Rooms), joining
+// (Joiner, JoinServer), the pull exchange and its scheduler (Exchange,
+// Scheduler) and the surfaces' thin layer (Surface). It knows nothing about
+// HTTP, MCP or TLS; the local API, the MCP shim and the peer transport are
+// thin layers over it.
 package node
 
-// Machine is the next version's behaviour for the rooms and agents on this
-// machine: writing signed records and reading them (DESIGN-next sections 2
-// and 6, rules [R2], [R4], [R6], [R7] of internal/model/delivery). It lives
-// beside Node until step 3b moves the surfaces over to it and deletes Node;
-// pull from other machines comes in step 5.
+// Machine is the behaviour for the rooms and agents on this machine:
+// writing signed records and reading them (DESIGN-next sections 2 and 6,
+// rules [R2], [R4], [R6], [R7] of internal/model/delivery).
 
 import (
 	"context"
@@ -12,6 +16,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -22,6 +27,14 @@ import (
 	"github.com/wallter/a2p2/internal/members"
 	"github.com/wallter/a2p2/internal/store"
 )
+
+// UserError is a mistake by the caller (unknown room, bad argument). Layers
+// above map it to a 4xx / tool error instead of an internal failure.
+type UserError struct{ Msg string }
+
+func (e *UserError) Error() string { return e.Msg }
+
+func userErr(format string, a ...any) error { return &UserError{fmt.Sprintf(format, a...)} }
 
 // Errors of the record operations. All are user errors.
 var (

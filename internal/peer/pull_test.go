@@ -22,7 +22,7 @@ import (
 	"github.com/wallter/a2p2/internal/store"
 )
 
-// pullH serves v0.2 (counting, never expected here) and the pull exchange.
+// pullH serves the pull exchange (and counts joins, never expected here).
 type pullH struct {
 	countH
 	x     atomic.Pointer[node.Exchange]
@@ -51,7 +51,8 @@ type pm struct {
 	agent string
 }
 
-func newPM(t *testing.T, name string, listen bool) *pm {
+// newPM makes a machine; wrap, if given, wraps its listener.
+func newPM(t *testing.T, name string, listen bool, wrap ...func(net.Listener) net.Listener) *pm {
 	t.Helper()
 	id := newID(t)
 	st, err := store.Open(filepath.Join(t.TempDir(), "a2p2.db"))
@@ -70,7 +71,11 @@ func newPM(t *testing.T, name string, listen bool) *pm {
 	var addrs []string
 	if listen {
 		p.h = &pullH{}
-		p.addr = serve(t, id, p.h, nil, nil)
+		var w func(net.Listener) net.Listener
+		if len(wrap) > 0 {
+			w = wrap[0]
+		}
+		p.addr = serve(t, id, p.h, w)
 		addrs = []string{p.addr}
 	}
 	p.x = node.NewExchange(r, p.cl, node.ExchangeOpts{Book: p.book, Addrs: addrs})
@@ -598,7 +603,7 @@ func TestOverTLSWaitingPullsToOnePeerShareOneConnection(t *testing.T) {
 	var accepted atomic.Int64
 	a := newPM(t, "alice", false)
 	a.h = &pullH{}
-	a.addr = serve(t, a.id, a.h, nil, func(ln net.Listener) net.Listener { return countListener{ln, &accepted} })
+	a.addr = serve(t, a.id, a.h, func(ln net.Listener) net.Listener { return countListener{ln, &accepted} })
 	a.x = node.NewExchange(a.r, a.cl, node.ExchangeOpts{Book: a.book, Addrs: []string{a.addr}})
 	a.h.x.Store(a.x)
 	b := newPM(t, "bob", false)

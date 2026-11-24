@@ -171,7 +171,7 @@ func TestV02NoticeFromASchemaOneDatabaseIsShownToAPersonOnceEver(t *testing.T) {
 		}
 		e.restart()
 	}
-	if !strings.Contains(NoticeV02, "ignores") || strings.Contains(NoticeV02, "deleted") {
+	if !strings.Contains(NoticeV02, "removed the messages and rooms") || !strings.Contains(NoticeV02, "room create") {
 		t.Fatalf("notice wording: %q", NoticeV02)
 	}
 	if st, err := e.s.Status(ctx, true); err != nil || st.Notice != NoticeV02 {

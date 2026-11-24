@@ -2,9 +2,7 @@ package store
 
 // The room log, the member cache derived from it, and requests waiting for
 // a person (DESIGN-next sections 3, 5 and 7; PROTOCOL-next section 8). This
-// is migration 3 (migration 2, the records of records.go, has shipped);
-// used only by the new path in internal/node until the surfaces switch
-// over (step 3b).
+// is migration 3 and the methods over it.
 
 import (
 	"context"
@@ -251,8 +249,8 @@ func createLogRoom(tx *sql.Tx, id, label string, root LogRow, members []RoomMemb
 	switch {
 	case errors.Is(err, ErrNotFound):
 		gen = 1
-		if _, err := tx.Exec(`INSERT INTO rooms (id, label, owner, version, created_at, create_id, gen, joined_at)
-			VALUES (?,?,'',0,?,?,1,?)`, id, label, ms(now), root.ID, ms(now)); err != nil {
+		if _, err := tx.Exec(`INSERT INTO rooms (id, label, create_id, gen, joined_at)
+			VALUES (?,?,?,1,?)`, id, label, root.ID, ms(now)); err != nil {
 			return 0, err
 		}
 	case err != nil:
