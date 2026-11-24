@@ -175,7 +175,7 @@ func (m *Machine) decide(g *agentState, agent string, h *held, heads map[Machine
 	var e *Entry
 	switch r.Kind {
 	case Message:
-		if !relevant(r, m.ID, agent) || g.seen[string(r.ID)] || g.seen["x:"+string(r.ID)] {
+		if !relevant(r, m.ID, agent) || g.keptOut(r) || g.seen[string(r.ID)] || g.seen["x:"+string(r.ID)] {
 			return nil, nil
 		}
 		if m.handledByAgent(r.ID, agent) {

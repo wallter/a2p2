@@ -84,6 +84,9 @@ func TestEveryToolMakesOnlyAgentCalls(t *testing.T) {
 		{"b", "inbox", map[string]any{}},
 		{"b", "inbox", map[string]any{"thread": id}},
 		{"b", "inbox", map[string]any{"recent": 5}},
+		{"b", "inbox", map[string]any{"level": "none", "peek": true}},
+		{"b", "inbox", map[string]any{"skipped": true}},
+		{"b", "inbox", map[string]any{"level": "all"}},
 		{"b", "reply", map[string]any{"id": id, "text": "ok"}},
 		{"b", "ack", map[string]any{"id": id}},
 		{"a", "ask_human", map[string]any{"question": "Ship?", "choices": []string{"yes", "no"}}},
@@ -104,7 +107,7 @@ func TestEveryToolMakesOnlyAgentCalls(t *testing.T) {
 		}
 		call(t, cs, step.tool, step.args)
 	}
-	allowed := []string{"register", "send", "inbox", "seen", "thread", "history", "ack", "status"}
+	allowed := []string{"register", "send", "inbox", "seen", "thread", "history", "ack", "status", "level", "unread"}
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	if len(rec.calls) < 15 {

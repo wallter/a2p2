@@ -432,3 +432,30 @@ func TestTheIconRequestIsAnsweredEmpty(t *testing.T) {
 		t.Fatalf("favicon: %d %q", code, body)
 	}
 }
+
+// Requirements: U1, A3. The page shows each local agent's level per room,
+// and the person reads the whole room whatever any agent's level is.
+func TestPageShowsAgentLevelsAndThePersonReadsEverything(t *testing.T) {
+	e := setup(t)
+	bob := e.agent(t, "bob")
+	alice := e.agent(t, "alice")
+	if _, err := e.s.Levels(e.ctx, bob, "local", store.LevelNone); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.s.Send(e.ctx, node.SendInput{Agent: alice, Text: "room-wide"}); err != nil {
+		t.Fatal(err)
+	}
+	st := e.state(t)
+	if len(st.Status.Levels) != 1 || st.Status.Levels[0].Agent != bob || st.Status.Levels[0].Level != store.LevelNone {
+		t.Fatalf("levels on the page: %+v", st.Status.Levels)
+	}
+	if len(st.Unread) != 1 || st.Unread[0].Text != "room-wide" {
+		t.Fatalf("the person's unread: %+v", st.Unread)
+	}
+	if _, hb := e.do(t, "GET", "/api/history?room=local", nil, nil); !strings.Contains(string(hb), "room-wide") {
+		t.Fatalf("history: %s", hb)
+	}
+	if in, _ := e.s.Inbox(e.ctx, bob, "", 0, 0); len(in.Entries) != 0 {
+		t.Fatalf("bob at none was shown %+v", in.Entries)
+	}
+}

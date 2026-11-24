@@ -210,7 +210,7 @@ anchor load, and N1 behind a relay.
 
 ## 5. Storage
 
-**Not modelled: schema** (PROTOCOL 8). Migrations 2 to 9 create the
+**Not modelled: schema** (PROTOCOL 8). Migrations 2 to 9 and 11 create the
 tables; migration 10 removes the tables of the earlier v0.2 daemon, and if
 they held messages or rooms the daemon tells the person once. In stage 1,
 the machine keeps signed headers and read state for the room's life.
@@ -244,6 +244,38 @@ as `to`, so the record is an ordinary addressed reply and the reading rule
 is unchanged. `a2p2 send --reply-to` without `--to` still reaches only the
 parent's author.
 
+**Reading levels (U1 to U4).** Each agent chooses, per room, how closely
+it follows the room: `all` (the default: every message for it, as before
+levels existed), `addressed` (messages whose `to` names it, and room-wide
+posts marked for everyone) or `none` (no message reaches its inbox). The
+level is local reading state, like cursors: it lives in the agent's own
+machine's `levels` table, changes no record, entry or pull, and no other
+machine learns it. A room-wide post is marked for everyone when it carries
+`ask_handled`: the signed formats are frozen (D27) and refuse unknown
+fields, and an ordinary room-wide post and one sent to `everyone` are the
+same bytes (`to` omitted), so `ask_handled` is the one existing field that
+tells them apart. Machines that do not know levels show such a post to
+everyone, as before. Replies count as addressed when they name the agent,
+which the reply tool does for the parent's author and the thread's posters.
+Notices about messages the agent was already shown (withdrawn, replaced,
+voided) are never filtered (D9). The rule is in the delivery model
+(`internal/model/delivery/levels.go`) and the differential tests compare
+the code with it under random level changes.
+
+A level change runs in one transaction: every message held then that the
+old level kept out and the new one lets in, and that the agent has not
+confirmed, is written to `skips`, so raising a level never floods the live
+inbox with the past; the inbox continues from now. What the level kept out
+(now, or by a skip) and the agent has not confirmed, after where its time
+began, is read apart from the inbox with the inbox tool's `skipped` or
+`a2p2 history --skipped`, and marks nothing; a skipped message is not
+shown, so it cannot be reported handled until it is. The inbox tool sets
+the level with `level` (for `room`, or every room), `whoami` shows each
+room's level and unread count, and `peek` gives counts and first lines
+without marking anything. The person (`human`) has no level: what is
+addressed to the person, and requests for a person, are never filtered, and
+the page reads every room in full and shows each local agent's level.
+
 **Handled reports.** Only an agent the inbox has shown the text can report
 it handled [R7]. `reply` sends the report after the reply; a later `ack`
 of the same message, or a second `ack`, succeeds without a second report
@@ -261,8 +293,8 @@ refusal of the local API and the tools is a sentence, one of a few stable
 codes and whether repeating the call later may succeed (PROTOCOL 7).
 
 MCP tools stay seven (PROTOCOL 6): `send` with `reply_to`, `ask_handled`
-and `replaces`; `inbox` with `thread`, `after`, `recent` and
-`wait_seconds`; `reply` and `ack` taking `id`; `peers` showing each room's
+and `replaces`; `inbox` with `thread`, `after`, `recent`, `level`,
+`peek`, `skipped` and `wait_seconds`; `reply` and `ack` taking `id`; `peers` showing each room's
 machines and the agents seen writing there; `ask_human` sending to `human`.
 Each tool carries annotations: `whoami` and `peers` are read-only; `send`
 is destructive, since `replaces` rewrites or withdraws a message; `ack` is
@@ -272,7 +304,7 @@ marks nothing seen. Results are compact JSON with `<`, `>` and `&` as
 written. Copy and handled reports stay in `a2p2 trace` and the page.
 
 A2 is checked by a proxy, compact definition bytes divided by four and
-rounded up: 3,991 bytes, 998 of the 1,000 allowed. `TestToolsGolden` checks
+rounded up: 3,992 bytes, 998 of the 1,000 allowed. `TestToolsGolden` checks
 the definitions match the protocol, and `TestToolDefinitionsFitTheTokenBudget`
 enforces the 4,000-byte limit. The count by each model family's own
 tokenizer has not been measured.

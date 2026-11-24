@@ -669,6 +669,10 @@ type agentState struct {
 	keys    map[string]*store.Read // nil: not confirmed
 	byMsg   map[string][]store.Read
 	pending map[string]store.Read
+	// level is how closely the agent follows the room, and skip the
+	// messages a level change marked skipped (levels.go).
+	level string
+	skip  map[string]bool
 }
 
 func copyCursor(c map[streamKey]int64) map[streamKey]int64 {
@@ -699,6 +703,12 @@ func (v *roomView) agent(agent string) (*agentState, error) {
 		g.cursor[k], g.start[k] = c.Pos, c.Start
 	}
 	if g.heads, err = v.rd.ReadHeads(agent, v.room); err != nil {
+		return nil, err
+	}
+	if g.level, err = v.rd.Level(agent, v.room); err != nil {
+		return nil, err
+	}
+	if g.skip, err = v.rd.Skips(agent, v.room); err != nil {
 		return nil, err
 	}
 	return g, nil
@@ -891,7 +901,7 @@ func (v *roomView) decide(g *agentState, agent string, h *rec, heads map[string]
 	var err error
 	switch h.f.Kind {
 	case core.KindMessage:
-		if !relevant(h, v.self, agent) {
+		if !relevant(h, v.self, agent) || g.keptOut(h) {
 			return nil, nil, nil
 		}
 		for _, k := range []string{h.id, "x:" + h.id} {

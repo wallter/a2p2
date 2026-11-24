@@ -89,6 +89,12 @@ Rows marked "model" include tests of the rules in `internal/members` or
 | Database write fails partway | The store rolls back the write or log batch | `TestFailureBetweenStatementsLeavesNoHalfAppliedWrite`, `TestLogBatchThatFailsLeavesNothingApplied` |
 | Power loss | Open test gap | None |
 | Clock set back or ahead | Expired text stays expired. Replacement order follows the author's history. A record dated over a day ahead waits. | `TestTextThatExpiredBeforeItWasShownIsAnExpiredNoticeEvenAfterTheClockGoesBack`, `TestAFutureRecordLeavesNoSeenAndIsTakenOnceTheClockAllows`, model `TestNewestReplacementIsByTheAuthorsHistoryNotItsClock` |
+| Agent at level `addressed` | Shown what names it, replies in its threads and posts with `ask_handled`; room-wide posts are skipped; another agent on the machine is unaffected | `TestAgentAtAddressedSeesWhatIsAddressedToItAndRepliesInItsThreadsButNotRoomWidePosts`, model `TestAddressedLevelShowsWhatIsAddressedAndPostsMarkedForEveryone` |
+| Agent at level `none` | Nothing reaches its inbox; it reads what it skipped when it asks, and asking marks nothing | `TestAgentAtNoneIsShownNothingUntilItAsks`, model `TestNoneLevelShowsNothingUntilTheAgentAsks` |
+| Level raised | What was skipped stays out of the inbox and is readable apart, unmarked; the inbox continues from now | `TestRaisingTheLevelShowsWhatWasSkippedWithoutMarkingItSeenAndTheInboxContinuesFromNow`, model `TestRaisingTheLevelKeepsWhatWasSkippedOutOfTheInboxAndReadableApart` |
+| Counts and first lines asked for | They follow the level and mark nothing | `TestCountsAndFirstLinesFollowTheLevelAndMarkNothing`, `TestAnAgentControlsItsLevelAndReadsCheaplyThroughTheTools` |
+| Daemon restarts after level changes | Levels and skips are kept | `TestLevelsAndSkipsSurviveARestart` |
+| Random level changes during random schedules | The implementation agrees with the delivery model; no message is both shown and skipped, or lost | `TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules`, `TestRealExchangeAgreesWithTheDeliveryModelOnRandomSchedules`, model `TestRandomLevelChangesNeitherLoseNorRepeatAMessage` |
 
 ## Acceptance
 

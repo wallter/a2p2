@@ -33,6 +33,20 @@
 8. A newcomer reads from the admitter's positions; without history, earlier
    records come as headers only.
 
+## Reading levels (added 2026-11-24, D-levels)
+
+9. Each agent has a level per room, kept on its own machine: `all`
+   (default, the rules above unchanged), `addressed` (messages whose `to`
+   names it, and room-wide posts with `ask_handled`) or `none` (no
+   message). A message the level keeps out is passed like one not meant
+   for the agent; notices about messages it was shown are not filtered.
+   A level change marks skipped every held message, after the agent's
+   start and not confirmed, that the old level kept out and the new one
+   lets in; skipped messages stay out of the inbox. `Skipped` lists what
+   the level keeps out (now or by a skip) with text here, marking nothing.
+   `TestRandomLevelChangesNeitherLoseNorRepeatAMessage`: every message for
+   the agent is shown once or listed skipped, never both.
+
 ## Membership
 
 Machines apply changes (grant, remove, void) when told, in order; a grant

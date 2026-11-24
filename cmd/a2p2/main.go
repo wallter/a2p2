@@ -49,7 +49,10 @@ Talking (as the human, or --as <label> for a script)
                                   Empty text with --replaces ID withdraws your message.
   a2p2 inbox [--room R] [--wait SECONDS] [--limit N] [--peek] [--thread ID]
                                   Read unread messages. Use --peek or --thread to leave seen status unchanged.
-  a2p2 history [--room R] [-n 50] [--before ID]
+  a2p2 inbox --level all|addressed|none [--room R] --as LABEL
+                                  Set how closely an agent follows a room (--levels shows them).
+  a2p2 history [--room R] [-n 50] [--before ID] [--skipped --as LABEL]
+                                  --skipped lists what that agent's level kept out of its inbox.
   a2p2 ack ID                     report that you handled a message you read in inbox
   a2p2 trace ID                   show which machines reported a copy and who handled it
 
@@ -1045,6 +1048,8 @@ func inbox(c *cmd, args []string) error {
 	limit := c.fs.Int("limit", 0, "at most this many entries")
 	peek := c.fs.Bool("peek", false, "do not mark the entries as seen")
 	thread := c.fs.String("thread", "", "show this message's thread (or the replies under it); marks nothing")
+	level := c.fs.String("level", "", "set the acting agent's level (all, addressed or none) in --room, or every room")
+	levels := c.fs.Bool("levels", false, "show the acting agent's level in each room")
 	if err := c.fs.Parse(args); err != nil {
 		return errUsage
 	}
@@ -1055,6 +1060,14 @@ func inbox(c *cmd, args []string) error {
 	cl, err := c.client()
 	if err != nil {
 		return err
+	}
+	if *level != "" || *levels {
+		var ls localapi.LevelResp
+		return c.call("level", localapi.LevelReq{Agent: me, Room: *roomName, Level: *level}, &ls, func() {
+			for _, l := range ls.Levels {
+				fmt.Printf("%s\t%s\n", l.RoomLabel, l.Level)
+			}
+		})
 	}
 	if *thread != "" {
 		var th localapi.Entries
@@ -1102,11 +1115,20 @@ func history(c *cmd, args []string) error {
 	roomName := c.fs.String("room", "", "room label or id (default: local)")
 	n := c.fs.Int("n", 50, "how many messages")
 	before := c.fs.String("before", "", "only messages before this message id")
+	skipped := c.fs.Bool("skipped", false, "only what the acting agent's level kept out of its inbox (every room unless --room)")
 	if err := c.fs.Parse(args); err != nil {
 		return errUsage
 	}
+	req := localapi.HistoryReq{Room: *roomName, Limit: *n, Before: *before}
+	if *skipped {
+		me, err := c.who()
+		if err != nil {
+			return err
+		}
+		req.Agent, req.Skipped = me, true
+	}
 	var res localapi.Entries
-	return c.call("history", localapi.HistoryReq{Room: *roomName, Limit: *n, Before: *before}, &res, func() {
+	return c.call("history", req, &res, func() {
 		if len(res.Entries) == 0 {
 			fmt.Println("No messages in this part of the room history.")
 		}

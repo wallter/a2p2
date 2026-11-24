@@ -136,10 +136,31 @@ type (
 		Handled string `json:"handled"`
 		Already bool   `json:"already,omitempty"`
 	}
+	// HistoryReq: with skipped, agent's messages its level kept out of its
+	// inbox and it has not confirmed (U3), in room or in every room when
+	// room is empty; before does not apply. It marks nothing.
 	HistoryReq struct {
-		Room   string `json:"room,omitempty"`
-		Before string `json:"before,omitempty"`
-		Limit  int    `json:"limit,omitempty"`
+		Room    string `json:"room,omitempty"`
+		Before  string `json:"before,omitempty"`
+		Limit   int    `json:"limit,omitempty"`
+		Agent   string `json:"agent,omitempty"`
+		Skipped bool   `json:"skipped,omitempty"`
+	}
+	// LevelReq reads agent's reading level in room (every room when room
+	// is empty) and, with level, first sets it: all, addressed or none
+	// (U1, U2).
+	LevelReq struct {
+		Agent string `json:"agent"`
+		Room  string `json:"room,omitempty"`
+		Level string `json:"level,omitempty"`
+	}
+	RoomLevel struct {
+		Room      string `json:"room"`
+		RoomLabel string `json:"room_label"`
+		Level     string `json:"level"`
+	}
+	LevelResp struct {
+		Levels []RoomLevel `json:"levels"`
 	}
 	IDReq struct {
 		ID string `json:"id"`
@@ -364,10 +385,12 @@ type (
 	}
 	// UnreadReq is what a harness hook knows about itself; Lines asks for
 	// first lines too (U4).
+	// An agent's tools name the agent instead.
 	UnreadReq struct {
 		Harness string `json:"harness"`
 		Cwd     string `json:"cwd"`
 		Lines   bool   `json:"lines,omitempty"`
+		Agent   string `json:"agent,omitempty"`
 	}
 	RoomCount struct {
 		Room  string `json:"room"`
@@ -411,6 +434,9 @@ type (
 		Version string        `json:"version"`
 		PID     int           `json:"pid"`
 		Notice  string        `json:"notice,omitempty"`
+		// Levels are the local agents' reading levels other than the
+		// default: an agent and room not listed is at "all".
+		Levels []store.AgentLevel `json:"levels"`
 	}
 	Empty struct{}
 )
@@ -561,7 +587,10 @@ func PreviewOf(p node.Preview) PreviewResp {
 func StatusOf(st node.StatusView, listen []string, info Info) Status {
 	out := Status{Node: st.Node, Name: st.Name, Human: st.Human, Local: st.Local, Rooms: roomsOf(st.Rooms),
 		Agents: st.Agents, Peers: []Peer{}, Listen: listen, Version: info.Version, PID: info.PID, Notice: st.Notice,
-		Network: statusNetwork(st), Waiting: st.Waiting}
+		Network: statusNetwork(st), Waiting: st.Waiting, Levels: st.Levels}
+	if out.Levels == nil {
+		out.Levels = []store.AgentLevel{}
+	}
 	for i := range out.Rooms {
 		for _, w := range st.Writers[out.Rooms[i].ID] {
 			out.Rooms[i].Agents = append(out.Rooms[i].Agents, Writer{Agent: w.Agent, LastSeen: Time(w.Last)})
@@ -645,8 +674,23 @@ func Handler(s *node.Surface, info Info) http.Handler {
 		return AckResp{Handled: h.ID, Already: h.Already}, err
 	})
 	handle(mux, "history", func(ctx context.Context, r HistoryReq) (Entries, error) {
+		if r.Skipped {
+			if r.Before != "" {
+				return Entries{}, &node.UserError{Msg: "before does not go with skipped", Code: node.ErrorInvalid}
+			}
+			es, err := s.Skipped(ctx, r.Agent, r.Room, r.Limit)
+			return Entries{entriesOf(es)}, err
+		}
 		es, err := s.History(ctx, r.Room, r.Before, r.Limit)
 		return Entries{entriesOf(es)}, err
+	})
+	handle(mux, "level", func(ctx context.Context, r LevelReq) (LevelResp, error) {
+		ls, err := s.Levels(ctx, r.Agent, r.Room, r.Level)
+		out := LevelResp{Levels: []RoomLevel{}}
+		for _, l := range ls {
+			out.Levels = append(out.Levels, RoomLevel{Room: l.Room, RoomLabel: l.Label, Level: l.Level})
+		}
+		return out, err
 	})
 	handle(mux, "trace", func(ctx context.Context, r IDReq) (TraceResp, error) {
 		t, err := s.Trace(ctx, r.ID)
@@ -728,11 +772,15 @@ func Handler(s *node.Surface, info Info) http.Handler {
 		return RoomsResp{roomsOf(rs)}, err
 	})
 	handle(mux, "unread", func(ctx context.Context, r UnreadReq) (Unread, error) {
-		a, ok, err := s.AgentFor(ctx, core.CleanLabel(r.Harness), r.Cwd)
-		if err != nil || !ok {
-			return Unread{}, err
+		id := r.Agent
+		if id == "" {
+			a, ok, err := s.AgentFor(ctx, core.CleanLabel(r.Harness), r.Cwd)
+			if err != nil || !ok {
+				return Unread{}, err
+			}
+			id = a.ID
 		}
-		u, err := s.Unread(ctx, a.ID, r.Lines)
+		u, err := s.Unread(ctx, id, r.Lines)
 		out := Unread{Agent: u.Agent, Count: u.Count, From: u.From}
 		for _, c := range u.Rooms {
 			out.Rooms = append(out.Rooms, RoomCount{Room: c.Room, Label: c.Label, Count: c.Count})
