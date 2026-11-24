@@ -72,7 +72,7 @@ func TestJoinOverTLSBetweenTwoMachines(t *testing.T) {
 	if err != nil || p.Room != room || p.Admin != ida.NodeID() || p.Role != node.RoleAdmin || !p.History {
 		t.Fatalf("preview: %+v %v", p, err)
 	}
-	if o, err := j.JoinAccept(bg, inv.Token, 0); err != nil || o.State != node.JoinStateAccepted {
+	if o, err := j.JoinAccept(bg, inv.Token, p.ID, 0); err != nil || o.State != node.JoinStateAccepted {
 		t.Fatalf("accept: %+v %v", o, err)
 	}
 	qs, err := a.Requests(bg)
@@ -145,6 +145,31 @@ func TestJoinRouteRefusesOversizeBodies(t *testing.T) {
 	plain := serve(t, id, &countH{}, nil, nil)
 	if code, err := post(c, plain, pathJoinV2, `{}`); err != nil || code != 404 && code != 405 {
 		t.Fatalf("join route without a join handler: %d %v", code, err)
+	}
+}
+
+// The join route limits each source address to 10 requests a minute
+// before it reads a body, whatever key each request presents.
+//
+// Requirements: T3; PROTOCOL-next 5.3; second review should-fix 7
+func TestJoinRouteLimitsEachSourceAddressBeforeReadingTheBody(t *testing.T) {
+	id := newID(t)
+	h := &joinH{js: node.NewJoinServer(machine(t, id))}
+	addr := serve(t, id, h, nil, nil)
+	for i := 0; i <= node.OpensPerMinute; i++ {
+		pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+		c := rawClient(certFor(t, pub, priv, hex.EncodeToString(pub)))
+		code, err := post(c, addr, pathJoinV2, `{"v":2,"op":"open"}`)
+		want := 400
+		if i == node.OpensPerMinute {
+			want = 429
+		}
+		if err != nil || code != want {
+			t.Fatalf("request %d: %d %v", i, code, err)
+		}
+	}
+	if n := h.bodies.Load(); n != int64(node.OpensPerMinute) {
+		t.Fatalf("bodies handed over: %d", n)
 	}
 }
 

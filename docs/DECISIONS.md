@@ -403,3 +403,17 @@ Choices made in review (`research/decisions/step4b-review-sol.md`):
   approval, and the other admin is asked to second it. A daemon never
   seconds without its own person's approval.
 
+Added after the re-review (`research/decisions/step4b-rereview-sol.md`):
+- A preview has an identifier (a hash of everything shown) that `accept`
+  must carry, so a second preview cannot change what a person approved.
+- The joiner reports the role and history its own log shows. A reviewer
+  wanted a join refused when they differ from the preview; the log is
+  signed by the room's admins and a promotion may land meanwhile, so the
+  difference is reported, not refused.
+- Paging uses `log.arrival`, a position allocated once per stored entry
+  (migration 7), because a count shifts when a held entry is evicted.
+- Admitting a machine that is not a member is possible only through an
+  invite with an accepted preview; `Propose` refuses it otherwise.
+- Not done: pruning the joiner's used-invite rows (it would reopen the
+  leave-then-old-token case) and binding an invite to a membership period.
+

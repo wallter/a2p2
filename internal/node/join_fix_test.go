@@ -76,7 +76,7 @@ func TestJoinOldInviteCannotUndoALeave(t *testing.T) {
 	if err := b.r.Leave(ctx, room); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := j.JoinAccept(ctx, tokY, 0); !errors.Is(err, ErrRoomChanged) {
+	if _, err := j.JoinAccept(ctx, tokY, previewOf(j, tokY), 0); !errors.Is(err, ErrRoomChanged) {
 		t.Fatalf("accept of a preview made before the leave: %v", err)
 	}
 	a.confirm(a.onlyRequest(room).ID)
@@ -116,7 +116,7 @@ func TestJoinAcceptAnswerLostOrCrashBeforeSendingResumes(t *testing.T) {
 		return rp, nil
 	}})
 	b.preview(j, tok)
-	if _, err := j.JoinAccept(ctx, tok, 0); !errors.Is(err, errJoinLost) {
+	if _, err := j.JoinAccept(ctx, tok, previewOf(j, tok), 0); !errors.Is(err, errJoinLost) {
 		t.Fatalf("accept: %v", err)
 	}
 	b.restart()
@@ -132,7 +132,7 @@ func TestJoinAcceptAnswerLostOrCrashBeforeSendingResumes(t *testing.T) {
 		return nil
 	}})
 	c.preview(j, tok)
-	if _, err := j.JoinAccept(ctx, tok, 0); !errors.Is(err, errJoinLost) {
+	if _, err := j.JoinAccept(ctx, tok, previewOf(j, tok), 0); !errors.Is(err, errJoinLost) {
 		t.Fatalf("accept: %v", err)
 	}
 	c.restart()
@@ -271,11 +271,7 @@ func TestJoinExpiryAtWriteTimeAndConcurrentAccepts(t *testing.T) {
 	ctx := context.Background()
 	s := NewJoinServer(a.r)
 	tok := mustToken(t, a.invite(room, RoleMember, false))
-	open := fmt.Sprintf(`{"v":2,"op":"open","secret":%q,"name":"b"}`, tok.SecretText())
-	accept := fmt.Sprintf(`{"v":2,"op":"accept","secret":%q,"name":"b"}`, tok.SecretText())
-	if rp := s.Handle(ctx, b.id, "s0", []byte(open)); rp.Status != http.StatusOK {
-		t.Fatalf("open: %d", rp.Status)
-	}
+	accept := openForAccept(t, s, b, tok)
 	var wg sync.WaitGroup
 	codes := make([]int, 2)
 	for i := range codes {
@@ -308,6 +304,20 @@ func TestJoinExpiryAtWriteTimeAndConcurrentAccepts(t *testing.T) {
 	if rp := s.Handle(ctx, b.id, "s9", []byte(poll)); rp.Status != http.StatusForbidden || !jsonHas(rp.Body, CodeExpired) {
 		t.Fatalf("poll after expiry: %d", rp.Status)
 	}
+}
+
+// openForAccept opens tok on s as n and returns the accept body for the
+// preview it was shown.
+func openForAccept(t *testing.T, s *JoinServer, n *lnode, tok core.Token) string {
+	t.Helper()
+	rp := s.Handle(context.Background(), n.id, "s0", []byte(fmt.Sprintf(`{"v":2,"op":"open","secret":%q,"name":%q}`,
+		tok.SecretText(), n.name)))
+	var p JoinAnswer
+	if err := json.Unmarshal(rp.Body, &p); err != nil || rp.Status != http.StatusOK {
+		t.Fatalf("open: %d", rp.Status)
+	}
+	return fmt.Sprintf(`{"v":2,"op":"accept","secret":%q,"name":%q,"terms":%q}`, tok.SecretText(), n.name,
+		previewID(answerToPreview(t, p)))
 }
 
 func jsonHas(body []byte, code string) bool {
@@ -381,7 +391,7 @@ func TestJoinUnknownPollsFullQueueAndRefusalText(t *testing.T) {
 		a.propose(room, Change{Kind: core.EntryAdd, Target: fmt.Sprintf("%064x", i+1), Name: "m"})
 	}
 	tok := mustToken(t, a.invite(room, RoleMember, false))
-	accept := fmt.Sprintf(`{"v":2,"op":"accept","secret":%q,"name":"b"}`, tok.SecretText())
+	accept := openForAccept(t, s, b, tok)
 	if rp := s.Handle(ctx, b.id, "q", []byte(accept)); rp.Status != http.StatusServiceUnavailable || rp.RetryAfter <= 0 {
 		t.Fatalf("accept with a full queue: %d %v", rp.Status, rp.RetryAfter)
 	}

@@ -108,9 +108,30 @@ func (n *lnode) preview(j *Joiner, token string) Preview {
 	return p
 }
 
+// previewOf is the identifier of the preview j holds for token, as the
+// local surface passes back what its person approved: the latest preview
+// in memory, or the one a recorded join was approved on.
+func previewOf(j *Joiner, token string) string {
+	tok, err := core.DecodeToken(token)
+	if err != nil {
+		return ""
+	}
+	h := secretHash(tok.Secret)
+	j.mu.Lock()
+	pv := j.previews[h]
+	j.mu.Unlock()
+	if pv != nil {
+		return pv.preview.ID
+	}
+	if rec, err := j.r.m.st.GetJoin(context.Background(), h); err == nil {
+		return recordPreview(rec).ID
+	}
+	return ""
+}
+
 func (n *lnode) accept(j *Joiner, token string, wait time.Duration) JoinOutcome {
 	n.t.Helper()
-	o, err := j.JoinAccept(context.Background(), token, wait)
+	o, err := j.JoinAccept(context.Background(), token, previewOf(j, token), wait)
 	if err != nil {
 		n.t.Fatalf("%s accept: %v", n.name, err)
 	}
@@ -178,6 +199,7 @@ func TestJoinPreviewShowsTheRoomAndNothingIsSignedUntilTheAdminsPersonConfirms(t
 	rl := a.r.rooms[room]
 	want := Preview{State: JoinStatePreviewed, Room: room, Label: "team", Create: rl.createID, Role: RoleMember,
 		History: true, Admin: a.id, Expires: clock.Add(JoinInviteTTL)}
+	want.ID = previewID(want)
 	if p != want {
 		t.Fatalf("preview:\n%+v\nwant\n%+v", p, want)
 	}
@@ -454,7 +476,7 @@ func TestJoinRestartOfEitherSideInEveryStateResumes(t *testing.T) {
 	b.preview(j, tok)
 	b.restart() // the secret was only in memory: the person previews again
 	j = b.joiner(jn)
-	if _, err := j.JoinAccept(context.Background(), tok, 0); err == nil {
+	if _, err := j.JoinAccept(context.Background(), tok, previewOf(j, tok), 0); err == nil {
 		t.Fatal("accepted without a preview in this run")
 	}
 	b.preview(j, tok)
@@ -680,7 +702,8 @@ func TestJoinBootstrapThreeMachinesFromNothingThenAFourthAsAMember(t *testing.T)
 }
 
 // Join requests are strict JSON with the fields each operation takes, and
-// opens are limited to 10 a minute per source address.
+// a key that presented a valid secret is limited to 10 requests a minute,
+// whatever its source address (the peer layer limits each address).
 //
 // Requirements: T3; PROTOCOL-next sections 0 and 5.3
 func TestJoinRequestsAreStrictAndOpensAreRateLimited(t *testing.T) {
@@ -718,8 +741,8 @@ func TestJoinRequestsAreStrictAndOpensAreRateLimited(t *testing.T) {
 	if rp.Status != http.StatusTooManyRequests || rp.RetryAfter <= 0 || rp.RetryAfter > time.Minute {
 		t.Fatalf("eleventh open: %d %v", rp.Status, rp.RetryAfter)
 	}
-	if rp := s.Handle(ctx, b.id, "other", []byte(ok)); rp.Status != http.StatusOK {
-		t.Fatalf("another source: %d", rp.Status)
+	if rp := s.Handle(ctx, b.id, "other", []byte(ok)); rp.Status != http.StatusTooManyRequests {
+		t.Fatalf("another source, same key: %d", rp.Status)
 	}
 	*clock = clock.Add(time.Minute)
 	if rp := s.Handle(ctx, b.id, "src", []byte(ok)); rp.Status != http.StatusOK {

@@ -359,11 +359,38 @@ func (r *Rooms) PinRoom(ctx context.Context, createWire []byte) (string, error) 
 }
 
 func (r *Rooms) pin(ctx context.Context, v *core.VerifiedEntry) error {
+	_, err := r.pinWith(ctx, v, func(row store.LogRow, ms []store.RoomMember) (int64, error) {
+		f := v.Fields()
+		return r.m.st.CreateLogRoom(ctx, f.Room, f.Label, row, ms, r.m.now())
+	})
+	return err
+}
+
+// pinJoin pins the room of the join recorded under invite from its create
+// entry, in one write that checks the join is still accepted and the
+// room's generation is still gen (store.JoinLogRoom), and returns the new
+// generation from that write. ErrStaleGeneration: the room was held, left
+// or joined since, or the join ended.
+func (r *Rooms) pinJoin(ctx context.Context, createWire []byte, invite string, gen int64) (int64, error) {
+	e, err := core.ParseEntry(createWire)
+	if err != nil || e.Fields().Kind != core.EntryCreate {
+		return 0, userErr("bad create entry")
+	}
+	v, err := e.Verified()
+	if err != nil {
+		return 0, userErr("create entry: %s", CodeBadSignature)
+	}
+	return r.pinWith(ctx, v, func(row store.LogRow, ms []store.RoomMember) (int64, error) {
+		return r.m.st.JoinLogRoom(ctx, invite, gen, v.Fields().Label, row, ms, r.m.now())
+	})
+}
+
+func (r *Rooms) pinWith(ctx context.Context, v *core.VerifiedEntry, create func(store.LogRow, []store.RoomMember) (int64, error)) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	f := v.Fields()
 	if r.rooms[f.Room] != nil {
-		return userErr("room is held here already")
+		return 0, userErr("room is held here already")
 	}
 	row := entryRow(v)
 	row.State = store.LogAccepted
@@ -373,15 +400,19 @@ func (r *Rooms) pin(ctx context.Context, v *core.VerifiedEntry) error {
 	bare.Header, bare.Sig = nil, nil
 	rl.state[v.ID()] = bare
 	if err := r.replay(rl); err != nil {
-		return err
+		return 0, err
 	}
-	gen, err := r.m.st.CreateLogRoom(ctx, f.Room, f.Label, row, cacheRows(rl.cache), r.m.now())
+	gen, err := create(row, cacheRows(rl.cache))
 	if err != nil {
-		return err
+		return 0, err
 	}
+	if bare.Arrival, err = r.m.st.LogArrival(ctx, f.Room, v.ID()); err != nil {
+		return 0, err
+	}
+	rl.state[v.ID()] = bare
 	rl.gen = gen
 	r.rooms[f.Room] = rl
-	return nil
+	return gen, nil
 }
 
 // Gen returns the room's current generation. A caller that prepares
@@ -613,7 +644,7 @@ func (r *Rooms) ingestWith(ctx context.Context, rl *roomLog, gen int64, wires []
 		}
 		if err == nil {
 			err = hookAt("ingest:apply")
-			b.Now = r.m.now() // the moment of the write: an approval is checked against its invite's expiry then
+			b.Now, b.Clock = r.m.now(), r.m.now // read again inside the write: an approval is judged against its invite's expiry then
 		}
 		var n int64
 		switch {

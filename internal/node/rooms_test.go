@@ -119,7 +119,7 @@ func (n *lnode) pull(room string, from *lnode) []EntryResult {
 func (n *lnode) propose(room string, c Change) store.Request {
 	n.t.Helper()
 	n.tick()
-	q, err := n.r.Propose(context.Background(), room, c)
+	q, err := n.r.proposeAny(context.Background(), room, c) // admits without the join exchange: test only
 	if err != nil {
 		n.t.Fatalf("%s propose %+v: %v", n.name, c, err)
 	}

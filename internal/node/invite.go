@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -167,9 +168,12 @@ type JoinRequest struct {
 	Name   string   `json:"name,omitempty"`
 	Addrs  []string `json:"addrs,omitempty"`
 	After  int64    `json:"after,omitempty"`
+	// Terms, on accept only: the identifier of the preview the person
+	// approved (previewID).
+	Terms string `json:"terms,omitempty"`
 }
 
-var joinRequestFields = []string{"v", "op", "secret", "invite", "name", "addrs", "after"}
+var joinRequestFields = []string{"v", "op", "secret", "invite", "name", "addrs", "after", "terms"}
 
 // JoinRoom is the room as a preview and a signed answer name it.
 type JoinRoom struct {
@@ -194,10 +198,28 @@ type JoinAnswer struct {
 	RetryMS int64             `json:"retry_ms,omitempty"`
 	Entries []json.RawMessage `json:"entries,omitempty"`
 	More    bool              `json:"more,omitempty"`
-	Error   string            `json:"error,omitempty"`
+	// Next is the position of the page's last entry, which the joiner
+	// sends back as after; Heads, on the last page only, are the server's
+	// accepted heads, which the joiner must end up accepting.
+	Next  int64    `json:"next,omitempty"`
+	Heads []string `json:"heads,omitempty"`
+	Error string   `json:"error,omitempty"`
 }
 
-var joinAnswerFields = []string{"state", "room", "role", "history", "member", "admin", "expires", "retry_ms", "entries", "more", "error"}
+var joinAnswerFields = []string{"state", "room", "role", "history", "member", "admin", "expires", "retry_ms", "entries",
+	"more", "next", "heads", "error"}
+
+// previewID identifies everything a preview showed: the hex SHA-256 of
+// the lines below, each ending in a newline. A person approves exactly
+// this, and accept carries it.
+func previewID(p Preview) string {
+	h := sha256.New()
+	for _, l := range []string{"a2p2 join preview 1", p.Room, p.Label, p.Create, p.Role,
+		strconv.FormatBool(p.History), strconv.FormatBool(p.Member), p.Admin, joinTime(p.Expires)} {
+		h.Write([]byte(l + "\n"))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
 
 // JoinReply is an answer as the transport carries it.
 type JoinReply struct {
@@ -249,6 +271,8 @@ func decodeJoinRequest(body []byte) (JoinRequest, string) {
 		return q, "op"
 	case q.Op != JoinPoll && (q.Secret == "" || q.Invite != "" || q.After != 0):
 		return q, "open and accept carry the secret and no after"
+	case (q.Op == JoinAccept) != (q.Terms != ""), !hash(q.Terms):
+		return q, "accept, and only accept, carries terms"
 	case q.Op == JoinPoll && (q.Secret == "") == (q.Invite == ""):
 		return q, "poll carries the secret or the invite"
 	case q.Invite != "" && !hash(q.Invite):
@@ -274,7 +298,7 @@ func decodeJoinRequest(body []byte) (JoinRequest, string) {
 type JoinServer struct {
 	r       *Rooms
 	mu      sync.Mutex
-	opens   map[string][]time.Time // per source address, requests carrying a secret in the last minute
+	opens   map[string][]time.Time // per key that presented a valid secret, its requests in the last minute
 	unknown []time.Time            // polls naming an unknown invite in the last minute, from anyone
 }
 
@@ -287,10 +311,10 @@ func lastMinute(ts []time.Time, now time.Time) []time.Time {
 	return slices.DeleteFunc(ts, func(t time.Time) bool { return !now.Before(t.Add(time.Minute)) })
 }
 
-// allow counts a request carrying the secret from source; at
+// allow counts a request from key, which presented a valid secret; at
 // OpensPerMinute in the last minute it refuses and says when the oldest
-// leaves the window. While the table of sources is full, a source not in
-// it is refused, so new sources never push out live ones.
+// leaves the window. While the table is full, a key not in it is refused,
+// so new keys never push out live ones.
 func (s *JoinServer) allow(source string, now time.Time) (bool, time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -314,31 +338,35 @@ func (s *JoinServer) allow(source string, now time.Time) (bool, time.Duration) {
 	return true, 0
 }
 
-// allowUnknown counts a poll naming an invite not held here against one
-// budget shared by every source.
-func (s *JoinServer) allowUnknown(now time.Time) bool {
+// unknownSpent reports whether the budget shared by every source for
+// polls naming an invite not held here is spent for the last minute.
+func (s *JoinServer) unknownSpent(now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.unknown = lastMinute(s.unknown, now)
-	if len(s.unknown) >= unknownPolls {
-		return false
-	}
+	return len(s.unknown) >= unknownPolls
+}
+
+// spendUnknown counts one poll that named an invite not held here.
+func (s *JoinServer) spendUnknown(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.unknown = append(s.unknown, now)
-	return true
 }
 
 // Handle answers one join request. from is the requester's node id as the
 // transport authenticated it (never a field of the request); source is its
-// network address, for the rate limit. The secret never appears in what
-// is logged, stored or answered.
+// network address (the peer layer limits requests by it before the body
+// is read). The secret never appears in what is logged, stored or
+// answered.
 //
 // Readings (PROTOCOL-next 5.2): poll may carry, instead of the secret,
 // "invite": the hex SHA-256 of the secret, accepted only from the key the
 // invite is bound to, so a joiner that restarted can resume polling
 // although it never stores the secret; polls naming an unknown invite
-// share one budget. The limit of 10 a minute per source counts every
-// request that carries the secret (an accept binds an unopened invite as
-// an open does).
+// share one budget, checked before the lookup. A key that presented a
+// valid secret is limited to 10 requests a minute. Accept needs a
+// preview: it carries terms, the preview's identifier.
 func (s *JoinServer) Handle(ctx context.Context, from, source string, body []byte) JoinReply {
 	q, bad := decodeJoinRequest(body)
 	if bad != "" {
@@ -348,10 +376,10 @@ func (s *JoinServer) Handle(ctx context.Context, from, source string, body []byt
 		return joinRefusal(CodeBadSecret)
 	}
 	now := s.r.m.now()
-	if q.Secret != "" {
-		if ok, wait := s.allow(source, now); !ok {
-			return limited(http.StatusTooManyRequests, CodeRateLimited, wait)
-		}
+	if q.Invite != "" && s.unknownSpent(now) {
+		// Checked before any lookup: polls naming unknown invites share
+		// one budget, and while it is spent no poll by hash is looked up.
+		return limited(http.StatusTooManyRequests, CodeRateLimited, time.Minute)
 	}
 	rp, err := s.serve(ctx, from, q, now)
 	if err != nil {
@@ -380,14 +408,21 @@ func (s *JoinServer) serve(ctx context.Context, from string, q JoinRequest, now 
 	inv, err := st.GetInvite(ctx, h)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		if q.Invite != "" && !s.allowUnknown(now) {
-			return limited(http.StatusTooManyRequests, CodeRateLimited, time.Minute), nil
+		if q.Invite != "" {
+			s.spendUnknown(now)
 		}
 		return joinRefusal(CodeBadSecret), nil
 	case err != nil:
 		return JoinReply{}, err
 	case inv.BoundKey != "" && inv.BoundKey != from, inv.BoundKey == "" && q.Op == JoinPoll:
 		return joinRefusal(CodeBadSecret), nil
+	}
+	if q.Secret != "" {
+		// The key presented a valid secret: only such keys enter this
+		// table (the peer layer limits every request by source address).
+		if ok, wait := s.allow(from, now); !ok {
+			return limited(http.StatusTooManyRequests, CodeRateLimited, wait), nil
+		}
 	}
 	if inv.Undecided() && !now.Before(inv.Expires) {
 		if inv, err = st.ExpireInvite(ctx, h, now); err != nil {
@@ -396,22 +431,18 @@ func (s *JoinServer) serve(ctx context.Context, from string, q JoinRequest, now 
 	}
 	switch inv.State {
 	case store.InviteIssued:
-		if q.Op == JoinPoll {
+		switch q.Op {
+		case JoinPoll:
 			return joinRefusal(CodeBadSecret), nil
+		case JoinAccept:
+			return badJoin("accept needs a preview: open the invite first"), nil
 		}
-		fallthrough
+		return s.open(ctx, inv, from, q, now)
 	case store.InvitePreviewed:
 		switch q.Op {
 		case JoinOpen:
 			return s.open(ctx, inv, from, q, now)
 		case JoinAccept:
-			if inv.State == store.InviteIssued {
-				// An accept binds an unopened invite as an open does, then
-				// accepts what that open would have shown.
-				if rp, err := s.open(ctx, inv, from, q, now); err != nil || rp.Status != http.StatusOK {
-					return rp, err
-				}
-			}
 			return s.accept(ctx, h, from, q, now)
 		}
 		return s.preview(inv, inv.Shown), nil
@@ -508,16 +539,31 @@ func (s *JoinServer) preview(inv store.Invite, t store.Terms) JoinReply {
 }
 
 // Reasons an accept revokes an invite.
-const ReasonTermsChanged = "the room changed since the preview, so its terms no longer hold; make a new invite"
+const (
+	ReasonTermsChanged = "the room changed since the preview, so its terms no longer hold; make a new invite"
+	ReasonNotShown     = "the accept names a preview this machine did not show; make a new invite"
+)
+
+// shownID is the identifier of the preview this machine last showed for
+// inv, as previewID computes it on the joiner.
+func (r *Rooms) shownID(rl *roomLog, inv store.Invite) string {
+	return previewID(Preview{Room: rl.id, Label: rl.label, Create: rl.createID, Role: inv.Shown.Role,
+		History: inv.Shown.History, Member: inv.Shown.Member, Admin: r.m.ID, Expires: inv.Expires})
+}
 
 // accept raises the request for a person (DESIGN-next section 7) through
 // the path Propose uses, and moves the invite to accepted with it, in one
-// transaction, if the terms the last preview showed still hold. An invite
-// accepted or decided meanwhile is answered as it now stands.
+// transaction, if the accept names the preview last shown to its key and
+// the terms it showed still hold. An invite accepted or decided meanwhile
+// is answered as it now stands. Expiry is judged by the clock read inside
+// that transaction.
 func (s *JoinServer) accept(ctx context.Context, h, from string, q JoinRequest, now time.Time) (JoinReply, error) {
 	r := s.r
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := hookAt("join:accept"); err != nil { // tests: time passes while the accept waited for the room
+		return JoinReply{}, err
+	}
 	st := r.m.st
 	inv, err := st.GetInvite(ctx, h)
 	if err != nil {
@@ -535,6 +581,9 @@ func (s *JoinServer) accept(ctx context.Context, h, from string, q JoinRequest, 
 	rl := r.rooms[inv.Room]
 	if rl == nil {
 		return revoke(ReasonRoomGone)
+	}
+	if q.Terms != r.shownID(rl, inv) {
+		return revoke(ReasonNotShown)
 	}
 	terms := effectiveTerms(rl.st, inv.Role, inv.History, from)
 	if terms != inv.Shown {
@@ -571,7 +620,7 @@ func (s *JoinServer) accept(ctx context.Context, h, from string, q JoinRequest, 
 	case err != nil:
 		return JoinReply{}, err
 	}
-	err = st.AcceptInvite(ctx, h, from, q.Name, q.Addrs, terms, req, now)
+	err = st.AcceptInvite(ctx, h, from, q.Name, q.Addrs, terms, req, r.m.now)
 	switch {
 	case errors.Is(err, store.ErrInviteExpired):
 		return joinRefusal(CodeExpired), nil
@@ -599,7 +648,7 @@ func (s *JoinServer) phaseLocked(inv store.Invite, from string) JoinReply {
 
 // signed is the answer once a person approved, while from is a member
 // (removed after): the room's log in the order this machine stored it,
-// from index after.
+// after position after.
 func (s *JoinServer) signed(inv store.Invite, from string, after int64) JoinReply {
 	s.r.mu.Lock()
 	defer s.r.mu.Unlock()
@@ -607,14 +656,13 @@ func (s *JoinServer) signed(inv store.Invite, from string, after int64) JoinRepl
 }
 
 // signedLocked pages every entry the room keeps (accepted, held, refused
-// as evidence, and invalid ones kept for replay) in arrival order: the
-// order in which this machine stored them, by batch and position, which
-// only ever appends. An index is therefore stable between polls, which an
-// order computed from the current accepted set (as Offer's) is not: an
-// entry held or refused when one page was read can be accepted before the
-// next, and an entry that arrives later can sort before the page boundary.
-// The joiner's replay of this order decides every entry as this machine
-// did.
+// as evidence, and invalid ones kept for replay) by arrival position: a
+// number the store allocates once per stored entry and never reuses. A
+// page holds the entries after position after, and next is its last
+// entry's position, which the joiner sends back. An entry dropped between
+// polls frees no position, so nothing is skipped; one stored later has a
+// larger position. The last page carries this machine's accepted heads,
+// which the joiner must end up accepting.
 func (s *JoinServer) signedLocked(inv store.Invite, from string, after int64) JoinReply {
 	r := s.r
 	rl := r.rooms[inv.Room]
@@ -625,28 +673,49 @@ func (s *JoinServer) signedLocked(inv store.Invite, from string, after int64) Jo
 		return joinRefusal(CodeRemoved)
 	}
 	a := JoinAnswer{State: JoinStateSigned, Room: &JoinRoom{ID: rl.id, Label: rl.label, Create: rl.createID}}
-	ids := arrivalOrder(rl)
 	size := 0
-	for i := after; i < int64(len(ids)); i++ {
-		w := rl.ents[ids[i]].Wire()
+	for _, id := range arrivalOrder(rl) {
+		at := rl.state[id].Arrival
+		if at <= after {
+			continue
+		}
+		w := rl.ents[id].Wire()
 		if size += len(w) + 1; len(a.Entries) == MaxJoinEntries || size > maxJoinPageBytes && len(a.Entries) > 0 {
 			a.More = true
 			break
 		}
 		a.Entries = append(a.Entries, json.RawMessage(w))
+		a.Next = at
+	}
+	if !a.More {
+		a.Heads = acceptedHeads(rl)
 	}
 	return joinReply(http.StatusOK, a)
 }
 
-// arrivalOrder is rl's kept entries by batch, then position in the batch.
+// arrivalOrder is rl's kept entries by arrival position.
 func arrivalOrder(rl *roomLog) []string {
 	ids := sortedIDs(rl.state)
-	sort.SliceStable(ids, func(i, j int) bool {
-		a, b := rl.state[ids[i]], rl.state[ids[j]]
-		if a.Batch != b.Batch {
-			return a.Batch < b.Batch
-		}
-		return a.Pos < b.Pos
-	})
+	sort.SliceStable(ids, func(i, j int) bool { return rl.state[ids[i]].Arrival < rl.state[ids[j]].Arrival })
 	return ids
+}
+
+// acceptedHeads are rl's accepted entries that no accepted entry names as
+// a parent, sorted.
+func acceptedHeads(rl *roomLog) []string {
+	parent := map[string]bool{}
+	for id, row := range rl.state {
+		if row.State == store.LogAccepted {
+			for _, p := range rl.ents[id].Fields().Parents {
+				parent[p] = true
+			}
+		}
+	}
+	var out []string
+	for _, id := range sortedIDs(rl.state) {
+		if rl.state[id].State == store.LogAccepted && !parent[id] {
+			out = append(out, id)
+		}
+	}
+	return out
 }

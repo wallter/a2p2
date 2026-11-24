@@ -40,14 +40,14 @@ func TestInviteStatesAndExpiry(t *testing.T) {
 	if _, err := s.OpenInvite(ctx, h1, kc, "sea", nil, memberTerms, t0); !errors.Is(err, ErrInviteBound) {
 		t.Fatalf("second key: %v", err)
 	}
-	if err := s.AcceptInvite(ctx, h1, kb, "bee", nil, Terms{Role: "admin"}, Request{ID: "q_0", Room: logRoom, Created: t0}, t0); !errors.Is(err, ErrInviteTerms) {
+	if err := s.AcceptInvite(ctx, h1, kb, "bee", nil, Terms{Role: "admin"}, Request{ID: "q_0", Room: logRoom, Created: t0}, func() time.Time { return t0 }); !errors.Is(err, ErrInviteTerms) {
 		t.Fatalf("accept on other terms: %v", err)
 	}
 	q := Request{ID: "q_1", Kind: "add", Action: "admit", Room: logRoom, Node: kb, Name: "bee", Created: t0}
-	if err := s.AcceptInvite(ctx, h1, kb, "bee", nil, memberTerms, q, t0); err != nil {
+	if err := s.AcceptInvite(ctx, h1, kb, "bee", nil, memberTerms, q, func() time.Time { return t0 }); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcceptInvite(ctx, h1, kb, "bee", nil, memberTerms, Request{ID: "q_2", Room: logRoom, Created: t0}, t0); !errors.Is(err, ErrInviteState) {
+	if err := s.AcceptInvite(ctx, h1, kb, "bee", nil, memberTerms, Request{ID: "q_2", Room: logRoom, Created: t0}, func() time.Time { return t0 }); !errors.Is(err, ErrInviteState) {
 		t.Fatalf("second accept: %v", err)
 	}
 	if qs, _ := s.Requests(ctx, logRoom, RequestPending); len(qs) != 1 {
@@ -64,7 +64,7 @@ func TestInviteStatesAndExpiry(t *testing.T) {
 			t.Fatal(err)
 		}
 		q := Request{ID: "q_" + h[:1], Kind: "add", Action: "admit", Room: logRoom, Node: key, Name: "m", Created: t0}
-		if err := s.AcceptInvite(ctx, h, key, "m", nil, memberTerms, q, t0); err != nil {
+		if err := s.AcceptInvite(ctx, h, key, "m", nil, memberTerms, q, func() time.Time { return t0 }); err != nil {
 			t.Fatal(err)
 		}
 		if i == 0 {
@@ -115,7 +115,7 @@ func TestApprovalWrittenAfterTheInviteExpiredFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	q := Request{ID: "q_1", Kind: "add", Action: "admit", Room: logRoom, Node: kb, Name: "bee", Created: t0}
-	if err := s.AcceptInvite(ctx, h, kb, "bee", nil, memberTerms, q, t0); err != nil {
+	if err := s.AcceptInvite(ctx, h, kb, "bee", nil, memberTerms, q, func() time.Time { return t0 }); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ApplyLog(ctx, LogBatch{Room: logRoom, Complete: q.ID, Now: exp}); !errors.Is(err, ErrInviteExpired) {
@@ -154,5 +154,110 @@ func TestJoinRecordIsKeptAndLeavingEndsAJoinInProgress(t *testing.T) {
 	}
 	if err := s.EndJoin(ctx, j.Invite, JoinSigned, "", t0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("ending a left join: %v", err)
+	}
+}
+
+// Every stored log row gets an arrival position allocated once: a row
+// deleted later frees nothing, and a later row's position is larger.
+//
+// Requirements: T3; second review blocker 4
+func TestLogArrivalPositionsAreNeverReused(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	root := testCreate(t)
+	gen, err := s.CreateLogRoom(ctx, logRoom, "team", root, nil, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := func(i int) LogRow {
+		r := root
+		r.ID, r.State = strings.Repeat("0", 31)+string(rune('1'+i)), LogHeld
+		return r
+	}
+	if _, err := s.ApplyLog(ctx, LogBatch{Room: logRoom, Gen: gen, New: []LogRow{row(0), row(1)}, Now: t0}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApplyLog(ctx, LogBatch{Room: logRoom, Gen: gen, Gone: []string{row(1).ID}, Now: t0}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApplyLog(ctx, LogBatch{Room: logRoom, Gen: gen, New: []LogRow{row(2)}, Now: t0}); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := s.Log(ctx, logRoom)
+	var got []int64
+	for _, r := range rows {
+		got = append(got, r.Arrival)
+	}
+	if len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 4 {
+		t.Fatalf("arrivals: %v", got)
+	}
+}
+
+// A join's pin checks, in its own write, that the join is still accepted
+// and the room's generation is the one recorded at the preview; a leave or
+// another pin in between refuses it.
+//
+// Requirements: T3; second review blocker 1
+func TestJoinLogRoomChecksTheJoinAndTheGenerationInItsWrite(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	root := testCreate(t)
+	j := Join{Invite: strings.Repeat("7", 64), Room: logRoom, Role: "member", Created: t0}
+	if _, _, err := s.AddJoin(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateLogRoom(ctx, logRoom, "team", root, nil, t0); err != nil { // pinned by another path
+		t.Fatal(err)
+	}
+	if _, err := s.JoinLogRoom(ctx, j.Invite, 0, "team", root, nil, t0); !errors.Is(err, ErrStaleGeneration) {
+		t.Fatalf("pin while held: %v", err)
+	}
+	if _, err := s.LeaveRoom(ctx, logRoom, t0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.JoinLogRoom(ctx, j.Invite, 0, "team", root, nil, t0); !errors.Is(err, ErrStaleGeneration) {
+		t.Fatalf("pin after a leave: %v", err)
+	}
+	j2 := Join{Invite: strings.Repeat("8", 64), Room: logRoom, Role: "member", Gen: 2, Created: t0} // left: a new generation
+	if _, _, err := s.AddJoin(ctx, j2); err != nil {
+		t.Fatal(err)
+	}
+	gen, err := s.JoinLogRoom(ctx, j2.Invite, 2, "team", root, nil, t0)
+	if got, _ := s.GetJoin(ctx, j2.Invite); err != nil || gen != 3 || got.PinnedGen != 3 {
+		t.Fatalf("pin: %d %v %+v", gen, err, got)
+	}
+	if _, err := s.JoinLogRoom(ctx, j2.Invite, 2, "team", root, nil, t0); !errors.Is(err, ErrStaleGeneration) {
+		t.Fatalf("second pin: %v", err)
+	}
+}
+
+// An approval's clock is read inside its transaction.
+//
+// Requirements: T3; second review should-fix 6
+func TestApprovalClockIsReadInsideTheWrite(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	if _, err := s.CreateLogRoom(ctx, logRoom, "team", testCreate(t), nil, t0); err != nil {
+		t.Fatal(err)
+	}
+	h, kb := strings.Repeat("9", 64), nodeOf(testKey("b"))
+	exp := t0.Add(30 * time.Minute)
+	if err := s.CreateInvite(ctx, Invite{SecretHash: h, Room: logRoom, Role: "member", Created: t0, Expires: exp}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.OpenInvite(ctx, h, kb, "bee", nil, memberTerms, t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AcceptInvite(ctx, h, kb, "bee", nil, memberTerms, Request{ID: "q_9", Room: logRoom, Created: t0},
+		func() time.Time { return t0 }); err != nil {
+		t.Fatal(err)
+	}
+	b := LogBatch{Room: logRoom, Complete: "q_9", Now: t0, Clock: func() time.Time { return exp }}
+	if _, err := s.ApplyLog(ctx, b); !errors.Is(err, ErrInviteExpired) {
+		t.Fatalf("approval written after the expiry: %v", err)
+	}
+	if err := s.AcceptInvite(ctx, h, kb, "bee", nil, memberTerms, Request{ID: "q_8", Room: logRoom, Created: t0},
+		func() time.Time { return exp }); !errors.Is(err, ErrInviteExpired) && !errors.Is(err, ErrInviteState) {
+		t.Fatalf("accept judged by its clock: %v", err)
 	}
 }

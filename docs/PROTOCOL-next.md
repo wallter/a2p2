@@ -468,10 +468,11 @@ server key's fingerprint against the token and stops on a mismatch
 | `accept` | only after `open` by the same key, and only if `terms` matches what that key was last shown (else `revoked`); then move to accepted and raise a request for a person (DESIGN 7); repeat is a no-op |
 | `poll` | report the state |
 
-`terms` (accept only): SHA-256 over a fixed encoding of everything the
-preview showed (room id, label, create entry id, role, history, member,
-admin key, expiry), so a person's approval on the joiner covers exactly one
-preview. `after` (poll only, never 0): the `next` value of the last page
+`terms` (accept only): 64 hex, SHA-256 over the lines `a2p2 join preview 1`,
+room id, label, create entry id, role, history, member, admin key and
+expiry as the preview gave them, each ending in a newline, so a person's
+approval on the joiner covers exactly one preview. An `accept` without an
+earlier `open` by the same key is 400 `bad_request`. `after` (poll only, never 0): the `next` value of the last page
 received.
 `invite` (poll only, instead of `secret`): SHA-256 of the secret, accepted
 only from the key the invite is bound to, so a joiner that restarts resumes
@@ -513,7 +514,7 @@ new grant is signed if it is still a member; approval returns the log).
 |---|---|---|
 | 403 | `bad_secret` | unknown secret, or bound to another key |
 | 403 | `declined`, `revoked`, `expired`, `removed` | as above |
-| 429 | `rate_limited`, `Retry-After` | 10 requests per minute per source address, counted before the body is read; polls naming an unknown invite share 60 per minute |
+| 429 | `rate_limited`, `Retry-After` | 10 requests per minute per source IP address, counted before the body is read; 10 per minute per key that presented a valid secret; polls naming an unknown invite share 60 per minute, counted before any lookup |
 | 503 | `unavailable`, `Retry-After` | the room already has 32 requests waiting for a person |
 
 The joiner polls every `retry_ms`, doubling to 60 s, until signed (and
@@ -728,7 +729,7 @@ shows the preview, asks on the terminal, then waits unless `--no-wait`),
 `send --reply-to --ask-handled --replaces`, `inbox --thread`, `trace`,
 `room list`. `confirm` refuses unless stdin is a terminal.
 
-## 8. Schema (migrations 2 to 6)
+## 8. Schema (migrations 2 to 7)
 
 | Table | Columns | Keys |
 |---|---|---|
@@ -751,7 +752,10 @@ shows the preview, asks on the terminal, then waits unless `--no-wait`),
 | `meta` | `key`, `value`; `v02_dropped_notice` shown once | `key` |
 
 Migration 4 adds `observed` and `refusals`, migration 5 `streams.known_from`
-(step 5a); migration 6 `room_invites`, `joins` and `requests.admins` (step 4b). Migration 2 holds the record tables (step 3a); migration 3 the log tables,
+(step 5a); migration 6 `room_invites`, `joins` and `requests.admins`, and
+migration 7 `log.arrival` (a position allocated once per stored entry, from
+the counter `rooms.arrivals`, never reused: the join's paging cursor) and
+`joins.pinned_gen` (step 4b). Migration 2 holds the record tables (step 3a); migration 3 the log tables,
 `rooms.left_at` and requests. Per room at most 32 requests wait, and 256
 refused dependants and 256 invalid entries are kept.
 
