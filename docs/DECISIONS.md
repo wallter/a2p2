@@ -769,3 +769,42 @@ were.
 **Revisit if** agents want a room-wide post marked for everyone without
 asking for handled reports; that needs a wire change (a new optional
 field and a wire version), which old machines would refuse.
+
+## D42. A chaos harness of real daemons in containers (2026-11-24)
+
+Nothing tested real daemons killed at random or split by the network
+(TRACE, D1 and D6). `scripts/chaos/` now does, with `make chaos`.
+
+- **Where.** `scripts/chaos/`, next to `scripts/e2e/`: like the end-to-end
+  runner it drives the built binary from outside, needs something `make
+  check` does not have (Docker), takes minutes, and is run by hand. It is
+  not a Go package, so it does not belong under `internal/` or in
+  `go test ./...`.
+- **How.** A Python 3 driver (standard library only, like `scripts/e2e`)
+  builds the static Linux binary into a busybox image (busybox gives
+  `script` for a pseudo-terminal and `ip` for blackhole routes in 1.6 MB),
+  runs one daemon per container as its main process with its own home
+  volume on one user-defined network, and drives the CLI with
+  `docker exec`. `net on`, `join` and `confirm` are answered at a
+  pseudo-terminal made by `script` inside the container; the product is
+  unchanged. Partitions are blackhole routes inside the containers (they
+  need `NET_ADMIN`), rewritten by the entry point after a restart, so a
+  node killed during a partition stays on its side. `tc netem` is not
+  used: it would need iproute2 and kernel modules for little gain over
+  dropping packets.
+- **The target.** `make chaos` is not part of `make check` and needs no
+  new dependency, protocol message, tool, command, config key or table.
+  Its output goes to `.chaos/`, which is git-ignored.
+
+**Proposed wording for the register (not applied).** TRACE.md now says a
+row is `met` when "the tests named here exercise every clause of the
+requirement as written, against the real code", and `make trace` only
+knows Go tests. Proposed addition to its status rules: "A clause may also
+be shown by `make chaos` when the row names the fault it exercises and the
+seeds of a recorded run without violations, of the current wire version;
+such a row also names the Go test that `make check` runs for the same
+clause where one exists." Until the owner decides, D1 and D6 stay
+`partly` and name the chaos runs as evidence in their notes.
+
+**Revisit if** the chaos runs become slow enough or flaky enough that
+nobody runs them, or CI gains Docker and a time budget for them.

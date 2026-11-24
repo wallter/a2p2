@@ -68,3 +68,10 @@ clean:
 check: team-test
 team-test: build  ## the team launcher against a fake harness and a throwaway home (about 5 seconds)
 	python3 scripts/team/test_team.py
+
+# Chaos: real daemons in Docker containers, killed, paused, disconnected and
+# partitioned from a seed (scripts/chaos). Needs Docker and minutes; not part
+# of check. Logs and the summary go to .chaos/ (git-ignored).
+.PHONY: chaos
+chaos:            ## make chaos [NODES=3] [SEED=1] [DURATION=90]; exits non-zero on any violation
+	python3 scripts/chaos/chaos.py run --nodes $${NODES:-3} --seed $${SEED:-1} --duration $${DURATION:-90}
