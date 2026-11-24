@@ -369,6 +369,14 @@ func (h *harness) addSim(n delivery.MachineID, agents []string) *sim {
 func (h *harness) change(c Change) {
 	h.t.Helper()
 	r := h.sims[h.px.admin].r
+	// The model has no "pull before signing" rule (DESIGN-next 3, not
+	// modelled): the admin's log is in step with the schedule's, so it
+	// counts as pulled even after a crash or restore.
+	r.mu.Lock()
+	if rl := r.rooms[diffRoom]; rl != nil {
+		rl.pulled = true
+	}
+	r.mu.Unlock()
 	q, err := r.proposeAny(context.Background(), diffRoom, c) // admits without the join exchange: test only
 	if err != nil {
 		h.fail("propose %+v: %v", c, err)

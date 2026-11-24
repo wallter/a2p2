@@ -64,6 +64,10 @@ type Machine struct {
 	// frontier published meanwhile, so that Prune reads the frontier and
 	// writes expiry as one decision.
 	locked func(fn func() error) error
+
+	// wakes is touched for a room after each write that can change its
+	// summary or log (wake.go).
+	wakes roomWakes
 }
 
 // readFront is this machine's reading frontier in a room: per author, the
@@ -150,7 +154,10 @@ func (m *Machine) Register(ctx context.Context, agent string) (bool, error) {
 func (m *Machine) Prune(ctx context.Context) error {
 	m.pruneDue.Store(false)
 	run := func() error {
-		_, err := m.st.ExpireTextWith(ctx, m.now(), m.undecided)
+		n, err := m.st.ExpireTextWith(ctx, m.now(), m.undecided)
+		if err == nil && n > 0 {
+			m.wakes.touchAll()
+		}
 		return err
 	}
 	var err error
@@ -389,6 +396,7 @@ func (m *Machine) write(ctx context.Context, room, agent string, decide func(*ro
 		return Sent{}, err
 	}
 	m.out[room] = epoch
+	m.wakes.touch(room)
 	return Sent{ID: r.ID(), Room: room, Created: r.Fields().Created}, nil
 }
 

@@ -106,10 +106,9 @@ type roomLog struct {
 	st                  members.State
 	perm                string // own membership and permission, to see it change
 	cache               map[string]store.RoomMember
-	// pulled is the hook for "sign nothing for a room until its log has
-	// been pulled since start" (DESIGN-next section 3): step 5 sets it
-	// after the first successful pull of this room since the daemon
-	// started. See maySign.
+	// pulled: this room's log has been pulled from another member since
+	// the daemon started, or the room was created or pinned in this run
+	// (DESIGN-next section 3). See maySign.
 	pulled bool
 }
 
@@ -411,7 +410,11 @@ func (r *Rooms) pinWith(ctx context.Context, v *core.VerifiedEntry, create func(
 	}
 	rl.state[v.ID()] = bare
 	rl.gen = gen
+	// Created here, or pinned to be joined (its log comes from the admin
+	// machine next): exempt from pulling before signing (maySign).
+	rl.pulled = true
 	r.rooms[f.Room] = rl
+	r.m.wakes.touch(f.Room, roomSet)
 	return gen, nil
 }
 
@@ -458,6 +461,7 @@ func (r *Rooms) Leave(ctx context.Context, room string) error {
 	r.fmu.Lock()
 	delete(r.fronts, room)
 	r.fmu.Unlock()
+	r.m.wakes.touch(room, roomSet)
 	return nil
 }
 
@@ -528,7 +532,13 @@ func (r *Rooms) Receive(ctx context.Context, room string, gen int64, wires ...[]
 	if gen != 0 && gen != rl.gen {
 		return nil, ErrStaleGeneration
 	}
-	return r.ingest(ctx, rl, gen, wires, nil)
+	res, err := r.ingest(ctx, rl, gen, wires, nil)
+	if err == nil {
+		// Entries handed over by another machine (the join's delivery of
+		// the log): the room's log counts as pulled (maySign).
+		rl.pulled = true
+	}
+	return res, err
 }
 
 // completion is the request a batch approves.
@@ -663,6 +673,7 @@ func (r *Rooms) ingestWith(ctx context.Context, rl *roomLog, gen int64, wires []
 			return nil, err
 		}
 		publish(n)
+		r.m.wakes.touch(rl.id)
 		fill()
 		// After the commit memory and disk agree: a failure here changes
 		// nothing, and the committed batch is not reported as failed.

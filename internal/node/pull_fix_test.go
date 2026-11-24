@@ -555,7 +555,7 @@ func TestAnOlderObservationNeverReplacesALaterOne(t *testing.T) {
 	ctx := context.Background()
 	gen, _ := b.r.Gen(room)
 	build := func() (prepared, *PullResponse) {
-		p, err := b.x.prepare(ctx, room, a.id, gen, nil, "", false, false, nil, map[string]bool{}, nil)
+		p, err := b.x.prepare(ctx, room, a.id, gen, nil, "", false, false, 0, nil, map[string]bool{}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

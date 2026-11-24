@@ -5,8 +5,9 @@ package node
 // internal/model/delivery): the one request type that moves records and
 // log entries, carried both ways. Serve is the server's side, in the order
 // of PROTOCOL-next 4.4; Pull is the requester's, one whole exchange of
-// rounds. Both work over Rooms and a PullTransport; the HTTP endpoint,
-// waiting pulls and the scheduler come in step 5b, joining in step 4b.
+// rounds. Both work over Rooms and a PullTransport (internal/peer carries
+// it over HTTP/2); waiting pulls are in waiting.go, the scheduler in
+// sched.go.
 
 import (
 	"context"
@@ -39,6 +40,13 @@ var ErrPeerNotMember = &UserError{"the peer is not a member of the room here"}
 type ExchangeOpts struct {
 	PageLimit  int // records per page; 0: MaxPageRecords
 	OfferLimit int // records per offer; 0: MaxOfferRecords
+	// Book is where peers' addresses are learned (addrs in requests,
+	// peers in responses) and listed from; nil: none are.
+	Book *AddrBook
+	// Addrs are this machine's own addresses, sent in opening requests.
+	Addrs []string
+	// After is the timer of a held response; nil: time.After.
+	After func(time.Duration) <-chan time.Time
 }
 
 // Exchange is the pull exchange of one machine.
@@ -47,6 +55,9 @@ type Exchange struct {
 	t          PullTransport
 	pageLimit  int
 	offerLimit int
+	book       *AddrBook
+	addrs      []string
+	after      func(time.Duration) <-chan time.Time
 
 	// In memory, per room and peer (PROTOCOL-next 4.5): refused, how the
 	// peer last refused this machine as not a member; heard, the log heads
@@ -69,6 +80,9 @@ type Exchange struct {
 	// over it [R5]. In memory: no request outlives the process.
 	made   int64
 	latest map[[2]string]int64
+	// waiting is, per room and peer, the held response now waiting; a new
+	// one closes its channel, which releases it (waiting.go).
+	waiting map[[2]string]chan struct{}
 
 	// Test hooks. atRelease runs where a held response is released (step
 	// 10 of PROTOCOL-next 4.4; step 5b holds there); withhold makes a
@@ -81,7 +95,14 @@ type Exchange struct {
 func NewExchange(r *Rooms, t PullTransport, o ExchangeOpts) *Exchange {
 	x := &Exchange{r: r, t: t, pageLimit: o.PageLimit, offerLimit: o.OfferLimit, refused: map[[2]string]*refusal{},
 		heard: map[[2]string][]string{}, seen: map[[2]string]seenSums{}, latest: map[[2]string]int64{},
-		evidence: map[[2]string]map[string]bool{}, pages: map[[2]string]*pageMemory{}}
+		evidence: map[[2]string]map[string]bool{}, pages: map[[2]string]*pageMemory{},
+		book: o.Book, addrs: slices.Clone(o.Addrs), after: o.After, waiting: map[[2]string]chan struct{}{}}
+	if x.after == nil {
+		x.after = time.After
+	}
+	if len(x.addrs) > MaxAddrs {
+		x.addrs = x.addrs[:MaxAddrs]
+	}
 	if x.pageLimit <= 0 || x.pageLimit > MaxPageRecords {
 		x.pageLimit = MaxPageRecords
 	}
@@ -726,6 +747,12 @@ func (x *Exchange) Serve(ctx context.Context, peer string, q *PullRequest) (*Pul
 	if err != nil {
 		return nil, err
 	}
+	if q.WaitMS > 0 && b.resp.Same {
+		// Step 9: held while the answer would stay same (waiting.go).
+		if b, err = x.hold(ctx, peer, q, b); err != nil {
+			return nil, err
+		}
+	}
 	if x.atRelease != nil {
 		x.atRelease(q.Room, peer, q)
 	}
@@ -758,6 +785,9 @@ func (x *Exchange) serve(ctx context.Context, peer string, q *PullRequest) (*bui
 	}
 	x.hear(q.Room, peer, q.Log.Heads)
 	now := r.m.now()
+	if x.book != nil && len(q.Addrs) > 0 && slices.Contains(rl.st.Members, peer) {
+		x.book.Replace(peer, q.Addrs, now) // its own word on where it is, from the authenticated peer
+	}
 	order := x.next() // received now: later than anything stored
 	wasMember := slices.Contains(rl.st.Members, peer)
 	member := false
@@ -826,6 +856,9 @@ func (x *Exchange) serve(ctx context.Context, peer string, q *PullRequest) (*bui
 	}
 	if !member {
 		return nil, notMember()
+	}
+	if sv.stored {
+		r.m.wakes.touch(rl.id)
 	}
 	b, err := x.respond(ctx, rl, peer, q, sv)
 	if err != nil {
@@ -982,6 +1015,19 @@ func (x *Exchange) release(ctx context.Context, peer string, q *PullRequest, b *
 	for _, it := range b.items {
 		resp.Page = append(resp.Page, json.RawMessage(it.wire()))
 	}
+	resp.Peers = nil
+	if q.Sum != "" && !resp.Same && x.book != nil {
+		// Other members with addresses, within the response limit.
+		var others []string
+		for _, n := range rl.st.Members {
+			if n != peer && n != r.m.ID {
+				others = append(others, n)
+			}
+		}
+		if ps := x.book.peers(others); len(ps) > 0 && jsonSize(resp)+jsonSize(ps)+wireMargin <= maxResponseBytes {
+			resp.Peers = ps
+		}
+	}
 	// What goes out is noted: evidence the peer cannot list, once; the
 	// page's streams, to find those blocked at the peer.
 	note := x.evidenceFor(rl.id, peer, true)
@@ -1001,7 +1047,19 @@ type PullOpts struct {
 	// Offer attaches, to each request, records the peer lacks by its last
 	// observed summary [RM3]; none without one.
 	Offer bool
+	// OfferLimit, if above 0 and below the exchange's, bounds the records
+	// of one offer (the scheduler halves it after a 413).
+	OfferLimit int
+	// WaitMS, above 0, makes the exchange's first request a waiting pull
+	// (PROTOCOL-next 4.4 step 9): the server holds a same answer up to it.
+	WaitMS int64
+	// Stop, closed while that first request waits, abandons it: Pull
+	// returns ErrWaitStopped (a local change re-issues it with an offer).
+	Stop <-chan struct{}
 }
+
+// ErrWaitStopped: Pull's waiting request was abandoned because Stop closed.
+var ErrWaitStopped = errors.New("pull: waiting request stopped")
 
 // PullStats says what one exchange did.
 type PullStats struct {
@@ -1110,7 +1168,7 @@ type prepared struct {
 // accepted log from the start, then nothing; never an offer); all within
 // the request limit: detail first, then entries, then the offer.
 func (x *Exchange) prepare(ctx context.Context, room, peer string, gen int64, chunk []string, snap string, useSeen,
-	offer bool, base map[string]store.Observation, sent map[string]bool, peerLog *store.PeerLog) (prepared, error) {
+	offer bool, offerLimit int, base map[string]store.Observation, sent map[string]bool, peerLog *store.PeerLog) (prepared, error) {
 	r := x.r
 	var p prepared
 	r.mu.Lock()
@@ -1144,6 +1202,7 @@ func (x *Exchange) prepare(ctx context.Context, room, peer string, gen int64, ch
 			if s, ok := x.seenOf(key, gen); useSeen && ok && s.own == q.Sum {
 				q.Seen = s.server
 			}
+			q.Addrs = x.addrs
 		} else {
 			q.Snap, q.Detail = snap, map[string][]store.StreamDetail{}
 			for _, a := range chunk {
@@ -1191,7 +1250,11 @@ func (x *Exchange) prepare(ctx context.Context, room, peer string, gen int64, ch
 						want[a], authors = d, append(authors, a)
 					}
 				}
-				items, cut, err := x.buildPage(v, readableBy(v, perm), want, authors, sent, nil, x.offerLimit, budget)
+				limit := x.offerLimit
+				if offerLimit > 0 && offerLimit < limit {
+					limit = offerLimit
+				}
+				items, cut, err := x.buildPage(v, readableBy(v, perm), want, authors, sent, nil, limit, budget)
 				if err != nil {
 					return err
 				}
@@ -1458,9 +1521,13 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 	digest, detail, baseDetail := map[string]string{}, map[string]string{}, map[string]string{}
 	learned := map[string][]store.StreamDetail{}
 	send := func(chunk []string, snap string, useSeen bool) (prepared, *PullResponse, error) {
-		p, err := x.prepare(ctx, room, peer, gen, chunk, snap, useSeen, o.Offer, base, sent, peerLog)
+		p, err := x.prepare(ctx, room, peer, gen, chunk, snap, useSeen, o.Offer, o.OfferLimit, base, sent, peerLog)
 		if err != nil {
 			return p, nil, err
+		}
+		waiting := o.WaitMS > 0 && st.Requests == 0 && snap == ""
+		if waiting {
+			p.req.WaitMS = min(o.WaitMS, MaxWaitMS)
 		}
 		if base == nil {
 			base = p.old
@@ -1477,7 +1544,12 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 		}
 		st.Requests++
 		st.Offered += len(p.req.Offer)
-		resp, err := x.t.Pull(ctx, peer, p.req)
+		var resp *PullResponse
+		if waiting && o.Stop != nil {
+			resp, err = x.pullStoppable(ctx, peer, p.req, o.Stop)
+		} else {
+			resp, err = x.t.Pull(ctx, peer, p.req)
+		}
 		if aerr := x.answered(ctx, room, peer, gen, p.req, err); aerr != nil {
 			return p, nil, errors.Join(err, aerr)
 		}
@@ -1503,6 +1575,10 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 		if err != nil {
 			return a, false, err
 		}
+		if a.stored+a.repaired > 0 {
+			x.r.m.wakes.touch(room)
+		}
+		x.learnPeers(room, peer, resp.Peers)
 		st.Responses++
 		st.Stored += a.stored
 		st.Repaired += a.repaired

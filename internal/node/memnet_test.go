@@ -10,8 +10,8 @@ import (
 )
 
 // memNet is the in-memory transport of the pull exchange: every request
-// and response is encoded to JSON and decoded again, as the HTTP endpoint
-// will (step 5b), and the requester's node id is passed to the server as
+// and response is encoded to JSON and decoded again by the strict decoders
+// the HTTP endpoint uses (internal/peer), and the requester's node id is passed to the server as
 // the transport authenticated it. It injects faults: machines that cannot
 // be reached (asleep) or take no connections, a lost response (the server
 // acted, the requester never hears), and a relay that alters what it
@@ -72,10 +72,12 @@ func (l memLink) Pull(ctx context.Context, peer string, req *PullRequest) (*Pull
 	if len(b) > maxRequestBytes {
 		return nil, pullErr(413, CodeTooLarge, "")
 	}
-	var q PullRequest
-	if err := json.Unmarshal(b, &q); err != nil {
-		return nil, pullErr(400, CodeBadRequest, "json")
+	// Decoded as the HTTP endpoint decodes it: strict JSON (step 5b).
+	qp, perr := DecodePullRequest(b)
+	if perr != nil {
+		return nil, perr
 	}
+	q := *qp
 	n.mu.Lock()
 	n.heard = append(n.heard, &q)
 	n.offerText = append(n.offerText, withText(q.Offer)...)
@@ -98,10 +100,11 @@ func (l memLink) Pull(ctx context.Context, peer string, req *PullRequest) (*Pull
 	n.pageText = append(n.pageText, withText(resp.Page)...)
 	lose, tamper := n.lose, n.tamper
 	n.mu.Unlock()
-	var out PullResponse
-	if err := json.Unmarshal(rb, &out); err != nil {
+	op, err := DecodePullResponse(rb)
+	if err != nil {
 		return nil, err
 	}
+	out := *op
 	if lose != nil && lose(l.from, peer, &q, &out) {
 		return nil, errLost
 	}

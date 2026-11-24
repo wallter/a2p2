@@ -52,7 +52,11 @@ func (r *Rooms) ReceiveRecord(ctx context.Context, gen int64, rec *core.Verified
 	if plan == nil {
 		return store.OutcomeAuthorNotAdmitted, nil
 	}
-	return r.m.st.PutRecordPlanned(ctx, rec, gen, plan)
+	out, err := r.m.st.PutRecordPlanned(ctx, rec, gen, plan)
+	if err == nil {
+		r.m.wakes.touch(f.Room)
+	}
+	return out, err
 }
 
 // recordPlan is ReceiveRecord's decision for rec under membership st (look
