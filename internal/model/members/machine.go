@@ -10,7 +10,9 @@ import "strconv"
 //     refused, and the two are kept as evidence that the key signed a fork.
 //     Everything that depends on a refused entry is refused too. So the
 //     first branch a machine sees is the one it keeps.
-//  3. A fork is settled when other admins remove the forking key. Once the
+//  3. A fork by a key that was not an admin is settled at once: neither
+//     entry had effect. A fork by an admin is settled when it is removed
+//     (its fork counts as its own vote, rule 12). Once the
 //     refused entries, together with the accepted ones, give a set in which
 //     every forking key has been removed as an admin, the machine accepts
 //     them all. From then on both branches are in every machine's set, so
@@ -124,7 +126,7 @@ func (m *Machine) settle() {
 	}
 	st := m.Rules.Resolve(cand)
 	for _, pair := range m.open {
-		if !removedAsAdmin(st, all, all[pair[0]].Author) {
+		if !notAdminFork(st, pair) && !removedAsAdmin(st, all, all[pair[0]].Author) {
 			return
 		}
 	}
@@ -141,6 +143,12 @@ func (m *Machine) settle() {
 		}
 	}
 	m.order = still
+}
+
+// notAdminFork reports whether neither entry of a fork had effect because
+// its author was not an admin: such a fork needs no settling.
+func notAdminFork(st State, pair [2]string) bool {
+	return st.Effects[pair[0]].Reason == ReasonNotAdmin && st.Effects[pair[1]].Reason == ReasonNotAdmin
 }
 
 // removedAsAdmin reports whether some removal of k took effect and k is

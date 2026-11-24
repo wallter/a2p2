@@ -18,7 +18,8 @@ re-appointed admin could empty the room
 4. Making or removing an admin needs matching entries from two different
    admins, unless the signer was the only admin in what it had seen. Removing
    a machine that is being made an admin at the same time also needs two.
-5. A machine's vote on its own removal does not count.
+5. A machine's vote on its own removal does not count. A fork it signed
+   does (rule 12).
 6. Removals that count are never cancelled. Simultaneous mutual removals that
    each have two signatures both stand.
 7. A removal is one event. An entry has seen it once it has seen enough votes
@@ -41,8 +42,21 @@ re-appointed admin could empty the room
     keeps and passes on both as evidence. Once the forking key has been
     removed as an admin, a machine accepts both branches and rule 9 decides.
     A settled fork stays settled: what that key signs after being re-admitted
-    counts normally.
-12. No timers, and no entry kinds beyond create, add, remove and make admin.
+    counts normally. A fork by a key that was not an admin at either entry
+    had no effect, and machines accept both branches at once.
+12. Fork evidence is a vote. Two different entries one key signed at one
+    position, at least one while it was an admin, count as that key's vote
+    for its own removal as an admin, in the period the fork was signed. The
+    evidence is part of the set `Resolve` sees, so P1 is unaffected: no
+    separate input. One other admin's removal vote then completes the
+    removal; evidence alone removes nobody, and the forking key cannot
+    complete it alone, since its own removal vote does not count. What
+    stands follows rule 9: the branch the remover had seen take effect
+    stands, the other does not; a remover that had seen both keeps neither.
+    Removals the forking key signed from the fork position on, which no
+    remover had seen take effect, have no effect. The forking machine
+    rejoins under a new key.
+13. No timers, and no entry kinds beyond create, add, remove and make admin.
 
 ## What holds
 
@@ -63,8 +77,12 @@ P1 same set, same state. P2 a removal sticks. P3 one key cannot change the
 admin set once there are three admins. P4 losing one admin of three is
 survivable. P5 nothing is promoted without entries. P6 every entry without
 effect has a reason, and no panic. P7 a fully informed change alters only its
-target. P3 excludes forks and changes still waiting for a second signature
-(gaps 2, 3 and 4). The package's ordinary run takes 11 s under the race
+target. P3 with forks: a key that also re-signs positions it has used cannot
+change the admin set on a machine holding the room, nor after another
+admin settles the fork, and every such set resolves the same in any order.
+P3 excludes changes still waiting for a second signature
+(gaps 3 and 4), and an unsettled fork, which counts as the forking key's
+signed vote. The package's ordinary run takes 11 s under the race
 detector.
 
 ## What the search rejected
@@ -83,22 +101,30 @@ detector.
 - **A removal counted vote by vote.** One key's late vote on an already
   completed removal undid a re-admission, and in a second form brought back
   an addition the removal had voided. Rules 7 and 9 close both.
+- **Letting any remover that had seen a forking key's removal vote keep
+  it.** A later vote that had seen the removal complete revived it. Rule
+  12 keeps only what a remover had seen take effect.
+- **Identifying a removal by how the entry's past classified it.** A
+  backup's concurrent promotion turned an earlier member removal into an
+  admin removal, and later grants lost track of it
+  (`TestForkTurningAnEarlierRemovalIntoAnAdminRemovalKeepsLaterGrants`).
 - **Settling a fork only on machines that saw the same branch.** The settling
   removal descends from one branch, so machines on the other refuse it.
   Rule 11 closes it.
 
 ## Known gaps
 
-1. **A fork by one of two admins never settles**
-   (`TestForkInTwoAdminRoomIsNeverSettled`, skipped). A and B are admins; B
-   adds D, is restored from backup, and adds E at the same position. A alone
-   cannot remove B, so machines that saw D first and those that saw E first
-   disagree for ever.
+1. **Closed by rule 12: a fork by one of two admins now settles.** A
+   alone, holding both branches, removes B, and machines that saw different
+   branches agree (`TestForkInTwoAdminRoomIsSettledByTheOtherAdminAlone`).
 2. **A fork inside a period when the creator was the only admin fools
-   machines that missed the honest entry at that position**, until two other
-   admins remove the forking key
+   machines that missed the honest entry at that position**, until another
+   admin removes the forking key (one is enough under rule 12)
    (`TestForkInsideSoleAdminPeriodFoolsOnlyMachinesMissingThatEntryUntilSettled`).
    Every machine that already holds the honest entry refuses the fork.
+   Rule 12 does not help a room whose only admin forks: no other admin can
+   vote, so the fork never settles. With one admin nobody else can change
+   membership anyway.
 3. **A stolen key can complete a change another admin started**, though
    never one aimed at itself
    (`TestStolenKeyCompletingAPendingRemovalDecidesTheTargetsUnseenEntries`,
@@ -114,7 +140,11 @@ detector.
    removal, then votes for the removal. The same entries arise honestly (D
    seconded in good faith, A and D removed C, a late vote arrives), and there
    the promotion must stand, so no rule can refuse it. Like gap 3 it needs a
-   signature the removed admin made before its removal.
+   signature the removed admin made before its removal. The same holds for
+   a forking key's removal vote voided by rule 12: a stolen key seconds it
+   and joins the removal having seen it take effect
+   (`TestStolenKeyCanSecondAForkingKeysVoidedRemovalAndThenJoinTheRemoval`,
+   skipped).
 5. **A removed key can still remove members it could see**, once per target,
    because its own chain blocks a repeat. It needs a current member willing
    to pass its entries on.
@@ -125,8 +155,9 @@ detector.
   or having one stolen.
 - A stolen key can add machines, remove members, and complete changes others
   have started. What it let machines read cannot be recalled.
-- A restored admin must catch up before signing. If it signs first, two other
-  admins must remove it, and it rejoins under a new key.
+- A restored admin must catch up before signing. If it signs first, one
+  other admin removes it, and it rejoins under a new key. Entries the
+  remover had not seen on the restored machine's other branch are lost.
 
 ## What `docs/REQUIREMENTS.md` should change
 
@@ -134,7 +165,7 @@ detector.
   more than one). A machine's vote on its own removal does not count.
 - Say that a removal of an admin, or of a machine being made an admin, waits
   for a second admin and is shown with its reason until then.
-- Add gaps 1, 3, 4 and 5 and the restore rule to section 6. Entries carry no
+- Add gaps 2, 3, 4 and 5, rule 12 and the restore rule to section 6. Entries carry no
   cut-off.
 - The design must say that a machine sends accepted entries in causal order,
   fork evidence after them, and follows rule 11.
@@ -151,9 +182,9 @@ has the two-admin weaknesses above.
 
 | Requirement | Tests |
 |---|---|
-| T9 | `TestOneKeyCannotChangeAdminSetOnceThereAreThreeAdmins`, `TestOneKeyCannotChangeAdminSetInLargerRooms`, `TestIdleStolenKeyBackdatingCannotChangeAdminSet`, `TestNoRankAnyTwoAdminsRemoveTheThirdNoneAlone`, `TestCreatorKeyIsRemovableByTwoOtherAdmins`, `TestMutualRemovalWithTwoThreeAndFourAdmins`, `TestOwnVoteOnOwnRemovalDoesNotCount`, `TestSeededRoomsKeepEveryProperty`, the fork tests |
+| T9 | `TestOneKeyCannotChangeAdminSetOnceThereAreThreeAdmins`, `TestOneKeyCannotChangeAdminSetInLargerRooms`, `TestIdleStolenKeyBackdatingCannotChangeAdminSet`, `TestNoRankAnyTwoAdminsRemoveTheThirdNoneAlone`, `TestCreatorKeyIsRemovableByTwoOtherAdmins`, `TestMutualRemovalWithTwoThreeAndFourAdmins`, `TestOwnVoteOnOwnRemovalDoesNotCount`, `TestSeededRoomsKeepEveryProperty`, `TestOneKeyCannotChangeAdminSetByForkingItsOwnChain`, `TestForkEvidenceNeedsTwoEntriesByOneKeyAtOnePosition`, the fork tests |
 | T5 | `TestRemovedAdminsConcurrentRemovalOfCompromisedMachineStands`, `TestConcurrentAddAndRemoveOfSameMachineRemovalWins`, `TestCascadeFromVoidAdminVoidsItsGrantsKeepsItsRemovals`, `TestRemovedAdminKeepsSigningGrantsVoidRemovalsCountOncePerTarget`, `TestLateVoteOnCompletedRemovalDoesNotUndoReadmission` |
 | T10 | `TestAllAdminsLostFreezesMembershipNobodyPromoted`, `TestLossOfAnyOneAdminIsSurvivable`, `TestLostAdminOfThreeIsReplacedByTheOtherTwo`, `TestLostAdminOfTwoLeavesMembersManageableAdminSetFixed` |
 | A4 | `TestResolveGivesEveryEntryAReasonOnArbitraryInput` |
 | T3 | `TestFirstThreeMachinesBecomeAdminsWithTwoAdminConfirmations` |
-| D6 | `TestBackupRestoreForkIsSettledByRemovalOfTheForkingAdmin`, `TestMachinesReceivingSameEntriesInAnyOrderAgree` |
+| D6 | `TestBackupRestoreForkIsSettledByRemovalOfTheForkingAdmin`, `TestForkInTwoAdminRoomIsSettledByTheOtherAdminAlone`, `TestForkSettledByOneRemoverKeepsTheBranchItHadSeen`, `TestForkByMemberWhoIsNotAnAdminChangesNothing`, `TestMachinesReceivingSameEntriesInAnyOrderAgree` |

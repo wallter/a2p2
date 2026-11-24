@@ -260,6 +260,22 @@ func ancestorsOf(es []Entry) map[string]map[string]bool {
 }
 
 // checkInvariants checks P2, P5 and P6 on one resolved set.
+// sawFork reports whether past holds two different entries by author at
+// one position.
+func sawFork(es []Entry, past map[string]bool, author string) bool {
+	at := map[int]string{}
+	for _, e := range es {
+		if e.Author != author || !past[e.ID] {
+			continue
+		}
+		if o, ok := at[e.Seq]; ok && o != e.ID {
+			return true
+		}
+		at[e.Seq] = e.ID
+	}
+	return false
+}
+
 func checkInvariants(es []Entry, st State) error {
 	anc := ancestorsOf(es)
 	for _, e := range es {
@@ -305,6 +321,11 @@ func checkInvariants(es []Entry, st State) error {
 				if anc[a.ID][v.ID] {
 					seen[v.Author] = true
 				}
+			}
+			// Rule 12: having seen a fork by the target counts as having
+			// seen the target's own vote.
+			if len(seen) > 0 && sawFork(es, anc[a.ID], r.Target) {
+				seen[r.Target] = true
 			}
 			if anc[a.ID][r.ID] || len(seen) >= len(authors) || len(seen) >= 2 {
 				readmitted = true
@@ -407,6 +428,46 @@ func attackNext(h history, k string) []Entry {
 	return out
 }
 
+// forkNext returns every entry key k could sign at a position it has
+// already used, continuing from its entry before that position, with any
+// parents that do not include its entries from that position on: a
+// restored backup or a thief re-signing the key's chain.
+func forkNext(h history, k string) []Entry {
+	var out []Entry
+	targets := append(machinesOf(h), "X")
+	for _, x := range h.es {
+		if x.Author != k || x.Kind == Create {
+			continue
+		}
+		for _, d := range downsets(h.es, x.Prev) {
+			ok := true
+			for _, y := range d {
+				if y.Author == k && y.Seq >= x.Seq {
+					ok = false
+					break
+				}
+			}
+			if !ok {
+				continue
+			}
+			for _, t := range targets {
+				base := Entry{Author: k, Seq: x.Seq, Prev: x.Prev, Parents: idsOf(d), Target: t}
+				for _, kind := range []Kind{Add, MakeAdmin, Remove} {
+					e := base
+					e.Kind = kind
+					if e = New(e); e.ID != x.ID {
+						out = append(out, e)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// withForks is attackNext plus forkNext.
+func withForks(h history, k string) []Entry { return append(attackNext(h, k), forkNext(h, k)...) }
+
 // p3Violation reports how extra entries by key k changed the admin set.
 func p3Violation(s0, s1 State, k string) string {
 	for _, y := range s0.Admins {
@@ -432,11 +493,13 @@ func p3Violation(s0, s1 State, k string) string {
 // TestStolenKeyCanCompleteAPromotionBeatenByAConcurrentRemoval). So is a
 // removed admin's grant vote voided by its removal: a key that seconds it
 // and then joins the removal brings it back (known gap 4, see
-// TestStolenKeyCanSecondAVoidedPromotionVoteAndThenJoinTheRemoval).
+// TestStolenKeyCanSecondAVoidedPromotionVoteAndThenJoinTheRemoval), and so
+// is a forking key's removal vote voided by rule 12 (see
+// TestStolenKeyCanSecondAForkingKeysVoidedRemovalAndThenJoinTheRemoval).
 func atRest(h history, s State) bool {
 	for _, e := range h.es {
 		r := s.Effects[e.ID].Reason
-		if r == ReasonNeedsSecond || (e.Kind == MakeAdmin && (r == ReasonRemovalWins || r == ReasonAfterCut)) {
+		if r == ReasonNeedsSecond || (e.Kind == MakeAdmin && (r == ReasonRemovalWins || r == ReasonAfterCut)) || (e.Kind == Remove && r == ReasonFork) {
 			return false
 		}
 	}
@@ -445,6 +508,7 @@ func atRest(h history, s State) bool {
 
 type p3Result struct {
 	checked int
+	forks   int
 	example string
 }
 
@@ -452,6 +516,13 @@ type p3Result struct {
 // three or more admins. A nil shared cache means one cache per history,
 // which keeps memory bounded on large searches.
 func searchP3(rules Rules, levels [][]history, depth int, shared cache) p3Result {
+	return searchP3With(rules, levels, depth, shared, 3, attackNext, nil)
+}
+
+// searchP3With is searchP3 from rooms of at least minAdmins admins, with
+// the attacker's entries drawn from next. With a non-nil rng it also
+// checks P1 on every attack set: a shuffled copy resolves the same.
+func searchP3With(rules Rules, levels [][]history, depth int, shared cache, minAdmins int, gen func(history, string) []Entry, rng *rand.Rand) p3Result {
 	var res p3Result
 	for _, level := range levels {
 		for _, h := range level {
@@ -460,7 +531,7 @@ func searchP3(rules Rules, levels [][]history, depth int, shared cache) p3Result
 				c = cache{}
 			}
 			s0 := c.resolve(rules, h.es)
-			if len(s0.Admins) < 3 || !atRest(h, s0) {
+			if len(s0.Admins) < minAdmins || !atRest(h, s0) {
 				continue
 			}
 			keys := map[string]bool{}
@@ -475,10 +546,18 @@ func searchP3(rules Rules, levels [][]history, depth int, shared cache) p3Result
 				for d := 0; d < depth; d++ {
 					var next []history
 					for _, cur := range frontier {
-						for _, e := range attackNext(cur, k) {
+						for _, e := range gen(cur, k) {
 							nh := cur.with(e)
 							res.checked++
 							s1 := c.resolve(rules, nh.es)
+							if rng != nil {
+								es := append([]Entry(nil), nh.es...)
+								rng.Shuffle(len(es), func(i, j int) { es[i], es[j] = es[j], es[i] })
+								if got := rules.Resolve(es); !reflect.DeepEqual(got.Admins, s1.Admins) || !reflect.DeepEqual(got.Members, s1.Members) || !reflect.DeepEqual(got.Effects, s1.Effects) {
+									res.example = "P1: order changed the result\n" + describe(nh.es)
+									return res
+								}
+							}
 							if v := p3Violation(s0, s1, k); v != "" {
 								if res.example == "" || len(nh.es) < strings.Count(res.example, "\n") {
 									res.example = fmt.Sprintf("key %s: %s\n%s", k, v, describe(nh.es))
@@ -673,6 +752,176 @@ func TestOneKeyCannotChangeAdminSetInLargerRooms(t *testing.T) {
 	t.Logf("P3 (larger rooms): %d attack sets checked at depth %d", res.checked, depth)
 	if res.example != "" {
 		t.Fatalf("P3 violated:\n%s", res.example)
+	}
+}
+
+// hasFork reports whether es holds two different entries by k at one
+// position.
+func hasFork(es []Entry, k string) bool {
+	all := map[string]bool{}
+	for _, e := range es {
+		all[e.ID] = true
+	}
+	return sawFork(es, all, k)
+}
+
+// searchForks checks rule 12 against one key k that also forks its own
+// chain, from every room at rest with at least minAdmins admins:
+//
+//   - P1: every attack set resolves the same in any order, fork evidence
+//     included (the evidence is part of the set: two of its entries);
+//   - without a fork, P3 as in searchP3;
+//   - with a fork, P3 for a machine that holds the room and then receives
+//     the attack entries (it refuses the second branch);
+//   - after settlement (each other admin removing k, having seen what
+//     its machine accepted), only k has left the admin set, and two machines that
+//     received the attack in opposite orders agree.
+func searchForks(levels [][]history, depth, minAdmins int, rng *rand.Rand) p3Result {
+	var res p3Result
+	fail := func(msg string, es []Entry) p3Result {
+		res.example = msg + "\n" + describe(es)
+		return res
+	}
+	for _, level := range levels {
+		for _, h := range level {
+			c := cache{}
+			s0 := c.resolve(Final, h.es)
+			if len(s0.Admins) < minAdmins || !atRest(h, s0) {
+				continue
+			}
+			keys := map[string]bool{}
+			for _, e := range h.es {
+				keys[e.Author] = true
+			}
+			for _, k := range sortedKeys(keys) {
+				frontier := []history{h}
+				for d := 0; d < depth; d++ {
+					var next []history
+					for _, cur := range frontier {
+						for _, e := range withForks(cur, k) {
+							nh := cur.with(e)
+							res.checked++
+							s1 := c.resolve(Final, nh.es)
+							es := append([]Entry(nil), nh.es...)
+							rng.Shuffle(len(es), func(i, j int) { es[i], es[j] = es[j], es[i] })
+							if got := Final.Resolve(es); !reflect.DeepEqual(got.Effects, s1.Effects) || !reflect.DeepEqual(got.Admins, s1.Admins) || !reflect.DeepEqual(got.Members, s1.Members) {
+								return fail("P1: order changed the result", nh.es)
+							}
+							attack := nh.es[len(h.es):]
+							if !hasFork(nh.es, k) {
+								if v := p3Violation(s0, s1, k); v != "" {
+									return fail("key "+k+": "+v, nh.es)
+								}
+							} else {
+								res.forks++
+								m1, m2 := machineWith(h.es), machineWith(h.es)
+								m1.Receive(attack...)
+								for i := len(attack) - 1; i >= 0; i-- {
+									m2.Receive(attack[i])
+								}
+								for _, m := range []*Machine{m1, m2} {
+									if v := p3Violation(s0, m.State(), k); v != "" {
+										return fail("key "+k+" (machine): "+v, nh.es)
+									}
+								}
+								for _, y := range s0.Admins {
+									if y == k {
+										continue
+									}
+									rm := settleBy(m1, nh, y, k)
+									s2 := Final.Resolve(append(append([]Entry(nil), nh.es...), rm))
+									for _, z := range s0.Admins {
+										if z != k && !s2.admins[z] {
+											return fail("key "+k+": settled by "+y+", removed admin "+z, append(nh.es, rm))
+										}
+									}
+									for _, z := range s2.Admins {
+										if !s0.admins[z] {
+											return fail("key "+k+": settled by "+y+", new admin "+z, append(nh.es, rm))
+										}
+									}
+									a, b := machineWith(h.es), machineWith(h.es)
+									a.Receive(attack...)
+									a.Receive(rm)
+									for i := len(attack) - 1; i >= 0; i-- {
+										b.Receive(attack[i])
+									}
+									b.Receive(rm)
+									a.Receive(b.Offer()...)
+									b.Receive(a.Offer()...)
+									if !sameState(a.State(), b.State()) {
+										return fail("key "+k+": settled by "+y+", machines disagree", append(nh.es, rm))
+									}
+								}
+							}
+							if d+1 < depth {
+								next = append(next, nh)
+							}
+						}
+					}
+					frontier = next
+				}
+			}
+		}
+	}
+	return res
+}
+
+// settleBy is y's removal of k signed on machine m: having seen what m
+// accepted, so one branch of the fork.
+func settleBy(m *Machine, h history, y, k string) Entry {
+	e := Entry{Author: y, Kind: Remove, Target: k, Seq: 1, Parents: idsOf(m.Entries())}
+	if p, ok := h.last[y]; ok {
+		e.Seq, e.Prev = p.Seq+1, p.ID
+	}
+	return New(e)
+}
+
+// Rule 12 and P3: a key that forks its own chain makes only itself
+// removable. From every honest room with two, three or four admins at
+// rest, one key's extra entries, including entries at positions it has
+// already used, do not remove another admin or create a new one, on a
+// machine holding the room or after another admin settles the fork; and
+// every such set resolves the same in any order (P1).
+//
+// Requirements: T9, D6
+func TestOneKeyCannotChangeAdminSetByForkingItsOwnChain(t *testing.T) {
+	depth := 1
+	if deep() {
+		depth = 2
+	}
+	rng := rand.New(rand.NewSource(12))
+	// The short run attacks rooms up to two entries after create, and one
+	// four-admin room; the deep run every room one entry deep, then rooms
+	// up to three entries two entries deep, and four seeded rooms one entry
+	// deep (two entries deep there did not finish in 50 minutes).
+	levels := histories(t)
+	res := searchForks(levels[:3], 1, 2, rng)
+	if deep() {
+		res = searchForks(levels, 1, 2, rng)
+		if res.example == "" {
+			r2 := searchForks(levels[:4], depth, 2, rng)
+			r2.checked += res.checked
+			r2.forks += res.forks
+			res = r2
+		}
+	}
+	t.Logf("forks (two and three admins): %d attack sets, %d with a fork", res.checked, res.forks)
+	if res.example != "" {
+		t.Fatalf("violated:\n%s", res.example)
+	}
+	var starts []history
+	names := []string{"four admins, one stale"}
+	if deep() {
+		names = append(names, "admin replaced", "removal complete, more voters", "fork settled")
+	}
+	for _, name := range names {
+		starts = append(starts, seeds(t)[name])
+	}
+	res = searchForks([][]history{starts}, 1, 2, rng)
+	t.Logf("forks (larger rooms): %d attack sets, %d with a fork", res.checked, res.forks)
+	if res.example != "" {
+		t.Fatalf("violated:\n%s", res.example)
 	}
 }
 

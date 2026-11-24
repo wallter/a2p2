@@ -148,19 +148,15 @@ func TestBackupRestoreForkIsSettledByRemovalOfTheForkingAdmin(t *testing.T) {
 	wantReason(t, s1, addE, ReasonAfterCut)
 }
 
-// C7 in a room of two admins: a fork by one of them cannot be settled,
-// because removing an admin needs two admins and the only other one is the
-// forking key. Machines that saw different branches first stay apart.
+// C7 and known gap 1, closed by rule 12: in a room of two admins, B is
+// restored from a backup and signs a second entry at a position it had
+// used. Machines that saw different branches first disagree until A, holding
+// both branches, removes B: the fork counts as B's own vote, so A's vote
+// completes the removal and every machine reaches the same state.
 //
-// Requirements: T9
-func TestForkInTwoAdminRoomIsNeverSettled(t *testing.T) {
-	r := newRoom(t, "A")
-	r.admin("A", "B")
-	h0 := r.all()
-	lastB := r.next("B", Add, "P", h0...)
-	h1 := r.all()
-	addD := r.add("B", "D", h1...)
-	addE := r.fork("B", 2, lastB, Add, "E", h1...)
+// Requirements: T9, D6
+func TestForkInTwoAdminRoomIsSettledByTheOtherAdminAlone(t *testing.T) {
+	r, h1, addD, addE := twoAdminFork(t)
 	p1, p2 := machineWith(r.entries(h1...)), machineWith(r.entries(h1...))
 	p1.Receive(r.byID[addD], r.byID[addE])
 	p2.Receive(r.byID[addE], r.byID[addD])
@@ -172,13 +168,88 @@ func TestForkInTwoAdminRoomIsNeverSettled(t *testing.T) {
 	p2.Receive(r.byID[ra])
 	p1.Receive(p2.Offer()...)
 	p2.Receive(p1.Offer()...)
-	if sameState(p1.State(), p2.State()) {
-		return
+	s1, s2 := p1.State(), p2.State()
+	if !sameState(s1, s2) {
+		t.Fatalf("not settled: %v/%v vs %v/%v", s1.Admins, s1.Members, s2.Admins, s2.Members)
 	}
-	t.Skip("KNOWN GAP: with two admins a fork by one of them is never settled; " +
-		"machines that saw different branches first disagree about a member for ever. " +
-		"Smallest case: A, B admins; B adds D, B restored from backup adds E at the same position; " +
-		"A alone cannot remove B. Remedy outside Resolve: three admins, or re-pair the affected machines.")
+	wantList(t, "admins", s1.Admins, "A")
+	wantApplied(t, s1, ra)
+}
+
+// twoAdminFork builds A and B as admins, B's add of P, then B's add of D
+// and, at the same position from a restored backup, B's add of E.
+func twoAdminFork(t *testing.T) (r *room, h1 []string, addD, addE string) {
+	r = newRoom(t, "A")
+	r.admin("A", "B")
+	lastB := r.next("B", Add, "P", r.all()...)
+	h1 = r.all()
+	addD = r.add("B", "D", h1...)
+	addE = r.fork("B", 2, lastB, Add, "E", h1...)
+	return r, h1, addD, addE
+}
+
+// Rule 12, what stands: when a single remover settles a fork, the branch it
+// had seen take effect stands and the other branch does not; a remover
+// that had seen both sees neither take effect, so neither stands.
+//
+// Requirements: T9, D6
+func TestForkSettledByOneRemoverKeepsTheBranchItHadSeen(t *testing.T) {
+	r, h1, addD, addE := twoAdminFork(t)
+	ra := r.remove("A", "B", append(h1, addD)...)
+	st := r.state(Final)
+	wantApplied(t, st, ra)
+	wantApplied(t, st, addD)
+	wantReason(t, st, addE, ReasonAfterCut)
+	wantList(t, "members", st.Members, "A", "D", "P")
+
+	r, h1, addD, addE = twoAdminFork(t)
+	r.remove("A", "B", append(h1, addD, addE)...)
+	st = r.state(Final)
+	wantReason(t, st, addD, ReasonAfterCut)
+	wantReason(t, st, addE, ReasonAfterCut)
+	wantList(t, "members", st.Members, "A", "P")
+}
+
+// Rule 12 needs two different entries signed by one key at one position.
+// Entries by different keys at the same position, or one entry offered
+// twice, are not a fork, and A's vote to remove B still needs a second.
+//
+// Requirements: T9
+func TestForkEvidenceNeedsTwoEntriesByOneKeyAtOnePosition(t *testing.T) {
+	r := newRoom(t, "A")
+	r.admin("A", "B")
+	addP := r.add("B", "P", r.all()...) // B#1
+	addQ := r.add("A", "Q", r.all()...) // A#3
+	r.add("B", "D", r.all()...)         // B#2, as A#2 is
+	ra := r.remove("A", "B", r.all()...)
+	es := r.entries(r.all()...)
+	es = append(es, r.byID[addP], r.byID[addQ], r.byID[ra])
+	st := Final.Resolve(es)
+	wantReason(t, st, ra, ReasonNeedsSecond)
+	wantList(t, "admins", st.Admins, "A", "B")
+}
+
+// Rule 12 counts only forks by an admin. A member that is not an admin
+// signs no entry with effect, so its fork changes nothing: both of its
+// entries are in every machine's set and nobody needs to be removed.
+//
+// Requirements: T9, D6
+func TestForkByMemberWhoIsNotAnAdminChangesNothing(t *testing.T) {
+	r := newRoom(t, "A")
+	r.admin("A", "B")
+	r.add("A", "M", r.all()...)
+	h0 := r.all()
+	m1 := r.add("M", "X", h0...)
+	m2 := r.put(Entry{Author: "M", Seq: 1, Kind: Add, Target: "Y", Parents: h0})
+	ab := r.add("A", "Z", append(h0, m2)...)
+	p1, p2 := machineWith(r.entries(h0...)), machineWith(r.entries(h0...))
+	p1.Receive(r.byID[m1], r.byID[m2], r.byID[ab])
+	p2.Receive(r.byID[m2], r.byID[m1], r.byID[ab])
+	s1, s2 := p1.State(), p2.State()
+	if !sameState(s1, s2) || !s1.members["Z"] {
+		t.Fatalf("a member's fork split the machines: %v vs %v", s1.Members, s2.Members)
+	}
+	wantList(t, "admins", s1.Admins, "A", "B")
 }
 
 // A fork is settled for good by the removal of its author: once the
@@ -201,4 +272,55 @@ func TestReadmittedAdminAfterSettledForkCanGrantAgain(t *testing.T) {
 	wantApplied(t, st, addF)
 	wantList(t, "admins", st.Admins, "A", "B", "C")
 	wantList(t, "members", st.Members, "A", "B", "C", "F", "P")
+}
+
+// Found by the deep fork search: A, the only admin, added B, removed it,
+// then made it an admin again; A and B made C an admin. A's restored
+// backup re-signs A's second position, making B an admin there, and B
+// settles the fork. B's earlier removal, which C's promotion had seen as a
+// member's removal, counts here as an admin's (the backup's grant is
+// concurrent with it); C's promotion still stands.
+//
+// Requirements: T9, D6
+func TestForkTurningAnEarlierRemovalIntoAnAdminRemovalKeepsLaterGrants(t *testing.T) {
+	r := newRoom(t, "A")
+	e1 := r.add("A", "B")
+	e2 := r.remove("A", "B", r.all()...)
+	e3 := r.admin("A", "B", r.all()...)
+	e4 := r.admin("A", "C", r.all()...)
+	e5 := r.next("B", MakeAdmin, "C", r.root, e1, e2, e3)
+	r.fork("A", 2, r.root, MakeAdmin, "B", r.root)
+	r.remove("B", "A", r.root, e1, e2, e3, e4, e5)
+	st := r.state(Final)
+	wantApplied(t, st, e5)
+	wantList(t, "admins", st.Admins, "B", "C")
+}
+
+// Limit (known gap 4, removal form), found by the deep seeded search: B
+// forked and A and C removed it. B, not yet knowing, votes to remove D;
+// the vote has no effect (rule 12). A stolen A key seconds it, claiming not
+// to have seen C's vote, then votes again to remove B having seen B's vote
+// take effect: D is removed. As in gap 4 the same entries arise honestly
+// (A seconded B's vote in good faith, then removed B), so no rule can
+// refuse it; it needs B's signature from before its removal.
+//
+// Requirements: T9, D6
+func TestStolenKeyCanSecondAForkingKeysVoidedRemovalAndThenJoinTheRemoval(t *testing.T) {
+	r, _ := threeAdmins(t)
+	r.admin("A", "D", r.all()...)
+	r.admin("B", "D", r.all()...)
+	h0 := r.all()
+	lastB := r.last["B"]
+	addD := r.add("B", "D", h0...)
+	addE := r.fork("B", lastB.Seq+1, lastB.ID, Add, "E", h0...)
+	r.remove("C", "B", append(h0, addE)...)
+	ra := r.remove("A", "B", append(h0, addD)...)
+	rbD := r.remove("B", "D", append(h0, addD, ra)...)
+	wantReason(t, r.state(Final), rbD, ReasonFork)
+	r.remove("A", "D", append(h0, addD, ra, rbD)...)
+	r.remove("A", "B", append(h0, addD, ra, rbD)...)
+	if r.state(Final).admins["D"] {
+		t.Fatal("the limit no longer holds: update known gap 4 and atRest")
+	}
+	t.Skip("KNOWN GAP 4: one key can second a removed admin's voided vote and then revive it by joining the removal")
 }

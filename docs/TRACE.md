@@ -40,7 +40,7 @@ delivery rework.
 | T6 | not yet | 3 | |
 | T7 | met | 2 | `TestWireIsEncrypted`, `TestServerRejectsBadClientCerts` |
 | T8 | met | 2 | `TestHostileStringsAreInert`, `TestInboxForgedHeadersStayInert`, `TestNoticeSanitisesLabels` |
-| T9 | not yet | 2 | Today a room has one owner. Model: `TestOneKeyCannotChangeAdminSetOnceThereAreThreeAdmins`, `TestSeededRoomsKeepEveryProperty`, `TestLostAdminOfThreeIsReplacedByTheOtherTwo`. Known gap: `TestForkInTwoAdminRoomIsNeverSettled` |
+| T9 | not yet | 2 | Today a room has one owner. Model: `TestOneKeyCannotChangeAdminSetOnceThereAreThreeAdmins`, `TestSeededRoomsKeepEveryProperty`, `TestLostAdminOfThreeIsReplacedByTheOtherTwo`, `TestForkInTwoAdminRoomIsSettledByTheOtherAdminAlone` |
 | T10 | untested | 2 | Nothing promotes a machine today; needs a test once there are several admins. Model: `TestAllAdminsLostFreezesMembershipNobodyPromoted` |
 | U1 | partly | 3 | `TestAddressedMessagesAndNewAgents`. Addressing works; there are no levels to choose |
 | U2 | not yet | 3 | |

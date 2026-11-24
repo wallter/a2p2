@@ -230,6 +230,27 @@ func quorum(rs *resolver, votes []string, thr map[string]int) bool {
 	return len(authors) >= need
 }
 
+// evQuorum is quorum for a removal's votes, counting the target's fork
+// evidence as its vote when withEvidence is set. At least one real vote is
+// needed: evidence alone never removes anyone.
+func evQuorum(rs *resolver, ev *removalEvent, votes []string, thr map[string]int, withEvidence bool) bool {
+	if len(votes) == 0 {
+		return false
+	}
+	authors := map[string]bool{}
+	need := 2
+	for _, v := range votes {
+		authors[rs.e[v].Author] = true
+		if thr[v] < need {
+			need = thr[v]
+		}
+	}
+	if withEvidence {
+		authors[ev.target] = true
+	}
+	return len(authors) >= need
+}
+
 // removalEvent is one removal that took effect: a single entry for a
 // machine that is not an admin, or the matching votes that removed an
 // admin. An entry has seen the event once it has seen enough of its votes
@@ -240,6 +261,10 @@ type removalEvent struct {
 	admin  bool
 	votes  []string
 	kept   map[string]bool // the target's entries that stand: those a voter had seen
+	// evidence is a fork by the target in the period this removal ends:
+	// two different entries it signed at one position. It counts as the
+	// target's own vote, from any entry that has seen both.
+	evidence [2]string
 }
 
 // resolve computes the state of a causally closed set of valid entries. It
@@ -297,6 +322,34 @@ func (rs *resolver) resolve(ids []string) *State {
 			authed[id] = true
 		}
 	}
+	// Fork evidence: two different entries by one key at one position, at
+	// least one signed while it was an admin. It counts as that
+	// admin's vote for its own removal in that period (rule 12).
+	evidence := map[string][2]string{}
+	{
+		pos := map[string]string{}
+		for _, id := range order[1:] {
+			e := rs.e[id]
+			k := e.Author + "\x00" + strconv.Itoa(e.Seq)
+			other, ok := pos[k]
+			if !ok {
+				pos[k] = id
+				continue
+			}
+			period := prefix[id].removedBy[e.Author]
+			if other == id || !prefix[id].admins[e.Author] && !prefix[other].admins[e.Author] {
+				continue
+			}
+			ek := e.Author + "\x00" + period
+			pair := [2]string{other, id}
+			if pair[1] < pair[0] {
+				pair = [2]string{id, other}
+			}
+			if cur, ok := evidence[ek]; !ok || e.Seq < rs.e[cur[0]].Seq || e.Seq == rs.e[cur[0]].Seq && pair[0]+pair[1] < cur[0]+cur[1] {
+				evidence[ek] = pair
+			}
+		}
+	}
 	byChange := map[string][]string{}
 	for _, id := range order {
 		if e := rs.e[id]; authed[id] {
@@ -319,13 +372,51 @@ func (rs *resolver) resolve(ids []string) *State {
 		byKey[ev.key] = ev
 		for _, v := range ev.votes {
 			applied[v] = true
+			// A removal seen in an entry's past as a plain member's may
+			// count here as an admin's, when a concurrent promotion of the
+			// target is in this set: the vote finds its event either way.
+			if _, ok := byKey[v]; !ok {
+				byKey[v] = ev
+			}
 		}
+	}
+	// A removal signed by a forked key at or after its fork, in the period
+	// of the fork, has no effect once another admin has voted to remove
+	// that key, unless some such vote had seen it take effect: the fork and
+	// that vote remove the key (rule 12), and, as in rule 9, what no
+	// remover had seen take effect does not stand.
+	againstForker := map[string][]string{}
+	for _, id := range order[1:] {
+		if e := rs.e[id]; authed[id] && e.Kind == Remove {
+			ek := e.Target + "\x00" + prefix[id].removedBy[e.Target]
+			if _, ok := evidence[ek]; ok {
+				againstForker[ek] = append(againstForker[ek], id)
+			}
+		}
+	}
+	forkedOut := func(id string) bool {
+		e := rs.e[id]
+		ek := e.Author + "\x00" + prefix[id].removedBy[e.Author]
+		pair, ok := evidence[ek]
+		if !ok || e.Seq < rs.e[pair[0]].Seq {
+			return false
+		}
+		for _, w := range againstForker[ek] {
+			if rs.anc[w][id] && prefix[w].Effects[id].Applied {
+				return false
+			}
+		}
+		return len(againstForker[ek]) > 0
 	}
 	groups := map[string][]string{}
 	var groupOrder []string
 	for _, id := range order[1:] {
 		e := rs.e[id]
 		if !authed[id] || e.Kind != Remove {
+			continue
+		}
+		if forkedOut(id) {
+			st.Effects[id] = Effect{Reason: ReasonFork}
 			continue
 		}
 		adminRemoval := prefix[id].admins[e.Target]
@@ -353,7 +444,9 @@ func (rs *resolver) resolve(ids []string) *State {
 	for _, k := range groupOrder {
 		vs := groups[k]
 		target := rs.e[vs[0]].Target
-		if !quorum(rs, vs, thr) {
+		sum := sha256.Sum256([]byte(k))
+		ev := &removalEvent{key: "r" + hex.EncodeToString(sum[:8]), target: target, admin: true, votes: vs, kept: map[string]bool{}, evidence: evidence[k]}
+		if !evQuorum(rs, ev, vs, thr, ev.evidence[0] != "") {
 			for _, v := range vs {
 				st.Effects[v] = Effect{Reason: ReasonNeedsSecond}
 			}
@@ -368,8 +461,6 @@ func (rs *resolver) resolve(ids []string) *State {
 		// voter could have made itself. Where the entries that stand
 		// include two at one position (a fork), neither branch from that
 		// position on stands.
-		sum := sha256.Sum256([]byte(k))
-		ev := &removalEvent{key: "r" + hex.EncodeToString(sum[:8]), target: target, admin: true, votes: vs, kept: map[string]bool{}}
 		atSeq := map[int]string{}
 		forkFrom := 0
 		for _, v := range vs {
@@ -395,7 +486,9 @@ func (rs *resolver) resolve(ids []string) *State {
 		addEvent(ev)
 	}
 
-	// Step 3. Forks: two different entries by one author at one position.
+	// Step 3. Forks: two different entries by one author at one position,
+	// signed while it was an admin (a fork by a key that was not an admin
+	// signs nothing with effect, so it changes nothing).
 	// A fork belongs to the period of membership in which it was signed: an
 	// entry that has seen a removal of its author that the fork had not
 	// seen is past the fork.
@@ -408,7 +501,7 @@ func (rs *resolver) resolve(ids []string) *State {
 	for _, id := range order[1:] {
 		e := rs.e[id]
 		k := e.Author + "\x00" + strconv.Itoa(e.Seq)
-		if other, ok := pos[k]; ok && other != id {
+		if other, ok := pos[k]; ok && other != id && (prefix[id].admins[e.Author] || prefix[other].admins[e.Author]) {
 			if f, ok := forkAt[e.Author]; !ok || e.Seq < f.seq {
 				forkAt[e.Author] = forkMark{e.Seq, prefix[id].removedBy[e.Author]}
 			}
@@ -533,7 +626,7 @@ func (rs *resolver) seesEvent(id string, ev *removalEvent, thr map[string]int) b
 	if !ev.admin {
 		return len(seen) == 1
 	}
-	return quorum(rs, seen, thr)
+	return evQuorum(rs, ev, seen, thr, ev.evidence[0] != "" && rs.anc[id][ev.evidence[0]] && rs.anc[id][ev.evidence[1]])
 }
 
 // laterThan reports whether a removal happened after entry id: enough of
@@ -548,7 +641,7 @@ func (rs *resolver) laterThan(ev *removalEvent, id string, thr map[string]int) b
 	if !ev.admin {
 		return len(after) == 1
 	}
-	return quorum(rs, after, thr)
+	return evQuorum(rs, ev, after, thr, ev.evidence[0] != "" && rs.anc[ev.evidence[0]][id] && rs.anc[ev.evidence[1]][id])
 }
 
 // grantReached reports whether admin vote v, with the other eligible votes
