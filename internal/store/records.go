@@ -2,9 +2,8 @@ package store
 
 // Signed records, streams, fork evidence and per-agent reading state
 // (DESIGN-next sections 2, 5 and 6; PROTOCOL-next section 8). This file is
-// migration 2 and the methods over it. The v0.2 tables above are untouched
-// and still serve the product until step 3b converts the surfaces and drops
-// them.
+// migration 2 and the methods over it. Migration 10 (notice.go) drops the
+// v0.2 tables.
 
 import (
 	"context"
@@ -217,8 +216,8 @@ func hook(point string) error {
 // admission frontier instead; see seedCursors).
 func (s *Store) AddRoom(ctx context.Context, id, label, createID string, now time.Time) error {
 	return s.tx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.Exec(`INSERT INTO rooms (id, label, owner, version, created_at, create_id, gen, joined_at)
-			VALUES (?,?,'',0,?,?,1,?) ON CONFLICT (id) DO NOTHING`, id, label, ms(now), createID, ms(now))
+		res, err := tx.Exec(`INSERT INTO rooms (id, label, create_id, gen, joined_at)
+			VALUES (?,?,?,1,?) ON CONFLICT (id) DO NOTHING`, id, label, createID, ms(now))
 		if err != nil {
 			return err
 		}

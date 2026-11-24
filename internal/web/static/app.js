@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 // notice: the one-time upgrade notice, kept for the life of the page because
 // the server returns it only once. onscreen: key -> version of every entry as
 // rendered; only that is ever confirmed. qShown: the same for question cards.
-const S = { st: null, unread: [], questions: [], qKeys: new Set(), waiting: 0, alerts: [], requests: [], room: null, msgs: [], older: [], notes: [], more: true, reply: null, sigs: {}, toSig: "", gen: 0, shown: null, toRoom: null, outcome: "", notice: "", onscreen: new Map(), qShown: new Map() };
+const S = { st: null, unread: [], questions: [], qKeys: new Set(), waiting: 0, alerts: [], requests: [], room: null, msgs: [], older: [], notes: [], more: true, reply: null, sigs: {}, toSig: "", gen: 0, shown: null, toRoom: null, outcome: "", notice: "", risky: new Set(), onscreen: new Map(), qShown: new Map() };
 let token = "";
 try { token = sessionStorage.getItem("a2p2.token") || ""; } catch (e) { /* storage blocked */ }
 if (location.hash.length > 1) {
@@ -141,7 +141,7 @@ function requestCard(r, row) {
 function renderNeeds() {
   const qs = S.questions;
   const alerts = S.alerts.filter((a) => a.kind === "fork" || a.kind === "missing");
-  const sig = JSON.stringify([S.requests, alerts.map((a) => [a.id, a.text]), qs.map((m) => [m.key, m.version, m.text]), S.outcome]);
+  const sig = JSON.stringify([S.requests, alerts.map((a) => [a.id, a.text]), qs.map((m) => [m.key, m.version, m.text]), S.outcome, [...S.risky]]);
   $("needs").hidden = !(qs.length || alerts.length || S.requests.length || S.outcome);
   if (sig === S.sigs.n) return;
   S.sigs.n = sig;
@@ -150,7 +150,15 @@ function renderNeeds() {
   rq.replaceChildren();
   for (const r of S.requests) {
     const row = el("div", "row");
-    row.append(btn("Approve this", "pri", () => decide(r, true, row), r.text), btn("Decline this", "", () => decide(r, false, row), r.text));
+    if (S.risky.has(r.id)) {
+      // The first approval answered not_caught_up: name the risk and take a
+      // second, explicit approval (sent as not_caught_up_ok).
+      row.append(el("div", "warnline", NOT_CAUGHT_UP),
+        btn("Approve anyway, I accept this risk", "pri", () => decide(r, true, row, true), r.text),
+        btn("Decline this", "", () => decide(r, false, row), r.text));
+    } else {
+      row.append(btn("Approve this", "pri", () => decide(r, true, row), r.text), btn("Decline this", "", () => decide(r, false, row), r.text));
+    }
     rq.append(requestCard(r, row));
   }
   const al = $("alerts");
@@ -171,11 +179,22 @@ function renderNeeds() {
     box.append(el("div", "qcard", el("div", "sub", m.from + " asks (" + (m.room || "") + ")"), el("div", "txt", m.text || ""), row));
   }
 }
-async function decide(r, approve, row) {
+// NOT_CAUGHT_UP is shown before the second approval (node.NotCaughtUpWarning).
+const NOT_CAUGHT_UP = "This machine has not checked the room's log with another member since it started. " +
+  "If it was restored from a backup, approving now can damage the room's admin record (two different entries " +
+  "signed at one position, a fork). Approve again only if every other member is gone or you are sure this " +
+  "machine holds the room's latest log.";
+async function decide(r, approve, row, notCaughtUpOK) {
   for (const b of row.querySelectorAll("button")) b.disabled = true;
   try {
-    const o = await api("/api/confirm", { id: r.id, approve, text: r.text });
-    S.outcome = "Request " + fp(r.id) + ": " + o.state + (o.reason ? " (" + o.reason + ")" : "");
+    const o = await api("/api/confirm", { id: r.id, approve, text: r.text, not_caught_up_ok: !!notCaughtUpOK });
+    if (o.reason === "not_caught_up") {
+      S.risky.add(r.id);
+      S.outcome = "Request " + fp(r.id) + " is not decided: this machine has not caught up with the room. Read the warning below.";
+    } else {
+      S.risky.delete(r.id);
+      S.outcome = "Request " + fp(r.id) + ": " + o.state + (o.reason ? " (" + o.reason + ")" : "");
+    }
   } catch (e) { S.outcome = "Request " + fp(r.id) + " failed: " + e.message; }
   S.sigs.n = "";
   refresh(true);

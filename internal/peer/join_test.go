@@ -17,8 +17,8 @@ import (
 	"github.com/wallter/a2p2/internal/store"
 )
 
-// joinH serves v0.2 (counting, never expected here) and the join exchange
-// of rooms, counting the bodies the join handler was given.
+// joinH serves the join exchange of rooms (and counts pulls, never
+// expected here), counting the bodies the join handler was given.
 type joinH struct {
 	countH
 	js     *node.JoinServer
@@ -58,7 +58,7 @@ func TestJoinOverTLSBetweenTwoMachines(t *testing.T) {
 	ida, idb := newID(t), newID(t)
 	a, b := machine(t, ida), machine(t, idb)
 	h := &joinH{js: node.NewJoinServer(a)}
-	addr := serve(t, ida, h, nil, nil)
+	addr := serve(t, ida, h, nil)
 	room, err := a.CreateRoom(bg, "team")
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +92,7 @@ func TestJoinOverTLSBetweenTwoMachines(t *testing.T) {
 		t.Fatalf("states: %+v %+v %v", sa, sb, err)
 	}
 	if h.from.Load() != idb.NodeID() || h.calls.Load() != 0 {
-		t.Fatalf("server saw %v; v0.2 calls %d", h.from.Load(), h.calls.Load())
+		t.Fatalf("server saw %v; pull calls %d", h.from.Load(), h.calls.Load())
 	}
 }
 
@@ -104,7 +104,7 @@ func TestJoinOverTLSToTheWrongKeySendsNothing(t *testing.T) {
 	ida, idb, idm := newID(t), newID(t), newID(t)
 	a, b := machine(t, ida), machine(t, idb)
 	h := &joinH{js: node.NewJoinServer(machine(t, idm))}
-	addr := serve(t, idm, h, nil, nil)
+	addr := serve(t, idm, h, nil)
 	room, err := a.CreateRoom(bg, "team")
 	if err != nil {
 		t.Fatal(err)
@@ -122,14 +122,13 @@ func TestJoinOverTLSToTheWrongKeySendsNothing(t *testing.T) {
 	}
 }
 
-// The join route refuses a body over its limit before reading it, and is
-// served only when the handler implements it.
+// The join route refuses a body over its limit before reading it.
 //
 // Requirements: T3
 func TestJoinRouteRefusesOversizeBodies(t *testing.T) {
 	id := newID(t)
 	h := &joinH{js: node.NewJoinServer(machine(t, id))}
-	addr := serve(t, id, h, nil, nil)
+	addr := serve(t, id, h, nil)
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	c := rawClient(certFor(t, pub, priv, hex.EncodeToString(pub)))
 	big := `{"secret":"` + strings.Repeat("a", int(maxJoinV2Body)) + `"}`
@@ -142,10 +141,6 @@ func TestJoinRouteRefusesOversizeBodies(t *testing.T) {
 	if h.bodies.Load() != 1 {
 		t.Fatalf("bodies handed over: %d", h.bodies.Load())
 	}
-	plain := serve(t, id, &countH{}, nil, nil)
-	if code, err := post(c, plain, pathJoinV2, `{}`); err != nil || code != 404 && code != 405 {
-		t.Fatalf("join route without a join handler: %d %v", code, err)
-	}
 }
 
 // The join route limits each source address to 10 requests a minute
@@ -155,7 +150,7 @@ func TestJoinRouteRefusesOversizeBodies(t *testing.T) {
 func TestJoinRouteLimitsEachSourceAddressBeforeReadingTheBody(t *testing.T) {
 	id := newID(t)
 	h := &joinH{js: node.NewJoinServer(machine(t, id))}
-	addr := serve(t, id, h, nil, nil)
+	addr := serve(t, id, h, nil)
 	for i := 0; i <= node.OpensPerMinute; i++ {
 		pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 		c := rawClient(certFor(t, pub, priv, hex.EncodeToString(pub)))

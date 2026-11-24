@@ -82,6 +82,6 @@ if [ $# -ge 2 ] && command -v "$1" >/dev/null && command -v "$2" >/dev/null; the
 fi
 
 echo
-"$bin" status | sed -n '/agents on this node/,$p'
+"$bin" status | sed -n '/agents on this machine/,$p'
 echo "passed $pass, failed $fail"
 [ "$fail" -eq 0 ]

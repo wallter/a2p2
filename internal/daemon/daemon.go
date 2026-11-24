@@ -151,6 +151,8 @@ type RunOpts struct {
 	PeerListener net.Listener
 	// Ready, if set, is called once every listener serves.
 	Ready func()
+	// Exchange, if set, is given the pull exchange once it exists.
+	Exchange func(*node.Exchange)
 }
 
 // Run is the daemon. It returns when ctx ends or a stop is requested.
@@ -199,9 +201,7 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	// Closed last of all, after every handler and loop has returned.
 	defer st.Close()
 
-	// The next version's path (DESIGN-next section 9): records, the room
-	// log, pull and join. No v0.2 node is constructed; the v0.2 tables stay
-	// in the database, unread.
+	// Records, the room log, pull and join (DESIGN-next section 9).
 	m := node.NewMachine(st, id.Key, node.MachineOpts{})
 	rooms, err := node.OpenRooms(ctx, m)
 	if err != nil {
@@ -231,10 +231,19 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	if len(addrs) > node.MaxAddrs {
 		addrs = addrs[:node.MaxAddrs]
 	}
-	book := node.NewAddrBook()
+	// Peers' addresses as last stored (peer_addrs): a machine that does
+	// not listen can reach its peers again after a restart. What joins,
+	// invites and pulls teach the book it saves itself.
+	book, err := node.LoadAddrBook(ctx, st)
+	if err != nil {
+		return err
+	}
 	pulls := peer.NewPullClient(id, book)
 	defer pulls.Close()
 	x := node.NewExchange(rooms, pulls, node.ExchangeOpts{Book: book, Addrs: addrs})
+	if o.Exchange != nil {
+		o.Exchange(x)
+	}
 	joiner := node.NewJoiner(rooms, peer.NewJoinClient(id), node.JoinerOpts{Name: cfg.Name, Addrs: addrs})
 	surf, err := node.OpenSurface(ctx, m, rooms, node.SurfaceOpts{Name: cfg.Name, Joiner: joiner, Book: book,
 		Addrs: func() []string { return addrs }, Network: netw})
@@ -263,7 +272,7 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 		ln := peerLn
 		peerLn = nil // Serve owns it now
 		run(func() {
-			if err := peer.Serve(ctx, ln, id, h, nil); err != nil && ctx.Err() == nil {
+			if err := peer.Serve(ctx, ln, id, h); err != nil && ctx.Err() == nil {
 				slog.Error("peer listener stopped", "err", err)
 			}
 		})
@@ -278,11 +287,9 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	// after (deferred first).
 	var servers []*http.Server
 	defer func() {
+		// Held (waiting) pulls end at once: peer.Serve cancels every
+		// request in progress when ctx ends, before its grace period.
 		stop()
-		// CANCEL-HOLDS: the pull endpoint's own call that releases held
-		// (waiting) pulls arrives with the scheduler work in another
-		// worktree; call it here, before draining. Until then the request
-		// contexts, which end with ctx, release them.
 		shut, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		for _, srv := range servers {
@@ -419,10 +426,8 @@ func prune(ctx context.Context, m *node.Machine) {
 	}
 }
 
-// peerHandler serves the next version's peer routes, /p/v2/join and
-// /p/v2/pull, each call inside the gate. The v0.2 routes, which peer.Serve
-// still mounts until they are deleted, refuse everything: no v0.2 node
-// exists to answer them.
+// peerHandler serves the peer routes, /p/v2/join and /p/v2/pull, each
+// call inside the gate.
 type peerHandler struct {
 	*node.JoinServer
 	x *node.Exchange
@@ -443,22 +448,6 @@ func (h peerHandler) Handle(ctx context.Context, from, source string, body []byt
 	}
 	defer h.g.leave()
 	return h.JoinServer.Handle(ctx, from, source, body)
-}
-
-func (peerHandler) Receive(_ context.Context, _ string, req node.DeliverReq, _ func(string)) []node.Result {
-	out := make([]node.Result, 0, len(req.Envelopes))
-	for _, e := range req.Envelopes {
-		out = append(out, node.Result{ID: e.ID, Status: node.ResRejected, Reason: "this machine runs the next version of a2p2"})
-	}
-	return out
-}
-
-func (peerHandler) HandleJoin(context.Context, string, node.JoinReq) (store.Room, error) {
-	return store.Room{}, node.ErrForbidden
-}
-
-func (peerHandler) HandleRoom(context.Context, string, node.RoomReq) (store.Room, error) {
-	return store.Room{}, node.ErrForbidden
 }
 
 // Connect returns a client for the daemon of home, starting the daemon in the

@@ -1,7 +1,7 @@
 package peer
 
 // POST /p/v2/pull (PROTOCOL-next section 4): the pull exchange on the
-// existing listener, beside /p/v1/*. The requester's node id comes from
+// peer listener, beside /p/v2/join. The requester's node id comes from
 // the TLS certificate only; the body is size-checked before it is read and
 // strict JSON (checked by internal/node); the per-peer rate and concurrency
 // limits and the deadlines are those of 4.6; refusals carry the statuses
@@ -50,8 +50,7 @@ var (
 	pullDialBurst = 8.0
 )
 
-// PullHandler serves the pull exchange (node.Exchange). A Handler passed
-// to Serve that also implements it serves /p/v2/pull.
+// PullHandler serves the pull exchange (node.Exchange) on /p/v2/pull.
 type PullHandler interface {
 	Serve(ctx context.Context, from string, q *node.PullRequest) (*node.PullResponse, error)
 }

@@ -114,6 +114,7 @@ type machine struct {
 	c    *localapi.Client
 	done chan error
 	node string
+	x    *node.Exchange // this run's pull exchange
 }
 
 // newMachine starts a machine with networking on, decided through the
@@ -151,7 +152,8 @@ func (m *machine) start() {
 	m.done = make(chan error, 1)
 	done, ready := m.done, make(chan struct{})
 	go func() {
-		done <- RunWith(context.Background(), m.home, "test", RunOpts{PeerListener: m.ln.view(), Ready: func() { close(ready) }})
+		done <- RunWith(context.Background(), m.home, "test", RunOpts{PeerListener: m.ln.view(), Ready: func() { close(ready) },
+			Exchange: func(x *node.Exchange) { m.x = x }})
 	}()
 	select {
 	case <-ready:
@@ -476,6 +478,19 @@ func TestV02NoticeFromASchemaOneFileIsShownOnceEverThroughStatus(t *testing.T) {
 	if st := call[localapi.Status](m, "status", localapi.StatusReq{ShowNotice: true}); st.Notice != "" {
 		t.Fatalf("after a restart: notice %q", st.Notice)
 	}
+	// The v0.2 data is gone from the file itself, the agent stays.
+	m.stop()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(m.home, "a2p2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v02, agents int
+	if err := db.QueryRow(`SELECT (SELECT COUNT(*) FROM sqlite_master WHERE name IN ('messages', 'members', 'deliveries', 'marks', 'invites')) +
+		(SELECT COUNT(*) FROM rooms WHERE id = 'r_v02shared'), (SELECT COUNT(*) FROM agents WHERE id = 'claude-x@abababab')`).Scan(&v02, &agents); err != nil || v02 != 0 || agents != 1 {
+		t.Fatalf("v0.2 tables and rooms left %d, agents %d: %v", v02, agents, err)
+	}
+	db.Close()
+	m.start() // and the daemon starts over the migrated file
 }
 
 func TestDaemonServesOnlyTheNewPath(t *testing.T) {
@@ -667,4 +682,76 @@ func TestPageDecisionNeedsTheExactOriginAndShowsTheFullFingerprint(t *testing.T)
 func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// TestStopReleasesAHeldPullAtOnce stops a daemon while a peer's waiting
+// pull is held at it (up to a minute otherwise): peer.Serve cancels the
+// hold as the daemon's context ends, so the daemon exits well inside the
+// listener's 5-second grace period.
+func TestStopReleasesAHeldPullAtOnce(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts daemons")
+	}
+	a, b := newMachine(t, "alpha"), newMachine(t, "beta")
+	room := call[localapi.Room](a, "room/create", localapi.RoomReq{Room: "team"}).ID
+	ann := a.agent("ann")
+	join(t, a, b, room, localapi.InviteReq{}, false)
+	bea := b.agent("bea")
+	held := a.x.NextHold(room, b.node)
+	// The message wakes any hold already there; the pull that follows it
+	// is the one held.
+	call[localapi.SendResp](a, "send", localapi.SendReq{Agent: ann, Room: room, Text: "ping", To: []string{bea}})
+	inboxWait(b, bea)
+	select {
+	case <-held:
+	case <-time.After(90 * time.Second):
+		t.Fatal("no waiting pull from the peer was held")
+	}
+	start := time.Now()
+	a.stop()
+	d := time.Since(start)
+	t.Logf("stopped in %v with a held pull", d)
+	if d > 2*time.Second {
+		t.Fatalf("stop took %v with a held pull", d)
+	}
+}
+
+// TestAMachineThatDoesNotListenReachesItsPeerAfterARestartFromStoredAddresses:
+// the daemon loads the address book from the database. A machine with
+// networking outbound (no listener) restarts with no join record left to
+// relearn its admin's address from; it still pulls from the admin, at the
+// address the book stored.
+func TestAMachineThatDoesNotListenReachesItsPeerAfterARestartFromStoredAddresses(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts daemons")
+	}
+	a, b := newMachine(t, "alpha"), newMachine(t, "beta")
+	room := call[localapi.Room](a, "room/create", localapi.RoomReq{Room: "team"}).ID
+	ann := a.agent("ann")
+	join(t, a, b, room, localapi.InviteReq{}, false)
+	bea := b.agent("bea")
+	b.setNet(node.NetworkOutbound)
+	b.stop()
+	db, err := store.Open(filepath.Join(b.home, "a2p2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.PeerAddrs(context.Background())
+	db.Close()
+	if err != nil || !slices.ContainsFunc(stored, func(p store.PeerAddr) bool { return p.Node == a.node && p.Addr == a.ln.ln.Addr().String() }) {
+		t.Fatalf("stored addresses: %+v %v", stored, err)
+	}
+	raw, err := sql.Open("sqlite", filepath.Join(b.home, "a2p2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec("DELETE FROM joins"); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+	b.start()
+	msg := call[localapi.SendResp](a, "send", localapi.SendReq{Agent: ann, Room: room, Text: "after the restart", To: []string{bea}})
+	if es := inboxWait(b, bea); len(es) != 1 || es[0].ID != msg.ID {
+		t.Fatalf("after the restart: %+v", es)
+	}
 }

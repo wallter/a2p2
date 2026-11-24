@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -578,39 +577,6 @@ func TestReopeningTheDatabaseGivesTheSameAnswers(t *testing.T) {
 	}
 }
 
-// Migration 2 is additive in 3a: the v0.2 tables keep working beside the
-// new ones, and a room added for records shows its new columns.
-func TestMigrationTwoKeepsTheV02TablesWorking(t *testing.T) {
-	s, _ := openTest(t)
-	ctx := context.Background()
-	if _, err := s.PutRoom(ctx, Room{ID: "local", Label: "local", Owner: "n", Version: 1}, true, t0); err != nil {
-		t.Fatal(err)
-	}
-	rooms, err := s.Rooms(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var names []string
-	for _, r := range rooms {
-		names = append(names, r.ID)
-	}
-	sort.Strings(names)
-	if !reflect.DeepEqual(names, []string{"local", testRoom}) {
-		t.Fatalf("rooms %v", names)
-	}
-	var gen int
-	if err := s.db.QueryRow(`SELECT gen FROM rooms WHERE id = ?`, testRoom).Scan(&gen); err != nil || gen != 1 {
-		t.Fatalf("gen %d, %v", gen, err)
-	}
-	if err := s.AddRoom(ctx, testRoom, "renamed", "", t0); err != nil {
-		t.Fatal(err)
-	}
-	var v int
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != len(migrations) {
-		t.Fatalf("user_version %d, %v", v, err)
-	}
-}
-
 // D8, review blocker 1: only a verified record can be stored; a nil or
 // empty one is refused, by PutRecord and by Write, and a record whose
 // signature fails cannot become verified.
@@ -842,73 +808,5 @@ func TestRegisteringAnAgentStartsItsCursorsAtTheCurrentEnd(t *testing.T) {
 	}
 	if err := s.AddRoom(ctx, "r_ffffffffffffffffffffffffffffffff", "other", "", t0); err != nil {
 		t.Fatal(err)
-	}
-}
-
-// Migration 2 over a populated v0.2 database: the file at user_version 1
-// with rows written by the v0.2 methods opens with this binary, the old
-// rows are intact, and the new tables exist.
-func TestMigrationTwoOverAPopulatedV02Database(t *testing.T) {
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "v02.db")
-	all := migrations
-	migrations = all[:1]
-	old, err := Open(path)
-	migrations = all
-	if err != nil {
-		t.Fatal(err)
-	}
-	owner, peer := nodeOf(testKey("owner")), nodeOf(testKey("peer"))
-	room := Room{ID: "r_0123456789abcdef0123456789abcdef", Label: "team", Owner: owner, Version: 1,
-		Members: []Member{{Node: owner, Name: "o", Addrs: []string{"a:1"}}, {Node: peer, Name: "p", Addrs: []string{}}}}
-	if _, err := old.PutRoom(ctx, room, true, t0); err != nil {
-		t.Fatal(err)
-	}
-	if err := old.TouchAgent(ctx, Agent{ID: core.AgentID("alice", owner), Label: "alice", Harness: "claude", Cwd: "/w", LastSeen: t0}, t0); err != nil {
-		t.Fatal(err)
-	}
-	e := core.Envelope{V: core.ProtocolVersion, ID: core.NewID(t0), Room: room.ID, FromNode: owner,
-		From: core.AgentID("alice", owner), Kind: core.KindMessage, Body: core.Body{Text: "old"}, CreatedAt: t0}
-	if _, err := old.Send(ctx, &e, "", t0); err != nil {
-		t.Fatal(err)
-	}
-	var v int
-	if err := old.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != 1 {
-		t.Fatalf("fixture user_version %d %v", v, err)
-	}
-	beforeRooms, _ := old.Rooms(ctx)
-	beforeMsg, err := old.Get(ctx, e.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	beforeAgents, _ := old.Agents(ctx)
-	old.Close()
-
-	s, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != len(migrations) {
-		t.Fatalf("user_version %d %v", v, err)
-	}
-	afterRooms, _ := s.Rooms(ctx)
-	afterMsg, err := s.Get(ctx, e.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	afterAgents, _ := s.Agents(ctx)
-	if !reflect.DeepEqual(beforeRooms, afterRooms) || !reflect.DeepEqual(beforeMsg, afterMsg) || !reflect.DeepEqual(beforeAgents, afterAgents) {
-		t.Fatalf("v0.2 rows changed:\n%+v\n%+v", beforeRooms, afterRooms)
-	}
-	for _, tbl := range []string{"records", "streams", "forks", "registrations", "cursors", "reads", "read_heads"} {
-		var n int
-		if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, tbl).Scan(&n); err != nil || n != 1 {
-			t.Fatalf("table %s missing", tbl)
-		}
-	}
-	var gen int
-	if err := s.db.QueryRow(`SELECT gen FROM rooms WHERE id = ?`, room.ID).Scan(&gen); err != nil || gen != 0 {
-		t.Fatalf("v0.2 room gen %d %v", gen, err)
 	}
 }
