@@ -304,3 +304,27 @@ and compares every inbox, thread and stored record after each step. It found
 a defect in the model (a replace could reuse a version number once the
 winning text had expired), fixed in both.
 
+## D30. The room log, requests and membership-aware reading (2026-11-24)
+
+Build step 4a, beside the v0.2 code. Migration 3 adds `log` (every entry
+with its disposition and arrival order, so the membership machine is rebuilt
+on start to the same state), `room_members` (a cache of the resolver's
+result), `requests` (changes waiting for a person) and `rooms.left_at`.
+`node.Receive` is the one way entries enter a room, from this machine or
+another.
+
+Choices made in review (`research/decisions/step4a-review-sol.md`):
+- A request records the exact action approved. If the state has moved so
+  that confirming would now do something else (promote has become re-admit),
+  it is refused and nothing is signed. Decisions on a request are serialised.
+- The in-memory state changes only after the database commit. On any failure
+  the room is rebuilt from its stored rows.
+- Every admitting grant carries the signer's positions (`from`), with or
+  without history. A newcomer's agents start reading there; `history`
+  decides only whether earlier text is readable. This changes the protocol,
+  which had forbidden `from` together with `history`.
+- Text whose readability cannot be decided yet waits; the reader's cursor
+  does not pass it.
+- A machine that has been removed may still write locally (nobody takes it),
+  and its own reader marks its records as from a removed author.
+

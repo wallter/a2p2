@@ -374,7 +374,7 @@ func place(tx *sql.Tx, r *core.VerifiedRecord, o PutOpts) (Outcome, error) {
 	f := r.Fields()
 	rd := &Reader{tx: tx}
 	var x int
-	switch err := tx.QueryRow(`SELECT 1 FROM rooms WHERE id = ?`, f.Room).Scan(&x); {
+	switch err := tx.QueryRow(`SELECT 1 FROM rooms WHERE id = ? AND left_at = 0`, f.Room).Scan(&x); {
 	case errors.Is(err, sql.ErrNoRows):
 		return "", ErrNotFound
 	case err != nil:

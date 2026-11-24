@@ -1,0 +1,715 @@
+package node
+
+// Rooms is the room log and membership on this machine (DESIGN-next
+// sections 3, 5 and 7): one members.Machine per room, rebuilt on start by
+// replaying the stored log in arrival batches, fed by one ingress function
+// (Receive). It lives beside Node, like Machine, and is exercised only by
+// its own tests until the surfaces switch over; joining over the network is
+// step 4b and pull is step 5, and both call Receive.
+
+import (
+	"context"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"slices"
+	"sort"
+	"sync"
+
+	"github.com/wallter/a2p2/internal/core"
+	"github.com/wallter/a2p2/internal/members"
+	"github.com/wallter/a2p2/internal/store"
+)
+
+// Errors of the log operations.
+var (
+	ErrNoRoom = &UserError{"room not held here"}
+	// ErrStaleGeneration: the room was left (or left and joined again)
+	// since the caller looked; whatever it prepared is not applied.
+	ErrStaleGeneration = store.ErrStaleGeneration
+)
+
+// Reasons an entry is invalid at ingress, before the membership machine
+// (PROTOCOL-next section 3: S1 to S7 and V1 give core's codes).
+const (
+	CodeWrongRoom    = "wrong_room"    // R1
+	CodeSecondCreate = "second_create" // C1
+	CodeBadSignature = "bad_signature" // G1
+	// ReasonKnownInvalid: the machine found the entry invalid before but
+	// it was over the bound kept, so only the fact is known.
+	ReasonKnownInvalid = "it was found invalid before"
+	// ReasonOverLimit: the entry was not taken, because the room already
+	// keeps as many entries of its kind as the bounds allow.
+	ReasonOverLimit = "the room keeps as many invalid or refused entries as it allows; this one was not taken"
+)
+
+// Bounds on what a room keeps beyond its effective log. Fork evidence (an
+// entry refused because its author signed another at its position) is
+// bounded by members.Machine (8 per position) and is not counted here.
+const (
+	// MaxRefusedDependants: entries refused because an entry they had
+	// seen was refused as a fork.
+	MaxRefusedDependants = 256
+	// MaxInvalidKept: entries the membership machine found invalid (bad
+	// chain, invalid parent), kept so a replay judges their dependants
+	// as before. Beyond it a further invalid entry is not taken at all.
+	MaxInvalidKept = 256
+	// MaxPendingRequests: requests waiting for a person, per room.
+	MaxPendingRequests = 32
+)
+
+// EntryResult is what ingress did with one received entry. ID is empty
+// when the bytes did not parse.
+type EntryResult struct {
+	ID          string
+	Disposition members.Disposition
+	Reason      string
+}
+
+// testHook, set by a test, fails a step of ingress at a named point.
+var testHook func(point string) error
+
+func hookAt(point string) error {
+	if testHook != nil {
+		return testHook(point)
+	}
+	return nil
+}
+
+// Rooms holds the membership of every room with a log on this machine.
+type Rooms struct {
+	m *Machine
+	// mu serialises every change to membership, every decision on a
+	// request and every record placed through ReceiveRecord, so that what
+	// a room's machine decided and what the store holds never diverge.
+	mu    sync.Mutex
+	rooms map[string]*roomLog
+	// signs counts membership entries signed (create entries excluded);
+	// tests read it.
+	signs int
+}
+
+// roomLog is one room's membership as this machine holds it. Nothing in it
+// changes until the store has committed what changed it.
+type roomLog struct {
+	id, label, createID string
+	gen                 int64
+	mach                *members.Machine
+	ents                map[string]*core.VerifiedEntry // kept: accepted, held, refused, invalid
+	state               map[string]store.LogRow        // state, reason and arrival of each (no bytes)
+	st                  members.State
+	perm                string // own membership and permission, to see it change
+	cache               map[string]store.RoomMember
+	// pulled is the hook for "sign nothing for a room until its log has
+	// been pulled since start" (DESIGN-next section 3): step 5 sets it
+	// after the first successful pull of this room since the daemon
+	// started. See maySign.
+	pulled bool
+}
+
+// OpenRooms rebuilds the membership of every room with a log from the
+// store, replaying each room's log in its arrival batches, and refreshes
+// the member cache from the result.
+func OpenRooms(ctx context.Context, m *Machine) (*Rooms, error) {
+	r := &Rooms{m: m, rooms: map[string]*roomLog{}}
+	lrs, err := m.st.LogRooms(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, lr := range lrs {
+		rl, err := r.load(ctx, lr)
+		if err != nil {
+			return nil, fmt.Errorf("room %s: %w", lr.ID, err)
+		}
+		if err := m.st.ReplaceMembers(ctx, rl.id, cacheRows(rl.cache)); err != nil {
+			return nil, err
+		}
+		r.rooms[rl.id] = rl
+	}
+	return r, nil
+}
+
+func (r *Rooms) load(ctx context.Context, lr store.LogRoom) (*roomLog, error) {
+	rows, err := r.m.st.Log(ctx, lr.ID)
+	if err != nil {
+		return nil, err
+	}
+	rl := &roomLog{id: lr.ID, label: lr.Label, createID: lr.CreateID, gen: lr.Gen,
+		ents: map[string]*core.VerifiedEntry{}, state: map[string]store.LogRow{}}
+	for _, row := range rows {
+		e, err := core.EntryFromParts(row.Header, row.Sig)
+		if err != nil {
+			return nil, errors.New("stored entry does not parse")
+		}
+		v, err := e.Verified()
+		if err != nil {
+			return nil, errors.New("stored entry does not verify")
+		}
+		row.Header, row.Sig = nil, nil
+		rl.ents[v.ID()], rl.state[v.ID()] = v, row
+	}
+	if err := r.replay(rl); err != nil {
+		return nil, err
+	}
+	return rl, nil
+}
+
+// replay rebuilds rl's machine from its kept entries in their arrival
+// batches, and the state derived from it. members.Machine is
+// deterministic, so the replay decides every kept entry as it was decided
+// before; a difference is reported as an error rather than adopted. It
+// uses nothing but memory: it cannot be cancelled.
+func (r *Rooms) replay(rl *roomLog) error {
+	ids := sortedIDs(rl.state)
+	sort.SliceStable(ids, func(i, j int) bool {
+		a, b := rl.state[ids[i]], rl.state[ids[j]]
+		if a.Batch != b.Batch {
+			return a.Batch < b.Batch
+		}
+		return a.Pos < b.Pos
+	})
+	root := rl.ents[rl.createID]
+	if root == nil || rl.state[rl.createID].Batch != 0 {
+		return errors.New("log does not start with the pinned create")
+	}
+	mach, err := members.NewMachine(root)
+	if err != nil {
+		return err
+	}
+	final := map[string]members.Result{rl.createID: {ID: rl.createID, Disposition: members.Accepted}}
+	var batch []*core.VerifiedEntry
+	flush := func() {
+		for _, x := range mach.Receive(batch...) {
+			final[x.ID] = x
+		}
+		batch = nil
+	}
+	cur := int64(0)
+	for _, id := range ids {
+		row := rl.state[id]
+		if id == rl.createID {
+			continue
+		}
+		if row.Batch != cur && len(batch) > 0 {
+			flush()
+		}
+		cur = row.Batch
+		batch = append(batch, rl.ents[id])
+	}
+	if len(batch) > 0 {
+		flush()
+	}
+	for id, row := range rl.state {
+		if x := final[id]; string(x.Disposition) != row.State || x.Reason != row.Reason {
+			return fmt.Errorf("replay decided entry %s as %s, stored %s", id, x.Disposition, row.State)
+		}
+	}
+	rl.mach = mach
+	rl.st = mach.State()
+	rl.perm = r.permKey(rl.st)
+	rl.cache = r.memberCache(rl.st, rl.lookup(nil))
+	return nil
+}
+
+// restore puts rl's machine back to exactly what the store holds, after
+// a batch that was not committed changed it. The store, and rl's maps,
+// were not changed, so this is a replay from memory.
+func (r *Rooms) restore(rl *roomLog) {
+	if err := r.replay(rl); err != nil {
+		// Only a non-deterministic machine gets here; the next start
+		// reports it. Until then the room is not served.
+		delete(r.rooms, rl.id)
+	}
+}
+
+func (rl *roomLog) lookup(fresh map[string]*core.VerifiedEntry) func(string) *core.VerifiedEntry {
+	return func(id string) *core.VerifiedEntry {
+		if v := rl.ents[id]; v != nil {
+			return v
+		}
+		return fresh[id]
+	}
+}
+
+func entryRow(v *core.VerifiedEntry) store.LogRow {
+	return store.LogRow{ID: v.ID(), Author: v.Author(), Seq: v.Fields().Seq, Header: v.Header(), Sig: v.Sig()}
+}
+
+// CreateRoom creates a room with this machine as its only member and
+// admin: a new room id (PROTOCOL-next section 0) and the create entry,
+// signed with this machine's key, which is pinned as the room's identity.
+// The create entry is the only log entry a daemon signs without a
+// confirmed request.
+func (r *Rooms) CreateRoom(ctx context.Context, label string) (string, error) {
+	var b [16]byte
+	r.m.rand(b[:])
+	id := "r_" + hex.EncodeToString(b[:])
+	e, err := core.NewEntry(r.m.key, core.EntryFields{Room: id, Seq: 1, Kind: core.EntryCreate, Label: label,
+		Created: r.m.now()})
+	if err != nil {
+		return "", userErr("cannot create the room: %v", err)
+	}
+	v, err := e.Verified()
+	if err != nil {
+		return "", err
+	}
+	if err := r.pin(ctx, v); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// PinRoom starts holding the log of a room this machine is joining, from
+// its create entry as received (the join preview, step 4b), which is
+// pinned: any other create entry for the room is refused (C1). The room's
+// generation moves on, so nothing prepared under an earlier membership of
+// it applies. Entries then arrive through Receive.
+func (r *Rooms) PinRoom(ctx context.Context, createWire []byte) (string, error) {
+	e, err := core.ParseEntry(createWire)
+	if err != nil {
+		return "", userErr("bad create entry: %v", err)
+	}
+	if e.Fields().Kind != core.EntryCreate {
+		return "", userErr("not a create entry")
+	}
+	v, err := e.Verified()
+	if err != nil {
+		return "", userErr("create entry: %s", CodeBadSignature)
+	}
+	if err := r.pin(ctx, v); err != nil {
+		return "", err
+	}
+	return v.Fields().Room, nil
+}
+
+func (r *Rooms) pin(ctx context.Context, v *core.VerifiedEntry) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	f := v.Fields()
+	if r.rooms[f.Room] != nil {
+		return userErr("room is held here already")
+	}
+	row := entryRow(v)
+	row.State = store.LogAccepted
+	rl := &roomLog{id: f.Room, label: f.Label, createID: v.ID(),
+		ents: map[string]*core.VerifiedEntry{v.ID(): v}, state: map[string]store.LogRow{}}
+	bare := row
+	bare.Header, bare.Sig = nil, nil
+	rl.state[v.ID()] = bare
+	if err := r.replay(rl); err != nil {
+		return err
+	}
+	gen, err := r.m.st.CreateLogRoom(ctx, f.Room, f.Label, row, cacheRows(rl.cache), r.m.now())
+	if err != nil {
+		return err
+	}
+	rl.gen = gen
+	r.rooms[f.Room] = rl
+	return nil
+}
+
+// Gen returns the room's current generation. A caller that prepares
+// something to apply later (a pull request, step 5; a join, step 4b)
+// records it and passes it back to Receive or ReceiveRecord, or checks it
+// with CheckGen; after a leave it no longer matches.
+func (r *Rooms) Gen(room string) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rl := r.rooms[room]
+	if rl == nil {
+		return 0, ErrNoRoom
+	}
+	return rl.gen, nil
+}
+
+// CheckGen reports ErrStaleGeneration unless room is held and at
+// generation gen. The store repeats the check inside each write.
+func (r *Rooms) CheckGen(room string, gen int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rl := r.rooms[room]
+	if rl == nil || rl.gen != gen {
+		return ErrStaleGeneration
+	}
+	return nil
+}
+
+// Leave stops carrying room (DESIGN-next section 7): its records, reading
+// state, log and requests are deleted here, and the room stays as a local
+// tombstone with a new generation, so a late response is not applied.
+// Other members still list this machine until an admin removes it.
+func (r *Rooms) Leave(ctx context.Context, room string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.rooms[room] == nil {
+		return ErrNoRoom
+	}
+	if _, err := r.m.st.LeaveRoom(ctx, room, r.m.now()); err != nil {
+		return err
+	}
+	delete(r.rooms, room)
+	return nil
+}
+
+// Offer returns the room's entries as a member passes them on: accepted
+// entries in causal order, then held and refused ones (fork evidence) in
+// arrival order, as wire objects. Invalid entries are never passed on.
+func (r *Rooms) Offer(room string) ([][]byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rl := r.rooms[room]
+	if rl == nil {
+		return nil, ErrNoRoom
+	}
+	var out [][]byte
+	for _, v := range rl.mach.Offer() {
+		out = append(out, v.Wire())
+	}
+	return out, nil
+}
+
+// State returns the room's resolved membership. Open fork evidence is not
+// part of it: until a removal settles a fork, the branch accepted first
+// stands here [M11], and the evidence counts only as a removal vote [M12].
+func (r *Rooms) State(room string) (members.State, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rl := r.rooms[room]
+	if rl == nil {
+		return members.State{}, ErrNoRoom
+	}
+	return rl.st, nil
+}
+
+func (r *Rooms) room(room string) (*roomLog, error) {
+	rl := r.rooms[room]
+	if rl == nil {
+		return nil, ErrNoRoom
+	}
+	return rl, nil
+}
+
+// Receive is the single ingress for log entries, whoever signed them:
+// this machine on confirmation, a joiner's poll (step 4b), a pull or an
+// offer (step 5). wires are wire objects exactly as received, in arrival
+// order, and are one arrival batch. For each, in order: decode with the
+// strict checks (S1 to S7, V1), the room (R1), the pinned create (C1) and
+// the signature (G1); then the entries not held yet go to the room's
+// members.Machine (C2 and C3: chain, parents, forks, settlement); then the
+// batch is stored with the dispositions the machine returned, the member
+// cache updated, requests raised for changes this machine's person can
+// second, and, if this machine's own permission changed, the text it may
+// hold re-decided and its agents' cursors seeded at its admission
+// frontier, all in one transaction. gen, if not zero, is the generation
+// the caller prepared under; a mismatch applies nothing
+// (ErrStaleGeneration). A batch that changes nothing writes nothing.
+//
+// It returns one result per wire, in order; entries already held report
+// their current disposition. On an error nothing was stored and the room
+// is exactly as it was, so the same batch can be retried as if for the
+// first time.
+func (r *Rooms) Receive(ctx context.Context, room string, gen int64, wires ...[]byte) ([]EntryResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rl, err := r.room(room)
+	if err != nil {
+		return nil, err
+	}
+	if gen != 0 && gen != rl.gen {
+		return nil, ErrStaleGeneration
+	}
+	return r.ingest(ctx, rl, gen, wires, nil)
+}
+
+// completion is the request a batch approves.
+type completion struct{ request, entry string }
+
+func (r *Rooms) ingest(ctx context.Context, rl *roomLog, gen int64, wires [][]byte, done *completion) ([]EntryResult, error) {
+	out := make([]EntryResult, len(wires))
+	idx := make([]string, len(wires)) // the verified entry of each wire
+	var fresh []*core.VerifiedEntry
+	seen := map[string]bool{}
+	for i, w := range wires {
+		e, err := core.ParseEntry(w)
+		if err != nil {
+			out[i] = EntryResult{Disposition: members.Invalid, Reason: refusalCode(err)}
+			continue
+		}
+		f := e.Fields()
+		out[i].ID = e.ID()
+		switch {
+		case f.Room != rl.id:
+			out[i].Disposition, out[i].Reason = members.Invalid, CodeWrongRoom
+			continue
+		case f.Kind == core.EntryCreate && e.ID() != rl.createID:
+			out[i].Disposition, out[i].Reason = members.Invalid, CodeSecondCreate
+			continue
+		}
+		v, err := e.Verified()
+		if err != nil {
+			out[i].Disposition, out[i].Reason = members.Invalid, CodeBadSignature
+			continue
+		}
+		idx[i] = v.ID()
+		if _, kept := rl.state[v.ID()]; !kept && !seen[v.ID()] {
+			fresh = append(fresh, v)
+		}
+		seen[v.ID()] = true
+	}
+	final := map[string]members.Result{}
+	fill := func() {
+		for i, id := range idx {
+			switch x, ok := final[id]; {
+			case id == "":
+			case ok:
+				out[i].Disposition, out[i].Reason = x.Disposition, x.Reason
+			default:
+				if row, ok := rl.state[id]; ok {
+					out[i].Disposition, out[i].Reason = members.Disposition(row.State), row.Reason
+				} else {
+					out[i].Disposition, out[i].Reason = members.Invalid, ReasonKnownInvalid
+				}
+			}
+		}
+	}
+	if len(fresh) == 0 {
+		fill() // nothing new: nothing to decide or write
+		return out, nil
+	}
+
+	excluded := map[string]bool{}
+	for {
+		var batch []*core.VerifiedEntry
+		for _, v := range fresh {
+			if !excluded[v.ID()] {
+				batch = append(batch, v)
+			}
+		}
+		final = map[string]members.Result{}
+		for _, x := range rl.mach.Receive(batch...) {
+			if x.ID != "" {
+				final[x.ID] = x
+			}
+		}
+		for id := range excluded {
+			final[id] = members.Result{ID: id, Disposition: members.Dropped, Reason: ReasonOverLimit}
+		}
+		if over := r.overBounds(rl, batch, final); len(over) > 0 {
+			// Undo and decide the batch again without them.
+			r.restore(rl)
+			if r.rooms[rl.id] != rl {
+				return nil, errors.New("room could not be restored")
+			}
+			for _, id := range over {
+				excluded[id] = true
+			}
+			continue
+		}
+		b, publish, err := r.stage(ctx, rl, gen, batch, final, done)
+		if err == nil && b == nil {
+			fill() // decided, but nothing kept changed: the machine is as the store
+			return out, nil
+		}
+		if err == nil {
+			err = hookAt("ingest:apply")
+		}
+		var n int64
+		if err == nil {
+			n, err = r.m.st.ApplyLog(ctx, *b)
+		}
+		if err != nil {
+			r.restore(rl)
+			return nil, err
+		}
+		publish(n)
+		fill()
+		// After the commit memory and disk agree; a failure here is
+		// reported but changes nothing.
+		return out, hookAt("ingest:committed")
+	}
+}
+
+// overBounds returns the entries of batch, latest first, that would take
+// the room over MaxRefusedDependants or MaxInvalidKept.
+func (r *Rooms) overBounds(rl *roomLog, batch []*core.VerifiedEntry, final map[string]members.Result) []string {
+	const (
+		other = iota
+		invalid
+		refusedDep
+	)
+	class := func(d, reason string) int {
+		switch {
+		case d == string(members.Invalid):
+			return invalid
+		case d == string(members.Refused) && reason != members.ReasonForkRefused:
+			return refusedDep
+		}
+		return other
+	}
+	n := map[int]int{}
+	for id, row := range rl.state {
+		if x, ok := final[id]; ok {
+			n[class(string(x.Disposition), x.Reason)]++
+		} else {
+			n[class(row.State, row.Reason)]++
+		}
+	}
+	for _, v := range batch {
+		if x, ok := final[v.ID()]; ok {
+			n[class(string(x.Disposition), x.Reason)]++
+		}
+	}
+	limit := map[int]int{invalid: MaxInvalidKept, refusedDep: MaxRefusedDependants}
+	var over []string
+	for i := len(batch) - 1; i >= 0; i-- {
+		x, ok := final[batch[i].ID()]
+		if !ok {
+			continue
+		}
+		if c := class(string(x.Disposition), x.Reason); c != other && n[c] > limit[c] {
+			n[c]--
+			over = append(over, batch[i].ID())
+		}
+	}
+	return over
+}
+
+// stage works out what a decided batch writes, and returns the batch and
+// the function that publishes it to rl once committed; a nil batch means
+// nothing kept changed.
+func (r *Rooms) stage(ctx context.Context, rl *roomLog, gen int64, batch []*core.VerifiedEntry,
+	final map[string]members.Result, done *completion) (*store.LogBatch, func(int64), error) {
+	kept := func(d members.Disposition) bool {
+		return d == members.Accepted || d == members.Held || d == members.Refused || d == members.Invalid
+	}
+	b := &store.LogBatch{Room: rl.id, Gen: gen, Now: r.m.now()}
+	byID := map[string]*core.VerifiedEntry{}
+	for _, v := range batch {
+		byID[v.ID()] = v
+		if x, ok := final[v.ID()]; ok && kept(x.Disposition) {
+			row := entryRow(v)
+			row.State, row.Reason = string(x.Disposition), x.Reason
+			b.New = append(b.New, row)
+		}
+	}
+	for _, id := range sortedIDs(final) {
+		x := final[id]
+		old, was := rl.state[id]
+		switch {
+		case !was:
+		case !kept(x.Disposition):
+			b.Gone = append(b.Gone, id)
+		case string(x.Disposition) != old.State || x.Reason != old.Reason:
+			b.Changed = append(b.Changed, store.LogRow{ID: id, State: string(x.Disposition), Reason: x.Reason})
+		}
+	}
+	if len(b.New) == 0 && len(b.Changed) == 0 && len(b.Gone) == 0 && done == nil {
+		return nil, nil, nil
+	}
+	st := rl.mach.State()
+	look := rl.lookup(byID)
+	cache := r.memberCache(st, look)
+	for _, n := range sortedIDs(cache) {
+		if m, ok := rl.cache[n]; !ok || m != cache[n] {
+			b.Members = append(b.Members, cache[n])
+		}
+	}
+	for _, n := range sortedIDs(rl.cache) {
+		if _, ok := cache[n]; !ok {
+			b.MembersGone = append(b.MembersGone, n)
+		}
+	}
+	reqs, err := r.raise(ctx, rl, st, look, final)
+	if err != nil {
+		return nil, nil, err
+	}
+	b.Requests = reqs
+	if done != nil {
+		b.Complete, b.Entries = done.request, done.entry
+	}
+	perm := r.permKey(st)
+	if p, member := st.Permissions[r.m.ID]; member && perm != rl.perm {
+		from := readFrom(p, look)
+		b.Access = func(rd *store.Reader) (store.Access, error) {
+			return r.access(rd, rl.id, p, from), nil
+		}
+	}
+	publish := func(n int64) {
+		for i, row := range b.New {
+			row.Header, row.Sig, row.Batch, row.Pos = nil, nil, n, i+1
+			rl.ents[row.ID], rl.state[row.ID] = byID[row.ID], row
+		}
+		for _, row := range b.Changed {
+			old := rl.state[row.ID]
+			old.State, old.Reason = row.State, row.Reason
+			rl.state[row.ID] = old
+		}
+		for _, id := range b.Gone {
+			delete(rl.ents, id)
+			delete(rl.state, id)
+		}
+		rl.st, rl.perm, rl.cache = st, perm, cache
+	}
+	return b, publish, nil
+}
+
+func refusalCode(err error) string {
+	var rf *core.Refusal
+	if errors.As(err, &rf) {
+		return rf.Code
+	}
+	return "bad_json"
+}
+
+func sortedIDs[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// memberCache is the member cache for state st: every machine ever
+// admitted, with whether it is a member and an admin now, and its name
+// from the newest effective grant that named it.
+func (r *Rooms) memberCache(st members.State, look func(string) *core.VerifiedEntry) map[string]store.RoomMember {
+	names := map[string]string{}
+	newest := map[string]int64{}
+	for _, id := range sortedIDs(st.Effects) {
+		v := look(id)
+		if v == nil || !st.Effects[id].Applied {
+			continue
+		}
+		f := v.Fields()
+		if f.Name == "" {
+			continue
+		}
+		if t := f.Created.UnixMilli(); t >= newest[f.Target] {
+			names[f.Target], newest[f.Target] = f.Name, t
+		}
+	}
+	out := map[string]store.RoomMember{}
+	for _, n := range st.Admitted {
+		out[n] = store.RoomMember{Node: n, Admitted: true, Member: slices.Contains(st.Members, n),
+			Admin: slices.Contains(st.Admins, n), Name: names[n]}
+	}
+	return out
+}
+
+func cacheRows(c map[string]store.RoomMember) []store.RoomMember {
+	out := make([]store.RoomMember, 0, len(c))
+	for _, n := range sortedIDs(c) {
+		out = append(out, c[n])
+	}
+	return out
+}
+
+// permKey identifies this machine's membership and history permission.
+func (r *Rooms) permKey(st members.State) string {
+	p, ok := st.Permissions[r.m.ID]
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%v|%v|%v|%v", p.All, p.Closed, p.From, p.Grants)
+}

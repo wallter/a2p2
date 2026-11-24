@@ -182,11 +182,15 @@ Codes are counted per peer in `refusals` and shown by `trace` and
 | `label` | R | – | – | – |
 | `name` | – | R | – | O |
 | `history` | – | O | – | O |
-| `from` | – | O, only without `history` | – | O, only without `history` |
+| `from` | – | O | – | O |
 
-`from` is omitted for an empty frontier. On an `admin` whose target was
+Every grant that admits carries `from`, the signer's heads per author when
+it signed, with or without `history`; it is omitted only when empty. `from`
+is where the new machine's agents start reading; `history` decides only
+whether text at or before it is readable. On an `admin` whose target was
 already a member in the signer's view, `history` and `from` are ignored:
-promotion does not change a permission. Entry ≤ 16,384 bytes. Wire object
+promotion does not change a permission. A grant that would need more than
+16 heads for one author is refused by the writer, naming the author. Entry ≤ 16,384 bytes. Wire object
 `{"h": …, "s": …}` (no `b`).
 
 Receiving an entry, in order:
@@ -210,7 +214,10 @@ it, the machine may read everything. Otherwise the frontier is the union,
 per author, of the `from` heads of those without `history`; a record by A
 is hidden (header only, no text) when it is at or before some head in the
 union through `prev` and `links`. A head that is not held, or a relation
-that cannot be decided, hides everything by that author (fail closed).
+that cannot be decided, keeps that author's text unreadable and waiting:
+a reader's cursor does not pass it, so nothing is skipped if it becomes
+readable (fail closed for reading, not for the cursor). A member with no
+usable grant (permission closed) is given no text at all.
 `members.Resolve` exposes, per member, the ids of these grants.
 
 ## 4. Pull
@@ -613,13 +620,13 @@ shows the preview, asks on the terminal, then waits unless `--no-wait`),
 `send --reply-to --ask-handled --replaces`, `inbox --thread`, `trace`,
 `room list`. `confirm` refuses unless stdin is a terminal.
 
-## 8. Schema (migration 2)
+## 8. Schema (migrations 2 and 3)
 
 | Table | Columns | Keys |
 |---|---|---|
 | `rooms` | `id`, `label`, `create_id` (pinned), `gen` int, `joined_at` | `id` |
-| `log` | `room`, `id`, `author`, `seq`, `bytes`, `sig`, `state` (`accepted`, `held`, `refused`), `batch` int, `batch_pos` int | unique (`room`,`id`); index (`room`,`author`,`seq`), not unique, so both branches of a fork fit |
-| `members` | `room`, `node`, `admin`, `name`, `addrs`, `seen_at` (cache of `Resolve`) | (`room`,`node`) |
+| `log` | `room`, `id`, `author`, `seq`, `bytes`, `sig`, `state` (`accepted`, `held`, `refused`, `invalid`: kept for replay, never passed on), `batch` int, `batch_pos` int | unique (`room`,`id`); index (`room`,`author`,`seq`), not unique, so both branches of a fork fit |
+| `room_members` | `room`, `node`, `admin`, `name`, `addrs`, `seen_at` (cache of `Resolve`; named apart from v0.2's `members` table while both exist) | (`room`,`node`) |
 | `records` | `room`, `id`, `author`, `epoch`, `seq`, `kind`, `ref`, `parent`, `thread`, `agent`, `created`, `hdr`, `sig`, `body` nullable, `reason` (`live`, `expired`, `withdrawn`, `not_admitted`, `missing`), `effect` (`ok`, `bad_reference`, `unresolved`) | unique (`room`,`id`); unique (`room`,`author`,`epoch`,`seq`); (`room`,`ref`); (`room`,`parent`); (`room`,`thread`) |
 | `streams` | `room`, `author`, `epoch`, `contig`, `known`, `known_at` | (`room`,`author`,`epoch`) |
 | `observed` | `room`, `peer`, `author`, `digest`, `detail` json, `at` | (`room`,`peer`,`author`) |
@@ -631,8 +638,12 @@ shows the preview, asks on the terminal, then waits unless `--no-wait`),
 | `forks` | `room`, `author`, `epoch`, `seq`, `id`, `hdr`, `sig` (at most 3 refused records per position, as evidence) | (`room`,`author`,`epoch`,`seq`,`id`) |
 | `registrations` | `agent`, `room`, `at` (when an agent's cursors were first set) | (`agent`,`room`) |
 | `invites` | `secret_hash`, `room`, `role`, `history`, `expires_at`, `bound_key`, `state` (5.3), `request` | `secret_hash` |
-| `requests` | `id`, `kind`, `room`, `node`, `name`, `role`, `history`, `created_at`, `state`, `decided_at`, `entries` | `id` |
+| `requests` | `id`, `kind`, `action` (admit, admit as admin, promote, remove, second), `room`, `node`, `name`, `role`, `history`, `created_at`, `state`, `decided_at`, `entries` | `id` |
 | `meta` | `key`, `value`; `v02_dropped_notice` shown once | `key` |
+
+Migration 2 holds the record tables (step 3a); migration 3 the log tables,
+`rooms.left_at` and requests. Per room at most 32 requests wait, and 256
+refused dependants and 256 invalid entries are kept.
 
 `gen` increases on leave and on join. `batch` and `batch_pos` record
 arrival order for replaying `members.Machine`; accepted offers are applied

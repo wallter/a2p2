@@ -606,7 +606,7 @@ func TestMigrationTwoKeepsTheV02TablesWorking(t *testing.T) {
 		t.Fatal(err)
 	}
 	var v int
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != 2 {
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != len(migrations) {
 		t.Fatalf("user_version %d, %v", v, err)
 	}
 }
@@ -889,7 +889,7 @@ func TestMigrationTwoOverAPopulatedV02Database(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != 2 {
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != len(migrations) {
 		t.Fatalf("user_version %d %v", v, err)
 	}
 	afterRooms, _ := s.Rooms(ctx)

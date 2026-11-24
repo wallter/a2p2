@@ -57,7 +57,8 @@ type Entry struct {
 	Room     string
 	From     string // agent id, label@short node
 	FromNode string
-	// AuthorRemoved is always false until membership comes (step 4).
+	// AuthorRemoved: the author is not a member of the room now, in this
+	// machine's view [RM1]. Always false in a room without a log.
 	AuthorRemoved bool
 	To            []core.Addressee
 	Parent        string
@@ -236,7 +237,7 @@ func (m *Machine) Thread(ctx context.Context, room, root string) ([]Entry, error
 		}
 		for _, h := range hs {
 			x := v.keep(h)
-			if x.id != root && x.h.Effect != store.EffectOK {
+			if v.hidden(x.author) || x.id != root && x.h.Effect != store.EffectOK {
 				continue
 			}
 			e, err := v.threadEntry(x)
@@ -285,8 +286,8 @@ func (m *Machine) Branch(ctx context.Context, room, under string) ([]Entry, erro
 				return err
 			}
 			for _, k := range kids {
-				if k.Effect == store.EffectOK {
-					queue = append(queue, v.keep(k))
+				if x := v.keep(k); k.Effect == store.EffectOK && !v.hidden(x.author) {
+					queue = append(queue, x)
 				}
 			}
 		}
@@ -338,6 +339,25 @@ type roomView struct {
 	byRef   map[string][]*rec
 	// expiredByClock: some text read is past retention but not yet marked.
 	expiredByClock bool
+	// members is the room's member cache, nil for a room without a log
+	// (step 3a's rooms), where every author counts.
+	members map[string]store.RoomMember
+	// hiddenAuthors: some held stream's author is hidden (see hidden).
+	hiddenAuthors bool
+}
+
+// hidden reports whether author's records are hidden here: it is not this
+// machine and is not in the room's Admitted set, which can shrink [M13];
+// its records are kept, and shown again if it is admitted again.
+func (v *roomView) hidden(author string) bool {
+	return v.members != nil && author != v.self && !v.members[author].Admitted
+}
+
+// removed reports whether author is not a member now [RM1]. This machine
+// included: a removed machine may still write locally, and its own reader
+// marks those records too.
+func (v *roomView) removed(author string) bool {
+	return v.members != nil && !v.members[author].Member
 }
 
 func (m *Machine) newView(rd *store.Reader, room string, now time.Time) *roomView {
@@ -379,6 +399,16 @@ func (v *roomView) requireAgent(agent string) error {
 // order come out oldest first. Streams only known of (nothing held) come
 // last and hold nothing to walk.
 func (v *roomView) load() error {
+	ms, err := v.rd.RoomMembers(v.room)
+	if err != nil {
+		return err
+	}
+	if len(ms) > 0 {
+		v.members = map[string]store.RoomMember{}
+		for _, m := range ms {
+			v.members[m.Node] = m
+		}
+	}
 	ss, err := v.rd.Streams(v.room)
 	if err != nil {
 		return err
@@ -404,7 +434,13 @@ func (v *roomView) load() error {
 		}
 		return a.Epoch < b.Epoch
 	})
-	v.streams = ss
+	v.streams = slices.DeleteFunc(ss, func(s store.Stream) bool {
+		if v.hidden(s.Author) {
+			v.hiddenAuthors = true
+			return true
+		}
+		return false
+	})
 	return nil
 }
 
@@ -432,6 +468,9 @@ func (v *roomView) get(id string) (*rec, error) {
 		return nil, nil
 	}
 	if r := v.byID[id]; r != nil {
+		if v.hidden(r.author) {
+			return nil, nil
+		}
 		return r, nil
 	}
 	h, ok, err := v.rd.Record(v.room, id)
@@ -439,7 +478,10 @@ func (v *roomView) get(id string) (*rec, error) {
 		v.absent[id] = err == nil
 		return nil, err
 	}
-	return v.keep(h), nil
+	if r := v.keep(h); !v.hidden(r.author) {
+		return r, nil
+	}
+	return nil, nil
 }
 
 // at returns the record at position n of stream k, loading the stream from
@@ -475,7 +517,9 @@ func (v *roomView) refs(id string) ([]*rec, error) {
 	}
 	rs := make([]*rec, 0, len(hs))
 	for _, h := range hs {
-		rs = append(rs, v.keep(h))
+		if r := v.keep(h); !v.hidden(r.author) {
+			rs = append(rs, r)
+		}
 	}
 	v.byRef[id] = rs
 	return rs, nil
@@ -732,7 +776,7 @@ func (v *roomView) parentState(p string) (string, error) {
 func (v *roomView) entry(h *rec, kind, key string) (*Entry, error) {
 	e := &Entry{Key: key, Kind: kind, ID: h.id, Record: h.id, Room: v.room,
 		From: core.AgentID(h.f.Agent, h.author), FromNode: h.author, Created: h.f.Created,
-		Epoch: h.f.Epoch, Seq: h.f.Seq}
+		Epoch: h.f.Epoch, Seq: h.f.Seq, AuthorRemoved: v.removed(h.author)}
 	msg := h
 	if h.f.Kind != core.KindMessage {
 		e.ID = h.f.Ref
@@ -958,6 +1002,13 @@ func (v *roomView) walk(g *agentState, agent string, advance bool) ([]Entry, map
 			}
 		}
 	}
+	if !advance {
+		vs, err := v.voided(g)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		entries = append(entries, vs...)
+	}
 	var ws []Wait
 	for _, s := range v.streams {
 		if s.Known > s.Contig {
@@ -969,6 +1020,50 @@ func (v *roomView) walk(g *agentState, agent string, advance bool) ([]Entry, map
 		}
 	}
 	return entries, pos, ws, nil
+}
+
+// voided returns a "voided" notice for each message whose text the agent
+// confirmed and whose author is now hidden (no longer in Admitted [M13],
+// [RM1]): the text is no longer shown, and the agent is told once. The
+// stored record stays.
+func (v *roomView) voided(g *agentState) ([]Entry, error) {
+	if !v.hiddenAuthors {
+		return nil, nil
+	}
+	rs, err := v.rd.Reads(g.agent, v.room)
+	if err != nil {
+		return nil, err
+	}
+	var out []Entry
+	done := map[string]bool{}
+	for _, r := range rs {
+		if r.Version == "" || done[r.Msg] {
+			continue
+		}
+		done[r.Msg] = true
+		h, ok, err := v.rd.Record(v.room, r.Msg)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		x := v.keep(h)
+		if !v.hidden(x.author) {
+			continue
+		}
+		key := "v:" + x.id
+		if seen, err := g.confirmed(key); err != nil || seen {
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
+		out = append(out, Entry{Key: key, Kind: EntryVoided, ID: x.id, Record: x.id, Room: v.room,
+			From: core.AgentID(x.f.Agent, x.author), FromNode: x.author, AuthorRemoved: true,
+			Created: x.f.Created, Epoch: x.f.Epoch, Seq: x.f.Seq})
+	}
+	return out, nil
 }
 
 // threadEntry is a message as the thread and branch views show it, or nil
