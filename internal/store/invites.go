@@ -1,9 +1,9 @@
 package store
 
 // Invites a machine issued (the admin side of PROTOCOL-next 5) and joins
-// this machine has in progress (the joiner side). This is migration 5;
-// migrations 2 to 4 have shipped. Used only by the new path in
-// internal/node until the surfaces switch over.
+// this machine has made (the joiner side). This is migration 5; migrations
+// 2 to 4 have shipped. Used only by the new path in internal/node until the
+// surfaces switch over.
 
 import (
 	"context"
@@ -18,29 +18,42 @@ import (
 // Differences from PROTOCOL-next section 8: the table is room_invites,
 // because v0.2's invites table (same name, other columns) is still used by
 // v0.2 joins. Beside the columns of section 8 it keeps created_at, the
-// joiner's name and addresses as its open or accept gave them, and reason
-// (why an invite was revoked). Signed, declined and revoked-by-a-person's-
-// confirmation are not stored as states: they are the state of the request
-// (requests.state), decided in the transaction that stores the approval and
-// the grant, so an invite and its request can never disagree.
+// joiner's name and addresses as its open or accept gave them, reason (why
+// an invite was revoked), and the terms the last preview showed the bound
+// key (shown_member, shown_role, shown_history), which accept must still
+// find. Signed, declined and revoked by a failed confirmation are not
+// stored states: they are the state of the request, decided in the
+// transaction that stores the approval and the grant, so an invite and its
+// request never disagree.
 //
-// joins is the joiner's durable record of a join a person has accepted
-// and the admin has not finished answering: what the preview showed, where
-// to reach the admin, and the invite's identifier (SHA-256 of the secret,
-// as the admin keys it). The secret itself is never stored, on either side.
+// requests gains admins: the number of admins the room had when a request
+// that makes an admin was raised. Making an admin takes one admin's entry
+// or two (M4), so a request raised under one count is not approved under
+// another.
+//
+// joins is the joiner's durable record of every invite it previewed and a
+// person here approved: the terms shown, the admin's full key, where to
+// reach it, the room's local generation when it was previewed (gen; 0 for
+// a room never held here), and the invite's identifier (SHA-256 of the
+// secret, as the admin keys it). It is written before the accept is sent
+// and kept after the join ends, so an invite is used once. The secret
+// itself is never stored, on either side.
 const schemaInvites = `
 CREATE TABLE room_invites (
   secret_hash TEXT PRIMARY KEY, room TEXT NOT NULL, role TEXT NOT NULL, history INTEGER NOT NULL,
   created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, bound_key TEXT NOT NULL DEFAULT '',
   name TEXT NOT NULL DEFAULT '', addrs TEXT NOT NULL DEFAULT '[]',
-  state TEXT NOT NULL, request TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '');
+  state TEXT NOT NULL, request TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '',
+  shown_member INTEGER NOT NULL DEFAULT 0, shown_role TEXT NOT NULL DEFAULT '', shown_history INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX room_invites_room ON room_invites (room);
 CREATE INDEX room_invites_request ON room_invites (request);
+ALTER TABLE requests ADD COLUMN admins INTEGER NOT NULL DEFAULT 0;
 CREATE TABLE joins (
   invite TEXT PRIMARY KEY, room TEXT NOT NULL, label TEXT NOT NULL, create_id TEXT NOT NULL,
-  role TEXT NOT NULL, history INTEGER NOT NULL, admin TEXT NOT NULL, addrs TEXT NOT NULL,
-  expires_at INTEGER NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL, history INTEGER NOT NULL, member INTEGER NOT NULL, admin TEXT NOT NULL, addrs TEXT NOT NULL,
+  gen INTEGER NOT NULL, expires_at INTEGER NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX joins_room ON joins (room, state);
 `
 
 // Stored states of an invite (PROTOCOL-next 5.3). An invite starts issued
@@ -50,7 +63,7 @@ const (
 	InvitePreviewed = "previewed"
 	InviteAccepted  = "accepted"
 	InviteExpired   = "expired"
-	InviteRevoked   = "revoked" // refused when accepted: the request could not be raised
+	InviteRevoked   = "revoked" // refused at accept: the request could not be raised
 )
 
 // ReasonInviteExpired is the failure recorded on a request whose invite
@@ -62,7 +75,16 @@ var (
 	ErrInviteBound   = errors.New("invite is bound to another key")
 	ErrInviteState   = errors.New("invite is not in the state the change needs")
 	ErrInviteExpired = errors.New("invite expired")
+	ErrInviteTerms   = errors.New("the terms the preview showed no longer hold")
 )
+
+// Terms are what a preview shows the joiner: whether it is a member
+// already, and the role and history it will have.
+type Terms struct {
+	Member  bool
+	Role    string
+	History bool
+}
 
 // Invite is one invite issued here. RequestState and RequestReason are
 // those of its request, when it has one.
@@ -79,8 +101,16 @@ type Invite struct {
 	State         string
 	Request       string
 	Reason        string
+	Shown         Terms
 	RequestState  string
 	RequestReason string
+}
+
+// Undecided reports whether no person has decided the invite's request
+// (there is none, or it is pending) and it is not expired or revoked.
+func (inv Invite) Undecided() bool {
+	return (inv.RequestState == "" || inv.RequestState == RequestPending) &&
+		(inv.State == InviteIssued || inv.State == InvitePreviewed || inv.State == InviteAccepted)
 }
 
 // CreateInvite stores a new invite in state issued. The room must be held.
@@ -96,14 +126,15 @@ func (s *Store) CreateInvite(ctx context.Context, inv Invite) error {
 }
 
 const inviteCols = `i.secret_hash, i.room, i.role, i.history, i.created_at, i.expires_at, i.bound_key, i.name, i.addrs,
-	i.state, i.request, i.reason, coalesce(q.state, ''), coalesce(q.reason, '')`
+	i.state, i.request, i.reason, i.shown_member, i.shown_role, i.shown_history, coalesce(q.state, ''), coalesce(q.reason, '')`
 
 func scanInvite(sc interface{ Scan(...any) error }) (Invite, error) {
 	var inv Invite
 	var created, expires int64
 	var addrs string
 	err := sc.Scan(&inv.SecretHash, &inv.Room, &inv.Role, &inv.History, &created, &expires, &inv.BoundKey, &inv.Name,
-		&addrs, &inv.State, &inv.Request, &inv.Reason, &inv.RequestState, &inv.RequestReason)
+		&addrs, &inv.State, &inv.Request, &inv.Reason, &inv.Shown.Member, &inv.Shown.Role, &inv.Shown.History,
+		&inv.RequestState, &inv.RequestReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Invite{}, ErrNotFound
 	}
@@ -114,16 +145,13 @@ func scanInvite(sc interface{ Scan(...any) error }) (Invite, error) {
 	return inv, nil
 }
 
-func getInvite(q interface {
+type queryRower interface {
 	QueryRow(string, ...any) *sql.Row
-}, where string, arg string) (Invite, error) {
-	return scanInvite(q.QueryRow(`SELECT `+inviteCols+` FROM room_invites i LEFT JOIN requests q ON q.id = i.request
-		WHERE `+where, arg))
 }
 
-// GetInvite returns the invite whose secret hashes to hash, or ErrNotFound.
-func (s *Store) GetInvite(ctx context.Context, hash string) (Invite, error) {
-	return getInvite(dbCtx{ctx, s.db}, `i.secret_hash = ?`, hash)
+func getInvite(q queryRower, where string, arg string) (Invite, error) {
+	return scanInvite(q.QueryRow(`SELECT `+inviteCols+` FROM room_invites i LEFT JOIN requests q ON q.id = i.request
+		WHERE `+where, arg))
 }
 
 // dbCtx runs one read statement outside a write transaction.
@@ -136,6 +164,11 @@ func (d dbCtx) QueryRow(q string, args ...any) *sql.Row {
 	return d.db.QueryRowContext(d.ctx, q, args...)
 }
 
+// GetInvite returns the invite whose secret hashes to hash, or ErrNotFound.
+func (s *Store) GetInvite(ctx context.Context, hash string) (Invite, error) {
+	return getInvite(dbCtx{ctx, s.db}, `i.secret_hash = ?`, hash)
+}
+
 // InviteByRequest returns the invite whose request is id, or ErrNotFound.
 func (s *Store) InviteByRequest(ctx context.Context, id string) (Invite, error) {
 	if id == "" {
@@ -144,50 +177,100 @@ func (s *Store) InviteByRequest(ctx context.Context, id string) (Invite, error) 
 	return getInvite(dbCtx{ctx, s.db}, `i.request = ?`, id)
 }
 
-// BindInvite is a first open (PROTOCOL-next 5.2): an issued, unexpired
-// invite is bound to key and moves to previewed; one already bound to key
-// is returned as it is; one bound to another key is ErrInviteBound. The
-// joiner's name and addresses are kept. It returns the invite after.
-func (s *Store) BindInvite(ctx context.Context, hash, key, name string, addrs []string, now time.Time) (inv Invite, err error) {
+// expireRow expires one undecided invite past its expiry and fails its
+// pending request, inside tx. It reports whether it did.
+func expireRow(tx *sql.Tx, inv Invite, now time.Time) (bool, error) {
+	if !inv.Undecided() || now.Before(inv.Expires) {
+		return false, nil
+	}
+	if _, err := tx.Exec(`UPDATE room_invites SET state = ? WHERE secret_hash = ?`, InviteExpired, inv.SecretHash); err != nil {
+		return false, err
+	}
+	if inv.Request != "" {
+		if _, err := tx.Exec(`UPDATE requests SET state = ?, reason = ?, decided_at = ? WHERE id = ? AND state = ?`,
+			RequestFailed, ReasonInviteExpired, ms(now), inv.Request, RequestPending); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// ExpireInvite expires the one invite named by hash if it is undecided
+// and past its expiry, in one transaction, and returns it as it is after.
+func (s *Store) ExpireInvite(ctx context.Context, hash string, now time.Time) (inv Invite, err error) {
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		if inv, err = getInvite(tx, `i.secret_hash = ?`, hash); err != nil {
 			return err
 		}
-		switch {
-		case inv.BoundKey != "" && inv.BoundKey != key:
-			return ErrInviteBound
-		case inv.BoundKey == key:
-			return nil
-		case inv.State != InviteIssued:
-			return ErrInviteState
-		case !now.Before(inv.Expires):
-			return ErrInviteExpired
+		done, err := expireRow(tx, inv, now)
+		if done {
+			inv, err = getInvite(tx, `i.secret_hash = ?`, hash)
 		}
-		if _, err := tx.Exec(`UPDATE room_invites SET bound_key = ?, name = ?, addrs = ?, state = ? WHERE secret_hash = ?`,
-			key, name, jsonText(addrs), InvitePreviewed, hash); err != nil {
-			return err
-		}
-		inv.BoundKey, inv.Name, inv.Addrs, inv.State = key, name, addrs, InvitePreviewed
-		return nil
+		return err
 	})
 	return inv, err
 }
 
-// AcceptInvite is an accept (PROTOCOL-next 5.2): a previewed, unexpired
-// invite bound to key moves to accepted and the request q for a person is
-// created, in one transaction. The room must be held.
-func (s *Store) AcceptInvite(ctx context.Context, hash, key, name string, addrs []string, q Request, now time.Time) error {
-	return s.tx(ctx, func(tx *sql.Tx) error {
-		inv, err := getInvite(tx, `i.secret_hash = ?`, hash)
-		switch {
-		case err != nil:
+// OpenInvite is an open (PROTOCOL-next 5.2), in one transaction: an
+// issued invite is bound to key and moves to previewed; one bound to
+// another key is ErrInviteBound; one past its expiry and undecided is
+// expired (ErrInviteExpired). shown, computed by the caller from the
+// room's state, is recorded as what this preview showed, unless the
+// invite is accepted or decided already. It returns the invite after.
+func (s *Store) OpenInvite(ctx context.Context, hash, key, name string, addrs []string, shown Terms, now time.Time) (inv Invite, err error) {
+	expired := false
+	err = s.tx(ctx, func(tx *sql.Tx) error {
+		if inv, err = getInvite(tx, `i.secret_hash = ?`, hash); err != nil {
 			return err
+		}
+		if inv.BoundKey != "" && inv.BoundKey != key {
+			return ErrInviteBound
+		}
+		if done, err := expireRow(tx, inv, now); err != nil || done {
+			expired = done
+			return err // the expiry is kept
+		}
+		if inv.State != InviteIssued && inv.State != InvitePreviewed {
+			return nil // accepted or decided: the caller answers its phase
+		}
+		if _, err := tx.Exec(`UPDATE room_invites SET bound_key = ?, name = ?, addrs = ?, state = ?,
+			shown_member = ?, shown_role = ?, shown_history = ? WHERE secret_hash = ?`,
+			key, name, jsonText(addrs), InvitePreviewed, shown.Member, shown.Role, shown.History, hash); err != nil {
+			return err
+		}
+		inv.BoundKey, inv.Name, inv.Addrs, inv.State, inv.Shown = key, name, addrs, InvitePreviewed, shown
+		return nil
+	})
+	if err == nil && expired {
+		err = ErrInviteExpired
+	}
+	return inv, err
+}
+
+// AcceptInvite is an accept (PROTOCOL-next 5.2), in one transaction: a
+// previewed, unexpired invite bound to key, whose last preview showed
+// terms now, moves to accepted and the request q for a person is created.
+// ErrInviteState: it is not previewed (accepted or decided meanwhile);
+// ErrInviteTerms: the terms changed since the preview; ErrInviteExpired.
+// The room must be held.
+func (s *Store) AcceptInvite(ctx context.Context, hash, key, name string, addrs []string, now Terms, q Request, at time.Time) error {
+	expired := false
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		inv, err := getInvite(tx, `i.secret_hash = ?`, hash)
+		if err != nil {
+			return err
+		}
+		if done, err := expireRow(tx, inv, at); err != nil || done {
+			expired = done
+			return err // the expiry is kept
+		}
+		switch {
 		case inv.BoundKey != key:
 			return ErrInviteBound
 		case inv.State != InvitePreviewed:
 			return ErrInviteState
-		case !now.Before(inv.Expires):
-			return ErrInviteExpired
+		case inv.Shown != now:
+			return ErrInviteTerms
 		}
 		if err := checkGen(tx, inv.Room, 0); err != nil {
 			return err
@@ -199,10 +282,14 @@ func (s *Store) AcceptInvite(ctx context.Context, hash, key, name string, addrs 
 			InviteAccepted, q.ID, name, jsonText(addrs), hash)
 		return err
 	})
+	if err == nil && expired {
+		err = ErrInviteExpired
+	}
+	return err
 }
 
-// RevokeInvite refuses a previewed invite whose request could not be
-// raised (revalidation failed when it was accepted), with reason.
+// RevokeInvite refuses an issued or previewed invite whose request could
+// not be raised (revalidation failed when it was accepted), with reason.
 func (s *Store) RevokeInvite(ctx context.Context, hash, reason string) error {
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.Exec(`UPDATE room_invites SET state = ?, reason = ? WHERE secret_hash = ? AND state IN (?, ?)`,
@@ -217,68 +304,81 @@ func (s *Store) RevokeInvite(ctx context.Context, hash, reason string) error {
 	})
 }
 
-// ExpireInvites moves every invite that is past its expiry and not signed
-// (its request, if any, not approved) to expired, and fails its pending
-// request with ReasonInviteExpired, in one transaction. It returns how
-// many invites expired.
+// ExpireInvites moves every undecided invite past its expiry to expired
+// and fails its pending request with ReasonInviteExpired, in one
+// transaction; a declined, failed or approved one is never touched. It
+// returns how many invites expired.
 func (s *Store) ExpireInvites(ctx context.Context, now time.Time) (int, error) {
-	var due int
+	const due = `SELECT ` + inviteCols + ` FROM room_invites i LEFT JOIN requests q ON q.id = i.request
+		WHERE i.expires_at <= ? AND i.state IN (?, ?, ?) AND coalesce(q.state, '') IN ('', ?)`
+	var any int
 	// Most calls find nothing: look first, outside a write transaction.
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM room_invites i LEFT JOIN requests q ON q.id = i.request
-		WHERE i.expires_at <= ? AND i.state IN (?, ?, ?) AND coalesce(q.state, '') != ?`,
-		ms(now), InviteIssued, InvitePreviewed, InviteAccepted, RequestApproved).Scan(&due); err != nil || due == 0 {
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM (`+due+`)`, ms(now), InviteIssued, InvitePreviewed,
+		InviteAccepted, RequestPending).Scan(&any); err != nil || any == 0 {
 		return 0, err
 	}
 	var n int
 	err := s.tx(ctx, func(tx *sql.Tx) error {
-		rows, err := tx.Query(`SELECT i.secret_hash, i.request FROM room_invites i LEFT JOIN requests q ON q.id = i.request
-			WHERE i.expires_at <= ? AND i.state IN (?, ?, ?) AND coalesce(q.state, '') != ?`,
-			ms(now), InviteIssued, InvitePreviewed, InviteAccepted, RequestApproved)
+		rows, err := tx.Query(due, ms(now), InviteIssued, InvitePreviewed, InviteAccepted, RequestPending)
 		if err != nil {
 			return err
 		}
-		var hashes, reqs []string
+		var invs []Invite
 		for rows.Next() {
-			var h, q string
-			if err := rows.Scan(&h, &q); err != nil {
+			inv, err := scanInvite(rows)
+			if err != nil {
 				rows.Close()
 				return err
 			}
-			hashes, reqs = append(hashes, h), append(reqs, q)
+			invs = append(invs, inv)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		for i, h := range hashes {
-			if _, err := tx.Exec(`UPDATE room_invites SET state = ? WHERE secret_hash = ?`, InviteExpired, h); err != nil {
+		for _, inv := range invs {
+			done, err := expireRow(tx, inv, now)
+			if err != nil {
 				return err
 			}
-			if reqs[i] != "" {
-				if _, err := tx.Exec(`UPDATE requests SET state = ?, reason = ?, decided_at = ? WHERE id = ? AND state = ?`,
-					RequestFailed, ReasonInviteExpired, ms(now), reqs[i], RequestPending); err != nil {
-					return err
-				}
+			if done {
+				n++
 			}
 		}
-		n = len(hashes)
 		return nil
 	})
 	return n, err
 }
 
+// inviteDeadline fails an approval (in applyLog) of a request whose invite
+// is past its expiry at the moment of the write: ErrInviteExpired.
+func inviteDeadline(tx *sql.Tx, request string, now time.Time) error {
+	var exp int64
+	err := tx.QueryRow(`SELECT expires_at FROM room_invites WHERE request = ?`, request).Scan(&exp)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return err
+	case ms(now) >= exp:
+		return ErrInviteExpired
+	}
+	return nil
+}
+
 // ---- the joiner's side ----
 
-// States of a join in progress on the joiner.
+// States of a join on the joiner.
 const (
-	JoinAccepted = "accepted" // waiting for a person on the admin machine
+	JoinAccepted = "accepted" // approved here; waiting for the admin machine
 	JoinSigned   = "signed"   // the room's log was received
-	JoinRefused  = "refused"  // declined, revoked or the secret refused; Reason says which
+	JoinRefused  = "refused"  // declined, revoked, refused, or failed here; Reason says which
 	JoinExpired  = "expired"
 	JoinRemoved  = "removed"
+	JoinLeft     = "left" // the room was left here while the join was in progress
 )
 
-// Join is a join this machine's person accepted.
+// Join is an invite this machine's person approved.
 type Join struct {
 	Invite   string // hex SHA-256 of the secret
 	Room     string
@@ -286,8 +386,10 @@ type Join struct {
 	CreateID string
 	Role     string
 	History  bool
-	Admin    string // the admin's node id, checked against the token
+	Member   bool   // the preview said this machine is a member already
+	Admin    string // the admin's full node id, checked against the token
 	Addrs    []string
+	Gen      int64 // the room's local generation when previewed; 0 if never held
 	Expires  time.Time
 	State    string
 	Reason   string
@@ -295,25 +397,41 @@ type Join struct {
 	Updated  time.Time
 }
 
-// PutJoin stores a join, replacing one with the same invite.
-func (s *Store) PutJoin(ctx context.Context, j Join) error {
-	return s.tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.Exec(`INSERT INTO joins (invite, room, label, create_id, role, history, admin, addrs, expires_at,
-			state, reason, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-			ON CONFLICT (invite) DO UPDATE SET room = excluded.room, label = excluded.label, create_id = excluded.create_id,
-			role = excluded.role, history = excluded.history, admin = excluded.admin, addrs = excluded.addrs,
-			expires_at = excluded.expires_at, state = excluded.state, reason = excluded.reason, updated_at = excluded.updated_at`,
-			j.Invite, j.Room, j.Label, j.CreateID, j.Role, j.History, j.Admin, jsonText(j.Addrs), ms(j.Expires),
-			j.State, j.Reason, ms(j.Created), ms(j.Updated))
+// Terms are the terms the join was approved on.
+func (j Join) Terms() Terms { return Terms{Member: j.Member, Role: j.Role, History: j.History} }
+
+// AddJoin records an approved join in state accepted, in one transaction.
+// A join with the same invite already recorded is returned unchanged and
+// nothing is written: an approved record is never overwritten.
+func (s *Store) AddJoin(ctx context.Context, j Join) (got Join, added bool, err error) {
+	err = s.tx(ctx, func(tx *sql.Tx) error {
+		if got, err = getJoin(tx, j.Invite); err == nil {
+			return nil
+		} else if !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		_, err := tx.Exec(`INSERT INTO joins (invite, room, label, create_id, role, history, member, admin, addrs, gen,
+			expires_at, state, reason, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			j.Invite, j.Room, j.Label, j.CreateID, j.Role, j.History, j.Member, j.Admin, jsonText(j.Addrs), j.Gen,
+			ms(j.Expires), JoinAccepted, "", ms(j.Created), ms(j.Created))
+		got, added = j, true
+		got.State, got.Updated = JoinAccepted, j.Created
 		return err
 	})
+	return got, added, err
 }
 
-// SetJoinState records a join's state and reason.
-func (s *Store) SetJoinState(ctx context.Context, invite, state, reason string, now time.Time) error {
+// GetJoin returns the join recorded for invite, or ErrNotFound.
+func (s *Store) GetJoin(ctx context.Context, invite string) (Join, error) {
+	return getJoin(dbCtx{ctx, s.db}, invite)
+}
+
+// EndJoin records the outcome of a join that is still accepted, in one
+// transaction: ErrNotFound if it is not (it ended, or the room was left).
+func (s *Store) EndJoin(ctx context.Context, invite, state, reason string, now time.Time) error {
 	return s.tx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.Exec(`UPDATE joins SET state = ?, reason = ?, updated_at = ? WHERE invite = ?`,
-			state, reason, ms(now), invite)
+		res, err := tx.Exec(`UPDATE joins SET state = ?, reason = ?, updated_at = ? WHERE invite = ? AND state = ?`,
+			state, reason, ms(now), invite, JoinAccepted)
 		if err != nil {
 			return err
 		}
@@ -324,27 +442,58 @@ func (s *Store) SetJoinState(ctx context.Context, invite, state, reason string, 
 	})
 }
 
+const joinCols = `invite, room, label, create_id, role, history, member, admin, addrs, gen, expires_at,
+	state, reason, created_at, updated_at`
+
+func scanJoin(sc interface{ Scan(...any) error }) (Join, error) {
+	var j Join
+	var addrs string
+	var exp, created, updated int64
+	err := sc.Scan(&j.Invite, &j.Room, &j.Label, &j.CreateID, &j.Role, &j.History, &j.Member, &j.Admin, &addrs, &j.Gen,
+		&exp, &j.State, &j.Reason, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Join{}, ErrNotFound
+	}
+	if err != nil {
+		return Join{}, err
+	}
+	j.Addrs, j.Expires, j.Created, j.Updated = parseAddrs(addrs), fromMS(exp), fromMS(created), fromMS(updated)
+	return j, nil
+}
+
+func getJoin(q queryRower, invite string) (Join, error) {
+	return scanJoin(q.QueryRow(`SELECT `+joinCols+` FROM joins WHERE invite = ?`, invite))
+}
+
 // Joins lists joins, oldest first, in one state if state is set.
 func (s *Store) Joins(ctx context.Context, state string) ([]Join, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT invite, room, label, create_id, role, history, admin, addrs, expires_at,
-		state, reason, created_at, updated_at FROM joins WHERE (? = '' OR state = ?) ORDER BY created_at, invite`, state, state)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+joinCols+` FROM joins WHERE (? = '' OR state = ?)
+		ORDER BY created_at, invite`, state, state)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []Join
 	for rows.Next() {
-		var j Join
-		var addrs string
-		var exp, created, updated int64
-		if err := rows.Scan(&j.Invite, &j.Room, &j.Label, &j.CreateID, &j.Role, &j.History, &j.Admin, &addrs, &exp,
-			&j.State, &j.Reason, &created, &updated); err != nil {
+		j, err := scanJoin(rows)
+		if err != nil {
 			return nil, err
 		}
-		j.Addrs, j.Expires, j.Created, j.Updated = parseAddrs(addrs), fromMS(exp), fromMS(created), fromMS(updated)
 		out = append(out, j)
 	}
 	return out, rows.Err()
+}
+
+// RoomGen is a room's local generation (0 if never held here) and whether
+// it is held now.
+func (s *Store) RoomGen(ctx context.Context, room string) (gen int64, held bool, err error) {
+	var leftAt int64
+	var create string
+	err = s.db.QueryRowContext(ctx, `SELECT gen, left_at, create_id FROM rooms WHERE id = ?`, room).Scan(&gen, &leftAt, &create)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	return gen, err == nil && leftAt == 0 && create != "", err
 }
 
 func parseAddrs(s string) []string {

@@ -147,3 +147,30 @@ func TestJoinRouteRefusesOversizeBodies(t *testing.T) {
 		t.Fatalf("join route without a join handler: %d %v", code, err)
 	}
 }
+
+// Keys that rotate cannot push live keys out of the per-key limiter: while
+// it is full of keys that have not refilled, a new key is refused and a
+// live key keeps its bucket.
+//
+// Requirements: T3 (review should-fix: work before the secret is checked)
+func TestLimiterRefusesNewKeysRatherThanEvictingLiveOnes(t *testing.T) {
+	l := newLimiter()
+	now := time.Now()
+	l.now = func() time.Time { return now }
+	live := "live"
+	for i := 0; i < 5; i++ {
+		l.allow(live)
+	}
+	for i := 0; i < 3*rateMaxKeys; i++ {
+		l.allow(string(rune(i + 1000)))
+	}
+	if len(l.m) > rateMaxKeys {
+		t.Fatalf("limiter holds %d keys", len(l.m))
+	}
+	if b := l.m[live]; b == nil || b.tokens > rateBurst-5+0.01 {
+		t.Fatalf("the live key lost its bucket: %+v", b)
+	}
+	if l.allow("newest") {
+		t.Fatal("a new key was let in while the table is full of live keys")
+	}
+}

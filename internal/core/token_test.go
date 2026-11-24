@@ -85,7 +85,7 @@ func tokenVectors(t *testing.T) map[string]string {
 	nine = nine[:9]
 	return map[string]string{
 		"valid-one-address":        one,
-		"valid-protocol-example":   enc("203.0.113.7:7443", "[2001:db8::7]:7443"),
+		"valid-protocol-example":   protocolExample,
 		"valid-eight-addresses":    enc("a.example:1", "b.example:2", "10.0.0.1:65535", "[::1]:3", "e:4", "f-g.h:5", "i:6", "j:7"),
 		"valid-folded":             TokenPrefix + folded + "@203.0.113.7:7443",
 		"valid-whitespace-around":  "  " + one + "\n",
@@ -168,6 +168,29 @@ func equalVector(a, b tokenVector) bool {
 // Every refusal of PROTOCOL-next 5.1, and the folding of I, L, O and case.
 //
 // Requirements: T3
+// protocolExample is the token PROTOCOL-next 5.1 shows, as text; its
+// bytes below were computed apart from this package's decoder.
+const protocolExample = "a2p2:KSWT-54VG-HARN-HH1N-C9M1-BVJJ-RG88-Z3MN-VR9J-9VFZ-RQP1-ADMA-BM38@203.0.113.7:7443,[2001:db8::7]:7443"
+
+// The example token of PROTOCOL-next 5.1 decodes to the bytes worked out
+// independently of this decoder.
+//
+// Requirements: T3; PROTOCOL-next 5.1
+func TestTokenProtocolExampleDecodesToItsBytes(t *testing.T) {
+	tok, err := DecodeToken(protocolExample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hex.EncodeToString(tok.Secret[:]) != "9e79a293708ab158c435626815ee52c4" ||
+		hex.EncodeToString(tok.Fingerprint[:]) != "423e3a57784c93b7ff17b054da29741a" ||
+		len(tok.Addrs) != 2 || tok.Addrs[0] != "203.0.113.7:7443" || tok.Addrs[1] != "[2001:db8::7]:7443" {
+		t.Fatalf("decoded: %x %x %v", tok.Secret, tok.Fingerprint, tok.Addrs)
+	}
+	if s, err := EncodeToken(tok); err != nil || s != protocolExample {
+		t.Fatalf("encoded again: %s %v", s, err)
+	}
+}
+
 func TestTokenRefusalsAndFolding(t *testing.T) {
 	gen := tokenVectors(t)
 	want := map[string]string{

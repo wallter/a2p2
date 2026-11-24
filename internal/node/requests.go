@@ -121,6 +121,8 @@ const (
 	ReasonActionMoved = "the room changed: signing now would "
 	ReasonTooMany     = "too many requests are waiting in this room"
 	errNotPendingText = "request is not pending"
+	ReasonTermsMoved  = "the machine's role or history permission changed since it was shown; make a new invite"
+	ReasonQuorumMoved = "the number of admins changed since the request was made, so the entries it needs differ; make a new request"
 	ReasonNoGrant     = "the machine is still a member: approving lets it fetch the room's log and signs nothing"
 	ReasonNotAdmitted = "the room's admins changed since the invite was accepted, so the joiner would not be admitted now; make a new invite"
 )
@@ -188,7 +190,12 @@ func (r *Rooms) prepared(ctx context.Context, rl *roomLog, q store.Request, hist
 	if q.Action == ActionAdmit || q.Action == ActionAdmitAdmin {
 		q.History = history // promoting changes no permission
 	}
-	q.Role = roleOf(q.Action)
+	if q.Action != ActionRejoin { // a rejoin names the role and history the member has
+		q.Role = roleOf(q.Action)
+	}
+	if q.Action == ActionAdmitAdmin || q.Action == ActionPromote {
+		q.Admins = len(rl.st.Admins) // one admin's entry, or two [M4]
+	}
 	if reason := r.check(rl, q); reason != "" {
 		return store.Request{}, &UserError{reason}
 	}
@@ -264,7 +271,14 @@ func (r *Rooms) Confirm(ctx context.Context, id string, approve bool) (Confirmat
 	}
 	if q.Action == ActionRejoin {
 		// Nothing to sign: the approval alone is stored.
-		if _, err := r.m.st.ApplyLog(ctx, store.LogBatch{Room: rl.id, Gen: rl.gen, Complete: id, Now: now}); err != nil {
+		_, err := r.m.st.ApplyLog(ctx, store.LogBatch{Room: rl.id, Gen: rl.gen, Complete: id, Now: r.m.now()})
+		if errors.Is(err, store.ErrInviteExpired) {
+			if _, err := r.m.st.ExpireInvites(ctx, r.m.now()); err != nil {
+				return Confirmation{}, err
+			}
+			return Confirmation{ID: id, State: store.RequestFailed, Reason: store.ReasonInviteExpired}, nil
+		}
+		if err != nil {
 			return Confirmation{}, err
 		}
 		return Confirmation{ID: id, State: store.RequestApproved, Effect: EffectApplied, Reason: ReasonNoGrant}, nil
@@ -312,6 +326,13 @@ func (r *Rooms) Confirm(ctx context.Context, id string, approve bool) (Confirmat
 		return fail(ReasonNotAdmitted)
 	}
 	res, err := r.ingest(ctx, rl, 0, wires, &completion{request: id, entry: strings.Join(ids, ",")})
+	if errors.Is(err, store.ErrInviteExpired) {
+		// The invite ran out while this was being signed: nothing was stored.
+		if _, err := r.m.st.ExpireInvites(ctx, r.m.now()); err != nil {
+			return Confirmation{}, err
+		}
+		return Confirmation{ID: id, State: store.RequestFailed, Reason: store.ReasonInviteExpired}, nil
+	}
 	if err != nil {
 		return Confirmation{}, err
 	}
@@ -352,8 +373,12 @@ func (r *Rooms) check(rl *roomLog, q store.Request) string {
 		return members.ReasonNotAdmin
 	case q.Action == ActionRejoin && !member:
 		return members.ReasonNotMember
+	case q.Action == ActionRejoin && effectiveTerms(st, "", false, q.Node) != store.Terms{Member: true, Role: q.Role, History: q.History}:
+		return ReasonTermsMoved
 	case q.Action == ActionRejoin:
 		return ""
+	case q.Admins != 0 && q.Seconds == "" && len(st.Admins) != q.Admins:
+		return ReasonQuorumMoved
 	case q.Node == self && q.Kind == string(core.EntryRemove):
 		return members.ReasonSelfVote + "; to stop carrying a room, leave it"
 	case q.Node == self:

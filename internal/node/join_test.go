@@ -255,7 +255,7 @@ func TestJoinDeclinedByTheAdminsPersonIsRefusedOnTheJoiner(t *testing.T) {
 	if a.r.signs != 0 || b.r.rooms[room] != nil {
 		t.Fatal("a declined join signed or pinned something")
 	}
-	if _, err := b.joiner(jn).JoinPreview(context.Background(), tok); !isRefused(err, CodeDeclined) {
+	if _, err := b.joiner(jn).JoinPreview(context.Background(), tok); !errors.Is(err, ErrInviteUsed) {
 		t.Fatalf("preview after decline: %v", err)
 	}
 }
@@ -335,7 +335,7 @@ func TestJoinSecretPresentedByASecondKeyIsRefused(t *testing.T) {
 	// Nor can it poll by the invite's hash.
 	body, _ := json.Marshal(JoinRequest{V: JoinVersion, Op: JoinPoll, Invite: secretHash(mustToken(t, tok).Secret)})
 	if rp := NewJoinServer(a.r).Handle(context.Background(), c.id, "x", body); rp.Status != 403 || !strings.Contains(string(rp.Body), CodeBadSecret) {
-		t.Fatalf("poll by another key: %d %s", rp.Status, rp.Body)
+		t.Fatalf("poll by another key: %d", rp.Status)
 	}
 	wantNodes(t, "members", a.state(room).Members, a.id, b.id)
 }
@@ -691,26 +691,27 @@ func TestJoinRequestsAreStrictAndOpensAreRateLimited(t *testing.T) {
 	s := NewJoinServer(a.r)
 	ctx := context.Background()
 	secret := tok.SecretText()
-	for _, body := range []string{
-		`{"v":2,"op":"open","secret":"` + secret + `","name":"b","name":"c"}`,
-		`{"v":2,"op":"open","Secret":"` + secret + `","name":"b"}`,
-		`{"v":2,"op":"open","secret":"` + secret + `","name":"b","x":null}`,
-		`{"v":2,"op":"open","secret":"` + secret + `","name":"b","after":0}`,
-		`{"v":2,"op":"open","secret":"` + secret + `","name":"b","after":3}`,
-		`{"v":2,"op":"open","secret":"` + secret + `","name":"b","addrs":[]}`,
-		`{"v":2,"op":"open","secret":"` + secret + `"}`,
-		`{"v":1,"op":"open","secret":"` + secret + `","name":"b"}`,
-		`{"v":2,"op":"poll","secret":"` + secret + `","invite":"` + strings.Repeat("a", 64) + `"}`,
-		`{"v":2,"op":"open","secret":"` + secret + `","name":"b"} x`,
+	for _, c := range []struct{ name, body string }{
+		{"duplicate key", `{"v":2,"op":"open","secret":"` + secret + `","name":"b","name":"c"}`},
+		{"case variant", `{"v":2,"op":"open","Secret":"` + secret + `","name":"b"}`},
+		{"null", `{"v":2,"op":"open","secret":"` + secret + `","name":"b","x":null}`},
+		{"after zero on open", `{"v":2,"op":"open","secret":"` + secret + `","name":"b","after":0}`},
+		{"after on open", `{"v":2,"op":"open","secret":"` + secret + `","name":"b","after":3}`},
+		{"empty addrs", `{"v":2,"op":"open","secret":"` + secret + `","name":"b","addrs":[]}`},
+		{"no name", `{"v":2,"op":"open","secret":"` + secret + `"}`},
+		{"version", `{"v":1,"op":"open","secret":"` + secret + `","name":"b"}`},
+		{"secret and invite", `{"v":2,"op":"poll","secret":"` + secret + `","invite":"` + strings.Repeat("a", 64) + `"}`},
+		{"trailing data", `{"v":2,"op":"open","secret":"` + secret + `","name":"b"} x`},
 	} {
-		if rp := s.Handle(ctx, b.id, "src", []byte(body)); rp.Status != http.StatusBadRequest {
-			t.Fatalf("%s: %d %s", body, rp.Status, rp.Body)
+		// The case's name only: bodies carry the secret and never go in output.
+		if rp := s.Handle(ctx, b.id, "src", []byte(c.body)); rp.Status != http.StatusBadRequest {
+			t.Fatalf("%s: %d", c.name, rp.Status)
 		}
 	}
 	ok := fmt.Sprintf(`{"v":2,"op":"open","secret":%q,"name":"b","unknown":[1]}`, strings.ToLower(secret))
 	for i := 0; i < OpensPerMinute; i++ {
 		if rp := s.Handle(ctx, b.id, "src", []byte(ok)); rp.Status != http.StatusOK {
-			t.Fatalf("open %d: %d %s", i, rp.Status, rp.Body)
+			t.Fatalf("open %d: %d", i, rp.Status)
 		}
 	}
 	rp := s.Handle(ctx, b.id, "src", []byte(ok))
