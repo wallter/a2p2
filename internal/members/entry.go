@@ -53,7 +53,7 @@ type entry struct {
 	From    map[string][]string
 	// src is the verified core entry this was made from, nil in the model
 	// tests. Its id is the entry's id; nothing is hashed again.
-	src  *core.Entry
+	src  *core.VerifiedEntry
 	room string // the signed room, empty in the model tests
 	size int    // the signed header's size, 0 in the model tests
 }

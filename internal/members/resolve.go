@@ -24,7 +24,7 @@ const (
 	ReasonBadChain      = "its previous entry is not its author's previous entry"
 	ReasonOtherCreate   = "a create entry other than the room's own"
 	ReasonOtherRoom     = "it is signed for another room"
-	ReasonBadSignature  = "its signature does not verify"
+	ReasonNotVerified   = "it is not a verified entry"
 	// Machine only.
 	ReasonForkRefused     = "another entry its author signed at this position was accepted first"
 	ReasonRefusedParent   = "an entry it had seen was refused as a fork"

@@ -127,16 +127,17 @@ re-appointed admin could empty the room
     hold. `Closed` marks a member with no such grant (its admission had no
     effect and it is a member through a later promotion): no history.
 15. No timers, and no entry kinds beyond create, add, remove and make admin.
-16. The package checks what it relies on. Signatures are verified when
-    entries enter (`NewMachine`, `Receive`, `ResolveRoom`); an entry signed
-    for another room than the pinned create's is refused (`it is signed for
-    another room`); an empty pin is an error
+16. The package checks what it relies on. Entries enter only as
+    `*core.VerifiedEntry`, which core returns only from
+    `(*core.Entry).Verified` after checking the signature (G1); callers
+    verify once, at ingress. A nil or zero `VerifiedEntry` is refused (`it
+    is not a verified entry`): an invalid result from `Receive`, an error
+    from `NewMachine` and `ResolveRoom`
+    (`TestOnlyVerifiedEntriesReachTheMachine`). An entry signed for another
+    room than the pinned create's is refused (`it is signed for another
+    room`); an empty pin is an error
     (`TestSignedIngressChecksRoomPinAndSignature`). Sequence numbers are
-    int64 throughout (`TestSequenceNumbersKeepSixtyFourBits`). Core's
-    `*core.Entry` can exist unverified (`ParseEntry`, `EntryFromParts`), so
-    the package verifies itself; a type core returns only after verifying,
-    for example `func (*Entry) Verified() (*VerifiedEntry, error)`, would let
-    the adapter take only that type and drop its own check.
+    int64 throughout (`TestSequenceNumbersKeepSixtyFourBits`).
 
 ## Cost
 
@@ -295,7 +296,7 @@ has the two-admin weaknesses above.
 | T9 | `TestOneKeyCannotChangeAdminSetOnceThereAreThreeAdmins`, `TestOneKeyCannotChangeAdminSetInLargerRooms`, `TestIdleStolenKeyBackdatingCannotChangeAdminSet`, `TestNoRankAnyTwoAdminsRemoveTheThirdNoneAlone`, `TestCreatorKeyIsRemovableByTwoOtherAdmins`, `TestMutualRemovalWithTwoThreeAndFourAdmins`, `TestOwnVoteOnOwnRemovalDoesNotCount`, `TestSeededRoomsKeepEveryProperty`, `TestOneKeyCannotChangeAdminSetByForkingItsOwnChain`, `TestForkEvidenceNeedsTwoEntriesByOneKeyAtOnePosition`, the fork tests |
 | T5 | `TestRemovedAdminsConcurrentRemovalOfCompromisedMachineStands`, `TestConcurrentAddAndRemoveOfSameMachineRemovalWins`, `TestCascadeFromVoidAdminVoidsItsGrantsKeepsItsRemovals`, `TestRemovedAdminKeepsSigningGrantsVoidRemovalsCountOncePerTarget`, `TestLateVoteOnCompletedRemovalDoesNotUndoReadmission` |
 | T10 | `TestAllAdminsLostFreezesMembershipNobodyPromoted`, `TestLossOfAnyOneAdminIsSurvivable`, `TestLostAdminOfThreeIsReplacedByTheOtherTwo`, `TestLostAdminOfTwoLeavesMembersManageableAdminSetFixed` |
-| A4 | `TestResolveGivesEveryEntryAReasonOnArbitraryInput`, `TestDaemonMachineRefusesEntriesWithoutASignedID`, `TestSignedIngressChecksRoomPinAndSignature`, `TestSequenceNumbersKeepSixtyFourBits`, `TestHeldEntriesAndBranchesAreBounded`, `TestPrevIsCheckedAgainstRefusedEntries` |
+| A4 | `TestResolveGivesEveryEntryAReasonOnArbitraryInput`, `TestDaemonMachineRefusesEntriesWithoutASignedID`, `TestSignedIngressChecksRoomPinAndSignature`, `TestOnlyVerifiedEntriesReachTheMachine`, `TestSequenceNumbersKeepSixtyFourBits`, `TestHeldEntriesAndBranchesAreBounded`, `TestPrevIsCheckedAgainstRefusedEntries` |
 | T3 | `TestFirstThreeMachinesBecomeAdminsWithTwoAdminConfirmations`, `TestSignedBootstrapMakesThreeAdmins` |
 | D6 | `TestBackupRestoreForkIsSettledByRemovalOfTheForkingAdmin`, `TestSignedForkInTwoAdminRoomIsSettledByTheOtherAdmin`, `TestForkInTwoAdminRoomIsSettledByTheOtherAdminAlone`, `TestForkSettledByOneRemoverKeepsTheBranchItHadSeen`, `TestForkByMemberWhoIsNotAnAdminChangesNothing`, `TestMachinesReceivingSameEntriesInAnyOrderAgree`, `TestForkEvidenceSeenDoesNotDependOnIDOrder`, `TestEntriesReleasedBySettlementReserveTheirPositions`, `TestReplayOfHeldCompetingEntriesPicksTheSameWinner` |
 | RM2 | `TestPermissionComesFromCurrentGrantsAndTheMoreRestrictiveApplies`, `TestGrantWithoutEffectContributesNoPermission`, `TestSignedBootstrapMakesThreeAdmins`, `TestPermissionHidesAtOrBeforeTheHeadAndFailsClosed` |

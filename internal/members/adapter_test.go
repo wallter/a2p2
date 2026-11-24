@@ -34,7 +34,7 @@ func newSigner(t *testing.T, n byte) *signer {
 
 // sign signs the signer's next entry; at reuses a position (a restored
 // backup) when at > 0, continuing from prev.
-func (s *signer) sign(kind core.EntryKind, target string, f core.EntryFields, parents ...*core.Entry) *core.Entry {
+func (s *signer) sign(kind core.EntryKind, target string, f core.EntryFields, parents ...*core.VerifiedEntry) *core.VerifiedEntry {
 	if f.Room == "" {
 		f.Room = testRoom
 	}
@@ -57,7 +57,11 @@ func (s *signer) sign(kind core.EntryKind, target string, f core.EntryFields, pa
 	case core.EntryAdd:
 		f.Name = "m"
 	}
-	e, err := core.NewEntry(s.key, f)
+	u, err := core.NewEntry(s.key, f)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	e, err := u.Verified()
 	if err != nil {
 		s.t.Fatal(err)
 	}
@@ -67,7 +71,7 @@ func (s *signer) sign(kind core.EntryKind, target string, f core.EntryFields, pa
 	return e
 }
 
-func ids(es ...*core.Entry) []string {
+func ids(es ...*core.VerifiedEntry) []string {
 	var out []string
 	for _, e := range es {
 		out = append(out, e.ID())
@@ -86,9 +90,9 @@ func sortedNodes(ss ...*signer) []string {
 // bootstrap: A creates the room; adds B with history and makes it an
 // admin alone (A is the only admin); adds C with a frontier, then A and B
 // make C an admin with two votes.
-func bootstrap(t *testing.T) (a, b, c *signer, log []*core.Entry, mkC1 *core.Entry) {
+func bootstrap(t *testing.T) (a, b, c *signer, log []*core.VerifiedEntry, mkC1 *core.VerifiedEntry) {
 	a, b, c = newSigner(t, 1), newSigner(t, 2), newSigner(t, 3)
-	add := func(e *core.Entry) *core.Entry { log = append(log, e); return e }
+	add := func(e *core.VerifiedEntry) *core.VerifiedEntry { log = append(log, e); return e }
 	create := add(a.sign(core.EntryCreate, "", core.EntryFields{}))
 	addB := add(a.sign(core.EntryAdd, b.id, core.EntryFields{History: true}, create))
 	mkB := add(a.sign(core.EntryAdmin, b.id, core.EntryFields{}, addB))
@@ -98,7 +102,7 @@ func bootstrap(t *testing.T) (a, b, c *signer, log []*core.Entry, mkC1 *core.Ent
 	return a, b, c, log, mkC1
 }
 
-func machineOf(t *testing.T, log []*core.Entry, order ...int) *Machine {
+func machineOf(t *testing.T, log []*core.VerifiedEntry, order ...int) *Machine {
 	m, err := NewMachine(log[0])
 	if err != nil {
 		t.Fatal(err)
@@ -161,7 +165,7 @@ func TestSignedRemovalByTwoAdmins(t *testing.T) {
 	head := log[len(log)-1]
 	rA := a.sign(core.EntryRemove, c.id, core.EntryFields{}, head)
 	rB := b.sign(core.EntryRemove, c.id, core.EntryFields{}, head)
-	one := mustResolve(t, log[0].ID(), append(append([]*core.Entry(nil), log...), rA))
+	one := mustResolve(t, log[0].ID(), append(append([]*core.VerifiedEntry(nil), log...), rA))
 	if one.Effects[rA.ID()].Reason != ReasonNeedsSecond {
 		t.Fatalf("one vote: %+v", one.Effects[rA.ID()])
 	}
@@ -193,14 +197,14 @@ func TestSignedForkInTwoAdminRoomIsSettledByTheOtherAdmin(t *testing.T) {
 	addP := b.sign(core.EntryAdd, p.id, core.EntryFields{}, mkB)
 	addD := b.sign(core.EntryAdd, d.id, core.EntryFields{}, addP)
 	addE := b.sign(core.EntryAdd, e.id, core.EntryFields{Seq: 2, Prev: addP.ID()}, addP)
-	base := []*core.Entry{create, addB, mkB, addP}
+	base := []*core.VerifiedEntry{create, addB, mkB, addP}
 	p1, p2 := machineOf(t, base), machineOf(t, base)
 	p1.Receive(addD, addE)
 	p2.Receive(addE, addD)
 	if s1, s2 := p1.State(), p2.State(); sameState(s1, s2) || len(p1.Evidence()) != 1 || len(p2.Evidence()) != 1 {
 		t.Fatalf("expected first-seen branches and evidence: %v / %v", s1.Members, s2.Members)
 	}
-	var accepted []*core.Entry
+	var accepted []*core.VerifiedEntry
 	for _, e := range p1.Offer() {
 		if e.ID() != addE.ID() {
 			accepted = append(accepted, e)
@@ -237,7 +241,7 @@ func TestDaemonMachineRefusesEntriesWithoutASignedID(t *testing.T) {
 	}
 }
 
-func mustResolve(t *testing.T, root string, es []*core.Entry) State {
+func mustResolve(t *testing.T, root string, es []*core.VerifiedEntry) State {
 	t.Helper()
 	st, err := ResolveRoom(root, es)
 	if err != nil {
@@ -277,9 +281,10 @@ func TestPermissionHidesAtOrBeforeTheHeadAndFailsClosed(t *testing.T) {
 }
 
 // The package checks what it relies on: an entry signed for another room
-// is refused with a reason, an empty pin is an error, a corrupted
-// signature is refused at the boundary, and entries parsed from the wire
-// resolve as built.
+// is refused with a reason, an empty pin is an error, a nil or zero
+// verified entry is refused, an entry whose signature does not verify
+// cannot become one, and entries parsed from the wire and verified resolve
+// as built.
 //
 // Requirements: A4, D6
 func TestSignedIngressChecksRoomPinAndSignature(t *testing.T) {
@@ -291,34 +296,48 @@ func TestSignedIngressChecksRoomPinAndSignature(t *testing.T) {
 	if len(res) != 1 || res[0].Disposition != Invalid || res[0].Reason != ReasonOtherRoom {
 		t.Fatalf("other room: %+v", res)
 	}
-	st := mustResolve(t, create.ID(), append(append([]*core.Entry(nil), log...), other))
+	st := mustResolve(t, create.ID(), append(append([]*core.VerifiedEntry(nil), log...), other))
 	if st.Effects[other.ID()].Reason != ReasonOtherRoom {
 		t.Fatalf("other room in ResolveRoom: %+v", st.Effects[other.ID()])
 	}
 	if _, err := ResolveRoom("", log); err == nil {
 		t.Fatal("an empty pin must be an error")
 	}
+	if res := m.Receive(nil, &core.VerifiedEntry{}); len(res) != 2 || res[0].Reason != ReasonNotVerified || res[1].Reason != ReasonNotVerified {
+		t.Fatalf("nil and zero entries: %+v", res)
+	}
+	for _, bad := range []*core.VerifiedEntry{nil, {}} {
+		if _, err := ResolveRoom(create.ID(), append(append([]*core.VerifiedEntry(nil), log...), bad)); err == nil {
+			t.Fatal("ResolveRoom took a nil or zero entry")
+		}
+		if _, err := NewMachine(bad); err == nil {
+			t.Fatal("NewMachine took a nil or zero entry")
+		}
+	}
+	// An entry whose signature does not verify has no VerifiedEntry, and
+	// every exported entry path takes only that type.
 	good := b.sign(core.EntryAdd, newSigner(t, 8).id, core.EntryFields{}, log[len(log)-1])
-	sig := good.Sig()
+	sig := append([]byte(nil), good.Sig()...)
 	sig[0] ^= 1
 	bad, err := core.EntryFromParts(good.Header(), sig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res := m.Receive(bad); len(res) != 1 || res[0].Reason != ReasonBadSignature {
-		t.Fatalf("bad signature: %+v", res)
-	}
-	if st := mustResolve(t, create.ID(), append(append([]*core.Entry(nil), log...), bad)); st.Effects[bad.ID()].Reason != ReasonBadSignature {
-		t.Fatalf("bad signature in ResolveRoom: %+v", st.Effects[bad.ID()])
+	if v, err := bad.Verified(); err == nil || v != nil {
+		t.Fatal("a corrupted signature verified")
 	}
 	// From the wire.
-	var parsed []*core.Entry
+	var parsed []*core.VerifiedEntry
 	for _, e := range log {
 		p, err := core.ParseEntry(e.Wire())
 		if err != nil {
 			t.Fatal(err)
 		}
-		parsed = append(parsed, p)
+		v, err := p.Verified()
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed = append(parsed, v)
 	}
 	if !sameState(machineOf(t, parsed).State(), mustResolve(t, create.ID(), log)) {
 		t.Fatal("entries from the wire resolve differently")
@@ -337,5 +356,30 @@ func TestSequenceNumbersKeepSixtyFourBits(t *testing.T) {
 	m := machineOf(t, log)
 	if res := m.Receive(big); len(res) != 1 || res[0].Disposition != Held {
 		t.Fatalf("got %+v", res)
+	}
+}
+
+// No exported entry path takes an unverified *core.Entry: the functions'
+// types are fixed here at compile time, and every exported method of
+// Machine is checked for a *core.Entry parameter.
+//
+// Requirements: A4
+func TestOnlyVerifiedEntriesReachTheMachine(t *testing.T) {
+	var (
+		_ func(*core.VerifiedEntry) (*Machine, error)        = NewMachine
+		_ func(string, []*core.VerifiedEntry) (State, error) = ResolveRoom
+		_ func(*Machine, ...*core.VerifiedEntry) []Result    = (*Machine).Receive
+		_ func(*Machine) []*core.VerifiedEntry               = (*Machine).Offer
+	)
+	unverified := reflect.TypeOf((*core.Entry)(nil))
+	mt := reflect.TypeOf((*Machine)(nil))
+	for i := 0; i < mt.NumMethod(); i++ {
+		f := mt.Method(i).Type
+		for j := 0; j < f.NumIn(); j++ {
+			in := f.In(j)
+			if in == unverified || (in.Kind() == reflect.Slice && in.Elem() == unverified) {
+				t.Fatalf("Machine.%s takes *core.Entry", mt.Method(i).Name)
+			}
+		}
 	}
 }
