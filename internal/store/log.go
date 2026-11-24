@@ -706,6 +706,7 @@ func (s *Store) LeaveRoom(ctx context.Context, room string, now time.Time) (int6
 			`DELETE FROM log WHERE room = ?`, `DELETE FROM room_members WHERE room = ?`,
 			`DELETE FROM requests WHERE room = ?`,
 			`DELETE FROM observed WHERE room = ?`, `DELETE FROM refusals WHERE room = ?`,
+			`DELETE FROM room_invites WHERE room = ?`,
 		} {
 			if _, err := tx.Exec(q, room); err != nil {
 				return err

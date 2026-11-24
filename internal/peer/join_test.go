@@ -1,0 +1,149 @@
+package peer
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/wallter/a2p2/internal/node"
+	"github.com/wallter/a2p2/internal/store"
+)
+
+// joinH serves v0.2 (counting, never expected here) and the join exchange
+// of rooms, counting the bodies the join handler was given.
+type joinH struct {
+	countH
+	js     *node.JoinServer
+	bodies atomic.Int64
+	from   atomic.Value
+}
+
+func (h *joinH) Handle(ctx context.Context, from, source string, body []byte) node.JoinReply {
+	h.bodies.Add(1)
+	h.from.Store(from)
+	return h.js.Handle(ctx, from, source, body)
+}
+
+// machine is one next-version machine with its own store.
+func machine(t *testing.T, id *Identity) *node.Rooms {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "a2p2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	r, err := node.OpenRooms(bg, node.NewMachine(st, id.Key, node.MachineOpts{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func noSleep(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+
+// One whole join between two machines with separate stores over TLS on
+// loopback: preview, accept, the admin's person approves, the joiner
+// fetches the log; the server saw the joiner's key from TLS.
+//
+// Requirements: T3, T7, P3
+func TestJoinOverTLSBetweenTwoMachines(t *testing.T) {
+	ida, idb := newID(t), newID(t)
+	a, b := machine(t, ida), machine(t, idb)
+	h := &joinH{js: node.NewJoinServer(a)}
+	addr := serve(t, ida, h, nil, nil)
+	room, err := a.CreateRoom(bg, "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv, err := a.Invite(bg, room, "", true, []string{addr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := node.NewJoiner(b, NewJoinClient(idb), node.JoinerOpts{Name: "bee", Sleep: noSleep})
+	p, err := j.JoinPreview(bg, inv.Token)
+	if err != nil || p.Room != room || p.Admin != ida.NodeID() || p.Role != node.RoleAdmin || !p.History {
+		t.Fatalf("preview: %+v %v", p, err)
+	}
+	if o, err := j.JoinAccept(bg, inv.Token, 0); err != nil || o.State != node.JoinStateAccepted {
+		t.Fatalf("accept: %+v %v", o, err)
+	}
+	qs, err := a.Requests(bg)
+	if err != nil || len(qs) != 1 || qs[0].Node != idb.NodeID() {
+		t.Fatalf("requests: %+v %v", qs, err)
+	}
+	if c, err := a.Confirm(bg, qs[0].ID, true); err != nil || c.State != store.RequestApproved {
+		t.Fatalf("confirm: %+v %v", c, err)
+	}
+	os, err := j.Resume(bg, time.Minute)
+	if err != nil || len(os) != 1 || os[0].State != node.JoinStateSigned {
+		t.Fatalf("resume: %+v %v", os, err)
+	}
+	sa, _ := a.State(room)
+	sb, err := b.State(room)
+	if err != nil || !slices.Equal(sa.Members, sb.Members) || !slices.Equal(sa.Admins, sb.Admins) || len(sb.Admins) != 2 {
+		t.Fatalf("states: %+v %+v %v", sa, sb, err)
+	}
+	if h.from.Load() != idb.NodeID() || h.calls.Load() != 0 {
+		t.Fatalf("server saw %v; v0.2 calls %d", h.from.Load(), h.calls.Load())
+	}
+}
+
+// A machine holding another key answers at the invite's address: the
+// joiner stops after the TLS handshake, and no request body reached it.
+//
+// Requirements: T3, T7
+func TestJoinOverTLSToTheWrongKeySendsNothing(t *testing.T) {
+	ida, idb, idm := newID(t), newID(t), newID(t)
+	a, b := machine(t, ida), machine(t, idb)
+	h := &joinH{js: node.NewJoinServer(machine(t, idm))}
+	addr := serve(t, idm, h, nil, nil)
+	room, err := a.CreateRoom(bg, "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv, err := a.Invite(bg, room, "", false, []string{addr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := node.NewJoiner(b, NewJoinClient(idb), node.JoinerOpts{Name: "bee", Sleep: noSleep})
+	if _, err := j.JoinPreview(bg, inv.Token); !errors.Is(err, node.ErrWrongKey) {
+		t.Fatalf("got %v, want wrong_key", err)
+	}
+	if h.bodies.Load() != 0 || h.calls.Load() != 0 {
+		t.Fatalf("the server was given %d bodies", h.bodies.Load())
+	}
+}
+
+// The join route refuses a body over its limit before reading it, and is
+// served only when the handler implements it.
+//
+// Requirements: T3
+func TestJoinRouteRefusesOversizeBodies(t *testing.T) {
+	id := newID(t)
+	h := &joinH{js: node.NewJoinServer(machine(t, id))}
+	addr := serve(t, id, h, nil, nil)
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	c := rawClient(certFor(t, pub, priv, hex.EncodeToString(pub)))
+	big := `{"secret":"` + strings.Repeat("a", int(maxJoinV2Body)) + `"}`
+	if code, err := post(c, addr, pathJoinV2, big); err != nil || code != 413 {
+		t.Fatalf("oversize join: %d %v", code, err)
+	}
+	if code, err := post(c, addr, pathJoinV2, `{"v":2,"op":"open"}`); err != nil || code != 400 {
+		t.Fatalf("bad join: %d %v", code, err)
+	}
+	if h.bodies.Load() != 1 {
+		t.Fatalf("bodies handed over: %d", h.bodies.Load())
+	}
+	plain := serve(t, id, &countH{}, nil, nil)
+	if code, err := post(c, plain, pathJoinV2, `{}`); err != nil || code != 404 && code != 405 {
+		t.Fatalf("join route without a join handler: %d %v", code, err)
+	}
+}

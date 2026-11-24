@@ -192,6 +192,15 @@ func requestText(q store.Request) string {
 	if q.Name != "" {
 		s += " (" + q.Name + ")"
 	}
+	switch {
+	case q.Action == ActionRejoin:
+		s = "let machine " + short(q.Node) + " (" + q.Name + "), still a member, fetch the room's log again"
+	case q.Kind == string(core.EntryAdd) && q.Action == ActionAdmitAdmin:
+		s += " and make it an admin"
+	}
+	if q.Kind != string(core.EntryRemove) && q.Action != ActionPromote && q.Action != ActionRejoin {
+		s += map[bool]string{true: ", with earlier history", false: ", without earlier history"}[q.History]
+	}
 	if q.Seconds != "" {
 		s += ", seconding another admin's entry"
 	}

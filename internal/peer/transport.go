@@ -300,6 +300,9 @@ func Serve(ctx context.Context, ln net.Listener, id *Identity, h Handler, refres
 	mux.Handle("POST "+pathRoom, route(maxSmallBody, func(ctx context.Context, from string, req node.RoomReq) (any, error) {
 		return h.HandleRoom(ctx, from, req)
 	}))
+	if j, ok := h.(JoinHandler); ok {
+		mux.Handle("POST "+pathJoinV2, joinV2Route(j))
+	}
 	protos := new(http.Protocols)
 	protos.SetHTTP1(true) // HTTP/1.1 only: one request per connection at a time, small surface
 	srv := &http.Server{

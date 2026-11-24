@@ -1,0 +1,10 @@
+{
+  "note": "valid-whitespace-around",
+  "token": "  a2p2:0CA2-ADJ7-B1MQ-N2WW-NPZC-ZR7H-088C-QYRX-P9KA-R9BX-CS3N-MZ0T-NWZR@203.0.113.7:7443\n",
+  "secret": "031425364758697a8b9cadbecfe0f102",
+  "fingerprint": "432fec76c99ab095f5991d69f06abcfe",
+  "addrs": [
+    "203.0.113.7:7443"
+  ],
+  "canonical": "a2p2:0CA2-ADJ7-B1MQ-N2WW-NPZC-ZR7H-088C-QYRX-P9KA-R9BX-CS3N-MZ0T-NWZR@203.0.113.7:7443"
+}

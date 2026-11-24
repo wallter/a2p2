@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"slices"
+	"strings"
 
 	"github.com/wallter/a2p2/internal/core"
 	"github.com/wallter/a2p2/internal/members"
@@ -28,6 +29,11 @@ type Change struct {
 	// without it the grant carries this machine's heads as its frontier.
 	// Ignored when the target is already a member.
 	History bool
+	// Admin, with Kind add, also makes the machine an admin: on approval
+	// this machine signs the add and then its own admin entry, which waits
+	// for a matching one from another admin [M4] (the third admin,
+	// DESIGN-next section 7). One confirmation covers both.
+	Admin bool
 }
 
 // Actions a request approves: exactly what the person agrees to.
@@ -36,6 +42,9 @@ const (
 	ActionAdmitAdmin = "admit_admin" // add a machine that is not a member, as an admin
 	ActionPromote    = "promote"     // make an existing member an admin
 	ActionRemove     = "remove"      // remove a member
+	// ActionRejoin lets a machine that is still a member, and joins again
+	// with a fresh invite, fetch the room's log: no entry is signed.
+	ActionRejoin = "rejoin"
 )
 
 // fromWithHistory: every admitting grant carries the signer's heads as
@@ -61,6 +70,20 @@ func actionOf(st members.State, kind, target string) string {
 	return ActionAdmitAdmin
 }
 
+// requestAction is what request q would do in state st now: actionOf, but
+// an add that also makes an admin (Change.Admin) stays admit_admin while
+// its target is not a member, and a rejoin stays a rejoin while it is.
+func requestAction(st members.State, q store.Request) string {
+	now := actionOf(st, q.Kind, q.Node)
+	switch {
+	case q.Action == ActionRejoin && slices.Contains(st.Members, q.Node):
+		return ActionRejoin
+	case q.Kind == string(core.EntryAdd) && q.Action == ActionAdmitAdmin && now == ActionAdmit:
+		return ActionAdmitAdmin
+	}
+	return now
+}
+
 func roleOf(action string) string {
 	switch action {
 	case ActionAdmit:
@@ -82,8 +105,11 @@ type Confirmation struct {
 	ID     string // the request
 	State  string // store.RequestApproved, RequestDeclined or RequestFailed
 	Reason string // why it failed, or why the entry is pending
-	Entry  string // the entry signed, when approved
-	Effect string // EffectApplied or EffectPending, when approved
+	Entry  string // the (last) entry signed, when approved
+	Effect string // EffectApplied or EffectPending of Entry, when approved
+	// Entries are every entry signed, in order: two for an add that also
+	// makes an admin, none for a rejoin.
+	Entries []string
 }
 
 // Reasons a request is refused or fails, besides the members package's.
@@ -95,24 +121,16 @@ const (
 	ReasonActionMoved = "the room changed: signing now would "
 	ReasonTooMany     = "too many requests are waiting in this room"
 	errNotPendingText = "request is not pending"
+	ReasonNoGrant     = "the machine is still a member: approving lets it fetch the room's log and signs nothing"
+	ReasonNotAdmitted = "the room's admins changed since the invite was accepted, so the joiner would not be admitted now; make a new invite"
 )
 
 // Propose records a request for a change to room's member list, for a
 // person to confirm. It is refused at once if it could not apply now.
 func (r *Rooms) Propose(ctx context.Context, room string, c Change) (store.Request, error) {
-	switch c.Kind {
-	case core.EntryAdd, core.EntryRemove, core.EntryAdmin:
-	default:
-		return store.Request{}, userErr("a change adds, removes or makes an admin")
-	}
-	if !core.ValidNode(c.Target) {
-		return store.Request{}, userErr("bad node id")
-	}
-	if c.Kind == core.EntryAdd && c.Name == "" || c.Name != "" && !core.ValidLabel(c.Name) {
-		return store.Request{}, userErr("bad or missing name for the machine")
-	}
-	if c.Kind == core.EntryRemove {
-		c.Name, c.History = "", false
+	c, err := checkChange(c)
+	if err != nil {
+		return store.Request{}, err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -120,16 +138,61 @@ func (r *Rooms) Propose(ctx context.Context, room string, c Change) (store.Reque
 	if err != nil {
 		return store.Request{}, err
 	}
-	q := store.Request{Kind: string(c.Kind), Room: room, Node: c.Target, Name: c.Name,
+	q, err := r.prepare(ctx, rl, c)
+	if err != nil {
+		return store.Request{}, err
+	}
+	if err := r.m.st.CreateRequest(ctx, q); err != nil {
+		return store.Request{}, err
+	}
+	return q, nil
+}
+
+// checkChange checks the form of c and clears what its kind ignores.
+func checkChange(c Change) (Change, error) {
+	switch c.Kind {
+	case core.EntryAdd, core.EntryRemove, core.EntryAdmin:
+	default:
+		return c, userErr("a change adds, removes or makes an admin")
+	}
+	if !core.ValidNode(c.Target) {
+		return c, userErr("bad node id")
+	}
+	if c.Kind == core.EntryAdd && c.Name == "" || c.Name != "" && !core.ValidLabel(c.Name) {
+		return c, userErr("bad or missing name for the machine")
+	}
+	if c.Kind == core.EntryRemove {
+		c.Name, c.History = "", false
+	}
+	if c.Kind != core.EntryAdd {
+		c.Admin = false
+	}
+	return c, nil
+}
+
+// prepare builds the request for change c (checked by checkChange) in
+// rl's current state, refused at once if it could not apply now or too
+// many wait. The caller holds r.mu and stores the request.
+func (r *Rooms) prepare(ctx context.Context, rl *roomLog, c Change) (store.Request, error) {
+	q := store.Request{Kind: string(c.Kind), Room: rl.id, Node: c.Target, Name: c.Name,
 		Action: actionOf(rl.st, string(c.Kind), c.Target), Created: r.m.now(), State: store.RequestPending}
+	if c.Admin && q.Action == ActionAdmit {
+		q.Action = ActionAdmitAdmin
+	}
+	return r.prepared(ctx, rl, q, c.History)
+}
+
+// prepared finishes request q: its history (only a grant that admits
+// carries one), role, the checks and an id.
+func (r *Rooms) prepared(ctx context.Context, rl *roomLog, q store.Request, history bool) (store.Request, error) {
 	if q.Action == ActionAdmit || q.Action == ActionAdmitAdmin {
-		q.History = c.History // promoting changes no permission
+		q.History = history // promoting changes no permission
 	}
 	q.Role = roleOf(q.Action)
 	if reason := r.check(rl, q); reason != "" {
 		return store.Request{}, &UserError{reason}
 	}
-	pending, err := r.m.st.Requests(ctx, room, store.RequestPending)
+	pending, err := r.m.st.Requests(ctx, rl.id, store.RequestPending)
 	if err != nil {
 		return store.Request{}, err
 	}
@@ -137,14 +200,14 @@ func (r *Rooms) Propose(ctx context.Context, room string, c Change) (store.Reque
 		return store.Request{}, &UserError{ReasonTooMany}
 	}
 	q.ID = r.newID()
-	if err := r.m.st.CreateRequest(ctx, q); err != nil {
-		return store.Request{}, err
-	}
 	return q, nil
 }
 
 // Requests lists requests waiting for a person, in every room.
 func (r *Rooms) Requests(ctx context.Context) ([]store.Request, error) {
+	if _, err := r.m.st.ExpireInvites(ctx, r.m.now()); err != nil {
+		return nil, err
+	}
 	return r.m.st.Requests(ctx, "", store.RequestPending)
 }
 
@@ -182,6 +245,13 @@ func (r *Rooms) Confirm(ctx context.Context, id string, approve bool) (Confirmat
 		}
 		return Confirmation{ID: id, State: store.RequestFailed, Reason: reason}, nil
 	}
+	invited, expired, err := r.inviteOf(ctx, q, now)
+	if err != nil || expired {
+		if err != nil {
+			return Confirmation{}, err
+		}
+		return Confirmation{ID: id, State: store.RequestFailed, Reason: store.ReasonInviteExpired}, nil
+	}
 	rl := r.rooms[q.Room]
 	if rl == nil {
 		return fail(ReasonRoomGone)
@@ -192,35 +262,67 @@ func (r *Rooms) Confirm(ctx context.Context, id string, approve bool) (Confirmat
 	if reason := r.check(rl, q); reason != "" {
 		return fail(reason)
 	}
-	v, err := r.sign(ctx, rl, q)
-	if err != nil {
-		return Confirmation{}, err
+	if q.Action == ActionRejoin {
+		// Nothing to sign: the approval alone is stored.
+		if _, err := r.m.st.ApplyLog(ctx, store.LogBatch{Room: rl.id, Gen: rl.gen, Complete: id, Now: now}); err != nil {
+			return Confirmation{}, err
+		}
+		return Confirmation{ID: id, State: store.RequestApproved, Effect: EffectApplied, Reason: ReasonNoGrant}, nil
 	}
-	// What the entry would do, resolved with the room's accepted entries:
-	// one that would have no effect (other than waiting for a second admin)
-	// is not stored.
+	// An add that also makes an admin is the add, then this machine's own
+	// admin entry naming the new member, both under this one approval.
+	steps := []store.Request{q}
+	if q.Kind == string(core.EntryAdd) && q.Action == ActionAdmitAdmin {
+		add, promote := q, q
+		add.Action = ActionAdmit
+		promote.Kind, promote.Action, promote.History = string(core.EntryAdmin), ActionPromote, false
+		steps = []store.Request{add, promote}
+	}
+	var signed []*core.VerifiedEntry
+	for _, step := range steps {
+		v, err := r.sign(ctx, rl, step, signed...)
+		if err != nil {
+			return Confirmation{}, err
+		}
+		signed = append(signed, v)
+	}
+	// What the entries would do, resolved with the room's accepted
+	// entries: one that would have no effect (other than waiting for a
+	// second admin) is not stored.
 	var acc []*core.VerifiedEntry
 	for _, eid := range sortedIDs(rl.ents) {
 		if rl.state[eid].State == store.LogAccepted {
 			acc = append(acc, rl.ents[eid])
 		}
 	}
-	dry, err := members.ResolveRoom(rl.createID, append(acc, v))
+	dry, err := members.ResolveRoom(rl.createID, append(acc, signed...))
 	if err != nil {
 		return Confirmation{}, err
 	}
-	if eff := dry.Effects[v.ID()]; !eff.Applied && eff.Reason != members.ReasonNeedsSecond {
-		return fail(eff.Reason)
+	var wires [][]byte
+	var ids []string
+	for _, v := range signed {
+		if eff := dry.Effects[v.ID()]; !eff.Applied && eff.Reason != members.ReasonNeedsSecond {
+			return fail(eff.Reason)
+		}
+		wires, ids = append(wires, v.Wire()), append(ids, v.ID())
 	}
-	res, err := r.ingest(ctx, rl, 0, [][]byte{v.Wire()}, &completion{request: id, entry: v.ID()})
+	if invited && !slices.Contains(dry.Members, q.Node) {
+		// The joiner was shown that it would be admitted (DESIGN-next 7).
+		return fail(ReasonNotAdmitted)
+	}
+	res, err := r.ingest(ctx, rl, 0, wires, &completion{request: id, entry: strings.Join(ids, ",")})
 	if err != nil {
 		return Confirmation{}, err
 	}
-	if res[0].Disposition != members.Accepted {
-		return Confirmation{}, errors.New("own entry not accepted: " + res[0].Reason)
+	for _, x := range res {
+		if x.Disposition != members.Accepted {
+			return Confirmation{}, errors.New("own entry not accepted: " + x.Reason)
+		}
 	}
-	c := Confirmation{ID: id, State: store.RequestApproved, Entry: v.ID(), Effect: EffectApplied}
-	if eff := rl.st.Effects[v.ID()]; !eff.Applied {
+	last := ids[len(ids)-1]
+	c := Confirmation{ID: id, State: store.RequestApproved, Entry: last, Effect: EffectApplied, Entries: ids}
+	if eff := rl.st.Effects[last]; !eff.Applied {
 		c.Effect, c.Reason = EffectPending, eff.Reason
 	}
 	return c, nil
@@ -248,6 +350,10 @@ func (r *Rooms) check(rl *roomLog, q store.Request) string {
 	switch {
 	case !slices.Contains(st.Admins, self):
 		return members.ReasonNotAdmin
+	case q.Action == ActionRejoin && !member:
+		return members.ReasonNotMember
+	case q.Action == ActionRejoin:
+		return ""
 	case q.Node == self && q.Kind == string(core.EntryRemove):
 		return members.ReasonSelfVote + "; to stop carrying a room, leave it"
 	case q.Node == self:
@@ -259,7 +365,7 @@ func (r *Rooms) check(rl *roomLog, q store.Request) string {
 	case q.Kind == string(core.EntryAdmin) && admin:
 		return members.ReasonAlreadyAdmin
 	}
-	if now := actionOf(st, q.Kind, q.Node); now != q.Action {
+	if now := requestAction(st, q); now != q.Action {
 		return ReasonActionMoved + now + " instead of " + q.Action
 	}
 	if q.Seconds != "" {
@@ -274,21 +380,29 @@ func (r *Rooms) check(rl *roomLog, q store.Request) string {
 // position of its own chain, naming as parents the heads of the entries
 // it has accepted (never a refused one [M11, M12]) and its previous entry.
 // A grant that admits carries history or this machine's heads per author.
-func (r *Rooms) sign(ctx context.Context, rl *roomLog, q store.Request) (*core.VerifiedEntry, error) {
+// before are entries this machine signed under the same approval and has
+// not stored yet; they count as accepted.
+func (r *Rooms) sign(ctx context.Context, rl *roomLog, q store.Request, before ...*core.VerifiedEntry) (*core.VerifiedEntry, error) {
 	f := core.EntryFields{Room: rl.id, Kind: core.EntryKind(q.Kind), Target: q.Node, Name: q.Name,
 		Seq: 1, Created: r.m.now()}
 	parentOf := map[string]bool{}
 	var accepted []string
-	for _, id := range sortedIDs(rl.ents) {
-		if rl.state[id].State != store.LogAccepted {
-			continue
+	look := map[string]*core.VerifiedEntry{}
+	for _, v := range before {
+		look[v.ID()] = v
+	}
+	for id, v := range rl.ents {
+		if rl.state[id].State == store.LogAccepted {
+			look[id] = v
 		}
+	}
+	for _, id := range sortedIDs(look) {
 		accepted = append(accepted, id)
-		ef := rl.ents[id].Fields()
+		ef := look[id].Fields()
 		for _, p := range ef.Parents {
 			parentOf[p] = true
 		}
-		if rl.ents[id].Author() == r.m.ID && ef.Seq >= f.Seq {
+		if look[id].Author() == r.m.ID && ef.Seq >= f.Seq {
 			f.Seq, f.Prev = ef.Seq+1, id
 		}
 	}

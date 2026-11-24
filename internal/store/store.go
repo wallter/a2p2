@@ -78,7 +78,7 @@ CREATE TABLE marks (
 `
 
 // migrations[i] upgrades the schema from version i to i+1. Append only.
-var migrations = []string{schema, schemaRecords, schemaLog, schemaPull}
+var migrations = []string{schema, schemaRecords, schemaLog, schemaPull, schemaInvites}
 
 // Store wraps the database. Safe for concurrent use.
 type Store struct {
