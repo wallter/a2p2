@@ -130,6 +130,9 @@ type Machine struct {
 	// fronts, set by OpenRooms, is this machine's reading frontier in each
 	// room with a log (see readFront).
 	fronts func() map[string]readFront
+	// filesChanged, set by NewFiles, applies the file rules [F1] to a
+	// room after something that may change which file may be kept.
+	filesChanged func(ctx context.Context, room string)
 	// locked, set by OpenRooms, runs fn with no membership change and no
 	// frontier published meanwhile, so that Prune reads the frontier and
 	// writes expiry as one decision.
@@ -299,7 +302,14 @@ func (m *Machine) Send(ctx context.Context, d Draft) (Sent, error) {
 		return Sent{}, userErr("a post to everyone names no addressees")
 	}
 	var to []core.Addressee
-	s, err := m.write(ctx, d.Room, d.Agent, func(v *roomView, f *core.RecordFields) error {
+	s, err := m.write(ctx, d.Room, d.Agent, sendDecide(d, &to))
+	s.To = to
+	return s, err
+}
+
+// sendDecide fills in a message from d; to receives its addressees.
+func sendDecide(d Draft, to *[]core.Addressee) func(v *roomView, f *core.RecordFields) error {
+	return func(v *roomView, f *core.RecordFields) error {
 		f.Kind, f.Text, f.Choices, f.AskHandled = core.KindMessage, d.Text, d.Choices, d.AskHandled
 		f.To = slices.Clone(d.To)
 		if d.ReplyTo != "" {
@@ -328,11 +338,9 @@ func (m *Machine) Send(ctx context.Context, d Draft) (Sent, error) {
 		if f.AskHandled && len(f.To) > 0 {
 			return userErr("ask_handled is only for a post to everyone")
 		}
-		to = slices.Clone(f.To)
+		*to = slices.Clone(f.To)
 		return nil
-	})
-	s.To = to
-	return s, err
+	}
 }
 
 // Replace gives new text for one of this machine's own messages (any agent
@@ -349,7 +357,12 @@ func (m *Machine) Withdraw(ctx context.Context, room, agent, ref string) (Sent, 
 }
 
 func (m *Machine) amend(ctx context.Context, room, agent, ref string, k core.Kind, text string) (Sent, error) {
-	return m.write(ctx, room, agent, func(v *roomView, f *core.RecordFields) error {
+	return m.write(ctx, room, agent, amendDecide(m.ID, ref, k, text))
+}
+
+// amendDecide fills in a replace or withdraw of ref, one of self's messages.
+func amendDecide(self, ref string, k core.Kind, text string) func(v *roomView, f *core.RecordFields) error {
+	return func(v *roomView, f *core.RecordFields) error {
 		f.Kind, f.Ref, f.Text = k, ref, text
 		t, err := v.get(ref)
 		if err != nil {
@@ -358,7 +371,7 @@ func (m *Machine) amend(ctx context.Context, room, agent, ref string, k core.Kin
 		if t == nil {
 			return ErrNotHeld
 		}
-		if t.author != m.ID || t.f.Kind != core.KindMessage {
+		if t.author != self || t.f.Kind != core.KindMessage {
 			return ErrNotAllowed
 		}
 		if k == core.KindReplace {
@@ -367,14 +380,14 @@ func (m *Machine) amend(ctx context.Context, room, agent, ref string, k core.Kin
 				return err
 			}
 			for _, r := range rs {
-				if r.f.Kind == core.KindReplace && r.author == m.ID && r.f.Version > f.Version {
+				if r.f.Kind == core.KindReplace && r.author == self && r.f.Version > f.Version {
 					f.Version = r.f.Version
 				}
 			}
 			f.Version++
 		}
 		return nil
-	})
+	}
 }
 
 // existing aborts a write whose report is already held.
@@ -439,6 +452,13 @@ func (m *Machine) Handled(ctx context.Context, room, agent, ref string) (Sent, e
 // first write in a room after a start begins a new stream whose first
 // record links every head of this machine's own history held there [R2].
 func (m *Machine) write(ctx context.Context, room, agent string, decide func(*roomView, *core.RecordFields) error) (Sent, error) {
+	return m.writeWith(ctx, room, agent, decide, m.st.Write)
+}
+
+// writeWith is write storing through put: the store's Write, or its
+// WriteWithFiles for a send with files.
+func (m *Machine) writeWith(ctx context.Context, room, agent string, decide func(*roomView, *core.RecordFields) error,
+	put func(context.Context, time.Time, func(*store.Reader) (*core.VerifiedRecord, error)) (*core.VerifiedRecord, error)) (Sent, error) {
 	if err := checkAgent(agent); err != nil {
 		return Sent{}, err
 	}
@@ -449,7 +469,7 @@ func (m *Machine) write(ctx context.Context, room, agent string, decide func(*ro
 	defer m.mu.Unlock()
 	now := m.now()
 	var epoch string
-	r, err := m.st.Write(ctx, now, func(rd *store.Reader) (*core.VerifiedRecord, error) {
+	r, err := put(ctx, now, func(rd *store.Reader) (*core.VerifiedRecord, error) {
 		v := m.newView(rd, room, now)
 		if err := v.load(); err != nil {
 			return nil, err
@@ -493,6 +513,9 @@ func (m *Machine) write(ctx context.Context, room, agent string, decide func(*ro
 	}
 	m.out[room] = epoch
 	m.wakes.touch(room)
+	if k := r.Fields().Kind; m.filesChanged != nil && (k == core.KindReplace || k == core.KindWithdraw) {
+		m.filesChanged(ctx, room) // [F1]: files the new version no longer lists
+	}
 	return Sent{ID: r.ID(), Room: room, Created: r.Fields().Created}, nil
 }
 

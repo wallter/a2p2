@@ -457,6 +457,11 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	})
 	adv := &advert{base: addrs}
 	x := node.NewExchange(rooms, pulls, node.ExchangeOpts{Book: book, Addrs: addrs, AddrsNow: adv.now})
+	files := node.NewFiles(rooms, peer.NewFileClient(pulls), node.FilesOpts{})
+	x.UseFiles(files)
+	if err := files.Start(parent); err != nil {
+		return false, err
+	}
 	if o.Exchange != nil {
 		o.Exchange(x)
 	}
@@ -511,7 +516,7 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	}()
 	keeping := false
 	if peerLn != nil {
-		h := peerHandler{JoinServer: node.NewJoinServer(rooms), x: x, g: g, db: node.NewDialBackServer(rooms, prober), reach: reach}
+		h := filesPeerHandler{peerHandler{JoinServer: node.NewJoinServer(rooms), x: x, g: g, db: node.NewDialBackServer(rooms, prober), reach: reach}, files}
 		ln := peerLn
 		peerLn = nil // Serve owns it now
 		lnCtx, lnStop := context.WithCancel(ctx)
@@ -532,6 +537,7 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	if netw.State != node.NetworkOff { // off: no scheduler, no join polling, nothing dialled
 		start(func() { node.NewScheduler(x, node.SchedOpts{}).Run(ctx) })
 		start(func() { resumeJoins(ctx, surf) })
+		start(func() { files.Run(ctx, time.Minute) })
 	}
 	if reach != nil {
 		start(func() { reach.Run(ctx) })

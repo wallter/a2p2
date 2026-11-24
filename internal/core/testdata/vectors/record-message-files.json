@@ -1,0 +1,7 @@
+{
+  "type": "record",
+  "note": "a message with files: the SHA-256 of its manifest (manifest-valid), nothing else about the files",
+  "room": "r_00112233445566778899aabbccddeeff",
+  "wire": "{\"h\":\"eyJ2IjoyLCJyb29tIjoicl8wMDExMjIzMzQ0NTU2Njc3ODg5OWFhYmJjY2RkZWVmZiIsImF1dGhvciI6ImYwN2E3NWM1YjZlMDRiOTI5YzIwZmJlMTJmNmVmOWI1YjhmYWExNjhkZGVjNjQxNTRlZDQ5ZGU1N2QwYTZiZTYiLCJlcG9jaCI6IjAxMjM0NTY3ODlhYmNkZWYiLCJzZXEiOjcsInByZXYiOiJhOTI5NzU5YTg2NjdhY2Y4YjNjNTkzOTk5MjRiN2RiMCIsImtpbmQiOiJtZXNzYWdlIiwiYWdlbnQiOiJjbGF1ZGUiLCJjcmVhdGVkIjoiMjAyNi0xMS0yM1QxMjowMDowMC4wMDBaIiwiYm9keSI6IjM4NTY0NmYzMDAxNGE1NzU5NzhlMWNhYTcwYTE2YTlhMjZjOGIzZDBhYzRjNWFhMDZhNTMxZGJjZjQ2OTE5ZjIiLCJzaXplIjozMSwiZmlsZXMiOiI5N2JjNTNjMjZkN2Y4NzAxMTYxNmQ5NDAyM2VjNGM5NTc1Nzg4YzMwZjQ0M2Q0MDRlOGZlNjVmNGUxYzFiN2Q0In0=\",\"s\":\"GPJ0p+pzPDSPlXh0j/4gFsE6/tFf8lGfHt5EqUEHSwJBUhUDjokiTZkEIsCk4+OB40hrrmq7NCkToFEJZPv2BA==\",\"b\":\"eyJ0ZXh0IjoiVGhlIGxvZyBpcyBhdHRhY2hlZC4ifQ==\"}",
+  "id": "60fd69803aa2cc2c1b54d6fbe0f443ba"
+}

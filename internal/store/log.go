@@ -131,6 +131,11 @@ type Request struct {
 	// Deadline, for a request an invite raised, is the invite's expiry
 	// (filled by the node; not stored with the request).
 	Deadline time.Time
+	// Draft and Terms, for a send with files (kind RequestSendFiles): the
+	// stored SendDraft, as JSON, and the SHA-256 of what the person
+	// approves (PROTOCOL 10.6).
+	Draft string
+	Terms string
 }
 
 // LogRoom is a room as the log path sees it.
@@ -660,19 +665,19 @@ func (s *Store) CreateRequest(ctx context.Context, q Request) error {
 }
 
 func insertRequest(tx *sql.Tx, q Request) error {
-	_, err := tx.Exec(`INSERT INTO requests (id, kind, action, room, node, name, role, history, seconds, created_at, state, admins)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, q.ID, q.Kind, q.Action, q.Room, q.Node, q.Name, q.Role, q.History, q.Seconds,
-		ms(q.Created), RequestPending, q.Admins)
+	_, err := tx.Exec(`INSERT INTO requests (id, kind, action, room, node, name, role, history, seconds, created_at, state, admins, draft, terms)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, q.ID, q.Kind, q.Action, q.Room, q.Node, q.Name, q.Role, q.History, q.Seconds,
+		ms(q.Created), RequestPending, q.Admins, q.Draft, q.Terms)
 	return err
 }
 
-const requestCols = `id, kind, action, room, node, name, role, history, seconds, created_at, state, decided_at, entries, reason, admins, not_caught_up`
+const requestCols = `id, kind, action, room, node, name, role, history, seconds, created_at, state, decided_at, entries, reason, admins, not_caught_up, draft, terms`
 
 func scanRequest(sc interface{ Scan(...any) error }) (Request, error) {
 	var q Request
 	var created, decided int64
 	if err := sc.Scan(&q.ID, &q.Kind, &q.Action, &q.Room, &q.Node, &q.Name, &q.Role, &q.History, &q.Seconds,
-		&created, &q.State, &decided, &q.Entries, &q.Reason, &q.Admins, &q.NotCaughtUp); err != nil {
+		&created, &q.State, &decided, &q.Entries, &q.Reason, &q.Admins, &q.NotCaughtUp, &q.Draft, &q.Terms); err != nil {
 		return Request{}, err
 	}
 	q.Created = fromMS(created)
@@ -746,6 +751,9 @@ func (s *Store) LeaveRoom(ctx context.Context, room string, now time.Time) (int6
 			return ErrLeft
 		}
 		gen = g + 1
+		if err := leaveFiles(tx, room, now); err != nil {
+			return err
+		}
 		for _, q := range []string{
 			`DELETE FROM records WHERE room = ?`, `DELETE FROM streams WHERE room = ?`,
 			`DELETE FROM forks WHERE room = ?`, `DELETE FROM cursors WHERE room = ?`,
@@ -764,5 +772,8 @@ func (s *Store) LeaveRoom(ctx context.Context, room string, now time.Time) (int6
 		_, err = tx.Exec(`UPDATE rooms SET gen = ?, left_at = ? WHERE id = ?`, gen, ms(now), room)
 		return err
 	})
+	if err == nil {
+		s.RunTrash(ctx)
+	}
 	return gen, err
 }

@@ -1,0 +1,8 @@
+{
+  "type": "manifest",
+  "note": "M2: v 2",
+  "room": "r_00112233445566778899aabbccddeeff",
+  "wire": "{\"v\":2,\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"files\":[{\"name\":\"a\",\"size\":1,\"sha256\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\"}]}",
+  "code": "unsupported_manifest",
+  "check": "M2"
+}

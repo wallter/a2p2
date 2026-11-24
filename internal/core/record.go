@@ -50,6 +50,10 @@ type RecordFields struct {
 	Parent     string
 	Thread     string
 	Created    time.Time
+	// Files is the SHA-256 of the manifest of a message or replacement
+	// with files (PROTOCOL 10.1), or empty. From a parsed record it is set
+	// only when the field is well formed on a kind that may carry it.
+	Files string
 	// Text and Choices are the body, for message and replace. From a parsed
 	// record they are set only if the body was present.
 	Text    string
@@ -74,6 +78,9 @@ type Record struct {
 	header   []byte
 	sig      []byte
 	body     []byte // nil when no text came with the header
+	// filesBad: the header has a files field that is not a manifest hash
+	// on a message or replace; stored as 0.1.0 stores it, read as no files.
+	filesBad bool
 }
 
 func (r *Record) Fields() RecordFields { return r.f.clone() }
@@ -83,6 +90,10 @@ func (r *Record) BodyHash() string     { return r.bodyHash }
 func (r *Record) Size() int64          { return r.size }
 func (r *Record) Header() []byte       { return bytes.Clone(r.header) }
 func (r *Record) Sig() []byte          { return bytes.Clone(r.sig) }
+
+// FilesMalformed reports a files header field that is not a manifest hash
+// on a message or replace: kept in the bytes and the id, read as no files.
+func (r *Record) FilesMalformed() bool { return r.filesBad }
 
 // Body returns the body bytes, or nil if no text is held.
 func (r *Record) Body() []byte { return bytes.Clone(r.body) }
@@ -124,6 +135,8 @@ func NewRecord(key ed25519.PrivateKey, f RecordFields) (*Record, error) {
 		return nil, refuseWrite(CodeTooManyHeads, "links")
 	case len(f.To) > maxTo:
 		return nil, refuseWrite(CodeBadField, "to")
+	case f.Files != "" && (f.Kind != KindMessage && f.Kind != KindReplace || !isHex(f.Files, 64)):
+		return nil, refuseWrite(CodeBadField, "files")
 	}
 	var body []byte
 	if f.Kind == KindMessage || f.Kind == KindReplace {
@@ -188,6 +201,7 @@ func NewRecord(key ed25519.PrivateKey, f RecordFields) (*Record, error) {
 	w.str("created", formatTime(f.Created))
 	w.str("body", hex.EncodeToString(sum[:]))
 	w.int("size", int64(len(body)))
+	w.str("files", f.Files)
 	header := w.end()
 	switch {
 	case f.Seq == 1 && len(header) > maxFirstHeader:
@@ -282,7 +296,8 @@ func recordFields(top jvalue) (*Record, *Refusal) {
 	r := &Record{}
 	f := &r.f
 	has := map[string]bool{}
-	for _, m := range top.obj {
+	var files *jvalue
+	for i, m := range top.obj {
 		k, v := m.key, m.val
 		ok := true
 		switch k {
@@ -338,6 +353,9 @@ func recordFields(top jvalue) (*Record, *Refusal) {
 			// bytes, ignored (section 1).
 			if !v.noNull() {
 				return nil, refuse("S6", k)
+			}
+			if k == "files" {
+				files = &top.obj[i].val // read below, once the kind is known (PROTOCOL 10.1)
 			}
 			continue
 		}
@@ -405,6 +423,13 @@ func recordFields(top jvalue) (*Record, *Refusal) {
 			return nil, refuse("S7", "links")
 		}
 		at[p] = true
+	}
+	if files != nil {
+		if (f.Kind == KindMessage || f.Kind == KindReplace) && files.kind == jString && isHex(files.str, 64) {
+			f.Files = files.str
+		} else {
+			r.filesBad = true
+		}
 	}
 	return r, nil
 }

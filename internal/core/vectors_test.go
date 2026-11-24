@@ -109,8 +109,28 @@ func outcome(v vector) (id, code, check string) {
 			return fail(err)
 		}
 		return e.ID(), "", ""
+	case "manifest":
+		if _, err := ParseManifest(wire); err != nil {
+			code := "invalid_manifest"
+			if errors.Is(err, ErrManifestVersion) {
+				code = "unsupported_manifest"
+			}
+			return "", code, manifestCheck(err)
+		}
+		return SHA256Hex(wire), "", ""
 	}
 	return "", "unknown vector type", ""
+}
+
+// manifestCheck names the rule of PROTOCOL 10.2 a manifest broke.
+func manifestCheck(err error) string {
+	switch {
+	case errors.Is(err, ErrManifestJSON):
+		return "M1"
+	case errors.Is(err, ErrManifestVersion):
+		return "M2"
+	}
+	return "M3"
 }
 
 func signWire(k ed25519.PrivateKey, header, body []byte) string {
@@ -248,6 +268,39 @@ func buildVectors() []namedVector {
 	}
 	reordered = append(reordered, '}')
 	rec("record-key-order", "record-replace's fields in another order: a different id, still valid", "", signWire(keyA, reordered, rr.Body()))
+
+	// Attachments (PROTOCOL 10.1, 10.2): a message and a replacement with
+	// the files field, a files field where it does not belong (stored, read
+	// as no files), and manifests.
+	man := []byte(`{"v":1,"salt":"000102030405060708090a0b0c0d0e0f","files":[{"name":"build.log","size":14,"sha256":"` +
+		SHA256Hex([]byte("build log text")) + `","type":"text/plain"}]}`)
+	mf := base
+	mf.Seq, mf.Prev, mf.Kind, mf.Text, mf.Files = 7, rr.ID(), KindMessage, "The log is attached.", SHA256Hex(man)
+	rmf := mustRecord(keyA, mf)
+	rec("record-message-files", "a message with files: the SHA-256 of its manifest (manifest-valid), nothing else about the files", "", string(rmf.Wire()))
+	rpf := base
+	rpf.Seq, rpf.Prev, rpf.Kind, rpf.Ref, rpf.Version, rpf.Text, rpf.Files = 8, rmf.ID(), KindReplace, rmf.ID(), 1, "The log, again.", SHA256Hex(man)
+	rrf := mustRecord(keyA, rpf)
+	rec("record-replace-files", "a replacement that lists the same manifest again", "", string(rrf.Wire()))
+	rec("record-files-on-handled", "files on a handled report: an unknown field there, stored and kept in the id, read as no files", "",
+		signWire(keyA, insert(rh.Header(), `"files":"`+SHA256Hex(man)+`"`), nil))
+	rec("record-files-malformed", "files that is not 64 lowercase hex: stored, kept in the id, read as no files", "",
+		signWire(keyA, insert(ra.Header(), `"files":"`+strings.ToUpper(SHA256Hex(man))+`"`), ra.Body()))
+	mfst := func(name, note, want string, b []byte) { add(name, "manifest", note, want, string(b)) }
+	mfst("manifest-valid", "a manifest with one file: its id is its SHA-256, the value of a header's files", "", man)
+	mfst("manifest-unknown-key", "an unknown key in a manifest and in a file is ignored", "",
+		[]byte(`{"v":1,"salt":"000102030405060708090a0b0c0d0e0f","files":[{"name":"a b.txt","size":1,"sha256":"`+SHA256Hex([]byte("x"))+`","later":[1]}],"later":{"k":"v"}}`))
+	mfst("manifest-bad-json", "M1: a duplicate key", "invalid_manifest",
+		[]byte(`{"v":1,"v":1,"salt":"000102030405060708090a0b0c0d0e0f","files":[]}`))
+	mfst("manifest-version", "M2: v 2", "unsupported_manifest",
+		[]byte(`{"v":2,"salt":"000102030405060708090a0b0c0d0e0f","files":[{"name":"a","size":1,"sha256":"`+SHA256Hex([]byte("x"))+`"}]}`))
+	mfst("manifest-name-slash", "M3: a name with /", "invalid_manifest",
+		[]byte(`{"v":1,"salt":"000102030405060708090a0b0c0d0e0f","files":[{"name":"../a","size":1,"sha256":"`+SHA256Hex([]byte("x"))+`"}]}`))
+	mfst("manifest-duplicate-hash", "M3: the same sha256 twice", "invalid_manifest",
+		[]byte(`{"v":1,"salt":"000102030405060708090a0b0c0d0e0f","files":[{"name":"a","size":1,"sha256":"`+SHA256Hex([]byte("x"))+
+			`"},{"name":"b","size":1,"sha256":"`+SHA256Hex([]byte("x"))+`"}]}`))
+	mfst("manifest-too-big", "M3: a size over 268,435,456", "invalid_manifest",
+		[]byte(`{"v":1,"salt":"000102030405060708090a0b0c0d0e0f","files":[{"name":"a","size":268435457,"sha256":"`+SHA256Hex([]byte("x"))+`"}]}`))
 
 	// Entries: one per kind, by A, in one chain.
 	ent := func(name, note, want string, e *Entry) { add(name, "entry", note, want, string(e.Wire())) }

@@ -21,7 +21,7 @@ import (
 // in case, and a non-empty object.
 var (
 	pullRequestFields  = []string{"v", "room", "sum", "seen", "snap", "log", "offer", "offer_more", "addrs", "wait_ms", "peers"}
-	pullResponseFields = []string{"v", "same", "authors", "digests", "sum", "log", "page", "more", "peers"}
+	pullResponseFields = []string{"v", "same", "authors", "digests", "sum", "log", "page", "more", "peers", "want"}
 	pullErrorFields    = []string{"error", "detail"}
 )
 
@@ -39,7 +39,8 @@ var (
 		"log": logShape, "offer": recordsShape, "offer_more": nil, "addrs": nil, "wait_ms": nil, "peers": nil}
 	responseShape = shape{"v": nil, "same": nil, "authors": nil, "digests": shape{"*": nil}, "sum": nil,
 		"detail": detailShape, "log": logShape, "page": recordsShape, "more": nil,
-		"peers": shape{"[]": shape{"node": nil, "addrs": nil, "seen": nil}}}
+		"peers": shape{"[]": shape{"node": nil, "addrs": nil, "seen": nil}},
+		"want":  shape{"[]": shape{"m": nil, "v": nil, "h": nil}}}
 )
 
 // exactAt checks a value decoded with UseNumber against sh: every number

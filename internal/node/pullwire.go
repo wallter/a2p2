@@ -96,6 +96,8 @@ type PullResponse struct {
 	Page    []json.RawMessage               `json:"page,omitempty"`
 	More    bool                            `json:"more,omitempty"`
 	Peers   []PullPeer                      `json:"peers,omitempty"`
+	// Want asks the puller, the author, to upload files (PROTOCOL 10.4).
+	Want []PullWant `json:"want,omitempty"`
 }
 
 // PullPeer is a member with addresses and when it was last heard from.

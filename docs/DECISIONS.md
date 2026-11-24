@@ -1208,3 +1208,49 @@ third member is reachable or someone forwards a port by hand.
   temporary-address detection on Windows, which report "not available";
   CGNAT and corporate networks cannot be fixed from the machine, and
   `net check` says so.
+
+
+## D49. Attachments, built to DESIGN 12 and PROTOCOL 10 (2026-11-24)
+
+The mechanism of the reviewed attachments design is built in `core`,
+`store`, `node` and `peer`, and the daemon serves it. What it adds, and why
+each is needed now:
+
+- **Migration 13** (`file_sets`, `file_items`, `files`, `file_parts`,
+  `file_for`, `file_obs`, `file_wants`, `file_lists`, `file_copies`,
+  `file_trash`, `room_files`, and `requests.draft` and `requests.terms`):
+  file state, wants, the deletion queue and the room setting must survive
+  a restart and change in the same transaction as the record they belong
+  to. Columns beyond PROTOCOL 10.8, each for one rule: `file_trash`
+  records what it removes (kind, room, message, hash, size), so a queued
+  deletion never removes bytes a live row names and a copy is removed only
+  if it is still the file written; `file_wants.list` and `sent_at` mark a
+  manifest's want and pace repeats; `file_parts.at` dates a part;
+  `file_copies.size` and `tmp` let a start remove only the files a row
+  proves a2p2 wrote.
+- **`want` in the pull answer** and **`GET`/`PUT /p/v2/file/...`**: as
+  PROTOCOL 10.3 to 10.5; old machines ignore `want` (tested with the 0.1.0
+  decoder).
+- No new direct dependency. Names are not NFC-normalised (it would need
+  one); a combining mark becomes `_` in a copy's name.
+
+Departures, each the smallest that keeps the model's rules:
+
+- F1's deletions run in their own transaction (`SweepFiles`) after each
+  pull, each replace or withdraw written here, each background tick and
+  at start, not inside the record's transaction. Serving, fetching,
+  uploading and publishing a copy all ask the rules again from rows at
+  the moment they act, and a response or upload asks before every read
+  of at most 64 KiB, so a sweep that has not run yet widens nothing.
+- Staged bytes are counted from the pending request's draft, and a
+  request being staged holds an in-memory reservation, instead of a
+  `files` row in state `staged`.
+- A copy for an agent is published with a hard link from its temporary
+  file (no replace on any system); a file system without hard links
+  cannot take copies.
+- On Windows a directory cannot be synced from Go: a2p2 relies on NTFS's
+  metadata journal there and repairs at start what a crash can lose (see
+  `store/files_windows.go`).
+
+**Revisit if** a harness needs files pushed rather than fetched, or the
+budgets prove wrong in use.

@@ -1,0 +1,7 @@
+{
+  "type": "manifest",
+  "note": "an unknown key in a manifest and in a file is ignored",
+  "room": "r_00112233445566778899aabbccddeeff",
+  "wire": "{\"v\":1,\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"files\":[{\"name\":\"a b.txt\",\"size\":1,\"sha256\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\",\"later\":[1]}],\"later\":{\"k\":\"v\"}}",
+  "id": "a3112706307b3f02a6fcdde7690e36227c7eb2c40f759448f8141a6205d83594"
+}
