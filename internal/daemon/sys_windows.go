@@ -18,7 +18,7 @@ import (
 // an AF_UNIX socket needs write access to its file), and the local key that
 // every local API request must present (localkey.go). Raw calls to
 // kernel32 and advapi32 keep golang.org/x/sys out of the direct
-// dependencies (DECISIONS, D-windows).
+// dependencies (DECISIONS, D47).
 
 const localKeyRequired = true
 
@@ -121,7 +121,22 @@ func checkPrivate(_ os.FileInfo, home string) error {
 	if err != nil {
 		return fmt.Errorf("%s: cannot read its access control list: %w", home, err)
 	}
-	return checkSDDL(sddl, user, []string{user, owner}, home)
+	return checkSDDL(sddl, user, []string{user, owner}, home, resolveSID)
+}
+
+// resolveSID turns a SID as SDDL writes it (S-1-..., or a constant such
+// as LA, BA or SY) into its S-1-... form; ConvertStringSidToSid takes
+// both. A string it cannot read is returned unchanged, so it matches
+// nothing but itself.
+func resolveSID(s string) string {
+	sid, err := syscall.StringToSid(s)
+	if err != nil {
+		return s
+	}
+	if r, err := sid.String(); err == nil {
+		return r
+	}
+	return s
 }
 
 // securityText returns the owner and DACL of path as SDDL.
