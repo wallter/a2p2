@@ -445,7 +445,10 @@ each 26-character field ends in 2 zero bits. Decoding ignores `-` and case,
 reads `I` and `L` as `1` and `O` as `0`, and refuses non-zero pad bits.
 Then `@` and 1 to 8 comma-separated `host:port` (IPv6 in brackets). An
 invite is single use and expires 30 minutes after creation; only
-SHA-256(secret) is stored.
+SHA-256(secret) is stored. Spellings: surrounding whitespace is ignored;
+`a2p2:` in any case; a port is decimal, 1 to 65535, without leading zeros;
+a host is DNS labels without a trailing dot, an IPv4 address, or a
+bracketed IPv6 address without a zone.
 
 ### 5.2 Requests
 
@@ -454,7 +457,8 @@ server key's fingerprint against the token and stops on a mismatch
 (`wrong_key`).
 
 ```json
-{"v":2,"op":"open","secret":"<26 base32>","name":"laptop","addrs":["…"],"after":0}
+{"v":2,"op":"open","secret":"<26 base32>","name":"laptop","addrs":["…"]}
+{"v":2,"op":"poll","invite":"<64 hex>","after":256}
 ```
 
 | `op` | Server |
@@ -463,19 +467,32 @@ server key's fingerprint against the token and stops on a mismatch
 | `accept` | as `open`, then move to accepted and raise a request for a person (DESIGN 7); repeat is a no-op |
 | `poll` | report the state |
 
-`after` (poll only): number of log entries already received.
+`after` (poll only, never 0): number of log entries already received.
+`invite` (poll only, instead of `secret`): SHA-256 of the secret, accepted
+only from the key the invite is bound to, so a joiner that restarts resumes
+without having stored the secret. `name` and `addrs` only on `open` and
+`accept`.
 
 ### 5.3 States
 
 | State | Reached by | `open` / `poll` answer | `accept` answer |
 |---|---|---|---|
-| previewed | first `open` | 200 `{"state":"previewed","room":{"id","label","create"},"role":"member"\|"admin","history":bool,"admin":"<node id>","expires":"<time>"}` | 202, moves to accepted |
+| previewed | first `open` | 200 `{"state":"previewed","room":{"id","label","create"},"role":"member"\|"admin","history":bool,"member":bool,"admin":"<node id>","expires":"<time>"}` | 202, moves to accepted |
 | accepted | `accept` | 202 `{"state":"accepted","retry_ms":5000}` | 202 same |
-| signed | a person approves; approval and grant entries stored in one transaction | 200 `{"state":"signed","room":{…},"entries":[…],"more":bool}`, the accepted log in causal order from index `after`, ≤ 256 | 200 same |
+| signed | a person approves; approval and grant entries stored in one transaction | 200 `{"state":"signed","room":{…},"entries":[…],"more":bool}`, the log in the order the server stored it (which only appends) from index `after`, ≤ 256 and ≤ 3 MiB | 200 same |
 | refused | a person declines, or revalidation fails | 403 `declined` or `revoked` | 403 same |
 | expired | 30 minutes pass before signing | 403 `expired` | 403 `expired` |
 
-`room.create` is the create entry id the joiner pins. After signed, the
+`room.create` is the create entry id the joiner pins; the signed log must
+begin with that entry. `member` is true when the key is a member already:
+`role` and `history` are then the ones it has, approval signs nothing and
+returns the log, and the request shown to the person says so. The terms
+shown in a preview are recorded on both sides; if they no longer hold at
+accept or at approval, the invite is refused with `revoked` and a new one
+is needed. The joiner records the approved preview before it sends
+`accept`, uses an invite once, and a join in progress ends when its room
+is left. It reports `signed` only when the last page is applied, every
+entry was accepted, and its own state shows it a member. After signed, the
 answer stays signed, expired or not, while the key is a member; once it is
 removed the answer is 403 `removed`. A pending promotion of the joiner
 (third admin) is visible in the returned log as an entry waiting for a
@@ -487,7 +504,8 @@ new grant is signed if it is still a member; approval returns the log).
 |---|---|---|
 | 403 | `bad_secret` | unknown secret, or bound to another key |
 | 403 | `declined`, `revoked`, `expired`, `removed` | as above |
-| 429 | `rate_limited`, `Retry-After` | 10 `open` per minute per source address |
+| 429 | `rate_limited`, `Retry-After` | 10 requests carrying a secret per minute per source; polls naming an unknown invite share 60 per minute |
+| 503 | `unavailable`, `Retry-After` | the room already has 32 requests waiting for a person |
 
 The joiner polls every `retry_ms`, doubling to 60 s, until signed (and
 `more` is false), refused or expired, and tells the person the outcome.
@@ -701,7 +719,7 @@ shows the preview, asks on the terminal, then waits unless `--no-wait`),
 `send --reply-to --ask-handled --replaces`, `inbox --thread`, `trace`,
 `room list`. `confirm` refuses unless stdin is a terminal.
 
-## 8. Schema (migrations 2 to 4)
+## 8. Schema (migrations 2 to 6)
 
 | Table | Columns | Keys |
 |---|---|---|
@@ -709,7 +727,7 @@ shows the preview, asks on the terminal, then waits unless `--no-wait`),
 | `log` | `room`, `id`, `author`, `seq`, `bytes`, `sig`, `state` (`accepted`, `held`, `refused`, `invalid`: kept for replay, never passed on), `batch` int, `batch_pos` int | unique (`room`,`id`); index (`room`,`author`,`seq`), not unique, so both branches of a fork fit |
 | `room_members` | `room`, `node`, `admin`, `name`, `addrs`, `seen_at` (cache of `Resolve`; named apart from v0.2's `members` table while both exist) | (`room`,`node`) |
 | `records` | `room`, `id`, `author`, `epoch`, `seq`, `kind`, `ref`, `parent`, `thread`, `agent`, `created`, `hdr`, `sig`, `body` nullable, `reason` (`live`, `expired`, `withdrawn`, `not_admitted`, `missing`), `effect` (`ok`, `bad_reference`, `unresolved`) | unique (`room`,`id`); unique (`room`,`author`,`epoch`,`seq`); (`room`,`ref`); (`room`,`parent`); (`room`,`thread`) |
-| `streams` | `room`, `author`, `epoch`, `contig`, `known`, `known_at` | (`room`,`author`,`epoch`) |
+| `streams` | `room`, `author`, `epoch`, `contig`, `known`, `known_at`, `known_from` (the peer whose report set `known`; its later report can lower it) | (`room`,`author`,`epoch`) |
 | `observed` | `room`, `peer`, `author`, `digest`, `detail` json, `at`; the row with an empty `author` holds the peer's last log heads and extra | (`room`,`peer`,`author`) |
 | `refusals` | `room`, `peer`, `reason`, `count`, `last_at` | (`room`,`peer`,`reason`) |
 | `agents` | as v0.2 | `id` |
@@ -718,11 +736,13 @@ shows the preview, asks on the terminal, then waits unless `--no-wait`),
 | `read_heads` | `agent`, `room`, `author`, `record` | (`agent`,`room`,`author`,`record`) |
 | `forks` | `room`, `author`, `epoch`, `seq`, `id`, `hdr`, `sig` (at most 3 refused records per position, as evidence) | (`room`,`author`,`epoch`,`seq`,`id`) |
 | `registrations` | `agent`, `room`, `at` (when an agent's cursors were first set) | (`agent`,`room`) |
-| `invites` | `secret_hash`, `room`, `role`, `history`, `expires_at`, `bound_key`, `state` (5.3), `request` | `secret_hash` |
-| `requests` | `id`, `kind`, `action` (admit, admit as admin, promote, remove, second), `room`, `node`, `name`, `role`, `history`, `created_at`, `state`, `decided_at`, `entries` | `id` |
+| `room_invites` (named apart from v0.2's `invites` while both exist) | `secret_hash`, `room`, `role`, `history`, `created_at`, `expires_at`, `bound_key`, `name`, `addrs`, `state` (`issued`, `previewed`, `accepted`, `expired`, `revoked`; signed and declined are read from the request), `request`, `reason`, `shown_member`, `shown_role`, `shown_history` (the terms the last preview showed) | `secret_hash` |
+| `joins` (joiner side) | `invite` (SHA-256 of the secret), `room`, `label`, `create_id`, `role`, `history`, `member`, `admin` (full key), `addrs`, `gen`, `expires_at`, `state`, `reason`, `created_at`, `updated_at`; written before `accept` is sent and kept afterwards, so an invite is used once | `invite` |
+| `requests` | `id`, `kind`, `action` (admit, admit as admin, promote, remove, second, rejoin), `room`, `node`, `name`, `role`, `history`, `created_at`, `state`, `decided_at`, `entries`, `admins` (how many admins the room had when a request that makes an admin was raised; if that has changed at approval the request fails) | `id` |
 | `meta` | `key`, `value`; `v02_dropped_notice` shown once | `key` |
 
-Migration 4 adds `observed` and `refusals` (step 5a). Migration 2 holds the record tables (step 3a); migration 3 the log tables,
+Migration 4 adds `observed` and `refusals`, migration 5 `streams.known_from`
+(step 5a); migration 6 `room_invites`, `joins` and `requests.admins` (step 4b). Migration 2 holds the record tables (step 3a); migration 3 the log tables,
 `rooms.left_at` and requests. Per room at most 32 requests wait, and 256
 refused dependants and 256 invalid entries are kept.
 

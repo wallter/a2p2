@@ -11,9 +11,16 @@
    anything it withholds.
 4. A machine stores only the next position of a stream, with matching
    predecessor and links.
-5. Copies are learned only from summaries, as dated reports.
+5. Copies are learned only from summaries, as dated reports. The highest
+   position a peer reports for a stream is a hint that shows a gap: a
+   higher report from any peer raises it, and the peer that set it lowers
+   it by reporting less (it was restored), so a retracted report does not
+   leave a gap that cannot close (changed 2026-11-24, with build step 5a).
 6. A header is held without text only on the holder's evidence: a signed
-   withdraw, its own clock past 30 days (never undone), or no history.
+   withdraw, no history, or its own clock past 30 days (never undone), in
+   that order: text from before a machine's admission is "not admitted"
+   however old it is, so a reader is told "before you joined", not
+   "expired" (order changed 2026-11-24, with build step 5a).
    Otherwise the text is "missing here": readers wait, any holder repairs.
 7. A replace takes one above the highest version held, text or not; the
    highest wins, then the highest id. A withdraw of a non-message does

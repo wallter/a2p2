@@ -367,3 +367,39 @@ Choices made in review (`research/decisions/step5a-review-sol.md`):
   summaries (a stated limit); a bucketed hash so that the digests answer
   shrinks for large rooms (measure first, step 7).
 
+## D32. Pairing: token, invites and the join exchange (2026-11-24)
+
+Build step 4b, beside the v0.2 code, in `core/token.go`, `store/invites.go`
+(migration 6), `node/invite.go`, `node/joiner.go` and `peer/join.go`.
+
+New tables, and why each is needed now:
+- `room_invites`: the admin side of an invite. v0.2's `invites` has other
+  columns and is still used by v0.2 joins, so the name differs until the
+  switch.
+- `joins`: the joiner's record of each preview a person approved. Without
+  it a crash between sending `accept` and hearing the answer leaves the
+  admin's person approving a join the joiner has forgotten, and an old
+  token could bring back a room that was left.
+- `requests.admins`: making an admin takes one entry or two depending on
+  how many admins there are, so a request raised under one count must not
+  be approved under another.
+
+New on the wire: `invite` in `poll` (the hash of the secret, accepted only
+from the bound key) so that a joiner resumes after a restart without
+storing the secret; `member` in the preview.
+
+Choices made in review (`research/decisions/step4b-review-sol.md`):
+- An invite is used once on the joiner too, and leaving a room ends its
+  joins in the same transaction.
+- A key that is already a member is shown the role and history it has;
+  approval signs nothing and returns the log.
+- The log is paged in the order the server stored it, which only appends.
+- Expiry and state are checked inside the transaction that changes them.
+- A correct secret that has expired is told so. The reviewer wanted it
+  indistinguishable from a wrong secret; knowing the secret is the
+  credential, and the person needs to hear that the invite ran out.
+- **First three admins:** with one admin, a join as admin is one `admin`
+  entry; with more, an `add` plus that admin's `admin` entry under one
+  approval, and the other admin is asked to second it. A daemon never
+  seconds without its own person's approval.
+
