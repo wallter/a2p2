@@ -101,7 +101,7 @@ func (r *Rooms) Invite(ctx context.Context, room, role string, history bool, add
 		return Invitation{}, err
 	}
 	if !slices.Contains(rl.st.Admins, r.m.ID) {
-		return Invitation{}, userErr("only an admin of the room can invite")
+		return Invitation{}, codedErr(ErrorNotAllowed, "only an admin of the room can invite")
 	}
 	switch role {
 	case RoleMember, RoleAdmin:

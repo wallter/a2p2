@@ -86,7 +86,15 @@ func TestNetworkingIsOffUntilAPersonsDecisionIsRecorded(t *testing.T) {
 	if pending, _ := e.st.Requests(ctx, "", store.RequestPending); len(pending) != 0 {
 		t.Fatalf("a decision waits: %+v", pending)
 	}
-	if v, err := e.s.Describe(ctx, qs[0]); err != nil || !strings.Contains(v.Text, "listen for other machines on 127.0.0.1:7423") {
+	// The three decisions may share a timestamp, so the list's order is
+	// not theirs: find the "on" one by its action.
+	on := qs[0]
+	for _, q := range qs {
+		if q.Action == NetworkOn {
+			on = q
+		}
+	}
+	if v, err := e.s.Describe(ctx, on); err != nil || !strings.Contains(v.Text, "listen for other machines on 127.0.0.1:7423") {
 		t.Fatalf("network decision text: %+v %v", v, err)
 	}
 }

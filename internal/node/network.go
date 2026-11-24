@@ -92,7 +92,7 @@ func (s *Surface) Network() Network { return s.net }
 // networking is off.
 func (s *Surface) dials() error {
 	if s.net.State == NetworkOff {
-		return userErr("networking is off on this machine, so it connects to no other machine; " +
+		return codedErr(ErrorNetworkingOff, "networking is off on this machine, so it connects to no other machine; "+
 			"a person can turn it on at a terminal: a2p2 net on (or a2p2 net on --outbound-only)")
 	}
 	return nil

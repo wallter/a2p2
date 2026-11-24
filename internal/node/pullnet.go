@@ -162,7 +162,7 @@ func DecodePullResponse(body []byte) (*PullResponse, error) {
 	return &resp, nil
 }
 
-var errNotStrictResponse = &UserError{"pull: the response is not strict json"}
+var errNotStrictResponse = &UserError{Msg: "pull: the response is not strict json"}
 
 // DecodePullError maps a refusal's status and body (PROTOCOL-next 4.5) to
 // a *PullError. A code that does not fit the status, or a body that is not

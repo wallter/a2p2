@@ -25,16 +25,16 @@ import (
 
 // ErrWrongKey: the machine at the invite's address is not the admin the
 // token names. Nothing was sent to it.
-var ErrWrongKey = &UserError{CodeWrongKey + ": the machine at the invite's address is not the admin the invite names; nothing was sent"}
+var ErrWrongKey = &UserError{Msg: CodeWrongKey + ": the machine at the invite's address is not the admin the invite names; nothing was sent"}
 
 // Errors of the joiner that a person is shown.
 var (
-	ErrInviteUsed     = &UserError{"this invite was used on this machine already; ask for a new one"}
-	ErrNoPreview      = &UserError{"preview the invite first"}
-	ErrRoomChanged    = &UserError{"the room was left or joined here since the preview; preview the invite again"}
-	ErrTermsChanged   = &UserError{"the admin machine now shows different terms from those approved here; ask for a new invite"}
-	ErrNoRecord       = &UserError{"the invite was accepted before, but this machine has no record of approving it; ask for a new invite"}
-	ErrPreviewChanged = &UserError{"the invite was previewed again since the preview you approved; approve the latest preview"}
+	ErrInviteUsed     = &UserError{"this invite was used on this machine already; ask for a new one", ErrorAlreadyDone}
+	ErrNoPreview      = &UserError{Msg: "preview the invite first"}
+	ErrRoomChanged    = &UserError{Msg: "the room was left or joined here since the preview; preview the invite again"}
+	ErrTermsChanged   = &UserError{Msg: "the admin machine now shows different terms from those approved here; ask for a new invite"}
+	ErrNoRecord       = &UserError{Msg: "the invite was accepted before, but this machine has no record of approving it; ask for a new invite"}
+	ErrPreviewChanged = &UserError{Msg: "the invite was previewed again since the preview you approved; approve the latest preview"}
 )
 
 // Reasons a join ends without the room, besides the server's codes.
@@ -282,7 +282,7 @@ func recordPreview(rec store.Join) Preview {
 func answerPreview(rp JoinReply, a JoinAnswer, server string) (Preview, error) {
 	switch {
 	case rp.Status == http.StatusTooManyRequests:
-		return Preview{}, userErr("the admin machine is limiting invites; try again in %s", rp.RetryAfter.Round(time.Second))
+		return Preview{}, codedErr(ErrorRateLimited, "the admin machine is limiting invites; try again in %s", rp.RetryAfter.Round(time.Second))
 	case rp.Status == http.StatusForbidden:
 		return Preview{}, &JoinRefused{Code: a.Error}
 	case rp.Status == http.StatusAccepted && a.State == JoinStateAccepted,

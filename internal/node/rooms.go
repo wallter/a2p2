@@ -22,7 +22,7 @@ import (
 
 // Errors of the log operations.
 var (
-	ErrNoRoom = &UserError{"room not held here"}
+	ErrNoRoom = &UserError{"room not held here", ErrorNotFound}
 	// ErrStaleGeneration: the room was left (or left and joined again)
 	// since the caller looked; whatever it prepared is not applied.
 	ErrStaleGeneration = store.ErrStaleGeneration
@@ -393,7 +393,7 @@ func (r *Rooms) pinWith(ctx context.Context, v *core.VerifiedEntry, create func(
 	defer r.mu.Unlock()
 	f := v.Fields()
 	if r.rooms[f.Room] != nil {
-		return 0, userErr("room is held here already")
+		return 0, codedErr(ErrorAlreadyDone, "room is held here already")
 	}
 	row := entryRow(v)
 	row.State = store.LogAccepted
