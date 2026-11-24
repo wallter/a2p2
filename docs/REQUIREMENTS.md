@@ -196,8 +196,8 @@ there is no server.
 
 - **A1 Harness-neutral.** The same small set of tools over stdio MCP for
   every harness; a CLI with JSON output; a local socket API for programs.
-- **A2 Token budget.** Tool definitions total at most 1,000 tokens (about 936
-  today, seven tools); the per-turn notice is one line.
+- **A2 Token budget.** Tool definitions total at most 1,000 tokens (1,000 by the
+  bytes/4 proxy today, seven tools); the per-turn notice is one line.
 - **A3 Human view and alert.** A local web page where a person can read
   rooms, post, answer questions and confirm requests. A person can be alerted
   that something is waiting without keeping the page open; the core offers a
@@ -360,15 +360,16 @@ when agents show the need); bridging to other agent protocols such as A2A
    (done 2026-11-23). Write the rules as small pure functions in
    `internal/model` and check them with exhaustive small scenarios in
    ordinary Go tests, before the design; no separate specification tool
-   unless a rule cannot be settled this way
-   (`docs/research/prior-art/07-requirements-and-verification.md`). A rule
+   unless a rule cannot be settled this way (from a survey of requirements
+   and verification practice, kept in the project's working notes). A rule
    that cannot be made to pass is recorded with its smallest counterexample
    and becomes a stated limit or a changed requirement. The scenarios: A
    posts, B takes a copy, A goes offline, C receives it from B and handles
    it, C goes offline, A learns it was handled through B; then lost
    responses, B restarting, expiry, and a machine restored from an old
-   backup. For membership: every counterexample in
-   `docs/research/decisions/q10-claude.md` and `q10-sol.md` becomes a named
+   backup. For membership: every counterexample found by the two
+   independent answers to the membership question (kept in the project's
+   working notes, not in this repository) becomes a named
    scenario (an admin removed while it removes a compromised machine; a
    machine added, and made admin, by an admin being removed; an admin
    restored from backup signing a second branch; a stolen admin key), plus

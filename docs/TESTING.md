@@ -64,6 +64,12 @@ Rows marked "model" include tests of the rules in `internal/members` or
 | Peer that answers every wait at once | It is backed off | `TestAPeerThatAnswersEveryWaitAtOnceIsBackedOff` |
 | Stranger connects | The handshake fails and its request is refused | `TestOverTLSAStrangersHandshakeFailsAndItsRequestIsRefused` |
 | Networking off | The daemon makes no peer connections until a person enables networking | `TestNetworkingOffDialsNothingAndOutboundDials`, `TestNetworkingIsOffUntilAPersonsDecisionIsRecorded` |
+| Stop arrives while a networking decision is being applied | The daemon still stops | `TestStopRightAfterANetworkingDecisionStillStopsTheDaemon` |
+| Networking on, but the listener cannot bind | The daemon runs outbound only; `status` shows `applied: outbound` with the error as `reason`, and a `network` alert is raised | `TestANetworkingDecisionIsAppliedByTheDaemonItself` |
+| A question to the person is replaced after it was read | It is a question again, with its new text | `TestAReplacementOfAQuestionIsAQuestion`, `TestAlertsListQuestionsWaitingForThePerson` |
+| Every other member keeps refusing this machine | After ten minutes the room is shown as perhaps removed and a `removed` alert is raised; one member still answering, a shorter time, or `local` is not | `TestARoomEveryOtherMemberKeepsRefusingMayHaveRemovedThisMachine` |
+| Reply in a thread with several participants | The reply tool reaches the parent's author and everyone who posted in the thread, across machines, at most 32; a plain `send` with `reply_to` and no `to` still reaches only the parent's author | `TestReplyReachesEveryoneWhoPostedInTheThreadAcrossMachines`, `TestSurfaceThreadReplyAddresseesAreCappedWithTheParentsAuthorKept`, `TestSendWithReplyToAndNoToStillAddressesOnlyTheParentsAuthor` |
+| `ack` that is not allowed | Refused with the reason; the rule itself is unchanged | `TestAckRefusalsSayWhy`, `TestSurfaceAckRefusalsSayWhyAndTheRuleIsUnchanged` |
 | Page request with wrong `Origin` or `Host`, or no token | Refused | `TestAuthHostOrigin`, `TestPageDecisionNeedsTheExactOriginAndShowsTheFullFingerprint` |
 | Message text that looks like instructions | Shown as labelled peer data | `TestHostileStringsAreInert`, `TestInboxForgedHeadersStayInert` |
 | Database write fails partway | The store rolls back the write or log batch | `TestFailureBetweenStatementsLeavesNoHalfAppliedWrite`, `TestLogBatchThatFailsLeavesNothingApplied` |
@@ -96,15 +102,19 @@ The Go test suite also runs the seeds for `FuzzDecodeToken`.
   fuzzes the record parser. Use `FuzzParseEntry` for log entries or
   `FuzzDecodeToken` for invite tokens.
 - `make e2e HARNESS=claude` uses a logged-in Claude Code CLI and spends model
-  tokens. The end-to-end runner also accepts `codex`, `agy` or `all`. The
-  [harness results](research/03-harness-integration.md) predate the delivery
-  rewrite.
+  tokens. The end-to-end runner also accepts `codex`, `agy` or `all`. Its
+  last recorded results predate the delivery rewrite; the
+  [harness notes](HARNESSES.md) record a single-run check of the tools on
+  the current code with each harness.
 
 ## Test gaps
 
-- The local page's JavaScript in a browser.
-- Logged-in harness runs after the delivery rewrite, interactive sessions,
-  end-of-turn hooks, and Codex and Antigravity models seeing hook text.
+- Automated tests of the local page's JavaScript in a browser. The page
+  has been checked by hand in headless Chrome at 1280 and 390 pixels wide,
+  in light and dark themes, and with the keyboard.
+- The end-to-end runner after the delivery rewrite, interactive sessions,
+  hooks inside a real session (including end-of-turn hooks and Codex and
+  Antigravity models seeing hook text), and a real installed configuration.
 - Two physical machines on a LAN, packet captures, and a real network with a
   machine whose clock is wrong by days.
 - Power loss, a kill at arbitrary points, and a database failure during a full

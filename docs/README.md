@@ -11,7 +11,7 @@ agent or share a room.
 | [Testing](TESTING.md) | Test layers, fault cases and verification status |
 | [Trace register](TRACE.md) | Which requirements the code meets today, and the tests that show it |
 | [Decisions](DECISIONS.md) | Why the design took its current shape |
-| [Harness notes](research/03-harness-integration.md) | Dated observations for Claude Code, Codex and Antigravity CLI |
+| [Harness notes](HARNESSES.md) | What was verified with Claude Code, Codex and Antigravity CLI, with versions and dates, and the configuration each uses |
 | [v0.2 design](DESIGN.md) | Historical reference for the replaced delivery code |
 
 See [AGENTS.md](../AGENTS.md) for the code map and contribution rules,

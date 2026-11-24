@@ -1,6 +1,8 @@
 package node
 
-// Tests for the findings of docs/research/decisions/step4a-review-sol.md.
+// Tests for the findings of the step 4a review (an independent review by
+// another model family, kept in the project's working notes, not in this
+// repository).
 
 import (
 	"context"

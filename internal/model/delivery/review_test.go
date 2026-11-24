@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// The schedules from the independent review
-// (docs/research/decisions/model-delivery-review-sol.md), one test each.
+// The schedules from the independent review (by another model family, kept
+// in the project's working notes, not in this repository), one test each.
 
 // Review 1. Requirements: D2, D5, D6, T3
 func TestReportHeldOnlyByANoHistoryNewcomerSurvivesTheLossOfItsAuthor(t *testing.T) {

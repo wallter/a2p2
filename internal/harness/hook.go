@@ -78,7 +78,7 @@ func Hook(ctx context.Context, c *localapi.Client, name, event string, stdin io.
 	case name == "agy" && event == "Stop":
 		out = map[string]any{"decision": "continue", "reason": notice}
 	case name == "agy":
-		// Documented shape per docs/research/03-harness-integration.md; UNVERIFIED against a real agy.
+		// Documented shape per docs/HARNESSES.md; UNVERIFIED against a real agy.
 		out = map[string]any{"injectSteps": []any{map[string]any{"systemMessage": notice}}}
 	case event == "Stop":
 		out = map[string]any{"decision": "block", "reason": notice}

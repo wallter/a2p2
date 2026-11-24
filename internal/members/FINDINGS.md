@@ -12,8 +12,8 @@ functions; the daemon calls `members.ResolveRoom(root, []*core.Entry)`.
 ## Rules as implemented
 
 Revised after an independent review found that a second removal of a
-re-appointed admin could empty the room
-(`docs/research/decisions/model-members-review-claude46.md`).
+re-appointed admin could empty the room (the review is kept in the
+project's working notes, not in this repository).
 
 1. A room starts with one create entry. Its author is the first admin and has
    no other lasting power. A machine is pinned to its room's create and
