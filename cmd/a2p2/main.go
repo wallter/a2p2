@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -26,6 +27,7 @@ import (
 	"github.com/wallter/a2p2/internal/harness"
 	"github.com/wallter/a2p2/internal/localapi"
 	"github.com/wallter/a2p2/internal/mcpshim"
+	"github.com/wallter/a2p2/internal/members"
 	"github.com/wallter/a2p2/internal/node"
 	"github.com/wallter/a2p2/internal/store"
 )
@@ -37,18 +39,22 @@ const usage = `a2p2 - peer-to-peer messaging for AI agents and the people who ru
 Getting started
   a2p2 install claude|codex|agy   connect a harness (undo with: a2p2 uninstall ...)
   a2p2 ui                         open the local web page
-  a2p2 doctor                     check that everything is wired up
+  a2p2 doctor                     check the daemon and harness connections
 
 Talking (as the human, or --as <label> for a script)
   a2p2 send [--room R] [--to AGENT]... [--reply-to ID] [--ask-handled] [--replaces ID] TEXT...
-                                  (--replaces ID with empty text withdraws the message)
+                                  Use --to label@machine, for example human@1a2b3c4d.
+                                  Find machine IDs with a2p2 room list ROOM.
+                                  Empty text with --replaces ID withdraws your message.
   a2p2 inbox [--room R] [--wait SECONDS] [--limit N] [--peek] [--thread ID]
+                                  Read unread messages. Use --peek or --thread to leave seen status unchanged.
   a2p2 history [--room R] [-n 50] [--before ID]
-  a2p2 ack ID                     mark a message handled
-  a2p2 trace ID                   where a message got to: copies and handling reports
+  a2p2 ack ID                     report that you handled a message you read in inbox
+  a2p2 trace ID                   show which machines reported a copy and who handled it
 
 Rooms across machines
-  a2p2 net on [ADDR]              listen for other machines (default 0.0.0.0:7423) and connect out
+  a2p2 net on [ADDR]              listen for other machines and connect out
+                                  Without ADDR, use the configured address or 0.0.0.0:7423.
   a2p2 net on --outbound-only     connect out only: pull rooms and follow joins, listen on nothing
   a2p2 net off                    this machine only: no listener, no connections
   a2p2 room create LABEL          make a room with this machine as its admin
@@ -60,15 +66,16 @@ Rooms across machines
   a2p2 room remove ROOM MACHINE   ask to remove a member (confirm to sign)
   a2p2 room leave ROOM            stop carrying a room on this machine
 
-A person's decisions (asked at a terminal and recorded; no agent tool reaches them,
-but any program running as you can call the daemon's socket)
-  a2p2 net ...                    (above)
-  a2p2 confirm                    list requests waiting for you
-  a2p2 confirm ID [--decline]     approve (or decline) one request
-  a2p2 alerts [--wait SECONDS]    what waits for a person; --wait returns when something does
+Requests and decisions
+  The CLI asks for decisions at a terminal. The daemon records them.
+  Agent tools cannot approve requests. Programs running as you can access the socket.
+  a2p2 confirm                    list pending requests and their IDs
+  a2p2 confirm ID [--decline]     approve a listed request, or use --decline to decline it
+  a2p2 alerts [--wait SECONDS]    list alerts or wait for one to arrive
 
-Plumbing
-  a2p2 status | stop | daemon | version
+This machine
+  a2p2 status                     list rooms, agent IDs and network settings
+  a2p2 stop | daemon | version
   a2p2 mcp --harness NAME [--name LABEL]     stdio MCP server (launched by harnesses)
   a2p2 hook --harness NAME --event EVENT     unread notice (launched by harness hooks)
 
@@ -183,8 +190,14 @@ func ask(prompt string) string {
 	return strings.TrimSpace(line)
 }
 
-func run(ctx context.Context, name string, args []string) error {
+func run(ctx context.Context, name string, args []string) (err error) {
 	c := newCmd(ctx, name)
+	defer func() {
+		var apiErr *localapi.Error
+		if !*c.json && errors.As(err, &apiErr) && apiErr.User {
+			err = cliError(apiErr)
+		}
+	}()
 	switch name {
 	case "help", "-h", "--help":
 		fmt.Print(usage)
@@ -316,6 +329,25 @@ func run(ctx context.Context, name string, args []string) error {
 	return usagef("unknown command %q; run a2p2 help", name)
 }
 
+// The daemon's user errors are shared with the MCP tools. Point CLI callers
+// to commands they can run here, preserving the original error category.
+func cliError(err *localapi.Error) error {
+	switch {
+	case strings.HasPrefix(err.Msg, "no room ") && strings.HasSuffix(err.Msg, " here"):
+		return fmt.Errorf("%w. Run a2p2 room list to see rooms on this machine", err)
+	case strings.HasSuffix(err.Msg, " is not an agent id (label@node, as in peers)"):
+		id := strings.TrimSuffix(err.Msg, " is not an agent id (label@node, as in peers)")
+		return &localapi.Error{User: true, Msg: id + " needs a full agent ID, such as human@1a2b3c4d. Run a2p2 room list ROOM for machine IDs"}
+	case strings.HasPrefix(err.Msg, "not an invite:"):
+		return &localapi.Error{User: true, Msg: "invalid invite (" + strings.TrimPrefix(err.Msg, "not an invite: ") + "). Run a2p2 join and paste the full invite, starting with a2p2:"}
+	case err.Msg == members.ReasonAlreadyAdmin:
+		return &localapi.Error{User: true, Msg: "this machine already lists that member as an admin. Run a2p2 room list ROOM to see the members"}
+	case err.Msg == node.ErrNotHeld.Error():
+		return &localapi.Error{User: true, Msg: "this machine has no message with that ID. Run a2p2 history --room ROOM to find a message ID"}
+	}
+	return err
+}
+
 // permute moves flags before positional arguments so "a2p2 trace ID --json"
 // works. Flags that take a value must use the --flag=value form after a
 // positional argument.
@@ -353,7 +385,7 @@ func printEntry(w io.Writer, e localapi.Entry) {
 		head += " [" + e.Kind + "]"
 	}
 	if e.Parent != "" {
-		head += " (reply to " + short(e.Parent)
+		head += " (reply to " + e.Parent
 		if e.ParentState != "" && e.ParentState != "here" {
 			head += ", " + e.ParentState
 		}
@@ -382,6 +414,16 @@ func short(s string) string {
 	return s
 }
 
+// Label loopback addresses without implying that a public or LAN address
+// was tested from another machine.
+func addressText(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err == nil && (net.ParseIP(host).IsLoopback() || strings.EqualFold(host, "localhost")) {
+		return addr + " (this machine only)"
+	}
+	return addr
+}
+
 func status(c *cmd) error {
 	var st localapi.Status
 	return c.call("status", localapi.StatusReq{ShowNotice: true}, &st, func() {
@@ -391,21 +433,39 @@ func status(c *cmd) error {
 		fmt.Printf("machine  %s (%s)  a2p2 %s  pid %d\n", st.Name, short(st.Node), st.Version, st.PID)
 		switch st.Network.State {
 		case "on":
-			fmt.Printf("network  on: listening on %s, reachable at %s; connects out\n", st.Network.Listen, strings.Join(st.Listen, ", "))
+			fmt.Printf("network  on, listening on %s\n", addressText(st.Network.Listen))
+			if len(st.Listen) > 0 {
+				addresses := make([]string, 0, len(st.Listen))
+				for _, addr := range st.Listen {
+					addresses = append(addresses, addressText(addr))
+				}
+				fmt.Println("         advertised:", strings.Join(addresses, ", "))
+			}
 		case "outbound":
-			fmt.Println("network  outbound only: connects out to the machines in its rooms; listens on nothing")
+			fmt.Println("network  outbound only, accepts no incoming connections")
 		default:
-			fmt.Println("network  off: this machine only, no connections (a person turns it on with: a2p2 net on)")
+			fmt.Println("network  off, this machine only. To connect to other machines, run a2p2 net on.")
 		}
 		if st.Waiting > 0 {
-			fmt.Printf("waiting  %d request(s) for you: a2p2 confirm\n", st.Waiting)
+			fmt.Printf("requests %d pending. Run a2p2 confirm to review.\n", st.Waiting)
 		}
-		fmt.Printf("ui       %s\n", st.UI)
+		fmt.Println("ui       run a2p2 ui to open the local page")
 		fmt.Println("rooms")
+		labels := make(map[string]int, len(st.Rooms))
 		for _, r := range st.Rooms {
-			fmt.Printf("  %-20s %s  %d machine(s), %d admin(s)\n", r.Label, r.ID, len(r.Members), len(r.Admins))
+			labels[r.Label]++
+		}
+		for _, r := range st.Rooms {
+			name := r.Label
+			if labels[name] > 1 {
+				name += " (" + r.ID + ")"
+			}
+			fmt.Printf("  %-20s machines: %d  admins: %d\n", name, len(r.Members), len(r.Admins))
 		}
 		fmt.Println("agents on this machine")
+		if len(st.Agents) == 0 {
+			fmt.Println("  none registered")
+		}
 		for _, a := range st.Agents {
 			fmt.Printf("  %-32s %-8s last seen %s\n", a.ID, a.Harness, a.LastSeen.Local().Format("Jan 02 15:04"))
 		}
@@ -425,25 +485,36 @@ func status(c *cmd) error {
 func trace(c *cmd, id string) error {
 	var t localapi.TraceResp
 	return c.call("trace", localapi.IDReq{ID: id}, &t, func() {
-		fmt.Printf("message %s in room %s: its signed header is saved here; its text here: %s\n", t.ID, t.Room, t.Reason)
+		reason := t.Reason
+		switch reason {
+		case store.ReasonLive:
+			reason = "available on this machine"
+		case store.ReasonNotAdmitted:
+			reason = "outside this machine's permitted room history"
+		case store.ReasonMissing:
+			reason = "waiting for a copy"
+		}
+		fmt.Printf("message  %s\nroom     %s\nheader   saved on this machine\ntext     %s\n", t.ID, t.Room, reason)
 		if len(t.Copies) == 0 {
-			fmt.Println("copies: none reported yet by a machine this one has been in touch with")
+			fmt.Println("copies: no other machine has reported a copy here")
 		} else {
-			fmt.Println("copies (dates are when this machine observed them; a machine showed it holds the author's")
-			fmt.Println("        messages up to this one's position, which does not tell apart a different message")
-			fmt.Println("        signed at the same position; member means a member now):")
+			fmt.Println("copy reports observed by this machine:")
 		}
 		for _, cp := range t.Copies {
-			member := "member"
+			member := "current member"
 			if !cp.Member {
 				member = "not a member now"
 			}
 			fmt.Printf("  %s (%s), observed %s\n", short(cp.Node), member, clock(cp.At))
 		}
+		if len(t.Copies) > 0 {
+			fmt.Println("  Each report covers the author's messages through this position at the time shown.")
+			fmt.Println("  It cannot distinguish two messages signed at the same position.")
+		}
 		if len(t.Handled) == 0 {
 			fmt.Println("handled: no report yet")
 		} else {
-			fmt.Println("handled (dates are when each report was written, as its author signed it):")
+			fmt.Println("handled reports (time signed by the agent's machine):")
 		}
 		for _, h := range t.Handled {
 			fmt.Printf("  by %s at %s\n", h.Agent, clock(h.At))
@@ -461,7 +532,14 @@ func join(c *cmd, args []string) error {
 	}
 	token := c.fs.Arg(0)
 	if token == "" || token == "-" {
-		token = ask("Paste the invite: ")
+		prompt := ""
+		if terminal() {
+			prompt = "Paste the full invite starting with a2p2: "
+		}
+		token = ask(prompt)
+		if token == "" && !*c.json {
+			return usagef("run a2p2 join in a terminal and paste the full invite starting with a2p2:")
+		}
 	}
 	var pv localapi.PreviewResp
 	cl, err := c.client()
@@ -481,7 +559,7 @@ func join(c *cmd, args []string) error {
 		fmt.Fprintln(os.Stderr, "This machine is a member already: approving fetches the room's log and changes nothing.")
 	}
 	if !terminal() {
-		return errors.New("accepting an invite is asked at a terminal; run a2p2 join there to accept (stdin is not a terminal)")
+		return errors.New("run a2p2 join in a terminal and paste the invite to accept it")
 	}
 	if ask("Join on these terms? Type yes: ") != "yes" {
 		return errors.New("not joined")
@@ -489,7 +567,7 @@ func join(c *cmd, args []string) error {
 	req := localapi.AcceptReq{Token: token, Preview: pv.Preview}
 	if !*noWait {
 		req.WaitMS = 60000
-		fmt.Fprintln(os.Stderr, "Waiting for the admin machine's person to approve (a2p2 confirm there)...")
+		fmt.Fprintln(os.Stderr, "Waiting for approval. Run a2p2 confirm on the admin machine to review the request.")
 	}
 	deadline := time.Now().Add(30 * time.Minute)
 	for {
@@ -507,7 +585,7 @@ func join(c *cmd, args []string) error {
 			case "signed":
 				fmt.Printf("joined room %s as %s.%s\n", o.Room, o.Role, map[bool]string{true: " " + o.Note, false: ""}[o.Note != ""])
 			case "accepted":
-				fmt.Println("accepted; waiting for the admin machine's person. The daemon keeps following it.")
+				fmt.Println("Invite accepted on this machine. Waiting for admin approval. The daemon will keep checking.")
 			default:
 				fmt.Printf("%s: %s\n", o.State, o.Reason)
 			}
@@ -535,8 +613,11 @@ func room(c *cmd, args []string) error {
 		}
 		var res localapi.RoomsResp
 		return c.call("room/list", req, &res, func() {
-			for _, r := range res.Rooms {
-				fmt.Printf("%s  %s\n", r.Label, r.ID)
+			for i, r := range res.Rooms {
+				if i > 0 {
+					fmt.Println()
+				}
+				fmt.Printf("Room %s  %s\n", r.Label, r.ID)
 				for _, m := range r.Members {
 					role := "member"
 					if m.Admin {
@@ -551,7 +632,11 @@ func room(c *cmd, args []string) error {
 					fmt.Printf("  no effect: entry %s: %s\n", short(n.Entry), n.Reason)
 				}
 				for _, f := range r.Forks {
-					fmt.Printf("  fork by %s at %d (open %v)\n", short(f.Author), f.Seq, f.Open)
+					state := "settled"
+					if f.Open {
+						state = "unresolved"
+					}
+					fmt.Printf("  conflicting membership entries from %s at position %d (%s)\n", short(f.Author), f.Seq, state)
 				}
 				for _, l := range r.Limits {
 					fmt.Printf("  limit: %s\n", l)
@@ -577,12 +662,12 @@ func room(c *cmd, args []string) error {
 		return c.call("room/invite", req, &inv, func() {
 			fmt.Println(inv.Token)
 			fmt.Fprintf(os.Stderr, "\nOne use, expires %s. Anyone holding it can ask to join, so send it privately.\n"+
-				"They run: a2p2 join   (and paste it); then approve here with: a2p2 confirm\n", clock(inv.Expires))
+				"On the other machine, run a2p2 join and paste the invite. Then run a2p2 confirm here to review the request.\n", clock(inv.Expires))
 		})
 	case (rest[0] == "admin" || rest[0] == "remove") && len(rest) == 3:
 		var r localapi.ChangeResp
 		return c.call("room/"+rest[0], localapi.MemberReq{Room: rest[1], Node: rest[2]}, &r, func() {
-			fmt.Printf("request %s, waiting for a person here:\n", r.Request)
+			fmt.Println("Request awaiting a decision on this machine")
 			printTerms(os.Stdout, r.Terms)
 			fmt.Printf("Decide it with: a2p2 confirm %s\n", r.Request)
 		})
@@ -594,37 +679,16 @@ func room(c *cmd, args []string) error {
 	return usagef("a2p2 room create LABEL | invite ROOM [--history] [--member|--admin] | admin ROOM MACHINE | remove ROOM MACHINE | leave ROOM | list [ROOM]")
 }
 
-// printTerms shows a request's terms as separate labelled fields, the
-// machine by its full fingerprint, then the sentence naming what
-// approving does.
+// The daemon describes the action, room ID, full fingerprint, role, history
+// and second signature in Text. Keep those terms together for review.
 func printTerms(w io.Writer, q localapi.Request) {
-	fmt.Fprintf(w, "  request      %s\n", q.ID)
-	if q.Kind == store.RequestNetwork {
-		fmt.Fprintf(w, "  networking   %s\n", q.Action)
-		if q.Name != "" {
-			fmt.Fprintf(w, "  listen on    %s\n", q.Name)
-		}
-	} else {
-		fmt.Fprintf(w, "  action       %s\n", q.Action)
-		fmt.Fprintf(w, "  room         %s (%s)\n", q.RoomLabel, q.Room)
-		fmt.Fprintf(w, "  machine      %s\n", q.Fingerprint)
-		if q.Name != "" {
-			fmt.Fprintf(w, "  name         %s (chosen by that machine)\n", q.Name)
-		}
-		if q.Role != "" {
-			fmt.Fprintf(w, "  role         %s\n", q.Role)
-		}
-		if q.Action != "remove" && q.Action != "promote" {
-			fmt.Fprintf(w, "  history      %s\n", map[bool]string{true: "may read earlier history", false: "no earlier history"}[q.History])
-		}
-		if q.Seconding {
-			fmt.Fprintln(w, "  seconding    another admin's entry")
-		}
-		if q.Deadline != "" {
-			fmt.Fprintf(w, "  invite ends  %s\n", clock(q.Deadline))
-		}
+	fmt.Fprintf(w, "Request %s\n  If approved: %s\n", q.ID, q.Text)
+	if q.Name != "" && q.Kind != store.RequestNetwork {
+		fmt.Fprintln(w, "  The machine chose its own name. Check its fingerprint.")
 	}
-	fmt.Fprintf(w, "  approving    %s\n", q.Text)
+	if q.Deadline != "" {
+		fmt.Fprintf(w, "  Invite expires %s\n", clock(q.Deadline))
+	}
 }
 
 // confirm lists requests, or decides one. Deciding is asked at a terminal
@@ -638,16 +702,19 @@ func confirm(c *cmd, args []string) error {
 	if c.fs.NArg() == 0 {
 		return c.call("requests", localapi.Empty{}, &qs, func() {
 			if len(qs.Requests) == 0 {
-				fmt.Println("nothing waits for you")
+				fmt.Println("No pending requests.")
 			}
 			for _, q := range qs.Requests {
 				printTerms(os.Stdout, q)
 				fmt.Println()
 			}
+			if len(qs.Requests) > 0 {
+				fmt.Println("Run a2p2 confirm ID to approve, or a2p2 confirm ID --decline to decline.")
+			}
 		})
 	}
 	if !terminal() {
-		return errors.New("a decision is asked at a terminal; run a2p2 confirm there (stdin is not a terminal)")
+		return errors.New("run this confirm command in a terminal to decide the request")
 	}
 	id := c.fs.Arg(0)
 	cl, err := c.client()
@@ -671,7 +738,7 @@ func confirm(c *cmd, args []string) error {
 		verb = "Decline"
 	}
 	printTerms(os.Stderr, *q)
-	if ask(verb+" this? Type yes: ") != "yes" {
+	if ask(verb+" request "+id+"? Type yes: ") != "yes" {
 		return errors.New("nothing decided")
 	}
 	send := func(q localapi.ConfirmReq) (localapi.ConfirmResp, []byte, error) {
@@ -724,10 +791,14 @@ func alerts(c *cmd, args []string) error {
 	var res localapi.AlertsResp
 	return c.call("alerts", localapi.WaitReq{WaitMS: int64(*wait) * 1000}, &res, func() {
 		if len(res.Alerts) == 0 {
-			fmt.Println("nothing waits for a person")
+			fmt.Println("No alerts.")
 		}
 		for _, a := range res.Alerts {
-			fmt.Printf("%-8s %s  room %s: %s\n", a.Kind, a.ID, a.Room, a.Text)
+			if a.Kind == node.AlertRequest {
+				fmt.Printf("Request %s\n  %s\n  Review with a2p2 confirm %s\n", a.ID, a.Text, a.ID)
+			} else {
+				fmt.Printf("%s %s in room %s\n  %s\n", a.Kind, a.ID, a.Room, a.Text)
+			}
 		}
 	})
 }
@@ -744,6 +815,12 @@ func netCmd(c *cmd, args []string) error {
 	if len(rest) == 0 || (rest[0] != "on" && rest[0] != "off") || len(rest) > 2 ||
 		rest[0] == "off" && (len(rest) > 1 || *outbound) || *outbound && len(rest) > 1 {
 		return usagef("a2p2 net on [ADDR] | net on --outbound-only | net off")
+	}
+	if !terminal() {
+		return errors.New("run this networking command in a terminal to review and apply it")
+	}
+	if err := daemon.CheckHome(c.home); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	req := localapi.NetReq{State: "off"}
 	switch {
@@ -764,15 +841,12 @@ func netCmd(c *cmd, args []string) error {
 		}
 	}
 	what := map[string]string{
-		"off":      "Networking off: this machine listens on no address and connects to no other machine.",
-		"outbound": "Networking outbound only: this machine listens on no address; it connects out to the machines in its rooms and to the admin machine of a join.",
-		"on":       "Networking on: this machine listens for other machines on " + req.Listen + " (any machine that can reach that address can connect; only room members get anything) and connects out to the machines in its rooms.",
+		"off":      "This machine will stop listening for connections and connecting to other machines.",
+		"outbound": "This machine will connect out to room members and to admins when joining a room. It will accept no incoming connections.",
+		"on":       "This machine will listen on " + addressText(req.Listen) + ". Anyone who can reach this address can connect. Only room members can fetch room messages. This machine will also connect out.",
 	}[req.State]
 	fmt.Fprintln(os.Stderr, what)
-	fmt.Fprintln(os.Stderr, "The daemon restarts to apply it.")
-	if !terminal() {
-		return errors.New("a networking decision is asked at a terminal; run a2p2 net there (stdin is not a terminal)")
-	}
+	fmt.Fprintln(os.Stderr, "Applying this change will restart the daemon.")
 	if ask("Apply this? Type yes: ") != "yes" {
 		return errors.New("nothing changed")
 	}
@@ -866,7 +940,7 @@ func send(c *cmd, args []string) error {
 	askHandled := c.fs.Bool("ask-handled", false, "room-wide post: ask readers to report handling")
 	replaces := c.fs.String("replaces", "", "id of your own message: new text, or withdraw it with empty text")
 	var to multi
-	c.fs.Var(&to, "to", "addressee agent id, or everyone (repeatable; default: everyone in the room)")
+	c.fs.Var(&to, "to", "agent ID such as human@1a2b3c4d, or everyone (repeatable)")
 	if err := c.fs.Parse(args); err != nil {
 		return errUsage
 	}
@@ -958,6 +1032,9 @@ func history(c *cmd, args []string) error {
 	}
 	var res localapi.Entries
 	return c.call("history", localapi.HistoryReq{Room: *roomName, Limit: *n, Before: *before}, &res, func() {
+		if len(res.Entries) == 0 {
+			fmt.Println("No messages in this part of the room history.")
+		}
 		for _, e := range res.Entries {
 			printEntry(os.Stdout, e)
 		}

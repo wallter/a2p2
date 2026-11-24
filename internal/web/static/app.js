@@ -55,10 +55,17 @@ async function api(path, body) {
   if (!r.ok) throw new Error((j && j.error) || "request failed (" + r.status + ")");
   return j;
 }
-function showAuthFail() { $("app").hidden = true; $("authfail").hidden = false; }
+function showAuthFail() { $("connection").hidden = true; $("app").hidden = true; $("authfail").hidden = false; }
 
 const rooms = () => (S.st && S.st.rooms) || [];
 const room = () => rooms().find((r) => r.id === S.room) || null;
+function roomLabel(id) {
+  const entries = rooms();
+  const r = entries.find((r) => r.id === id);
+  if (!r) return id;
+  return entries.some((other) => other.id !== id && other.label === r.label)
+    ? r.label + " (" + id + ")" : r.label;
+}
 // Badges count ordinary mail only: questions have their own section.
 const unreadFor = (id) => S.unread.filter((m) => m.room === id && !S.qKeys.has(m.key));
 const all = () => S.older.concat(S.msgs);
@@ -66,44 +73,67 @@ const all = () => S.older.concat(S.msgs);
 const NETWORK_WORDS = {
   off: "off (this machine only)",
   outbound: "outbound only (this machine can reach others, others cannot reach it)",
-  on: "on (other machines can reach this one)",
+  on: "on (accepts incoming connections)",
 };
 
 // ---- sidebar ----
 function renderSide() {
   const ul = $("rooms");
-  ul.replaceChildren();
-  for (const r of rooms()) {
-    const n = unreadFor(r.id).length, nm = (r.members || []).length;
-    const admin = (r.admins || []).includes(S.st.node);
-    const li = el("li", r.id === S.room ? "sel" : "");
-    li.append(el("span", "l", r.label, el("div", "sub", nm + (nm === 1 ? " node" : " nodes") + " · " + (admin ? "admin" : "member"))));
-    if (n) li.append(el("span", "badge", n));
-    li.addEventListener("click", () => openRoom(r.id));
-    ul.append(li);
+  const choices = rooms().map((r) => [r.id, roomLabel(r.id), unreadFor(r.id).length,
+    (r.members || []).length, (r.admins || []).includes(S.st.node)]);
+  const sig = JSON.stringify([S.room, choices]);
+  if (sig !== S.sigs.rooms) {
+    S.sigs.rooms = sig;
+    const focused = ul.contains(document.activeElement) ? document.activeElement.dataset.room : null;
+    ul.replaceChildren();
+    for (const [id, label, unread, count, admin] of choices) {
+      const b = btn("", "room-choice", () => openRoom(id));
+      b.dataset.room = id;
+      if (id === S.room) b.setAttribute("aria-current", "true");
+      b.append(el("span", "l", label, el("span", "sub", count + (count === 1 ? " machine" : " machines") + " · " + (admin ? "admin" : "member"))));
+      if (unread) {
+        const badge = el("span", "badge", unread);
+        badge.setAttribute("aria-label", unread + " unread");
+        b.append(badge);
+      }
+      ul.append(el("li", id === S.room ? "sel" : "", b));
+      if (id === focused) b.focus({ preventScroll: true });
+    }
   }
   const box = $("node");
-  box.replaceChildren();
+  const limits = box.querySelector("details");
   const r = room();
+  const keepOpen = limits && limits.open && box.dataset.room === S.room;
+  const refocus = limits && limits.contains(document.activeElement);
+  box.dataset.room = S.room;
+  box.replaceChildren();
   if (r) {
     box.append(el("h2", "", "Members of " + r.label));
     for (const m of r.members || []) {
       const adm = m.admin || (r.admins || []).includes(m.node);
-      box.append(el("div", "mem", m.name || fp(m.node), " ", el("span", "muted", fp(m.node)), " ", adm ? el("span", "mark adm", "admin") : null));
+      box.append(el("div", "mem", m.name || "Machine", " ", el("span", "muted", fp(m.node)), " ", adm ? el("span", "mark adm", "admin") : null));
     }
     for (const p of r.pending || []) box.append(el("div", "sub", "pending " + p.kind + " " + p.state + (p.reason ? ": " + p.reason : "")));
-    for (const l of r.limits || []) box.append(el("div", "sub", l));
+    if (r.limits && r.limits.length) {
+      const details = el("details", "", el("summary", "", "Room limits"), ...r.limits.map((l) => el("p", "sub", l)));
+      details.open = !!keepOpen;
+      box.append(details);
+      if (refocus) details.firstChild.focus({ preventScroll: true });
+    }
   }
   const listen = S.st.listen || [];
   const net = S.st.network || { state: listen.length ? "on" : "off" };
-  box.append(el("h2", "", "This node"),
+  box.append(el("h2", "", "This machine"),
     el("div", "", el("strong", "", S.st.name), " ", el("span", "muted", fp(S.st.node))),
     el("div", "", el("span", "dot " + (net.state === "off" ? "" : "ok")), "Network: " + (NETWORK_WORDS[net.state] || net.state)));
-  for (const a of listen) box.append(el("div", "sub", a));
-  box.append(el("h2", "", "Peers"));
-  if (!(S.st.peers || []).length) box.append(el("div", "sub", "No peers yet."));
+  for (const a of listen) {
+    const loopback = /^(127\.|\[::1\]:|localhost:)/i.test(a);
+    box.append(el("div", "sub", a + (loopback ? " (this machine only)" : "")));
+  }
+  box.append(el("h2", "", "Other machines"));
+  if (!(S.st.peers || []).length) box.append(el("div", "sub", "No other machines yet."));
   for (const p of S.st.peers || []) {
-    box.append(el("div", "", p.name || fp(p.node), " ", el("span", "muted", fp(p.node))),
+    box.append(el("div", "", p.name || "Machine", " ", el("span", "muted", fp(p.node))),
       el("div", "sub", p.last_heard ? "heard " + ago(p.last_heard) : "not heard from yet"));
   }
   box.append(el("h2", "", "Local agents"));
@@ -120,32 +150,27 @@ function renderNotice() {
   n.hidden = !S.notice;
   if (S.notice) n.append(el("span", "", S.notice));
 }
-const field = (k, v, cls) => el("div", "field", el("span", "k", k), el("span", "v" + (cls ? " " + cls : ""), v));
 function requestCard(r, row) {
-  const c = el("div", "qcard");
-  c.append(el("div", "sub", "Request " + fp(r.id) + " (" + r.kind + ")"));
-  if (r.kind === "network") {
-    c.append(field("Networking", r.action), field("Listen address", r.name || "none"));
-  } else {
-    c.append(field("Action", r.action), field("Room", (r.room_label || "") + " (" + r.room + ")"),
-      field("Machine fingerprint", r.fingerprint, "mono"),
-      field("Name", (r.name || "none") + " (chosen by that machine)"));
-    if (r.role) c.append(field("Role", r.role));
-    if (r.action !== "remove" && r.action !== "promote") c.append(field("History", r.history ? "may read earlier history" : "no earlier history"));
-    c.append(field("Seconding", r.seconding ? "yes" : "no"));
-    c.append(field("Invite deadline", r.deadline && !String(r.deadline).startsWith("0001") ? fmt(r.deadline) || r.deadline : "none"));
-  }
-  c.append(el("div", "txt", r.text), row);
+  // These are the exact terms compared by the daemon when the person decides.
+  const c = el("div", "qcard", el("div", "sub", "Request " + fp(r.id)), el("div", "txt", r.text));
+  if (r.name && r.kind !== "network") c.append(el("div", "sub", "The machine chose its own name."));
+  if (r.deadline && !String(r.deadline).startsWith("0001")) c.append(el("div", "sub", "Invite expires " + (fmt(r.deadline) || r.deadline)));
+  c.append(row);
   return c;
 }
 function renderNeeds() {
   const qs = S.questions;
   const alerts = S.alerts.filter((a) => a.kind === "fork" || a.kind === "missing");
-  const sig = JSON.stringify([S.requests, alerts.map((a) => [a.id, a.text]), qs.map((m) => [m.key, m.version, m.text]), S.outcome, [...S.risky]]);
+  const sig = JSON.stringify([
+    S.requests, alerts.map((a) => [a.id, roomLabel(a.room), a.text, a.since]),
+    qs.map((m) => [m.key, m.version, roomLabel(m.room)]), S.outcome, [...S.risky],
+  ]);
   $("needs").hidden = !(qs.length || alerts.length || S.requests.length || S.outcome);
   if (sig === S.sigs.n) return;
   S.sigs.n = sig;
-  $("outcome").textContent = S.outcome;
+  const count = qs.length + alerts.length + S.requests.length;
+  $("needs-title").textContent = count ? "Needs you (" + count + ")" : "Update";
+  if ($("outcome").textContent !== S.outcome) $("outcome").textContent = S.outcome;
   const rq = $("requests");
   rq.replaceChildren();
   for (const r of S.requests) {
@@ -155,29 +180,47 @@ function renderNeeds() {
       // second, explicit approval (sent as not_caught_up_ok).
       row.append(el("div", "warnline", NOT_CAUGHT_UP),
         btn("Approve anyway, I accept this risk", "pri", () => decide(r, true, row, true), r.text),
-        btn("Decline this", "", () => decide(r, false, row), r.text));
+        btn("Decline request", "", () => decide(r, false, row)));
     } else {
-      row.append(btn("Approve this", "pri", () => decide(r, true, row), r.text), btn("Decline this", "", () => decide(r, false, row), r.text));
+      const remove = r.action === "remove";
+      row.append(
+        btn(remove ? "Approve removal" : "Approve request", remove ? "danger" : "pri", () => decide(r, true, row)),
+        btn("Decline request", "", () => decide(r, false, row))
+      );
     }
     rq.append(requestCard(r, row));
   }
   const al = $("alerts");
   al.replaceChildren();
-  for (const a of alerts) al.append(el("div", "warnline", a.kind + " in " + a.room + ": " + a.text + (a.since ? " (since " + fmt(a.since) + ")" : "")));
+  for (const a of alerts) al.append(el("div", "warnline", a.kind + " in " + roomLabel(a.room) + ": " + a.text + (a.since ? " (since " + fmt(a.since) + ")" : "")));
   const box = $("questions");
-  box.replaceChildren();
+  // Keep a draft and its focused control when unrelated alerts or mail arrive.
+  const existing = new Map(Array.from(box.children, (card) => [card.dataset.key, card]));
   S.qShown = new Map();
   for (const m of qs) {
     S.qShown.set(m.key, m.version);
+    const prev = existing.get(m.key);
+    existing.delete(m.key);
+    if (prev && prev.dataset.version === m.version) {
+      prev.firstChild.textContent = m.from + " in " + roomLabel(m.room);
+      continue;
+    }
     const input = el("input");
-    input.placeholder = "Type an answer";
-    const answer = (t) => t.trim() && sendAnswer(m, t.trim());
-    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); answer(input.value); } });
+    input.placeholder = "Write a reply";
+    input.setAttribute("aria-label", "Reply to " + m.from + " in " + roomLabel(m.room));
+    const error = el("div", "question-error");
+    error.setAttribute("role", "alert");
+    const answer = (t) => t.trim() && sendAnswer(m, t.trim(), error);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); answer(input.value); } });
     const row = el("div", "row");
     for (const c of m.choices || []) row.append(btn(c, "pri", () => answer(c)));
-    row.append(input, btn("Answer", "", () => answer(input.value)), btn("Dismiss", "link", () => dismissQuestion(m), "Mark read without answering"));
-    box.append(el("div", "qcard", el("div", "sub", m.from + " asks (" + (m.room || "") + ")"), el("div", "txt", m.text || ""), row));
+    row.append(input, btn("Send reply", "", () => answer(input.value)), btn("Mark handled without replying", "link", () => dismissQuestion(m, error)));
+    const card = el("div", "qcard", el("div", "sub", m.from + " in " + roomLabel(m.room)), el("div", "txt", m.text || ""), row, error);
+    card.dataset.key = m.key;
+    card.dataset.version = m.version;
+    if (prev) prev.replaceWith(card); else box.append(card);
   }
+  for (const obsolete of existing.values()) obsolete.remove();
 }
 // NOT_CAUGHT_UP is shown before the second approval (node.NotCaughtUpWarning).
 const NOT_CAUGHT_UP = "This machine has not checked the room's log with another member since it started. " +
@@ -221,15 +264,25 @@ async function finishQuestion(m) {
   S.sigs.n = "";
   refresh(true);
 }
-async function sendAnswer(m, text) {
+async function sendAnswer(m, text, error) {
+  let sent = false;
   try {
     if (!questionOnScreen(m)) throw new Error("the question changed; read the new version first");
     await api("/api/send", { room: m.room, text, reply_to: m.id });
+    sent = true;
     await finishQuestion(m);
-  } catch (e) { $("err").textContent = e.message; refresh(true); }
+  } catch (e) {
+    showQuestionError(m, error, (sent ? "Reply sent. Could not mark the question handled. " : "Could not send the reply. ") + e.message);
+  }
 }
-async function dismissQuestion(m) {
-  try { await finishQuestion(m); } catch (e) { $("err").textContent = e.message; refresh(true); }
+async function dismissQuestion(m, error) {
+  try { await finishQuestion(m); } catch (e) { showQuestionError(m, error, e.message); }
+}
+function showQuestionError(m, error, message) {
+  // A partial success may remove the card on the next poll.
+  if (error.isConnected && S.questions.some((q) => q.key === m.key && q.version === m.version)) error.textContent = message;
+  else S.outcome = message;
+  refresh(true);
 }
 
 // ---- stream ----
@@ -256,48 +309,49 @@ function renderStream(force) {
   box.replaceChildren();
   for (const m of list) {
     const meta = entryMeta(m);
-    meta.append(btn("reply", "link", () => setReply(m)), btn("thread", "link", () => openThread(m.thread || m.id)));
+    meta.append(btn("Reply", "link", () => setReply(m)), btn("Thread", "link", () => openThread(m.thread || m.id)), btn("Trace", "link", () => openTrace(m.id)));
     const d = el("div", "msg" + (m.from === S.st.human ? " mine" : ""), meta, el("div", "body", m.text));
-    d.addEventListener("click", () => openTrace(m.id));
     box.append(d);
   }
   for (const n of notes) box.append(el("div", "noteline", n.kind + ": " + fmt(n.created) + ", message " + fp(n.id)));
   $("older").hidden = !S.more || !S.msgs.length;
-  $("empty").hidden = !(!(S.st.agents || []).some((a) => a.id !== S.st.human) && !list.length);
+  $("empty").hidden = !S.room || list.length > 0 || notes.length > 0 || all().length > 0;
   if (atBottom) sc.scrollTop = sc.scrollHeight;
 }
 function updateCompose() {
   const r = room(), ready = !!r && S.shown === S.room;
-  $("text").placeholder = r ? "Message #" + r.label + ". Enter sends, Shift+Enter adds a line." : "Select a room";
+  $("text").placeholder = r ? "Message " + r.label : "Select a room";
   const b = $("compose").querySelector("button[type=submit]");
-  if (b) { b.disabled = !ready; b.textContent = r ? "Send to #" + r.label : "Send"; }
+  b.disabled = !ready;
 }
 function renderHead() {
   const r = room();
-  $("roomhead").textContent = r ? r.label + (S.waiting ? " (fetching " + S.waiting + " more)" : "") : "";
+  $("roomhead").textContent = r ? roomLabel(r.id) + (S.waiting ? " (fetching " + S.waiting + " more)" : "") : "";
   updateCompose();
   if (S.toRoom !== S.room) { S.toRoom = S.room; $("to").value = ""; }
   const senders = new Set();
   for (const m of all()) if (m.from !== S.st.human) senders.add(m.from);
-  const sig = S.room + [...senders].join();
+  const sig = JSON.stringify([S.room, S.reply && S.reply.from, [...senders]]);
   if (sig === S.toSig) return;
   S.toSig = sig;
   const sel = $("to"), cur = sel.value;
-  sel.replaceChildren(el("option", "", "Everyone"));
+  sel.replaceChildren(el("option", "", S.reply ? S.reply.from + " (reply)" : "Everyone"));
   sel.firstChild.value = "";
   for (const s of senders) { const o = el("option", "", s); o.value = s; sel.append(o); }
   sel.value = cur;
 }
 function setReply(m) {
   S.reply = m;
+  renderHead();
   const r = $("replying");
   r.hidden = false;
-  r.replaceChildren("Replying to " + m.from + ": " + (m.text || "").slice(0, 60) + " ", btn("cancel", "link", () => { S.reply = null; r.hidden = true; }));
+  r.replaceChildren("Replying to " + m.from + ": " + (m.text || "").slice(0, 60) + " ", btn("Cancel reply", "link", () => { S.reply = null; r.hidden = true; renderHead(); $("text").focus(); }));
   $("text").focus();
 }
 
 // ---- dialogs ----
 function showDialog(...kids) {
+  kids[0].id = "dialog-title";
   $("tracebody").replaceChildren(...kids);
   if (!$("trace").open) $("trace").showModal();
 }
@@ -305,15 +359,20 @@ async function openTrace(id) {
   try {
     const t = await api("/api/trace?id=" + encodeURIComponent(id));
     const ct = el("table"), ht = el("table");
-    ct.append(el("tr", "", ...["Node", "When", "Member"].map((h) => el("th", "", h))));
+    ct.append(el("tr", "", ...["Machine", "Copy observed", "Member now"].map((h) => el("th", "", h))));
     for (const c of t.copies || []) ct.append(el("tr", "", el("td", "", fp(c.node)), el("td", "", fmt(c.at)), el("td", "", c.member ? "yes" : "no")));
     ht.append(el("tr", "", ...["Agent", "When"].map((h) => el("th", "", h))));
     for (const h of t.handled || []) ht.append(el("tr", "", el("td", "", h.agent), el("td", "", fmt(h.at))));
+    const textState = {
+      live: "available here", missing: "waiting for a copy", not_admitted: "outside this machine's permitted history",
+      withdrawn: "withdrawn by the author", expired: "expired",
+    }[t.reason] || t.reason;
     showDialog(el("h2", "", "Message " + fp(id)),
-      el("div", "", "Saved: " + (t.saved ? "yes" : "no") + " (" + t.reason + ")"),
-      el("h2", "", "Copies"), (t.copies || []).length ? ct : el("div", "sub", "No copies recorded."),
-      el("h2", "", "Handled"), (t.handled || []).length ? ht : el("div", "sub", "Nobody has handled it yet."));
-  } catch (e) { $("err").textContent = e.message; }
+      el("p", "", t.saved ? "Signed header saved on this machine." : "Signed header unavailable."),
+      el("p", "", "Message text: " + textState + "."),
+      el("h2", "", "Copies"), (t.copies || []).length ? ct : el("div", "sub", "No other machine has reported a copy."),
+      el("h2", "", "Handled"), (t.handled || []).length ? ht : el("div", "sub", "No handling reports yet."));
+  } catch (e) { showDialog(el("h2", "", "Could not open message trace"), el("p", "", e.message)); }
 }
 async function openThread(id) {
   try {
@@ -322,7 +381,7 @@ async function openThread(id) {
     for (const m of t.entries || []) kids.push(el("div", "thr", entryMeta(m), el("div", "body", m.text || m.kind)));
     if (kids.length === 1) kids.push(el("div", "sub", "Nothing in this thread."));
     showDialog(...kids);
-  } catch (e) { $("err").textContent = e.message; }
+  } catch (e) { showDialog(el("h2", "", "Could not open thread"), el("p", "", e.message)); }
 }
 
 // ---- data flow ----
@@ -338,8 +397,10 @@ function switchTo(id) {
   if (S.st) { renderHead(); renderSide(); }
 }
 async function openRoom(id) {
-  if (id === S.room && S.shown === id) return;
-  switchTo(id);
+  const load = id !== S.room || S.shown !== id;
+  if (load) switchTo(id);
+  if (matchMedia("(max-width: 64rem)").matches) $("roomhead").focus();
+  if (!load) return;
   await refresh(true);
   $("stream").scrollTop = $("stream").scrollHeight;
 }
@@ -378,7 +439,15 @@ async function refresh(force) {
       }
     }
     renderNotice(); renderSide(); renderNeeds(); renderHead(); renderStream(force);
-  } catch (e) { if (e.message !== "unauthorized") $("err").textContent = e.message; }
+    $("connection").hidden = true;
+  } catch (e) {
+    if (e.message !== "unauthorized") {
+      const status = $("connection");
+      const message = "Could not load the page data. Retrying. " + e.message;
+      if (status.textContent !== message) status.textContent = message;
+      status.hidden = false;
+    }
+  }
   finally {
     busy = false;
     if (again) { again = false; refresh(true); }
@@ -436,5 +505,9 @@ $("text").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); }
 });
 
+const desktop = matchMedia("(min-width: 64.001rem)");
+function setDetailsLayout() { document.querySelector(".machine-details").open = desktop.matches; }
+setDetailsLayout();
+desktop.addEventListener("change", setDetailsLayout);
 if (!token) showAuthFail();
 else { refresh(true); setInterval(refresh, 2000); }

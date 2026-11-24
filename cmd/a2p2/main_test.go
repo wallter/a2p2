@@ -51,3 +51,18 @@ func TestConfirmNotCaughtUpWithoutASecondYesDecidesNothing(t *testing.T) {
 		t.Fatalf("decline: %+v %v asked %v sent %+v", r, err, asked, sent)
 	}
 }
+
+func TestConfirmShowsExactTermsOnceAndInviteDeadline(t *testing.T) {
+	q := localapi.Request{
+		ID: "q_1", Name: "laptop", Deadline: "2026-11-24T12:35:00Z",
+		Text: "add machine 0123 4567 (laptop) to room team (r_1) as an admin, without earlier history",
+	}
+	var out bytes.Buffer
+	printTerms(&out, q)
+	got := out.String()
+	if strings.Count(got, q.Text) != 1 || strings.Count(got, "0123 4567") != 1 ||
+		!strings.Contains(got, q.ID) || !strings.Contains(got, clock(q.Deadline)) ||
+		!strings.Contains(got, "chose its own name") {
+		t.Fatalf("request terms shown: %q", got)
+	}
+}
