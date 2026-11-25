@@ -8,6 +8,20 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-25
+
+A one-line installer, a demo that runs on one computer, feedback through
+Issues and Discussions, two network recipes, and fixes for four limits of
+file attachments that 0.2.0 listed. Nothing changes on the wire; 0.2.0,
+0.2.1 and 0.2.2 machines work together.
+
+Known limits: the limits of 0.2.0 still apply, except the two about
+storage budgets on Windows and a copy left by a page download, which are
+fixed. Parts of unfinished transfers, staged files and copies whose removal
+failed are not yet counted against the storage budgets. Record-stream fork
+evidence is kept and shown nowhere. `install.ps1` has not been run on
+Windows. A run between two physical machines has still not been recorded.
+
 ### Added
 
 - **A two-machine demo on one computer.** `scripts/demo.sh` starts two
@@ -286,7 +300,8 @@ The first release, a preview: read the limits and the status in the
 - The full list is in [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md),
   section 6.
 
-[Unreleased]: https://github.com/wallter/a2p2/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/wallter/a2p2/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/wallter/a2p2/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/wallter/a2p2/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/wallter/a2p2/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/wallter/a2p2/releases/tag/v0.1.0
