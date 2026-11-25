@@ -582,40 +582,14 @@ func (s *Store) WantsToSend(ctx context.Context, room, author string, clock func
 	var out []FileWant
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		now := clock()
-		rows, err := tx.Query(`SELECT `+wantCols+` FROM file_wants WHERE room = ? AND author = ? AND lapsed_at = 0
-			ORDER BY list DESC, at, msg, sha256`, room, author)
+		rd := &Reader{tx: tx}
+		due, err := rd.wantsDue(room, author, now, repeat, ok, -1)
 		if err != nil {
 			return err
 		}
-		var all []FileWant
-		for rows.Next() {
-			w, err := scanWant(rows)
-			if err != nil {
-				rows.Close()
-				return err
-			}
-			all = append(all, w)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		rd := &Reader{tx: tx}
-		for _, w := range all {
+		for _, w := range due {
 			if len(out) == max {
 				break
-			}
-			if !w.Sent.IsZero() && now.Sub(w.Sent) < repeat {
-				continue
-			}
-			if ok != nil {
-				good, err := ok(rd, w, now)
-				if err != nil {
-					return err
-				}
-				if !good {
-					continue
-				}
 			}
 			tries := w.Tries
 			if !w.Sent.IsZero() {
@@ -638,6 +612,60 @@ func (s *Store) WantsToSend(ctx context.Context, room, author string, clock func
 		return nil
 	})
 	return out, err
+}
+
+// WantsDue reports whether WantsToSend would choose a want for author's
+// pull now, without recording anything: a held pull of the author ends
+// when one is due, so the want reaches it at once (PROTOCOL 10.4).
+func (rd *Reader) WantsDue(room, author string, now time.Time, repeat time.Duration,
+	ok func(*Reader, FileWant, time.Time) (bool, error)) (bool, error) {
+	due, err := rd.wantsDue(room, author, now, repeat, ok, 1)
+	return len(due) > 0, err
+}
+
+// wantsDue is the choice of WantsToSend: author's wants in room that are
+// not lapsed, not sent within repeat and pass ok, manifests first, at most
+// max (-1: all).
+func (rd *Reader) wantsDue(room, author string, now time.Time, repeat time.Duration,
+	ok func(*Reader, FileWant, time.Time) (bool, error), max int) ([]FileWant, error) {
+	rows, err := rd.tx.Query(`SELECT `+wantCols+` FROM file_wants WHERE room = ? AND author = ? AND lapsed_at = 0
+		ORDER BY list DESC, at, msg, sha256`, room, author)
+	if err != nil {
+		return nil, err
+	}
+	var all []FileWant
+	for rows.Next() {
+		w, err := scanWant(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		all = append(all, w)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []FileWant
+	for _, w := range all {
+		if len(out) == max {
+			break
+		}
+		if !w.Sent.IsZero() && now.Sub(w.Sent) < repeat {
+			continue
+		}
+		if ok != nil {
+			good, err := ok(rd, w, now)
+			if err != nil {
+				return nil, err
+			}
+			if !good {
+				continue
+			}
+		}
+		out = append(out, w)
+	}
+	return out, nil
 }
 
 // ListFailed counts a failed answer for record's missing manifest: after

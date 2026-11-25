@@ -1329,7 +1329,8 @@ cannot dial it [F9]:
 
 At most 16 entries, deduplicated, manifests before the files they list,
 each repeated at most once a minute; the field counts inside the answer's
-size limit (4.6, 4 MiB), so the answer is cut to fit, never the other way.
+size limit (4.6, 4 MiB), so the answer is cut to fit, never the other way. A waiting pull of the author is not held, and one already held ends,
+while a want for it is due, so the want travels at once.
 Only the author is asked: it knows its own files, so a want discloses
 nothing, and no machine promises bytes it does not hold. A copy held only
 by another machine nobody can dial is not reachable this way.

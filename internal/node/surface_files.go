@@ -166,7 +166,42 @@ func (s *Surface) Fetch(ctx context.Context, agent, room, sha, msg string, wait 
 	if !core.ValidSHA256(sha) {
 		return FetchResult{}, userErr("sha256 is 64 lowercase hex: the file's sha256 as inbox shows it")
 	}
-	return s.r.files.Fetch(ctx, FetchOpts{Agent: label, Room: room, SHA256: sha, Message: msg, Wait: wait})
+	return s.r.files.fetchWaiting(ctx, FetchOpts{Agent: label, Room: room, SHA256: sha, Message: msg, Wait: wait})
+}
+
+// fetchPoll is how often a fetch that waits asks again while the file is
+// coming: a carrier is asked again, and bytes committed here wake it
+// sooner.
+var fetchPoll = 2 * time.Second
+
+// fetchWaiting is Fetch, asked again while the answer is coming or partial
+// and o.Wait lasts: the bytes may arrive by an upload from an author that
+// only dials out (PROTOCOL 10.4) or by a member that carries them (10.5),
+// and the agent's wait covers that as it covers a download.
+func (f *Files) fetchWaiting(ctx context.Context, o FetchOpts) (FetchResult, error) {
+	deadline := time.Now().Add(o.Wait)
+	for {
+		// Taken before the look, so bytes committed after it wake.
+		var wake <-chan struct{}
+		if o.Room != "" {
+			wake = f.m.wakes.wait(o.Room)
+		}
+		r, err := f.Fetch(ctx, o)
+		left := time.Until(deadline)
+		if err != nil || r.State != FetchComing && r.State != FetchPartial || left <= 0 {
+			return r, err
+		}
+		if wake == nil {
+			wake = f.m.wakes.wait(r.Room)
+		}
+		o.Wait = left
+		select {
+		case <-wake:
+		case <-time.After(min(fetchPoll, left)):
+		case <-ctx.Done():
+			return r, nil
+		}
+	}
 }
 
 // RoomFilesView is a room's files setting and what its files take.

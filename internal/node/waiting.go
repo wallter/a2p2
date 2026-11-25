@@ -132,7 +132,8 @@ func (x *Exchange) stillSame(ctx context.Context, peer string, q *PullRequest, b
 	if err != nil {
 		return nil, false, unavailable(err)
 	}
-	return nb, nb.resp.Same, nil
+	// A want for the puller ends the hold: release adds it (PROTOCOL 10.4).
+	return nb, nb.resp.Same && (x.files == nil || !x.files.wantsDue(ctx, q.Room, peer)), nil
 }
 
 // pullStoppable sends a waiting request and abandons it if stop closes

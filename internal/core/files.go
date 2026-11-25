@@ -46,6 +46,7 @@ const (
 	FileRateWindow  = 30 * time.Second  // FileMinRate is kept over any window this long
 	WantRepeat      = time.Minute       // a want is repeated at most this often
 	ListRetryFirst  = time.Minute       // backoff for a missing manifest, doubling
+	ListRetrySoon   = 5 * time.Second   // a first ask that found no list, asked again once this soon
 	ListRetryMax    = time.Hour
 )
 

@@ -86,6 +86,16 @@ type Files struct {
 	chunk int64
 	// limits of one transfer
 	limits func() RateLimits
+
+	// soon carries rooms whose file work Run does now rather than at the
+	// next tick: a header with files arrived, or a quick second ask of a
+	// list is due (PROTOCOL 10.2: the manifest follows the pull that
+	// brought the header). Sends never block; a full channel drops.
+	soon chan string
+	// tried holds the records whose list was asked for once since start:
+	// that first ask is not a failed answer (the holders may be fetching
+	// it at the same moment), the second one is.
+	tried map[string]bool
 }
 
 // FilesOpts shape the attachment part.
@@ -99,7 +109,7 @@ type FilesOpts struct {
 // Start once before serving.
 func NewFiles(r *Rooms, t FileTransport, o FilesOpts) *Files {
 	f := &Files{m: r.m, r: r, t: t, tr: newTransfers(core.FileTransfers), old: map[string]time.Time{}, writing: map[[3]string]bool{},
-		chunk: o.Chunk, limits: o.Limits}
+		chunk: o.Chunk, limits: o.Limits, soon: make(chan string, 64), tried: map[string]bool{}}
 	if f.chunk <= 0 || f.chunk > core.FileChunk {
 		f.chunk = core.FileChunk
 	}
@@ -304,7 +314,7 @@ func (f *Files) carry(ctx context.Context, peer string, q FileGet, c fileCheck) 
 	case !c.fits:
 		return nil, ErrNotHeldFile
 	}
-	_, err := f.m.st.IssueWant(ctx, store.FileWant{Room: q.Room, Msg: q.Msg, Version: c.mf.Winner.ID, SHA256: q.SHA256,
+	_, err := f.issueWant(ctx, store.FileWant{Room: q.Room, Msg: q.Msg, Version: c.mf.Winner.ID, SHA256: q.SHA256,
 		Author: c.mf.Author, Size: c.ref.Size, At: f.m.now()})
 	if errors.Is(err, store.ErrNoSpace) {
 		return nil, ErrNotHeldFile
