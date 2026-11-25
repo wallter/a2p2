@@ -403,7 +403,7 @@ func (sv *server) file(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	}
 	fileHook("fetched", res.Path)
-	snap, n, ok := snapshot(res.Path, res.Size, sha)
+	snap, n, ok := snapshot(res.Path, res.Size, sha, sv.s.SnapshotFile)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"state": "changed",
 			"error": "this machine's copy of the file is not the file verified; fetch it again"})
@@ -433,12 +433,14 @@ var fileHook = func(stage, path string) {}
 // snapshot takes a private copy of the file at path to serve: path is
 // opened once, without following a link and without blocking on a FIFO;
 // it must be a regular file of exactly size bytes (checked on the open
-// handle); at most size+1 bytes are copied into a new temporary file,
-// mode 0600, while they are hashed. Only a copy of size bytes whose
-// SHA-256 is sha is returned, rewound; anything else is removed. Since
-// the bytes served are the snapshot's, a change to path after this
-// cannot reach the response.
-func snapshot(path string, size int64, sha string) (*os.File, int64, bool) {
+// handle); at most size+1 bytes are copied into a new private file made by
+// create, while they are hashed. Only a copy of size bytes whose SHA-256
+// is sha is returned, rewound; anything else is removed. Since the bytes
+// served are the snapshot's, a change to path after this cannot reach the
+// response. A snapshot never outlives the next start: create puts it
+// under the home with a temporary file's name, which a start removes, and
+// never in the system's temporary directory.
+func snapshot(path string, size int64, sha string, create func() (*os.File, error)) (*os.File, int64, bool) {
 	f, err := openFile(path)
 	if err != nil {
 		return nil, 0, false
@@ -448,7 +450,7 @@ func snapshot(path string, size int64, sha string) (*os.File, int64, bool) {
 		return nil, 0, false
 	}
 	fileHook("opened", path)
-	tmp, err := os.CreateTemp("", "a2p2-download-")
+	tmp, err := create()
 	if err != nil {
 		return nil, 0, false
 	}

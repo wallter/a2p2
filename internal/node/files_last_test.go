@@ -175,18 +175,25 @@ func TestAnApprovalWhoseRecordCannotBeWrittenCopiesNothing(t *testing.T) {
 }
 
 // TestAPublicationThatFailsAfterItsBytesArePlacedLeavesNoBlob (L3): the
-// request expires while its four files are put in place, so the
-// publishing transaction refuses; the blobs it wrote go in the same step
-// and nothing counts against the budget, ten times over.
+// last of four staged files changes after approval began, so the
+// publication fails after the manifest and three files were put in place;
+// the blobs it wrote go in the same step and nothing counts against the
+// budget, ten times over. (An expired request no longer gets this far: it
+// is refused before a byte is copied [F3].)
 // Requirements: L1, F7
 func TestAPublicationThatFailsAfterItsBytesArePlacedLeavesNoBlob(t *testing.T) {
 	ns := filesNet(t, "a", "b")
 	a := ns[0]
 	room := fileRoom(t, a, ns[1])
 	ctx := context.Background()
+	var last string // the staged path of the request's last file
 	testHook = func(p string) error {
 		if p == "files:publish" {
-			*a.clock = a.clock.Add(core.StagingLife)
+			b, err := os.ReadFile(last)
+			if err != nil {
+				return err
+			}
+			_ = os.WriteFile(last, []byte(strings.ToUpper(string(b))), 0o600) // the same size, other bytes
 		}
 		return nil
 	}
@@ -201,7 +208,8 @@ func TestAPublicationThatFailsAfterItsBytesArePlacedLeavesNoBlob(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if c, err := a.f.ApproveSend(ctx, res.Request, res.Terms); err != nil || c.State == store.RequestApproved {
+		last = filepath.Join(a.st.FileRoot(), "blobs", ".staging", res.Request, "3")
+		if c, err := a.f.ApproveSend(ctx, res.Request, res.Terms); err != nil || c.State != store.RequestFailed || c.Reason != store.ReasonSendChanged {
 			t.Fatalf("try %d: %+v %v", i, c, err)
 		}
 		if left, used := unnamedBlobs(t, a, room); len(left) != 0 || used != 0 {

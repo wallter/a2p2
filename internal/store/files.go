@@ -208,7 +208,11 @@ func stageRel(req string, n int) string    { return stageDirRel(req) + "/" + str
 func copyDirRel(room string) string        { return "files/" + room }
 func copyRel(room, name string) string     { return copyDirRel(room) + "/" + name }
 func (s *Store) abs(rel string) string     { return filepath.Join(s.root, filepath.FromSlash(rel)) }
-func tmpName() string                      { var b [12]byte; rand.Read(b[:]); return tmpPrefix + hex.EncodeToString(b[:]) }
+func tmpName() string {
+	var b [tmpBytes]byte
+	rand.Read(b[:])
+	return tmpPrefix + hex.EncodeToString(b[:])
+}
 func checkIDs(room, msg, sha string) bool {
 	return validRoomID(room) && validMsgID(msg) && core.ValidSHA256(sha)
 }
@@ -218,9 +222,46 @@ func (s *Store) blobPath(room, sha string) string { return s.abs(blobRel(room, s
 // removes them all.
 const tmpPrefix = ".a2p2-tmp-"
 
+// tmpBytes is how many random bytes follow tmpPrefix, in lowercase hex.
+const tmpBytes = 12
+
+// isTmpName says whether n is exactly a name tmpName generates: tmpPrefix
+// and 2*tmpBytes lowercase hexadecimal characters, nothing else. Only such
+// a name is removed as a temporary file; a name that merely resembles one
+// is left and counted as unknown [F4].
+func isTmpName(n string) bool {
+	h, ok := strings.CutPrefix(n, tmpPrefix)
+	if !ok || len(h) != 2*tmpBytes {
+		return false
+	}
+	for _, c := range h {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // UnknownFiles is how many files under blobs/ the last start found with
 // a name a2p2 does not generate, and left alone [K3].
 func (s *Store) UnknownFiles() int64 { return s.unknownFiles.Load() }
+
+// SnapshotFile creates a new, empty private file (mode 0600) for the
+// snapshot a download from the page serves. A snapshot lives under the
+// home with a temporary file's name, blobs/.a2p2-tmp-<24 hex>, so one a
+// crash leaves behind is removed by the next start (ReconcileFiles); the
+// caller removes it when the download ends.
+func (s *Store) SnapshotFile() (*os.File, error) {
+	dir := s.abs("blobs")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fileErr("write", err)
+	}
+	f, err := os.OpenFile(filepath.Join(dir, tmpName()), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, fileErr("write", err)
+	}
+	return f, nil
+}
 
 // FileRoot is the directory under which blobs/ and files/ live: the
 // directory of the database.
@@ -418,7 +459,9 @@ func (rd *Reader) FileMode(room string) (string, error) {
 
 // FileUsage returns the bytes counted against the room's budget and the
 // machine's [F7]: held, partial at its declared size, staged, copied, and
-// reserved by wants with no part yet.
+// reserved by wants with no part yet. A queued blob counts only until its
+// file is removed: an entry marked unlinked (removed where a directory
+// cannot be synced, kept until a start sees it gone) counts nothing.
 func (rd *Reader) FileUsage(room string) (int64, int64, error) { return fileUsage(rd.tx, room) }
 
 // FileBudgets returns the budgets in force.
@@ -428,7 +471,7 @@ const usageSQL = `SELECT
 	(SELECT coalesce(sum(size), 0) FROM files WHERE ?1 = '' OR room = ?1) +
 	(SELECT coalesce(sum(size), 0) FROM file_parts WHERE ?1 = '' OR room = ?1) +
 	(SELECT coalesce(sum(size), 0) FROM file_copies WHERE ?1 = '' OR room = ?1) +
-	(SELECT coalesce(sum(t.size), 0) FROM file_trash t WHERE t.kind = 'blob' AND t.size > 0 AND (?1 = '' OR t.room = ?1)
+	(SELECT coalesce(sum(t.size), 0) FROM file_trash t WHERE t.kind = 'blob' AND t.size > 0 AND t.unlinked = 0 AND (?1 = '' OR t.room = ?1)
 	  AND NOT EXISTS (SELECT 1 FROM files f WHERE f.room = t.room AND f.sha256 = t.sha256)) +
 	(SELECT coalesce(sum(w.size), 0) FROM file_wants w WHERE (?1 = '' OR w.room = ?1) AND w.lapsed_at = 0
 	  AND NOT EXISTS (SELECT 1 FROM file_parts p WHERE p.room = w.room AND p.msg = w.msg AND p.sha256 = w.sha256))`
@@ -1299,6 +1342,12 @@ func (s *Store) WriteWithFiles(ctx context.Context, now time.Time, sf SendFiles,
 	}
 	s.fileMu.Lock()
 	defer s.fileMu.Unlock()
+	// A request that has expired copies nothing: its expiry is checked by
+	// the store's clock before a byte is put in place, and again in the
+	// transaction that publishes [F3].
+	if err := s.View(ctx, func(rd *Reader) error { return sendLive(rd.tx, sf, now) }); err != nil {
+		return nil, err
+	}
 	msha := core.SHA256Hex(sf.Manifest)
 	dir := s.abs("blobs/" + sf.Room)
 	if err := s.mkdirSynced(dir); err != nil { // each new directory synced into its parent [B5]
@@ -1335,20 +1384,8 @@ func (s *Store) WriteWithFiles(ctx context.Context, now time.Time, sf SendFiles,
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		// the request's expiry, by the clock read in the transaction that
 		// publishes, after the bytes were put in place [B6]
-		at := now
-		if sf.Clock != nil {
-			at = sf.Clock()
-		}
-		var created int64
-		var state string
-		if err := tx.QueryRow(`SELECT created_at, state FROM requests WHERE id = ?`, sf.Request).Scan(&created, &state); err != nil {
-			return ErrNotFound
-		}
-		if state != RequestPending {
-			return ErrNotFound
-		}
-		if !at.Before(fromMS(created).Add(core.StagingLife)) {
-			return ErrSendExpired
+		if err := sendLive(tx, sf, now); err != nil {
+			return err
 		}
 		var err error
 		if r, err = build(&Reader{tx: tx}); err != nil {
@@ -1395,6 +1432,28 @@ func (s *Store) WriteWithFiles(ctx context.Context, now time.Time, sf SendFiles,
 	}
 	s.runTrashLocked(ctx, false)
 	return r, nil
+}
+
+// sendLive says whether sf's request still waits and has not expired, by
+// sf.Clock read now (or now): ErrNotFound if it no longer waits,
+// ErrSendExpired if it is past its life.
+func sendLive(tx *sql.Tx, sf SendFiles, now time.Time) error {
+	at := now
+	if sf.Clock != nil {
+		at = sf.Clock()
+	}
+	var created int64
+	var state string
+	if err := tx.QueryRow(`SELECT created_at, state FROM requests WHERE id = ?`, sf.Request).Scan(&created, &state); err != nil {
+		return ErrNotFound
+	}
+	if state != RequestPending {
+		return ErrNotFound
+	}
+	if !at.Before(fromMS(created).Add(core.StagingLife)) {
+		return ErrSendExpired
+	}
+	return nil
 }
 
 // putPath is a blob path a publication writes: fresh if nothing was there.

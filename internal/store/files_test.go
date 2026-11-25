@@ -123,7 +123,7 @@ func TestAStartRemovesTemporaryFilesAndFilesWithoutRows(t *testing.T) {
 	root := s.FileRoot()
 	stray := []string{
 		filepath.Join(root, "blobs", testRoom, strings.Repeat("e", 64)),
-		filepath.Join(root, "blobs", testRoom, tmpPrefix+"x"),
+		filepath.Join(root, "blobs", testRoom, tmpName()), // exactly a name a2p2 generates (F4)
 		filepath.Join(root, "blobs", testRoom, "part", strings.Repeat("1", 32), strings.Repeat("f", 64)),
 		filepath.Join(root, "blobs", ".staging", "q_"+strings.Repeat("2", 32), "0"),
 	}

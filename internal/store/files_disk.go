@@ -632,10 +632,11 @@ func (s *Store) removeQueued(root *os.Root, t trashRow, name string) (keep, abse
 	return false, false, nil
 }
 
-// stagingName: a name a2p2 gives a file inside a request's staging
-// directory (a file's number, or a temporary file).
+// stagingName: exactly a name a2p2 gives a file inside a request's
+// staging directory (a file's number, or a temporary file's name as
+// tmpName makes it).
 func stagingName(n string) bool {
-	if strings.HasPrefix(n, tmpPrefix) {
+	if isTmpName(n) {
 		return true
 	}
 	i, err := strconv.Atoi(n)
@@ -738,7 +739,7 @@ func (s *Store) ReconcileFiles(ctx context.Context) error {
 	}
 	base := s.abs("blobs")
 	_ = filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasPrefix(d.Name(), tmpPrefix) {
+		if err != nil || d.IsDir() || !isTmpName(d.Name()) {
 			return nil
 		}
 		_ = os.Remove(p)
@@ -1003,12 +1004,12 @@ func (s *Store) removeUnnamed(ctx context.Context) error {
 				})
 				if !live {
 					// only what a2p2 generates in it; the rest stays and is
-					// counted, and so does the directory then [W2]
+					// counted, and so is the directory kept for it [W2, F4]
 					if root, err := s.openDir(false, "blobs", ".staging"); err == nil {
 						others, _, err := removeStaging(root, parts[2])
 						root.Close()
-						if err == nil {
-							unknown += others
+						if err == nil && others > 0 {
+							unknown += others + 1
 						}
 					}
 					return filepath.SkipDir

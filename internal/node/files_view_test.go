@@ -388,8 +388,10 @@ func TestAFetchAfterTheAgentEditedItsCopyGetsVerifiedBytes(t *testing.T) {
 }
 
 // TestARequestThatExpiresWhileItsFilesArePutInPlaceIsNotPublished (B6):
-// the request is live when approved; copying its files takes it past its
-// life; the publishing transaction reads the clock and refuses.
+// the request is live when approved and past its life when its files are
+// to be put in place; the store reads the clock before copying and
+// refuses (the transaction's own check is
+// TestARequestThatExpiresWhileItsBytesArePlacedIsRefusedByThePublication).
 // Requirements: L1, P3
 func TestARequestThatExpiresWhileItsFilesArePutInPlaceIsNotPublished(t *testing.T) {
 	ns := filesNet(t, "a", "b")

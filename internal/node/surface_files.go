@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -143,6 +144,10 @@ func cannotAttachErr(err error, files []string) error {
 	}
 	return &UserError{Code: ErrorInvalid, Msg: CannotAttach}
 }
+
+// SnapshotFile is a new private file under the home for the snapshot a
+// page download serves; a start removes one a crash left behind.
+func (s *Surface) SnapshotFile() (*os.File, error) { return s.m.st.SnapshotFile() }
 
 // Fetch is an agent's fetch of one file (PROTOCOL 10.6): verified bytes
 // copied under files/<room>/ for it, never opened. room and msg may be
