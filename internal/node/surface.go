@@ -322,6 +322,8 @@ func (s *Surface) Invite(ctx context.Context, room, role string, history bool) (
 		return Invitation{}, codedErr(ErrorNetworkingOff, "networking is %s here, so no machine could reach this one to join; "+
 			"a person can turn the listener on at a terminal: a2p2 net on", s.net.State)
 	}
+	// Only beside an advertised address: a mapping alone issues no invite,
+	// so a listener that failed cannot hand out a mapping it has lost.
 	if s.extra != nil {
 		addrs = inviteAddrs(s.extra(), addrs)
 	}

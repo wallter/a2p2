@@ -644,8 +644,14 @@ widen who can be reached, none of them a service run by anyone else.
   the list. The joiner dials a token's addresses in order, 3 seconds each,
   and a joiner outside the network would otherwise wait out the private
   ones; a wrong address costs a timeout, since the key's fingerprint is
-  checked before anything is sent. Only invites carry it before then; what
-  the machine advertises and asks members to dial back is unchanged.
+  checked before anything is sent. What the machine itself advertises and
+  asks members to dial back is unchanged. A joiner keeps a token's
+  addresses as it keeps any it learns and may pass them to other members
+  as hints, so the mapped address can reach them that way before it is
+  confirmed; it is the machine's own router's answer, never another
+  member's claim, and if it does not work it costs a failed dial. An
+  invite still needs an advertised address: a mapping alone issues none,
+  so a listener that failed cannot hand out a mapping it no longer has.
   Mapping is a decision like turning networking on:
   asked at a terminal, saying that it opens a port on the router to the
   internet and that only room members get anything from it, and recorded
