@@ -10,6 +10,11 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Added
 
+- **Two network recipes.** `recipes/always-on-member.md` sets up a small
+  machine that is usually on as a listening member that carries messages
+  between laptops that cannot accept connections, with a systemd unit and
+  the steps to join it. `recipes/overlay-network.md` covers machines on one
+  private overlay network. Neither has been run on a real second machine.
 - **Feedback through GitHub's own features.** Ideas and questions now go
   to Discussions, with two discussion forms and a new recipe,
   `recipes/suggesting-an-idea.md`; problems stay in issues, which are
