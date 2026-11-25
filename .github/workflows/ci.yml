@@ -16,6 +16,8 @@ on:
       - 'scripts/**'
       - '.github/workflows/**'
       - 'internal/**/testdata/**'
+      # The page's HTML, script and style are not Go files.
+      - 'internal/web/static/**'
       - '.gitattributes'
   workflow_dispatch:
     inputs:

@@ -1461,21 +1461,33 @@ shadowed the file's own `roomLabel`, which the same function called first
 the lint and the README's "checked in headless Chrome" all passed. Added
 now: a Go test that runs `app.js` in `node` against the real handler with
 a hand-written DOM stand-in (`internal/web/testdata/page_harness.js`), a
-`web-js` step in `make check`, and a `skip` line in `scripts/gate.sh` for
-a step that could not run. Also a flag, `a2p2 ui --print`, of an existing
-command (as D48's `--map-port`): printing the address and opening
+`web-js` step in `make check`, and a `gate: skip:` line in `scripts/gate.sh` for
+a step that could not run, counted apart in its last line. Also a flag, `a2p2 ui --print`, of an existing
+command (as D48's `--map-port`): printing the address and nothing else (refused with `--json`), and opening
 nothing, for scripts, agents and machines with no browser. No new
 dependency, protocol message, command or table.
 
-- **Guarantees:** the first refresh of the page ends without an error
-  against the data the real server sends, and the sidebar lists every room.
+- **Guarantees (what the test asserts):** against the data the real
+  server sends, and with elements built from `static/index.html`, the
+  first refresh ends before a deadline with no error, the app is shown by
+  the script and the status line hidden; the sidebar holds exactly the
+  server's room ids; the heading and alice's message appear; and a
+  recipient chosen before a reload that drops that author's messages is
+  still the recipient, or the send is refused with a reason.
 - **Does not guarantee:** anything a browser does. The stand-in has no
-  layout, events, CSS or later polls. Without `node` the check is skipped
-  and `make check` says `skip`; CI's runner has node. `make prerelease`
-  sets `A2P2_REQUIRE_NODE=1`, so a release cannot be made without it.
+  layout, CSS, real events or the script's own polling. Without `node` the
+  check is skipped: `make check` prints the step as `skip` and counts it
+  as skipped in its last line, and CI's runner has node. `make
+  prerelease` sets `A2P2_REQUIRE_NODE=1`, so it fails without node. A tag
+  pushed by hand skips every local check, as it always has
+  (RELEASING: do not tag by hand). A `GOFLAGS=-skip` in the environment
+  can also hide the test.
+- **Windows:** the test skips on Windows (the harness has not been tried
+  there). The Windows job runs `go test` on `internal/web` and lists that
+  skip.
 - **Left out on purpose:** a JS engine in Go or a browser driver (a new
   dependency); a lint with no engine (it cannot see this class of error
-  without a parser); running the harness on Windows CI.
+  without a parser).
 - **Token:** the address `a2p2 ui` prints carries the page's access
   token (it was always printed). The flag changes nothing there; it is
   written to standard output only and the help says to keep it out of

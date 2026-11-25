@@ -76,10 +76,10 @@ handled reports. The team launcher also ran Claude Code and Codex.
 OpenCode 1.18.30, Hermes Agent 0.15.2 and Pi 0.73.1 exchanged messages
 using Ollama models and configurations installed in scratch homes.
 
-Delivery has automated tests. The web page's script runs in Node against
-the real server in `make check` and its first render is checked; it has no
-test in a real browser, and 0.2.2 and earlier did not load it (see the
-changelog). The two-machine walkthrough used two daemons on
+Delivery has automated tests. When node is installed, `make check` runs
+the web page's script in Node against the real server, and checks its
+first render and choosing a recipient; the page has no test in a real
+browser, and 0.2.2 and earlier did not load it (see the changelog). The two-machine walkthrough used two daemons on
 one computer. Two physical machines, interactive sessions and live hooks
 remain unverified on the current delivery code. For Claude Code, Codex
 and Antigravity, installer writes were checked in test homes and a rerun

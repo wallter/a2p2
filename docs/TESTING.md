@@ -19,9 +19,12 @@ that need to replay the same steps.
 vet, the Windows build gate, licences, trace, recipes, web-js, the race
 tests and the launcher's tests. It prints one line per step as it ends,
 with its time, then the full log of every step that failed, and exits
-non-zero naming each failed step. A step whose first log line starts with
-`skip:` is printed as `skip`, not `ok`: `web-js` does that when `node` is
-not on PATH.
+non-zero naming each failed step. A step that exits 0 and prints a line
+`gate: skip: REASON` anywhere in its log is printed as `skip  NAME  SECONDS  (REASON)`,
+not `ok`, and the last line then reads, for example,
+`gate: 10 of 11 steps passed, 1 skipped (web-js) in 80s`. `web-js` does
+that when `node` is not on PATH. Only that exact line counts, and a
+non-zero exit is a failure whatever the log says.
 
 `make test` (`scripts/gotest.sh`) runs every test once with
 `-race -count=1 -timeout 30m`, as `go test ./...` did. A package whose
@@ -89,7 +92,7 @@ its fake router to answer within 30 ms. Two rules follow for tests:
 | [`internal/peer`](../internal/peer) | Mutual TLS on loopback, joins, access checks, request limits, waiting pulls and address fallback. |
 | [`internal/localapi`](../internal/localapi), [`internal/mcpshim`](../internal/mcpshim), [`internal/web`](../internal/web), [`internal/daemon`](../internal/daemon) | Unix-socket API, MCP calls, web server checks and integration with two daemons. |
 | [`internal/harness`](../internal/harness) | Install and uninstall preserve the settings exercised by the tests. Hook tests check the output sent to the harness. |
-| [`internal/web/page_script_test.go`](../internal/web/page_script_test.go), [`testdata/page_harness.js`](../internal/web/testdata/page_harness.js) (`make web-js`, in `make check`) | `static/app.js`, unchanged, runs in Node against the real handler with a small hand-written stand-in for the DOM. The first refresh must end without an error and the sidebar must list every room (two with one label show their ids) and the agent list. It does not test layout, styling, clicks, typing, later polls or any browser behaviour; Node is not a browser. Without `node` it is skipped and `make check` prints `skip`; CI's runner has node. It was added after 0.2.2 shipped a page that never drew (`Cannot access 'roomLabel' before initialization`). |
+| [`internal/web/page_script_test.go`](../internal/web/page_script_test.go), [`testdata/page_harness.js`](../internal/web/testdata/page_harness.js) (`make web-js`, in `make check`) | `static/app.js`, unchanged, runs in Node against the real handler with a small hand-written stand-in for the DOM. The stand-in's elements are built from `static/index.html` (an id it lacks is null, and the `/app.js` script tag must exist). The first refresh must end, without an error and before a 15 second deadline, with the app shown by the script, the status line hidden, the sidebar holding exactly the server's room ids (two rooms with one label show their ids), the room heading and alice's message in the stream, and alice in the agent list. A scenario then calls the script's own listeners: it opens the room, chooses alice as the recipient, reloads with a history that no longer holds alice, and sends; the post must still name alice. A draft whose recipient was lost some other way must be refused with a message and send nothing. It does not test layout, styling, real clicks and typing, the script's own polling or any browser behaviour; Node is not a browser. Without `node` the Go test is skipped, and `make check` prints `skip` for `web-js` and counts it as skipped; `make prerelease` fails without node. CI's runner has node. The test is skipped on Windows: the harness has not been tried there. It was added after 0.2.2 shipped a page that never drew (`Cannot access 'roomLabel' before initialization`). |
 | [`scripts/recipes.sh`](../scripts/recipes.sh) (`make recipes`, in `make check`) | Every tool, tool argument and CLI command named in [`recipes/`](../recipes) and [`skills/`](../skills) exists in the golden tools file and `a2p2 help`, and each recipe and the skill stay short. |
 
 ## Fault matrix
@@ -300,7 +303,7 @@ Tests skipped on Windows, each with its reason in the skip message:
 `TestConfigSymlinksAreFollowedAndDanglingOnesRefused` (only when the
 account cannot make symbolic links) and
 `TestDaemonWithoutTheLocalKeyOptionWritesNoKeyOnUnix` (Windows always
-uses the key). The Windows job in `.github/workflows/ci.yml` (`what`: `windows`) also leaves out, with `-skip`, the deep schedules `Test*AgreesWithTheDeliveryModelOnEveryShortSchedule` and `Test*AgreesWithTheDeliveryModelOnRandomSchedules` (19 minutes on the runner; they test the delivery rules, not the system), and
+uses the key) and `TestPageScriptDrawsTheSidebarInNode` (the Node harness has not been tried there). The Windows job in `.github/workflows/ci.yml` (`what`: `windows`) also leaves out, with `-skip`, the deep schedules `Test*AgreesWithTheDeliveryModelOnEveryShortSchedule` and `Test*AgreesWithTheDeliveryModelOnRandomSchedules` (19 minutes on the runner; they test the delivery rules, not the system), and
 lists every skip it meets.
 
 | Real daemon killed with `kill -9` at a random moment, then started | What `send` accepted survives; the room converges with each message once and in its author's order | `make chaos` (not in `make check`) |
@@ -510,8 +513,8 @@ containers through kills, pauses and network splits (see
   the model and the code share a mistaken rule, both agree.
 - Automated tests of the local page in a browser. `make web-js` runs its
   script in Node against the real handler and checks the first render
-  only (see the table above). Clicks, later polls, layout, themes and
-  keyboard use are not tested. Before this fix the page had been looked at by
+  and choosing a recipient (see the table above). Real clicks, the
+  script's own polling, layout, themes and keyboard use are not tested. Before this fix the page had been looked at by
   hand in headless Chrome at 1280 and 390 pixels wide, in light and dark
   themes and with the keyboard, but 0.2.2 did not load at all, so treat
   that as not done for the current page until it is repeated.

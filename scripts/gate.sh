@@ -30,7 +30,7 @@ stop() {
 }
 trap stop INT TERM
 
-failed=""; left=${#pids[@]}
+failed=""; skipped=""; left=${#pids[@]}
 while [ "$left" -gt 0 ]; do
   for i in "${!pids[@]}"; do
     [ "${done_[$i]}" = 0 ] || continue
@@ -38,9 +38,12 @@ while [ "$left" -gt 0 ]; do
     wait "${pids[$i]}"; rc=$?
     done_[$i]=1; left=$((left - 1))
     secs=$(( $(date +%s) - t0 ))
-    if [ "$rc" = 0 ] && head -n 1 "$logdir/${names[$i]}.log" | grep -q '^skip:'; then
-      # A step that could not run says so on its first line; it did not pass.
-      printf 'skip  %-12s %4ss  (%s)\n' "${names[$i]}" "$secs" "$(head -n 1 "$logdir/${names[$i]}.log")"
+    if [ "$rc" = 0 ] && grep -q '^gate: skip: ' "$logdir/${names[$i]}.log"; then
+      # A step that could not run prints "gate: skip: REASON" on a line of its
+      # own, anywhere in its log (make echoes its recipe first). Only that
+      # line counts, and only with exit 0: a failure is a failure.
+      printf 'skip  %-12s %4ss  (%s)\n' "${names[$i]}" "$secs" "$(grep -m1 '^gate: skip: ' "$logdir/${names[$i]}.log" | sed 's/^gate: skip: //')"
+      skipped="$skipped ${names[$i]}"
     elif [ "$rc" = 0 ]; then
       printf 'ok    %-12s %4ss\n' "${names[$i]}" "$secs"
     else
@@ -60,4 +63,9 @@ if [ -n "$failed" ]; then
   exit 1
 fi
 [ "$own" = 1 ] && rm -rf "$logdir"
-echo "gate: all $# steps passed in ${total}s"
+if [ -n "$skipped" ]; then
+  set -- $skipped
+  echo "gate: $(( ${#names[@]} - $# )) of ${#names[@]} steps passed, $# skipped ($(echo $skipped | sed 's/^ //; s/ /, /g')) in ${total}s"
+else
+  echo "gate: all $# steps passed in ${total}s"
+fi

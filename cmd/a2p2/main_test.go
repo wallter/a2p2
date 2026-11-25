@@ -228,6 +228,14 @@ func TestUIPrintOnlyPrintsTheAddressAndOpensNothing(t *testing.T) {
 	}
 }
 
+func TestUIPrintRefusesJSON(t *testing.T) {
+	// Refused before the daemon is asked, so nothing needs to run.
+	err := run(context.Background(), "ui", []string{"--print", "--json"})
+	if !errors.Is(err, errUsage) || !strings.Contains(err.Error(), "--json") {
+		t.Fatalf("a2p2 ui --print --json: %v", err)
+	}
+}
+
 func TestUIPrintIsAFlagOfUIOnly(t *testing.T) {
 	if err := run(context.Background(), "status", []string{"--print"}); err == nil {
 		t.Fatal("a2p2 status --print should be refused")

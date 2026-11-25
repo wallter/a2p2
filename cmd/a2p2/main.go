@@ -328,6 +328,9 @@ func run(ctx context.Context, name string, args []string) (err error) {
 	case "status":
 		return status(c)
 	case "ui":
+		if *printOnly && *c.json {
+			return usagef("a2p2 ui --print prints the address and nothing else; it does not take --json")
+		}
 		var st localapi.Status
 		if err := c.call("status", nil, &st, nil); err != nil {
 			return err
