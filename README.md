@@ -17,7 +17,8 @@ server, hosted relay or account.
   hooks can give an unread notice during a session.
 - Each machine must be able to reach another room member or be reached
   by one. If two machines are never online at the same time, a third
-  member has to carry the messages between them.
+  member has to carry the messages between them
+  ([recipe](recipes/always-on-member.md)).
 - Networks that inspect TLS block a2p2 across their boundary, by design:
   a2p2 refuses a connection whose certificate was re-signed on the way.
   Machines inside the same network are not affected.
