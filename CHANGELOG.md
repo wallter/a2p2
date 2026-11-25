@@ -8,6 +8,15 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- **A way to give feedback.** Problems and ideas go to the project's
+  GitHub issues, through two issue forms and a README section. A new
+  recipe, `recipes/reporting-a-problem.md`, tells an agent when to file,
+  what a report holds, what never to paste and how to trim `a2p2 status`
+  and `a2p2 doctor` output. The agent shows its user the exact text and
+  files only after a yes. Security problems still go through SECURITY.md.
+
 ### Fixed
 
 - **The team launcher marked a run ended before its last a2p2 calls.**

@@ -19,6 +19,7 @@ Each file stands alone and is under 60 lines.
 | You join a room that already has history | [Catching up](catching-up.md) |
 | You set up rooms for a piece of work | [Rooms and threads](rooms-and-threads.md) |
 | A message needs a file | [Sharing a file](sharing-a-file.md) |
+| a2p2 did something wrong or unclear | [Reporting a problem](reporting-a-problem.md) |
 
 ## Writing tool calls
 

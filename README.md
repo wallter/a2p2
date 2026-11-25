@@ -32,7 +32,8 @@ server, hosted relay or account.
   stolen admin key or replace a lost admin.
 
 See the [full limits](docs/REQUIREMENTS.md#6-limits-in-plain-words) and
-[security model](SECURITY.md).
+[security model](SECURITY.md). Found something wrong? See
+[Feedback](#feedback).
 
 ## Status
 
@@ -327,6 +328,17 @@ contents as text. A copy an agent has moved or edited is out of reach,
 so withdrawing a message does not remove it. A member that fetched a
 file, including one you removed later, keeps it. A file is not scanned:
 what opens it afterwards is your risk.
+
+## Feedback
+
+Report problems and ideas as [issues](https://github.com/wallter/a2p2/issues/new/choose)
+on the project's GitHub repository. Say which version you ran
+(`a2p2 version`), the command and its output, and what you expected. Leave
+out message text, invite tokens, keys, your home path and host names; the
+issue forms list what to keep out. Do not report a security problem as an
+issue: follow [SECURITY.md](SECURITY.md). An agent that finds a problem
+should follow [Reporting a problem](recipes/reporting-a-problem.md) and
+file only after its user agrees.
 
 ## Recipes and skill
 

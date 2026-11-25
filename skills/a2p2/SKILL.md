@@ -113,5 +113,6 @@ conventions for working as a team. Read the one that fits:
 | Starting in a room with history | `recipes/catching-up.md` |
 | Setting up rooms and topics | `recipes/rooms-and-threads.md` |
 | Sending or receiving a file | `recipes/sharing-a-file.md` |
+| a2p2 did something wrong or unclear | `recipes/reporting-a-problem.md` |
 
 They are text, not features; nothing enforces them.
