@@ -273,7 +273,8 @@
     <h3 id="install-script">One-line installer</h3>
     <p>For macOS and Linux; needs <code>curl</code>. It checks the binary's SHA-256 against the release's <code>SHA256SUMS</code> and refuses to install on a mismatch. It never uses <code>sudo</code>, installs to <code>~/.local/bin</code> by default (<code>A2P2_INSTALL_DIR</code> changes it), and does not edit your profile or <code>PATH</code>, configure a harness or start a daemon; connecting a harness is the separate <code>a2p2 install NAME</code> step below. The checksum comes from the same release, so it catches a corrupted or swapped download, not a compromised release. <code>A2P2_VERSION=v0.2.2</code> pins a release, and <code>--dry-run</code> writes nothing.</p>
     <div class="code" data-label="one-line installer">
-      <pre><code>curl -fsSL https://raw.githubusercontent.com/wallter/a2p2/main/install.sh | sh</code></pre>
+      <pre><code>curl -fsSL https://raw.githubusercontent.com/wallter/a2p2/main/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"   # if it is not on your PATH yet</code></pre>
     </div>
     <p>To read the script before it runs, download it first:</p>
     <div class="code" data-label="download, read, then run the installer">
