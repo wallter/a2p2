@@ -48,9 +48,13 @@ trace:            ## every requirement has a row in docs/TRACE.md, and every tes
 recipes:          ## requirement I3: the recipes and the skill name only tools, arguments and commands that exist
 	scripts/recipes.sh
 
+.PHONY: install-test
+install-test:     ## install.sh against a fake release in a temporary directory, offline (about 10 seconds)
+	scripts/install-test.sh
+
 # The steps of check run at the same time (scripts/gate.sh): one line per
 # step with its time, then the full log of any step that failed.
-CHECK_STEPS := fmt vet windows licences trace recipes test team-test
+CHECK_STEPS := fmt vet windows licences trace recipes install-test test team-test
 check:            ## everything CI runs except lint/vuln (which need network), steps at the same time
 	@scripts/gate.sh $(foreach s,$(CHECK_STEPS),$(s)='$(MAKE) --no-print-directory $(s)')
 

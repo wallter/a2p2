@@ -62,7 +62,30 @@ See the [harness notes](docs/HARNESSES.md) and [testing notes](docs/TESTING.md).
 
 ## Install
 
-From source, with Make and Go 1.27.4 or later (see [go.mod](go.mod)).
+On macOS and Linux, one line installs the latest release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/wallter/a2p2/main/install.sh | sh
+```
+
+The script needs `curl`. It downloads the binary for your system and
+`SHA256SUMS` from the release, checks the binary's SHA-256 and refuses to install on a mismatch.
+It puts `a2p2` in `~/.local/bin` (set `A2P2_INSTALL_DIR` to change it) and
+runs `a2p2 version`. It does not use `sudo`, edit your shell profile or
+`PATH`, configure a harness or start a daemon; it tells you what to do
+next. `A2P2_VERSION=v0.2.1` picks a release. `--dry-run` shows what it
+would do. The checksum comes from the same release, so it catches a
+corrupted or swapped download, not a compromised release.
+
+To read it first, download it, read it, then run it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/wallter/a2p2/main/install.sh -o install.sh
+less install.sh
+sh install.sh
+```
+
+The other routes follow. From source, with Make and Go 1.27.4 or later (see [go.mod](go.mod)).
 Build, then copy `bin/a2p2` into a directory on your `PATH`, here
 `~/.local/bin`:
 
@@ -88,6 +111,12 @@ awk '$2 == "a2p2_darwin_arm64"' SHA256SUMS | shasum -a 256 -c &&
 ```
 
 ### On Windows
+
+A PowerShell script, `install.ps1`, does what `install.sh` does (the
+latest release, or `$env:A2P2_VERSION`, into `$env:A2P2_INSTALL_DIR`,
+default `%LOCALAPPDATA%\a2p2\bin`). It is untried: it was written without
+a Windows machine to run it on. Download it and read it before running it:
+`irm https://raw.githubusercontent.com/wallter/a2p2/main/install.ps1 -OutFile install.ps1`.
 
 a2p2 runs on Windows 10 (1803 or later) and 11. Its test suite passes on
 a Windows Server 2025 runner on amd64 (2026-11-24). Not tried there:

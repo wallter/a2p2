@@ -110,7 +110,7 @@ CLI process, under a throwaway key, to each address the person names (or
 the invite holds), whatever the networking state; no request is sent. A
 host name in any address is resolved by the system's resolver; a2p2 has
 no resolver of its own. (4) `install.sh` and `install.ps1` (D52, separate
-scripts that a person runs, not the daemon; not yet in every tree): they download one release's
+scripts that a person runs, not the daemon): they download one release's
 binary and `SHA256SUMS` from github.com/wallter/a2p2/releases.
 
 ## D12. Members pull the member list from the owner; nothing is pushed (2026-11-22)
@@ -1414,3 +1414,41 @@ replaces the receipt it looked for.
 
 **Revisit if** agents need to be told of a decided request without
 reading their inbox (a hook line).
+
+## D52. An install script (2026-11-25)
+
+People and agents asked for a one-step install, and curators of tool
+lists require one. The README's routes (build from source, `go install`,
+download and check by hand) each take several steps and a toolchain or
+care. Added now: `install.sh` for macOS and Linux, `install.ps1` for
+Windows (untried), `glama.json` for a directory of MCP servers, and
+`scripts/install-test.sh` in `make check`. No new dependency, protocol
+message, command or table.
+
+- **Guarantees:** the binary's SHA-256 is checked against the line for it
+  in `SHA256SUMS` before anything is installed, and a mismatch, a missing
+  line or a missing hash tool refuses. Downloads are https only (a
+  `file://` or loopback `A2P2_BASE_URL` is allowed for tests and mirrors).
+  It never uses `sudo`, and it does not edit a shell profile, configure a
+  harness or start a daemon. The file is written beside its target and
+  renamed into place.
+- **Does not guarantee:** it trusts GitHub's TLS and a `SHA256SUMS` from
+  the same release. That protects against a corrupted or swapped download,
+  not against a compromised release or account. The binaries are not
+  signed yet (RELEASING).
+- **Left out on purpose:** a check that the install directory is owned by
+  the user, and a defence against someone who can already write to it. A
+  party that can write to a directory on the person's PATH can replace
+  the binary at any time, and the installer cannot fix that. Resolving
+  "latest" to a tag first, so both downloads come from one release: if a
+  release is published between the two downloads the checksum does not
+  match and nothing is installed, which is the safe outcome, and the person
+  runs it again. An atomic replace on Windows (MoveFileExW): too much
+  untested code for a script nobody has run; `install.ps1` reports the
+  failure and leaves the old file. wget is not supported: its https-only
+  flag does not cover redirects.
+- **Agents:** the skill says to download, read, then run the script,
+  and not to pipe it to a shell.
+
+**Revisit if** releases are signed (verify the signature too), or a
+package manager takes over (Homebrew, winget).

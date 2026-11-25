@@ -18,9 +18,9 @@ Follow the README's "Install" and "Connect a harness" sections. In short:
    (`claude`), Codex CLI (`codex`), Antigravity CLI (`agy`), OpenCode
    (`opencode`), Hermes Agent (`hermes`) or Pi (`pi`). Each one's own
    command must be on the `PATH`, or install stops with "not on PATH".
-2. Build or install the binary and put it on the `PATH`: `make build` in a
-   clone, then copy `bin/a2p2` into a directory on the `PATH`, or
-   `go install` as the README shows. Check with `a2p2 version`.
+2. Install the binary on the `PATH`: download `install.sh` (see the
+   README), read it, then `sh install.sh`; pipe it to a shell only if
+   your user says to. Or `make build`, or `go install`. Check `a2p2 version`.
 3. Run every `install` from that copy (`command -v a2p2`), never from the
    clone's `bin/`: the configuration records the path of the binary that
    ran it.
