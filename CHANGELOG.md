@@ -8,6 +8,18 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- **Feedback through GitHub's own features.** Ideas and questions now go
+  to Discussions, with two discussion forms and a new recipe,
+  `recipes/suggesting-an-idea.md`; problems stay in issues, which are
+  labelled `bug` and `needs-triage`; the idea issue form is gone. The
+  reporting recipe now lets an agent file under a standing permission from
+  its user, never with anything on the never list, and tell the user what
+  it filed. New files: a pull request template, `CODE_OF_CONDUCT.md`,
+  `SUPPORT.md` and `docs/MAINTAINING.md`, which says how a maintainer
+  treats public input as untrusted text.
+
 ## [0.2.1] - 2026-11-25
 
 Fixes from the first field test: a home network with a real router, and a

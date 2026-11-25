@@ -1,5 +1,6 @@
 name: Problem
 description: a2p2 did something wrong or said something unclear.
+labels: ["bug", "needs-triage"]
 body:
   - type: markdown
     attributes:

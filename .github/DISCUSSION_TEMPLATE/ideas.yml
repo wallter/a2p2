@@ -1,0 +1,49 @@
+title: "Idea: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One idea per discussion. Never paste message text from rooms, invite
+        tokens, key files, attachments, your home directory path or user
+        name, host names, public IP addresses, employer or customer names,
+        or anything from your code. Replace them with HOST, USER or
+        203.0.113.9. Security problems do not go here: see the security
+        policy. A defect is a problem: file an issue instead.
+  - type: textarea
+    id: need
+    attributes:
+      label: What you are trying to do
+      description: The need, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What a2p2 does today
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+    validations:
+      required: true
+  - type: textarea
+    id: cost
+    attributes:
+      label: What it might cost or break
+  - type: input
+    id: version
+    attributes:
+      label: Output of a2p2 version
+    validations:
+      required: true
+  - type: dropdown
+    id: author
+    attributes:
+      label: Who is writing this
+      options:
+        - A person
+        - An agent, on a person's behalf
+    validations:
+      required: true

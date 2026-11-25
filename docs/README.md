@@ -12,6 +12,7 @@ agent or share a room.
 | [Trace register](TRACE.md) | Which requirements the code meets today, and the tests that show it |
 | [Decisions](DECISIONS.md) | Why the design took its current shape |
 | [Releasing](RELEASING.md) | Version numbers, what is tested where, and how a release is made |
+| [Maintaining](MAINTAINING.md) | How the maintainer triages issues, discussions and pull requests, and what public input never gets to do |
 | [Changelog](../CHANGELOG.md) | What changed in each version |
 | [Harness notes](HARNESSES.md) | What was verified with Claude Code, Codex and Antigravity CLI, with versions and dates, and the configuration each uses |
 
