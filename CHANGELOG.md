@@ -10,6 +10,16 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Added
 
+- **A one-line installer.** `install.sh` (macOS and Linux) downloads the
+  release binary for the system and `SHA256SUMS`, checks the SHA-256 and
+  installs only on a match, into `~/.local/bin` or `A2P2_INSTALL_DIR`. It
+  never uses `sudo` and changes nothing else. `A2P2_VERSION` picks a
+  release, `--dry-run` writes nothing, and `A2P2_BASE_URL` is for tests and
+  mirrors. `install.ps1` does the same on Windows and is untried. A new
+  step of `make check`, `install-test`, runs the script offline against a
+  fake release. Also `glama.json`, which names the maintainer for a
+  directory of MCP servers.
+
 - **Feedback through GitHub's own features.** Ideas and questions now go
   to Discussions, with two discussion forms and a new recipe,
   `recipes/suggesting-an-idea.md`; problems stay in issues, which are

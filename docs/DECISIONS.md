@@ -1392,3 +1392,30 @@ replaces the receipt it looked for.
 
 **Revisit if** agents need to be told of a decided request without
 reading their inbox (a hook line).
+
+## D52. An install script (2026-11-25)
+
+People and agents asked for a one-step install, and curators of tool
+lists require one. The README's routes (build from source, `go install`,
+download and check by hand) each take several steps and a toolchain or
+care. Added now: `install.sh` for macOS and Linux, `install.ps1` for
+Windows (untried), `glama.json` for a directory of MCP servers, and
+`scripts/install-test.sh` in `make check`. No new dependency, protocol
+message, command or table.
+
+- **Guarantees:** the binary's SHA-256 is checked against the line for it
+  in `SHA256SUMS` before anything is installed, and a mismatch, a missing
+  line or a missing hash tool refuses. Downloads are https only (a
+  `file://` or loopback `A2P2_BASE_URL` is allowed for tests and mirrors).
+  It never uses `sudo`, and it does not edit a shell profile, configure a
+  harness or start a daemon. The file is written beside its target and
+  renamed into place.
+- **Does not guarantee:** it trusts GitHub's TLS and a `SHA256SUMS` from
+  the same release. That protects against a corrupted or swapped download,
+  not against a compromised release or account. The binaries are not
+  signed yet (RELEASING).
+- **Agents:** the skill says to download, read, then run the script,
+  and not to pipe it to a shell.
+
+**Revisit if** releases are signed (verify the signature too), or a
+package manager takes over (Homebrew, winget).
