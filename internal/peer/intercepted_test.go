@@ -209,7 +209,7 @@ func certNodeOfWebServer(t *testing.T) error {
 //
 // Requirements: N2
 func TestNoRouteToAnAttachedSubnetIsAVPNOrFirewallBlock(t *testing.T) {
-	nets := []netip.Prefix{netip.MustParsePrefix("192.168.86.0/24"), netip.MustParsePrefix("fe80::/64"),
+	nets := []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24"), netip.MustParsePrefix("fe80::/64"),
 		netip.MustParsePrefix("0.0.0.0/0")}
 	dial := func(ip string, err error) error {
 		return &net.OpError{Op: "dial", Net: "tcp", Addr: &net.TCPAddr{IP: net.ParseIP(ip), Port: 7423}, Err: err}
@@ -222,21 +222,21 @@ func TestNoRouteToAnAttachedSubnetIsAVPNOrFirewallBlock(t *testing.T) {
 		took time.Duration
 		want bool
 	}{
-		{"no route on the attached subnet, at once", dial("192.168.86.241", syscall.EHOSTUNREACH), "192.168.86.241", fast, true},
-		{"no route on the attached subnet, after seconds (a neighbour that does not answer)", dial("192.168.86.241", syscall.EHOSTUNREACH), "192.168.86.241", slow, false},
+		{"no route on the attached subnet, at once", dial("192.168.1.241", syscall.EHOSTUNREACH), "192.168.1.241", fast, true},
+		{"no route on the attached subnet, after seconds (a neighbour that does not answer)", dial("192.168.1.241", syscall.EHOSTUNREACH), "192.168.1.241", slow, false},
 		{"no route at a link-local address (zone unknown)", dial("fe80::1", syscall.EHOSTUNREACH), "fe80::1", fast, false},
 		{"no route at an IPv4 link-local address", dial("169.254.1.2", syscall.EHOSTUNREACH), "169.254.1.2", fast, false},
 		{"no route elsewhere, with a /0 in the list", dial("203.0.113.9", syscall.EHOSTUNREACH), "203.0.113.9", fast, false},
-		{"network unreachable on the subnet", dial("192.168.86.241", syscall.ENETUNREACH), "192.168.86.241", fast, false},
-		{"refused on the subnet", dial("192.168.86.241", syscall.ECONNREFUSED), "192.168.86.241", fast, false},
-		{"no route, host name resolved to the subnet", dial("192.168.86.7", syscall.EHOSTUNREACH), "printer.local", fast, true},
+		{"network unreachable on the subnet", dial("192.168.1.241", syscall.ENETUNREACH), "192.168.1.241", fast, false},
+		{"refused on the subnet", dial("192.168.1.241", syscall.ECONNREFUSED), "192.168.1.241", fast, false},
+		{"no route, host name resolved to the subnet", dial("192.168.1.7", syscall.EHOSTUNREACH), "printer.local", fast, true},
 		{"no route, no address known", errors.New("connect: no route to host"), "printer.local", fast, false},
 	} {
 		if got := noRouteOnLink(c.err, c.host, nets, c.took); got != c.want {
 			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
 	}
-	if noRouteOnLink(dial("192.168.86.241", syscall.EHOSTUNREACH), "192.168.86.241", nil, fast) {
+	if noRouteOnLink(dial("192.168.1.241", syscall.EHOSTUNREACH), "192.168.1.241", nil, fast) {
 		t.Error("no attached subnet is known")
 	}
 }
@@ -247,14 +247,14 @@ func TestNoRouteToAnAttachedSubnetIsAVPNOrFirewallBlock(t *testing.T) {
 //
 // Requirements: N2
 func TestAnInterfaceAddressWithoutAPlainMaskIsNotAnAttachedSubnet(t *testing.T) {
-	ip4 := net.ParseIP("192.168.86.10")
+	ip4 := net.ParseIP("192.168.1.10")
 	for _, c := range []struct {
 		name string
 		a    net.Addr
 		want string // "" none
 	}{
-		{"a /24", &net.IPNet{IP: ip4, Mask: net.CIDRMask(24, 32)}, "192.168.86.0/24"},
-		{"a /24 in a 16-byte mask", &net.IPNet{IP: ip4.To16(), Mask: net.CIDRMask(120, 128)}, "192.168.86.0/24"},
+		{"a /24", &net.IPNet{IP: ip4, Mask: net.CIDRMask(24, 32)}, "192.168.1.0/24"},
+		{"a /24 in a 16-byte mask", &net.IPNet{IP: ip4.To16(), Mask: net.CIDRMask(120, 128)}, "192.168.1.0/24"},
 		{"no mask", &net.IPNet{IP: ip4}, ""},
 		{"a mask that is not a prefix", &net.IPNet{IP: ip4, Mask: net.IPMask{255, 0, 255, 0}}, ""},
 		{"a /0", &net.IPNet{IP: ip4, Mask: net.CIDRMask(0, 32)}, ""},

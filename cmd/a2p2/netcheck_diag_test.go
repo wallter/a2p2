@@ -34,7 +34,7 @@ func TestNetCheckAdviceForAnInspectingProxyAndABlockedLocalNetwork(t *testing.T)
 	if got := addrAdvice(proxy); strings.Contains(got, "\x1b") || !strings.Contains(got, `Evil\u{1b}[2J`) {
 		t.Errorf("issuer reached the advice raw: %q", got)
 	}
-	local := addrCheckOut{Addrs: []node.AddrCheck{{Addr: "192.168.86.241:7423", Result: node.ProbeUnreachable,
+	local := addrCheckOut{Addrs: []node.AddrCheck{{Addr: "192.168.1.241:7423", Result: node.ProbeUnreachable,
 		Detail: "connect: no route to host", OnLink: true}}}
 	if got := addrAdvice(local); !strings.Contains(got, "a VPN or firewall on this machine is probably blocking local-network access") {
 		t.Errorf("on-link advice %q", got)
