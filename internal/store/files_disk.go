@@ -32,6 +32,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -559,14 +560,24 @@ func (s *Store) unlink(t trashRow) (done, durable bool) {
 	}
 	defer root.Close()
 	dir := s.abs(strings.Join(dirs, "/"))
+	var absent bool
 	if t.kind == "stage" {
-		if err := root.RemoveAll(name); err != nil {
+		// only the files a2p2 generates there; the directory goes only if
+		// nothing else is left in it, and what is left a start counts [W2]
+		others, gone, err := removeStaging(root, name)
+		switch {
+		case err != nil:
 			return false, false
+		case others > 0:
+			return true, true // what is left is not a2p2's: never removed
 		}
-	} else if keep, err := s.removeQueued(root, t, name); err != nil {
+		absent = gone
+	} else if keep, gone, err := s.removeQueued(root, t, name); err != nil {
 		return false, false
 	} else if keep {
 		return true, true // not a file a2p2 wrote, or not the one published: never removed
+	} else {
+		absent = gone
 	}
 	// Removed now, or already absent (perhaps by an earlier run whose
 	// directory sync failed): either way the entry leaves the queue only
@@ -580,38 +591,104 @@ func (s *Store) unlink(t trashRow) (done, durable bool) {
 			up.Close()
 		}
 	}
+	// A removal done where a directory cannot be synced (unlinked) is
+	// finished when a start finds the path gone: a crash that undid it
+	// would have put the file back [W6]. Without this the entry was marked
+	// unlinked again at every start and never left the queue.
+	if absent && t.unlinked {
+		return true, true
+	}
 	return true, dirSyncDurable
 }
 
 // removeQueued removes the regular file name in root for t, if it is
 // there. keep: what is there is not a file a2p2 wrote (a link, a
 // directory, or for a copy another file than the one published), and is
-// left; err: a lookup or the removal failed.
-func (s *Store) removeQueued(root *os.Root, t trashRow, name string) (keep bool, err error) {
+// left; absent: nothing was there; err: a lookup or the removal failed.
+func (s *Store) removeQueued(root *os.Root, t trashRow, name string) (keep, absent bool, err error) {
 	st, err := root.Lstat(name)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return false, nil
+		return false, true, nil
 	case err != nil:
-		return false, err
+		return false, false, err
 	case !st.Mode().IsRegular():
-		return true, nil
+		return true, false, nil
 	}
 	if t.kind == "copy" {
 		id, err := identOf(root, name)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
-			return false, nil
+			return false, true, nil
 		case err != nil:
-			return false, err
+			return false, false, err
 		case t.ident == "" || id != t.ident:
-			return true, nil
+			return true, false, nil
 		}
 	}
 	if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return false, err
+		return false, false, err
 	}
-	return false, nil
+	return false, false, nil
+}
+
+// stagingName: a name a2p2 gives a file inside a request's staging
+// directory (a file's number, or a temporary file).
+func stagingName(n string) bool {
+	if strings.HasPrefix(n, tmpPrefix) {
+		return true
+	}
+	i, err := strconv.Atoi(n)
+	return err == nil && i >= 0 && i < core.MaxFiles && strconv.Itoa(i) == n
+}
+
+// removeStaging removes the staging directory name in parent: each
+// regular file in it with a name a2p2 generates, then the directory if
+// nothing else is left [W2]. others counts what was left (anything at
+// name that is not a directory counts as one); absent: nothing was there.
+func removeStaging(parent *os.Root, name string) (others int64, absent bool, err error) {
+	st, err := parent.Lstat(name)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return 0, true, nil
+	case err != nil:
+		return 0, false, err
+	case !st.IsDir():
+		return 1, false, nil
+	}
+	sub, err := parent.OpenRoot(name)
+	if err != nil {
+		return 0, false, err
+	}
+	d, err := sub.Open(".")
+	if err != nil {
+		sub.Close()
+		return 0, false, err
+	}
+	ents, err := d.ReadDir(-1)
+	d.Close()
+	if err != nil {
+		sub.Close()
+		return 0, false, err
+	}
+	for _, e := range ents {
+		if !stagingName(e.Name()) || !e.Type().IsRegular() {
+			others++
+			continue
+		}
+		if err := sub.Remove(e.Name()); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			sub.Close()
+			return 0, false, err
+		}
+	}
+	sub.Close() // before the directory's removal: Windows refuses an open one
+	if others > 0 {
+		return others, false, nil
+	}
+	if err := parent.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return 0, false, err
+	}
+	return 0, false, nil
 }
 
 // ---- the start ----
@@ -751,26 +828,72 @@ func blobVerified(path, sha string, size int64) bool {
 	return handleHashes(f, sha, size)
 }
 
-// rootFileHashes is blobVerified for name inside root.
-func rootFileHashes(root *os.Root, name, sha string) bool {
-	f, err := root.OpenFile(name, os.O_RDONLY|oNoFollow, 0)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	return handleHashes(f, sha, -1)
+func handleHashes(f *os.File, sha string, size int64) bool {
+	ok, err := handleHash(f, sha, size)
+	return ok && err == nil
 }
 
-func handleHashes(f *os.File, sha string, size int64) bool {
+// handleHash is handleHashes telling a file that does not match (false,
+// nil) from one that could not be read (err).
+func handleHash(f *os.File, sha string, size int64) (bool, error) {
 	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() || size >= 0 && st.Size() != size {
-		return false
+	if err != nil {
+		return false, err
+	}
+	if !st.Mode().IsRegular() || size >= 0 && st.Size() != size {
+		return false, nil
 	}
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
-		return false
+		return false, err
 	}
-	return hex.EncodeToString(h.Sum(nil)) == sha
+	return hex.EncodeToString(h.Sum(nil)) == sha, nil
+}
+
+// rootHash is handleHash for name inside root; a name that is not there
+// does not match.
+func rootHash(root *os.Root, name, sha string) (bool, error) {
+	f, err := root.OpenFile(name, os.O_RDONLY|oNoFollow, 0)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	defer f.Close()
+	return handleHash(f, sha, -1)
+}
+
+// errUnverifiedBlob: a held blob the last start could not examine did not
+// hash to its name when it was first opened; it is not served [W1].
+var errUnverifiedBlob = &FileError{Op: "read", Code: "unverified"}
+
+// The blobs the last start could not examine (W1), under vmu, a leaf.
+func (s *Store) unverifiedReset() {
+	s.vmu.Lock()
+	defer s.vmu.Unlock()
+	s.unverified = map[[2]string]bool{}
+}
+
+func (s *Store) unverifiedMark(room, sha string) {
+	s.vmu.Lock()
+	defer s.vmu.Unlock()
+	if s.unverified == nil {
+		s.unverified = map[[2]string]bool{}
+	}
+	s.unverified[[2]string{room, sha}] = true
+}
+
+func (s *Store) unverifiedHas(room, sha string) bool {
+	s.vmu.Lock()
+	defer s.vmu.Unlock()
+	return s.unverified[[2]string{room, sha}]
+}
+
+func (s *Store) unverifiedClear(room, sha string) {
+	s.vmu.Lock()
+	defer s.vmu.Unlock()
+	delete(s.unverified, [2]string{room, sha})
 }
 
 // reconcileBlobs drops the rows of held bytes whose blob is gone (a
@@ -796,23 +919,43 @@ func (s *Store) reconcileBlobs(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
+	s.unverifiedReset()
 	for _, k := range ks {
 		if !validRoomID(k.room) || !core.ValidSHA256(k.sha) {
 			continue
 		}
 		root, err := s.openDir(false, "blobs", k.room)
 		gone := errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrBadPath)
+		// unknown: the file could not be examined (any error but its
+		// absence). It keeps its row, since the bytes may be the only
+		// copy, but is not served until OpenBlob has hashed it [W1].
+		unknown := err != nil && !gone
 		if err == nil {
 			st, lerr := root.Lstat(k.sha)
-			gone = errors.Is(lerr, fs.ErrNotExist) || lerr == nil && !st.Mode().IsRegular()
-			if lerr == nil && !gone && !rootFileHashes(root, k.sha, k.sha) {
-				// Not the bytes it is named for: this start verifies every
-				// held blob before anything serves it, and one that fails
-				// is removed and fetched again [K2].
-				_ = root.Remove(k.sha)
+			switch {
+			case errors.Is(lerr, fs.ErrNotExist):
 				gone = true
+			case lerr != nil:
+				unknown = true
+			case !st.Mode().IsRegular():
+				gone = true
+			default:
+				switch ok, herr := rootHash(root, k.sha, k.sha); {
+				case herr != nil:
+					unknown = true
+				case !ok:
+					// Not the bytes it is named for: this start verifies
+					// every held blob before anything serves it, and one
+					// that fails is removed and fetched again [K2].
+					_ = root.Remove(k.sha)
+					gone = true
+				}
 			}
 			root.Close()
+		}
+		if unknown {
+			s.unverifiedMark(k.room, k.sha)
+			continue
 		}
 		if !gone {
 			continue
@@ -859,7 +1002,15 @@ func (s *Store) removeUnnamed(ctx context.Context) error {
 					return e
 				})
 				if !live {
-					_ = os.RemoveAll(p)
+					// only what a2p2 generates in it; the rest stays and is
+					// counted, and so does the directory then [W2]
+					if root, err := s.openDir(false, "blobs", ".staging"); err == nil {
+						others, _, err := removeStaging(root, parts[2])
+						root.Close()
+						if err == nil {
+							unknown += others
+						}
+					}
 					return filepath.SkipDir
 				}
 			}

@@ -203,7 +203,10 @@ type SendDraft struct {
 	Replaces   string           `json:"replaces,omitempty"`
 	Base       string           `json:"base,omitempty"`    // the winning version of Replaces when the agent asked
 	Members    int              `json:"members,omitempty"` // for everyone: the member count when the agent asked
-	Files      []DraftFile      `json:"files"`
+	// MemberSet, for everyone, is the digest of the members' sorted keys
+	// when the agent asked: the terms bind that set, not only its size [L2].
+	MemberSet string      `json:"member_set,omitempty"`
+	Files     []DraftFile `json:"files"`
 }
 
 // DraftFile is one file of a draft: staged, or kept from the version

@@ -13,8 +13,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -89,8 +92,7 @@ func (f *Files) RequestSend(ctx context.Context, s FileSend) (FileSendResult, er
 	if len(s.Choices) > 0 {
 		return res, userErr("a send with files carries no choices")
 	}
-	mst, err := f.r.State(s.Room)
-	if err != nil {
+	if _, err := f.r.State(s.Room); err != nil {
 		return res, err
 	}
 	now := f.m.now()
@@ -114,9 +116,6 @@ func (f *Files) RequestSend(ctx context.Context, s FileSend) (FileSendResult, er
 			return res, err
 		}
 	}
-	if d.Everyone || len(d.To) == 0 {
-		d.Members = len(mst.Members) // "everyone", as many as that is now [fix-files-b 5]
-	}
 	var mf *store.MessageFiles
 	if s.Replaces != "" {
 		if !validRecordID(s.Replaces) {
@@ -132,6 +131,31 @@ func (f *Files) RequestSend(ctx context.Context, s FileSend) (FileSendResult, er
 			return res, ErrNotAllowed
 		}
 		d.Base = mf.Winner.ID
+		// A replacement has the audience of the message it replaces, which
+		// is immutable: the terms name it, a broadcast reply included [L2].
+		if err := f.m.view(ctx, s.Room, func(v *roomView) (err error) {
+			d.To, err = replacedAudience(v, s.Replaces)
+			return err
+		}); err != nil {
+			return res, err
+		}
+	}
+	// The audience as written: no addressee is everyone, whatever made it so.
+	d.Everyone = len(d.To) == 0
+	if d.Everyone {
+		// "everyone" is the set of members now, bound by its digest and
+		// shown by its size [fix-files-b 5, L2]
+		if err := f.m.st.View(ctx, func(rd *store.Reader) (err error) {
+			d.Members, d.MemberSet, err = memberSet(rd, s.Room)
+			return err
+		}); err != nil {
+			return res, err
+		}
+	}
+	// The whole record, as approval would write it, is checked before a
+	// byte is staged: a send that cannot be published copies nothing [L3].
+	if err := f.m.checkWrite(ctx, s.Room, d.Agent, f.publishDecide(s.Room, d, placeholderSHA(0))); err != nil {
+		return res, unwritable(err)
 	}
 	id := f.r.newID()
 	seen := map[string]bool{}
@@ -161,6 +185,31 @@ func (f *Files) RequestSend(ctx context.Context, s FileSend) (FileSendResult, er
 		}
 		sizes[i] = st.Size()
 		total += st.Size()
+	}
+	// The manifest's rules too, with the names the paths give and stand-in
+	// digests, before anything is copied; checked again once staged [L3].
+	pre := store.SendDraft{}
+	for i, p := range s.Files {
+		name := filepath.Base(p)
+		if !core.ValidFileName(name) {
+			name = store.SafeName(name)
+		}
+		x := store.DraftFile{StagedFile: store.StagedFile{N: i, SHA256: placeholderSHA(i + 1), Size: sizes[i]}, Name: name}
+		if strings.HasPrefix(p, KeptPrefix) {
+			var ref core.FileRef
+			var isList, ok bool
+			if mf != nil {
+				ref, isList, ok = mf.Listed(strings.TrimPrefix(p, KeptPrefix))
+			}
+			if !ok || isList {
+				continue // refused with its own words below
+			}
+			x.Name, x.Size, x.Type = ref.Name, ref.Size, ref.Type
+		}
+		pre.Files = append(pre.Files, x)
+	}
+	if _, err := core.EncodeManifest(draftManifest(pre, strings.Repeat("00", 16))); err != nil {
+		return res, badFile("the files break a manifest rule: " + err.Error())
 	}
 	switch err := f.m.st.ReserveStaging(ctx, s.Room, id, total); {
 	case errors.Is(err, store.ErrNoSpace):
@@ -236,20 +285,58 @@ func draftManifest(d store.SendDraft, salt string) core.Manifest {
 	return m
 }
 
+// replacedAudience is the addressees of message ref as written (none:
+// everyone): what a replacement of it is delivered to.
+func replacedAudience(v *roomView, ref string) ([]core.Addressee, error) {
+	t, err := v.get(ref)
+	if err != nil {
+		return nil, err
+	}
+	if t == nil || t.f.Kind != core.KindMessage {
+		return nil, ErrNotAllowed
+	}
+	return slices.Clone(t.f.To), nil
+}
+
+// memberSet is the room's members as committed in rd's transaction: how
+// many, and the SHA-256 over "a2p2 members 1" and their sorted keys.
+func memberSet(rd *store.Reader, room string) (int, string, error) {
+	ms, err := rd.RoomMembers(room)
+	if err != nil {
+		return 0, "", err
+	}
+	var keys []string
+	for _, m := range ms {
+		if m.Member {
+			keys = append(keys, m.Node)
+		}
+	}
+	sort.Strings(keys)
+	h := sha256.New()
+	h.Write([]byte("a2p2 members 1\n"))
+	for _, k := range keys {
+		h.Write([]byte(k + "\n"))
+	}
+	return len(keys), hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // SendTerms is what a person approves (PROTOCOL 10.6): the SHA-256 over
-// "a2p2 send files 2", the room, the agent, the effective recipients
-// (each one, or everyone with the member count), the thread parent, the
-// message replaced and the version of it replaced, the whole text's hash
-// and each file's path, size and SHA-256 [fix-files-b 5].
+// "a2p2 send files 3", the room, the agent, the effective recipients
+// (each one, or everyone with the member count and the digest of the
+// member set), the thread parent, the message replaced and the version of
+// it replaced, the whole text's hash and each file's path, size and
+// SHA-256 [fix-files-b 5, L2]. A replacement's recipients are those of
+// the message it replaces.
 func SendTerms(room string, d store.SendDraft) string {
 	h := sha256.New()
 	put := func(s string) { h.Write([]byte(strconv.Itoa(len(s)) + ":" + s + "\n")) }
-	put("a2p2 send files 2")
+	put("a2p2 send files 3")
 	put(room)
 	put(d.Agent)
 	if d.Everyone || len(d.To) == 0 {
 		put("everyone")
 		put(strconv.Itoa(d.Members))
+		put(d.MemberSet)
 	}
 	for _, a := range d.To {
 		put(a.Node + "/" + a.Agent)
@@ -334,52 +421,33 @@ func (f *Files) confirmSend(ctx context.Context, q store.Request, approve bool) 
 		}
 	}
 	sf := store.SendFiles{Request: q.ID, Room: q.Room, Clock: f.m.now} // the expiry by the clock inside the transaction [B6]
-	var man core.Manifest
-	var fields func(*roomView, *core.RecordFields) error
-	if d.Replaces != "" {
-		fields = amendDecide(f.m.ID, d.Replaces, core.KindReplace, d.Text)
-	} else {
-		var to []core.Addressee
-		fields = sendDecide(Draft{Room: q.Room, Agent: d.Agent, Text: d.Text, To: d.To, Everyone: d.Everyone,
-			ReplyTo: d.Parent, AskHandled: d.AskHandled}, &to)
-	}
 	var rnd [16]byte
 	f.m.rand(rnd[:])
 	salt, err := core.NewSalt(rnd[:])
 	if err != nil {
 		return Confirmation{}, err
 	}
-	man = draftManifest(d, salt)
+	man := draftManifest(d, salt)
 	if sf.Manifest, err = core.EncodeManifest(man); err != nil {
 		return decide(store.RequestFailed, "the files break a manifest rule")
 	}
 	for _, x := range d.Files {
 		sf.Files = append(sf.Files, x.StagedFile)
 	}
-	msha := core.SHA256Hex(sf.Manifest)
-	decideAll := func(v *roomView, rf *core.RecordFields) error {
-		if err := fields(v, rf); err != nil {
-			return err
+	decideAll := f.publishDecide(q.Room, d, core.SHA256Hex(sf.Manifest))
+	// The whole record is built and checked before a byte is copied: a
+	// send that cannot be published copies nothing [L3].
+	switch err := f.m.checkWrite(ctx, q.Room, d.Agent, decideAll); {
+	case errors.Is(err, errReplacedMeanwhile):
+		return decide(store.RequestFailed, store.ReasonSendReplaced)
+	case errors.Is(err, errTermsChangedMeanwhile):
+		return decide(store.RequestFailed, ErrorTermsChanged)
+	case err != nil:
+		var ue *UserError
+		if errors.As(err, &ue) {
+			return decide(store.RequestFailed, ReasonSendUnwritable)
 		}
-		// the approved recipients again, inside the write's transaction:
-		// "everyone" as many as the terms said [S1]
-		if d.Everyone || len(d.To) == 0 {
-			if st, err := f.r.State(q.Room); err != nil || len(st.Members) != d.Members {
-				return errTermsChangedMeanwhile
-			}
-		}
-		if d.Replaces != "" {
-			// the base again, inside the write's transaction [F8]
-			ok, err := store.StillReplaceable(v.rd, q.Room, f.m.ID, d, now)
-			if err != nil {
-				return err
-			}
-			if !ok {
-				return errReplacedMeanwhile
-			}
-		}
-		rf.Files = msha
-		return nil
+		return Confirmation{}, err
 	}
 	sent, err := f.m.writeWith(ctx, q.Room, d.Agent, decideAll, func(ctx context.Context, now time.Time,
 		build func(*store.Reader) (*core.VerifiedRecord, error)) (*core.VerifiedRecord, error) {
@@ -401,6 +469,89 @@ func (f *Files) confirmSend(ctx context.Context, q store.Request, approve bool) 
 	f.sweepRoom(ctx, q.Room)
 	return Confirmation{ID: q.ID, State: store.RequestApproved, Entry: sent.ID, Effect: sent.ID, Entries: []string{sent.ID}}, nil
 }
+
+// publishDecide is what publishing draft d in room writes and checks,
+// inside the write's own transaction: the record (a message, or the
+// replacement), the approved recipients again ("everyone" the member set
+// the terms bound, read from the membership the transaction sees
+// committed [S1, L2]; a replacement's the replaced message's addressees),
+// for a replacement the base again with the clock read there [F8, W3],
+// and the manifest's hash msha.
+func (f *Files) publishDecide(room string, d store.SendDraft, msha string) func(*roomView, *core.RecordFields) error {
+	var fields func(*roomView, *core.RecordFields) error
+	if d.Replaces != "" {
+		fields = amendDecide(f.m.ID, d.Replaces, core.KindReplace, d.Text)
+	} else {
+		var to []core.Addressee
+		fields = sendDecide(Draft{Room: room, Agent: d.Agent, Text: d.Text, To: d.To, Everyone: d.Everyone,
+			ReplyTo: d.Parent, AskHandled: d.AskHandled}, &to)
+	}
+	return func(v *roomView, rf *core.RecordFields) error {
+		if err := fields(v, rf); err != nil {
+			return err
+		}
+		if d.Everyone || len(d.To) == 0 {
+			n, set, err := memberSet(v.rd, room)
+			if err != nil {
+				return err
+			}
+			if n != d.Members || set != d.MemberSet {
+				return errTermsChangedMeanwhile
+			}
+		}
+		if d.Replaces != "" {
+			to, err := replacedAudience(v, d.Replaces)
+			if err != nil {
+				return err
+			}
+			if !slices.Equal(to, d.To) {
+				return errTermsChangedMeanwhile
+			}
+			_ = hookAt("files:replaceable") // tests: time passes before the clock is read
+			ok, err := store.StillReplaceable(v.rd, room, f.m.ID, d, f.m.now())
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return errReplacedMeanwhile
+			}
+		}
+		rf.Files = msha
+		return nil
+	}
+}
+
+// ReasonSendUnwritable: the message a send with files would publish
+// breaks a rule of records (its text too long, too many addressees);
+// nothing was copied [L3].
+const ReasonSendUnwritable = "the message cannot be written: its text or recipients break a limit of a record"
+
+// placeholderSHA is a stand-in digest, distinct for each i, of the length
+// of a real one.
+func placeholderSHA(i int) string { return fmt.Sprintf("%064x", i) }
+
+// unwritable is a refusal of a send whose record cannot be written: its
+// own words reach the agent, since they are about the text or the
+// recipients, never about a path.
+func unwritable(err error) error {
+	switch {
+	case errors.Is(err, errTermsChangedMeanwhile):
+		return &UserError{Code: ErrorTermsChanged, Msg: "the room's members changed while the send was asked; ask again"}
+	case errors.Is(err, errReplacedMeanwhile):
+		return ErrNotAllowed
+	}
+	var ue *UserError
+	if errors.As(err, &ue) {
+		return recordRefusal{ue}
+	}
+	return err
+}
+
+// recordRefusal is a user error about the record, not a path: surfaces
+// pass it on as it is (cannotAttachErr).
+type recordRefusal struct{ *UserError }
+
+func (r recordRefusal) Unwrap() error { return r.UserError }
 
 var errReplacedMeanwhile = errors.New("files: the replaced version changed before approval")
 

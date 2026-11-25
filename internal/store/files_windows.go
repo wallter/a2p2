@@ -24,7 +24,7 @@ import (
 func syncDir(string) error { return nil }
 
 // dirSyncDurable: a removal here is not known durable until a start.
-const dirSyncDurable = false
+var dirSyncDurable = false
 
 // oNoFollow: Windows has no such open flag; the caller looks with Lstat
 // first and refuses anything but a regular file.

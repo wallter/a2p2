@@ -26,7 +26,7 @@ func syncDir(dir string) error {
 }
 
 // dirSyncDurable: syncDir makes a removal durable here.
-const dirSyncDurable = true
+var dirSyncDurable = true // a variable so a test can take the Windows path
 
 // oNoFollow makes an open fail on a link at the last component.
 const oNoFollow = syscall.O_NOFOLLOW

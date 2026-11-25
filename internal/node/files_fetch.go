@@ -40,8 +40,10 @@ func (f *Files) wantsFor(ctx context.Context, room, puller string, room0 int) []
 	if max < 1 {
 		return nil
 	}
-	now := f.m.now()
-	ws, err := f.m.st.WantsToSend(ctx, room, puller, now, max, core.WantRepeat, func(rd *store.Reader, w store.FileWant) (bool, error) {
+	// the clock read inside the transaction that chooses the wants [W4]
+	clock := func() time.Time { return f.m.now() }
+	_ = hookAt("files:wants") // tests: time passes while the transaction is waited for
+	ws, err := f.m.st.WantsToSend(ctx, room, puller, clock, max, core.WantRepeat, func(rd *store.Reader, w store.FileWant, now time.Time) (bool, error) {
 		mf, err := rd.MessageFiles(room, w.Msg, f.m.ID, now)
 		if err != nil {
 			return false, err
@@ -189,7 +191,7 @@ func (f *Files) holders(ctx context.Context, room, msg, sha, author string) ([]s
 			if err != nil {
 				return err
 			}
-			if !c.member || p != author && !c.mayRead {
+			if !askable(c, p, author) {
 				return nil
 			}
 			out = append(out, p)
@@ -214,6 +216,22 @@ func (f *Files) holders(ctx context.Context, room, msg, sha, author string) ([]s
 		return nil
 	})
 	return out, err
+}
+
+// askable is the rule a fetch's candidates are chosen by [K1]: peer is a
+// member with a permission and is the message's author, or may read the
+// message and its winning version.
+func askable(c fileCheck, peer, author string) bool {
+	return c.member && (peer == author || c.mayRead)
+}
+
+// fetchRule: this machine may ask peer for sha of msg now and keep what it
+// sends: keepRule, and peer passes askable [K1, L1]. A fetch holds a lease
+// on it and asks it again before each request, which names the hash.
+func (f *Files) fetchRule(msg, sha, peer string) rule {
+	return f.ruleOf(msg, sha, peer, func(c fileCheck) bool {
+		return c.listed && !c.heldForMsg() && c.mf != nil && askable(c, peer, c.mf.Author)
+	}, nil)
 }
 
 // download fetches sha for msg from the first of holders that serves it,
@@ -270,9 +288,15 @@ func (f *Files) getFrom(ctx context.Context, room, msg, sha, peer string) (bool,
 		}
 	}
 	keep := f.keepRule(msg, sha)
-	l, err := f.grant(ctx, room, keep)
+	// The lease is on asking this peer as well as on keeping the file: a
+	// peer removed, or no longer permitted, while an earlier candidate or
+	// chunk was being asked is not asked (L1).
+	l, err := f.grant(ctx, room, f.fetchRule(msg, sha, peer))
 	if err != nil {
-		return false, ErrFileGone
+		if ok, _, _, _ := f.ask(ctx, room, f.m.now(), keep); !ok {
+			return false, ErrFileGone
+		}
+		return false, nil // this peer may not be asked; another may
 	}
 	defer l.end()
 	offset, total, done := int64(0), c.ref.Size, false
@@ -282,6 +306,10 @@ func (f *Files) getFrom(ctx context.Context, room, msg, sha, peer string) (bool,
 		}
 	}()
 	for {
+		// the rule again immediately before each request that names the hash
+		if !l.valid() {
+			return false, nil
+		}
 		rep, err := f.t.GetFile(l.ctx, peer, FileGet{Room: room, Msg: msg, SHA256: sha, Offset: offset})
 		if err != nil {
 			note(store.AnswerFailed)
@@ -725,10 +753,28 @@ func (f *Files) fetchOne(ctx context.Context, o FetchOpts, room, msg string, c f
 // notHere says why the bytes are not here yet, issuing a want to an
 // author nobody can dial [F9].
 func (f *Files) notHere(ctx context.Context, res FetchResult, room, msg, sha string, c fileCheck) (FetchResult, error) {
+	// Only what current members answered, read in one transaction with
+	// the membership: a former holder's old "not yet" says nothing now [W5].
 	var obs []store.FileObs
-	_ = f.m.st.View(ctx, func(rd *store.Reader) (err error) {
-		obs, err = rd.FileObs(room, msg, sha)
-		return err
+	_ = f.m.st.View(ctx, func(rd *store.Reader) error {
+		all, err := rd.FileObs(room, msg, sha)
+		if err != nil {
+			return err
+		}
+		ms, err := rd.RoomMembers(room)
+		if err != nil {
+			return err
+		}
+		member := map[string]bool{}
+		for _, m := range ms {
+			member[m.Node] = m.Member
+		}
+		for _, ob := range all {
+			if member[ob.Peer] {
+				obs = append(obs, ob)
+			}
+		}
+		return nil
 	})
 	for _, ob := range obs {
 		res.Holders = append(res.Holders, FetchHolder{Node: ob.Peer, At: ob.At.UTC().Format(time.RFC3339), Answer: ob.Answer})

@@ -7,9 +7,11 @@ package node
 // store transaction) as of the same commit: the store's change count is
 // read before the membership and again inside the transaction, and the two
 // are consistent only if no commit fell between (with one connection, a
-// transaction sees every commit counted before it; Rooms publishes a
-// membership change under its lock before any reader can see the count
-// move past it). Every answer is affirmative or a refusal: a view that
+// transaction sees every commit counted before it). A commit that changes
+// membership moves the count before Rooms publishes the new state, so
+// Rooms counts each such publication from before its commit to after its
+// publish; a reader waits while one is open and refuses a view during
+// which one began (L1). Every answer is affirmative or a refusal: a view that
 // cannot be read consistently, a missing permission or an undecided grant
 // is a refusal.
 //
@@ -52,16 +54,17 @@ type rule func(v *roomView, st members.State) (ok bool, until time.Time, err err
 // as of the same commit; seen is the change count they are consistent
 // with. ErrNoRoom if the room is not held.
 func (f *Files) within(ctx context.Context, room string, now time.Time, fn func(v *roomView, st members.State, seen int64) error) error {
-	for range maxViewTries {
-		seen := f.m.st.Changes()
-		st, err := f.r.State(room)
+	for tries := 0; tries < maxViewTries; {
+		seen, st, pub, err := f.membership(ctx, room)
 		if err != nil {
 			return err
 		}
 		_ = hookAt("files:view") // tests: a commit between the membership and the rows
 		stale := false
 		err = f.m.st.View(ctx, func(rd *store.Reader) error {
-			if f.m.st.Changes() != seen {
+			// no commit since seen, and no membership publication begun
+			// since st was read: the rows and st are as of one commit [L1]
+			if f.m.st.Changes() != seen || f.r.published(room) != pub {
 				stale = true
 				return nil
 			}
@@ -79,8 +82,30 @@ func (f *Files) within(ctx context.Context, room string, now time.Time, fn func(
 		if !stale {
 			return err
 		}
+		tries++
 	}
 	return errNoView
+}
+
+// membership reads the store's change count, then room's membership with
+// the count of its publications, waiting while one is in progress: a
+// membership the store has committed is never paired with an older state
+// (L1). Waiting is safe under the store's file lock, since ingest, the
+// only publisher, waits for nothing that holds it (Rooms.pubs).
+func (f *Files) membership(ctx context.Context, room string) (seen int64, st members.State, pub int64, err error) {
+	for {
+		seen = f.m.st.Changes()
+		var wait <-chan struct{}
+		st, pub, wait, err = f.r.stateAt(room)
+		if wait == nil {
+			return seen, st, pub, err
+		}
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return 0, members.State{}, 0, ctx.Err()
+		}
+	}
 }
 
 // ask runs r over one consistent view of room at now.
@@ -103,14 +128,13 @@ func (f *Files) ask(ctx context.Context, room string, now time.Time, r rule) (ok
 // again.
 func (f *Files) gate(room string, r rule) func() store.Gate {
 	return func() store.Gate {
-		seen := f.m.st.Changes()
 		_ = hookAt("files:gate") // tests: under the store's file lock, before the membership is read [K4]
-		st, serr := f.r.State(room)
+		seen, st, pub, serr := f.membership(context.Background(), room)
 		return func(rd *store.Reader) (bool, error) {
 			if serr != nil {
 				return false, nil
 			}
-			if f.m.st.Changes() != seen {
+			if f.m.st.Changes() != seen || f.r.published(room) != pub {
 				return false, store.ErrStale
 			}
 			_ = hookAt("files:gate-tx") // tests: time passes before the clock is read

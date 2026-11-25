@@ -128,7 +128,10 @@ func cannotAttachErr(err error, files []string) error {
 	}
 	var fe *store.FileError
 	var ue *UserError
+	var rr recordRefusal
 	switch {
+	case errors.As(err, &rr):
+		return rr.UserError // about the text or the recipients, never a path [L3]
 	case !paths:
 		return err
 	case errors.As(err, &fe):
@@ -313,27 +316,26 @@ func (s *Surface) describeSend(ctx context.Context, q store.Request, v *RequestV
 	if err := json.Unmarshal([]byte(q.Draft), &d); err != nil {
 		return err
 	}
-	sv := &SendView{Agent: s.agentID(d.Agent, s.m.ID), Everyone: d.Everyone || len(d.To) == 0 && d.Replaces == "" && d.Parent == "",
+	// The recipients are the ones the terms bind, as the draft holds them
+	// (for a replacement, the replaced message's addressees): no
+	// addressee is everyone, a reply sent to everyone included [L2].
+	sv := &SendView{Agent: s.agentID(d.Agent, s.m.ID), Everyone: d.Everyone || len(d.To) == 0,
 		Parent: d.Parent, Replaces: d.Replaces, Base: d.Base, TextLine: EscapeDisplay(firstLineOf(d.Text)),
 		Body: escapeLines(d.Text), Terms: q.Terms}
 	for _, a := range d.To {
 		sv.To = append(sv.To, AgentID(a))
 	}
 	// The member count the terms were made with, not the live one: the
-	// person approves "everyone" as many as that was.
+	// person approves "everyone" as that set of members.
 	sv.Members = d.Members
 	_ = s.m.view(ctx, q.Room, func(rv *roomView) error {
 		if d.Replaces != "" {
-			// A replacement keeps its message's audience and parent: show them.
+			// A replacement keeps its message's parent: show it.
 			h, err := rv.get(d.Replaces)
 			if err != nil || h == nil {
 				return err
 			}
-			sv.Parent, sv.To = h.f.Parent, nil
-			for _, a := range h.f.To {
-				sv.To = append(sv.To, AgentID(a))
-			}
-			sv.Everyone = len(h.f.To) == 0 && h.f.Parent == ""
+			sv.Parent = h.f.Parent
 			t, _, _, err := rv.currentText(h)
 			if err == nil && t != nil {
 				sv.ReplacesLine = EscapeDisplay(firstLineOf(t.f.Text))
