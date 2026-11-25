@@ -8,7 +8,7 @@ A person turns networking on and approves joins at a terminal. Agents check thei
 
 ## Docs
 
-- [README](README.md) covers release limits, verification, install (a checked one-line script for macOS and Linux, a release binary, Go or source), the six harnesses, a first exchange and the two-machine fingerprint check.
+- [README](README.md) covers release limits, verification, install (a checked one-line script for macOS and Linux, a release binary, Go or source), the six harnesses, a first exchange, a two-machine demo on one computer (`scripts/demo.sh`) and the two-machine fingerprint check.
 - [MCP tools](docs/PROTOCOL.md#6-mcp-tools-golden-file) lists the seven tool definitions.
 - [Local API and CLI](docs/PROTOCOL.md#7-local-api-and-cli) describes socket calls and command syntax.
 - [Harness notes](docs/HARNESSES.md) records tested versions, configurations and verification gaps.

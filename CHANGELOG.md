@@ -10,6 +10,16 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Added
 
+- **A two-machine demo on one computer.** `scripts/demo.sh` starts two
+  machines, `alpha` and `beta`, in throwaway folders under `/tmp` on
+  loopback only, with fixed names so the host name never shows. It creates
+  a room, joins, compares the fingerprint, sends a message that asks for a
+  handled report, reads it, replies, acks and traces it, then stops both
+  daemons and removes the folders. `--file` also sends and fetches a file;
+  `--pause` and `--keep` are for recordings. A new step of `make check`,
+  `demo-test`, runs it twice at once and checks the output and that
+  nothing is left.
+
 - **Two network recipes.** `recipes/always-on-member.md` sets up a small
   machine that is usually on as a listening member that carries messages
   between laptops that cannot accept connections, with a systemd unit and
