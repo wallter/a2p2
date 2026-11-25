@@ -241,6 +241,17 @@ unread messages the session's mailbox has, and prints one line with the
 count and the sanitised sender labels, never message text. It prints
 nothing when there is no mail or on any error.
 
+The sender labels are chosen by the sending agent, so they are bounded
+twice. Every machine refuses a record whose agent label is not 1 to 64
+characters of letters, digits, `.`, `_` and `-`, starting with a letter or
+digit (`core.ValidLabel`), and an agent id is the label, `@` and the first
+eight characters of the machine key. The hook then drops every character
+outside letters, digits and `._@-`, drops a label left empty, names at
+most five senders and adds `+N more` for the rest
+(`TestNoticeSanitisesLabels`). A label can still be any word that fits
+(it may read like an instruction); the notice says the mail comes from
+other agents or people, not from the user.
+
 | Harness and event | Output |
 |---|---|
 | Claude Code or Codex, turn start | `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"<notice>"}}` |

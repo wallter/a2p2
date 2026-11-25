@@ -158,11 +158,14 @@ arrives: `ref` must be a `message` of the same room (for `withdraw` and
 `replace` by the same `author`; for `handled`, one whose `to` names
 `{author, agent}`, or with no `to` and `ask_handled`); `parent` must be a
 `message` of the same room whose `thread` (or id) equals `thread`. A
-record whose reference fails has no effect (`bad_reference` in `trace`); a
+record whose reference fails has no effect (stored as `bad_reference`; `trace`
+does not print it); a
 reply that fails is shown without a parent.
 
-Codes are counted per peer in `refusals` and shown by `trace` and
-`status`; nothing is sent back.
+Codes are counted per peer in `refusals`; nothing is sent back, and no
+command, tool or page shows the counts yet. `trace` shows none of them. A
+second record at a held position (`fork`) is kept in `forks` as evidence
+and shown nowhere.
 
 ## 3. Log entry
 

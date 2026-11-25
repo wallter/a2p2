@@ -91,6 +91,28 @@ wanted.
 
 A tool whose pitch is "nothing hosted" must not phone anywhere.
 
+Since 2026-11-25 (a note; the decision stands: no update check, no
+telemetry, no third-party service): "no network calls except to room
+members" is no longer exact. The program connects in these cases and no
+others, each after a person's decision. (1) Members' addresses: pulls,
+file fetches and dial-back requests go to the addresses known for room
+members, only while `net on` or `net on --outbound-only` is in force;
+accepting an invite dials the addresses in the token the person pasted,
+before the machine is a member. Every connection is pinned to the peer's
+key. A machine that is a member also makes this machine dial back: only
+its own source IP, at most two ports, a TLS handshake and no request
+(D48, PROTOCOL 4.7). (2) The local router, only after `a2p2 net on
+--map-port`: UDP to the default gateway on port 5351 (PCP, NAT-PMP), UDP
+multicast to 239.255.255.250:1900 (SSDP) and HTTP to the UPnP URLs the
+gateway names, if their host is the gateway. (3) `a2p2 net check
+HOST:PORT` and `--invite`: a TCP connection and TLS handshake from the
+CLI process, under a throwaway key, to each address the person names (or
+the invite holds), whatever the networking state; no request is sent. A
+host name in any address is resolved by the system's resolver; a2p2 has
+no resolver of its own. (4) `install.sh` and `install.ps1` (D52, separate
+scripts that a person runs, not the daemon; not yet in every tree): they download one release's
+binary and `SHA256SUMS` from github.com/wallter/a2p2/releases.
+
 ## D12. Members pull the member list from the owner; nothing is pushed (2026-11-22)
 
 Supersedes the push wording in D5. Review found that pushed updates race with
