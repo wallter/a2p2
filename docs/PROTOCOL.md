@@ -1285,7 +1285,7 @@ served.
 
 Every 404 is the same: status, `Content-Type: application/json`, body
 `{"error":"not_held"}` with no `detail`, decided from database rows before
-any file is opened, so its timing does not depend on why.
+any file is opened. Its timing is not made equal (DESIGN 12, limits).
 
 | Status | When | Headers |
 |---|---|---|
@@ -1387,7 +1387,7 @@ readable text.
 | `send` (changed) | adds `"files":["<path>",…]` (1–8): an absolute path, or `"sha256:<hex>"` naming verified bytes this machine holds for the version being replaced, kept by listing it again. With `replaces`, absent means the replacement has no files. Approval of a replacement checks again that the replaced version is still the winning one, readable here, and lists each kept file; otherwise the request fails and its staging is removed | `{"request","state":"waiting","room","room_label","to"?,"replaces"?,"files":[{"name","size","sha256","type"?}]}`; nothing is written. Refused: `invalid_request` (not absolute, not a regular file once opened, unreadable), `too_large` (over 8 files, 256 MiB or a budget) |
 | `fetch` (new) | `{"agent","room"?,"sha256","message"?,"wait_ms"?}` (≤ 120,000; the tool sends at most 30,000). The agent must have been shown the version that lists the file | `{"state","path"?,"size","have"?,"from"?,"reason"?,"holders"?:[{"node","at","answer"}]}`; `state` is `here` (with `path`), `partial`, `coming`, `fetching`, `unavailable`, `gone` (`reason`: `withdrawn`, `replaced`, `expired`, `before_you_joined`) or `too_large` |
 | `requests` (changed) | | kind `send_files`: `agent`, `room`, `to` (or everyone, with the member count), `replaces` (id and first line), `text_line`, `files:[{"path","name","size","sha256","type"?}]` with `path` escaped (10.8), `terms` |
-| `confirm` (changed) | as now; the approval covers `terms`: SHA-256 over `a2p2 send files 1`, room, agent, recipients, `replaces`, the text's hash and each file's path, size and SHA-256 | `approved` with `effect` the message id, after the staged digests are checked again; expires as `declined` after 24 hours |
+| `confirm` (changed) | as now; the approval covers `terms`: SHA-256 over `a2p2 send files 2`, room, agent, the effective recipients (each, or `everyone` and the member count), the thread parent, `replaces` and the version of it replaced, the whole text's hash and each file's path, size and SHA-256; a surface sends the digest it showed, and one that is not the request's current one is refused `terms_changed` with nothing sent; approval copies each staged file into a new private file while hashing and publishes only if its size and digest are the approved ones | `approved` with `effect` the message id, after the staged digests are checked again; expires as `declined` after 24 hours |
 | `trace` (changed) | | adds `files:[{"sha256","name","size","state","holders"}]` |
 | `room/files` (new) | `{"room","mode"?:"off"\|"carry"\|"keep"}`; a person's setting, not in agent tools | `{"room","mode","held","budget"}` |
 
@@ -1430,7 +1430,9 @@ user".
 | `blobs/.staging/<request id>/<n>` | a send waiting for a person |
 | `files/<room id>/<name>` | the copy written for an agent, for one message, 0600 |
 
-Staging opens the path once (following links), checks with `fstat` on the
+Staging refuses, before any I/O, a Windows UNC path, a `\\?\` or `\\.\`
+namespace and a reserved device name; it opens the path once (following
+links, non-blocking on Unix), checks with `fstat` on the
 handle that it is a regular file, and copies and hashes from that handle.
 The path shown is the one the system reports for the open handle, with C0,
 C1, U+200E, U+200F, U+061C, U+202A to U+202E and U+2066 to U+2069 written
@@ -1439,7 +1441,11 @@ as `\u{…}`. A copy's name is the manifest's `name` sanitised as before
 becomes `_`, so a combining mark becomes `_`; no leading
 or trailing dots or spaces; Windows reserved names prefixed; 200 bytes;
 `O_EXCL` through an `os.Root`; ` (2)` for a clash). A copy is deleted with
-its message if it is still at its path with the same size and hash.
+its message only if the file at its path is the one a2p2 linked there
+(the file identity recorded when it was published: device, inode and
+modification time, or volume, file index and last write time; a copy the
+agent changed is left alone). Each fetch writes a new copy; the agent's earlier
+copy of that file is queued for deletion.
 
 Staged bytes are counted from the pending request's draft, and a request
 being staged holds an in-memory reservation; no `files` row is made for
@@ -1453,18 +1459,23 @@ one transaction after its bytes are safe; if they are not, the send is
 not published and the request still waits. A copy's row commits first,
 marked `writing`; the copy is written under a temporary name, synced,
 then published as a hard link to its final name (which never replaces an
-existing file, on any system), and the row is marked done. A file system
+existing file, on any system), and the row is marked done, with the
+permission asked again in that transaction. A file system
 without hard links cannot take copies. On Windows a directory cannot be
 synced from Go: a2p2 relies on NTFS's metadata journal there and repairs
 at start what a crash can lose. Deletion is by rows and runs in its own sweep (`SweepFiles`) after each
 pull, each replace or withdraw written here, each background tick and at
 start, not inside the record's transaction. Serving, fetching, uploading
-and publishing a copy each ask the rules again from rows when they act,
-and a response or upload asks before every read of at most 64 KiB, so a
-sweep that has not run yet widens nothing. The sweep drops the rows that
-the rules no longer allow and queues their paths in `file_trash`; the queue runs after commit and skips, and removes
-from the queue, any path a live row names again (bytes acquired again for
-another message are never unlinked). A start runs the queue, removes every
+and publishing a copy each decide under one view of the membership and
+the rows, hold that decision while they run and ask again before every
+read of at most 64 KiB once anything was committed, so a sweep that has
+not run yet widens nothing. The sweep drops the rows that the rules no
+longer allow and queues their paths in `file_trash`; the queue runs after
+commit and on each file tick, keeps an entry whose removal or lookup
+failed, and skips, and removes from the queue, any path a live row names
+again (bytes acquired again for another message are never unlinked). A
+start drops every `file_parts` row and its file (a transfer cut by a
+restart starts again from zero), runs the queue, removes every
 `.a2p2-tmp-` file, every file under `blobs/` with no row and every copy
 still `writing`.
 
@@ -1484,6 +1495,10 @@ still `writing`.
 | `file_trash` | `path`, `at`, `kind`, `room`, `msg`, `sha256`, `size` (so the queue can tell whether a live row names the path again and whether a copy is still the file written) | `path` |
 | `room_files` | `room`, `mode`, `decided_at` | `room` |
 | `requests` | adds `draft` (text, to, reply_to, replaces, files) and `terms` | |
+
+Migration 14 adds `file_copies.ident` and `file_trash.ident` (the
+published copy's file identity) and `file_trash.unlinked` (removed, its
+directory not yet synced; retried at a start, as on Windows).
 
 ### 10.9 Threats
 
@@ -1565,7 +1580,7 @@ with the test that holds it.
 
 | Property | Test |
 |---|---|
-| Every refusal on the file route is the same status and body, and takes the same time class whatever its reason | `TestEveryNotHeldAnswerIsTheSameBytesAndTimingClass` |
+| Every refusal on the file route is the same status and body whatever its reason | `TestEveryNotHeldAnswerIsTheSameBytes` |
 | A response or upload in progress stops when the sender commits a withdraw, replacement, removal, narrower grant or void that ends it | `TestARevocationStopsATransferInProgress` |
 | Staging opens the path once, refuses a non-regular file after opening (a FIFO, a device, a directory), and copies from that handle | `TestStagingCopiesFromTheHandleItOpenedAndRefusesAFifo` |
 | The approval display shows the resolved path in full with controls and bidirectional characters escaped, and the replaced message | `TestTheRequestEscapesBidiCharactersInThePathAndNamesTheReplacedMessage`, added with the surfaces (10.6) |

@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wallter/a2p2/internal/core"
@@ -34,9 +35,18 @@ type FileHandler interface {
 var fileDeadline = core.FileResponseMax + 5*time.Second
 
 // fileRoute serves the file route with h.
+func isFileRoute(p string) bool { return strings.HasPrefix(p, pathFileV2) }
+
+// File requests are admitted by their own bucket per machine, so file
+// traffic never spends the pull exchange's (B7).
 func fileRoute(h FileHandler) http.Handler {
+	lim := newLimiter()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		from := requestNode(r)
+		if !lim.allow(from) {
+			pullRefuse(w, &node.PullError{Status: http.StatusTooManyRequests, Code: node.CodeRateLimited, RetryAfter: time.Second})
+			return
+		}
 		room, msg, sha, ok := filePath(r.URL.Path)
 		rc := http.NewResponseController(w)
 		_ = rc.SetWriteDeadline(time.Now().Add(fileDeadline))
@@ -99,13 +109,41 @@ func serveGet(w http.ResponseWriter, r *http.Request, h FileHandler, from string
 	w.WriteHeader(fs.Status)
 	// A revocation or an error mid-body ends the stream short: the
 	// requester sees fewer bytes than Content-Length and keeps none of them
-	// past what it verified. A reader slower than the minimum rate, or one
-	// past the total time, is cut by moving the write deadline to now,
-	// which ends a write blocked on the peer (finding 10).
-	rr := node.LimitRate(fs.Body, node.TransferLimits())
+	// past what it verified. A reader slower than the minimum rate, one past
+	// the total time, or a response whose permission ended (fs.Done) is cut
+	// by moving the write deadline to now, which ends a write blocked on the
+	// peer.
+	limits := fs.Limits
+	if limits.Window <= 0 {
+		limits = node.TransferLimits()
+	}
+	rr := node.LimitRate(fs.Body, limits)
 	rc := http.NewResponseController(w)
-	stop := rr.Watch(func() { _ = rc.SetWriteDeadline(time.Now()) })
+	// cut never touches the response once the handler is returning: a
+	// watcher that wakes late, with both of its channels closed, does nothing.
+	var mu sync.Mutex
+	finished := false
+	cut := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if !finished {
+			_ = rc.SetWriteDeadline(time.Now())
+		}
+	}
+	defer func() { mu.Lock(); finished = true; mu.Unlock() }()
+	stop := rr.Watch(cut)
 	defer stop()
+	if fs.Done != nil {
+		ended := make(chan struct{})
+		defer close(ended)
+		go func() {
+			select {
+			case <-fs.Done:
+				cut()
+			case <-ended:
+			}
+		}()
+	}
 	_, _ = io.Copy(w, rr)
 }
 

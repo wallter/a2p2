@@ -24,7 +24,11 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   only connect out; `a2p2 room files ROOM off|carry|keep` sets it
   (`carry` by default). A 0.1.0 member shows the text without the files.
   New: the file route and `want` in the pull answer (old machines ignore
-  them), database migration 13, `files` and `fetch` on the tools. The
+  them), database migrations 13 and 14, `files` and `fetch` on the tools.
+  Each fetch writes and checks a new copy (the agent's earlier one is
+  removed), a transfer cut by a restart starts again from zero, and a
+  copy is deleted with its message only if it is still the file a2p2
+  wrote there. The
   confirmation is a guard rail for an agent running as your user. Not yet
   tried with a real harness (DESIGN section 12, PROTOCOL section 10).
 - **`a2p2 net check`** says whether this machine can talk to the members

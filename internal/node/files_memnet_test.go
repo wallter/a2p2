@@ -137,7 +137,11 @@ func (n *fnode) sendFiles(room, agent, text string, paths ...string) (string, Fi
 }
 
 func (n *fnode) fetch(room, agent, sha string) (FetchResult, error) {
-	r, err := n.f.Fetch(context.Background(), FetchOpts{Agent: agent, Room: room, SHA256: sha, Wait: time.Second})
+	// Fetch returns as soon as its download ends (done, refused, or no
+	// holder to dial); the wait is the longest the local API allows, which
+	// only a real hang reaches, so a loaded machine never cuts a download.
+	r, err := n.f.Fetch(context.Background(), FetchOpts{Agent: agent, Room: room, SHA256: sha,
+		Wait: time.Duration(core.MaxFetchWaitMS) * time.Millisecond})
 	n.f.Wait()
 	return r, err
 }

@@ -64,7 +64,7 @@ func receive(t *testing.T, s *Store, msg, sha string, data []byte, items *core.M
 	if got, err := s.PartSHA256(p); err != nil || got != sha {
 		t.Fatalf("part hash %s %v", got, err)
 	}
-	if err := s.CommitPart(ctx, p, HowReceived, items, t0); err != nil {
+	if err := s.CommitPart(ctx, p, HowReceived, items, t0, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -139,14 +139,16 @@ func TestAStartRemovesTemporaryFilesAndFilesWithoutRows(t *testing.T) {
 	}
 	// a copy that crashed between its link and its commit: the row names
 	// its temporary file, and the final name is the same file
-	c, _, err := s.ReserveCopy(ctx, testRoom, tf.msg.ID(), tf.sha, "alice", "a.txt", int64(len(tf.data)))
-	if err != nil {
-		t.Fatal(err)
+	writing := func(agent, name, tmp string) FileCopy {
+		c := FileCopy{Room: testRoom, Msg: tf.msg.ID(), SHA256: tf.sha, Agent: agent, Path: copyRel(testRoom, name), Size: int64(len(tf.data))}
+		if _, err := s.db.Exec(`INSERT INTO file_copies (room, msg, sha256, agent, path, state, size, tmp) VALUES (?,?,?,?,?,'writing',?,?)`,
+			c.Room, c.Msg, c.SHA256, c.Agent, c.Path, c.Size, tmp); err != nil {
+			t.Fatal(err)
+		}
+		return c
 	}
 	tmp := tmpPrefix + "crashed"
-	if _, err := s.db.Exec(`UPDATE file_copies SET tmp = ? WHERE path = ?`, tmp, c.Path); err != nil {
-		t.Fatal(err)
-	}
+	c := writing("alice", "a.txt", tmp)
 	tmpAbs := filepath.Join(filepath.Dir(s.CopyPath(c.Path)), tmp)
 	if err := os.WriteFile(tmpAbs, tf.data, 0o600); err != nil {
 		t.Fatal(err)
@@ -154,11 +156,8 @@ func TestAStartRemovesTemporaryFilesAndFilesWithoutRows(t *testing.T) {
 	if err := os.Link(tmpAbs, s.CopyPath(c.Path)); err != nil {
 		t.Fatal(err)
 	}
-	// another reserved copy whose name a person's file took meanwhile
-	c2, _, err := s.ReserveCopy(ctx, testRoom, tf.msg.ID(), tf.sha, "bob", "c.txt", int64(len(tf.data)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// another copy being written whose name a person's file took meanwhile
+	c2 := writing("bob", "c.txt", tmpPrefix+"other")
 	if err := os.WriteFile(s.CopyPath(c2.Path), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +227,7 @@ func TestACrashBetweenDroppingAFileAndDeletingItCompletesTheDeletionAtTheRestart
 		if _, err := tx.Exec(`DELETE FROM files WHERE room = ?`, testRoom); err != nil {
 			return err
 		}
-		return trash(tx, blobRel(testRoom, tf.sha), "blob", testRoom, "", tf.sha, 0, t0)
+		return trash(tx, blobRel(testRoom, tf.sha), "blob", testRoom, "", tf.sha, 0, "", t0)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +264,7 @@ func TestAQueuedDeletionNeverRemovesBytesALiveRowNames(t *testing.T) {
 		if _, err := tx.Exec(`DELETE FROM files WHERE room = ?`, testRoom); err != nil {
 			return err
 		}
-		return trash(tx, blobRel(testRoom, tf.sha), "blob", testRoom, "", tf.sha, 0, t0)
+		return trash(tx, blobRel(testRoom, tf.sha), "blob", testRoom, "", tf.sha, 0, "", t0)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -305,14 +304,9 @@ func TestAFetchedNameCannotLeaveTheRoomsDirectoryOrOverwrite(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("mine"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c, done, err := s.ReserveCopy(ctx, testRoom, tf.msg.ID(), tf.sha, "alice", "../a.txt", int64(len(tf.data)))
-	if err != nil || done {
-		t.Fatal(err, done)
-	}
-	if err := s.WriteCopy(c); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.CopyDone(ctx, c); err != nil {
+	c, err := s.PublishCopy(ctx, CopyReq{Room: testRoom, Msg: tf.msg.ID(), SHA256: tf.sha, Agent: "alice", Name: "../a.txt",
+		Size: int64(len(tf.data))}, nil, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(dir, "a.txt")); string(b) != "mine" {
@@ -324,11 +318,20 @@ func TestAFetchedNameCannotLeaveTheRoomsDirectoryOrOverwrite(t *testing.T) {
 	if b, _ := os.ReadFile(s.CopyPath(c.Path)); string(b) != string(tf.data) {
 		t.Fatalf("copy holds %q", b)
 	}
-	// the exclusive create refuses a name that appeared meanwhile
-	c2 := c
-	c2.Path = copyRel(testRoom, "a.txt")
-	if err := s.WriteCopy(c2); err == nil {
-		t.Fatal("wrote over an existing file")
+	// a name that appears while the copy is written is never replaced
+	appeared := filepath.Join(dir, "b.txt")
+	_, err = s.PublishCopy(ctx, CopyReq{Room: testRoom, Msg: tf.msg.ID(), SHA256: tf.sha, Agent: "bob", Name: "b.txt",
+		Size: int64(len(tf.data))}, nil, func() bool {
+		if !exists(appeared) {
+			_ = os.WriteFile(appeared, []byte("someone else's"), 0o600)
+		}
+		return true
+	})
+	if err == nil {
+		t.Fatal("published over a name that appeared meanwhile")
+	}
+	if b, _ := os.ReadFile(appeared); string(b) != "someone else's" {
+		t.Fatalf("the file that appeared holds %q", b)
 	}
 }
 
@@ -362,14 +365,9 @@ func TestWithdrawDropsTheFilesOfTheMessageInTheSweep(t *testing.T) {
 	tf := newTestFiles(t, s, 1, "", "withdrawn bytes")
 	receive(t, s, tf.msg.ID(), tf.msha, tf.man, &tf.m)
 	receive(t, s, tf.msg.ID(), tf.sha, tf.data, nil)
-	c, _, err := s.ReserveCopy(ctx, testRoom, tf.msg.ID(), tf.sha, "alice", "a.txt", int64(len(tf.data)))
+	c, err := s.PublishCopy(ctx, CopyReq{Room: testRoom, Msg: tf.msg.ID(), SHA256: tf.sha, Agent: "alice", Name: "a.txt",
+		Size: int64(len(tf.data))}, nil, nil)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.WriteCopy(c); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.CopyDone(ctx, c); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := s.SweepFiles(ctx, testRoom, "", t0); err != nil || n != 0 {
@@ -393,6 +391,86 @@ func TestWithdrawDropsTheFilesOfTheMessageInTheSweep(t *testing.T) {
 	})
 	if r != 0 || m != 0 {
 		t.Fatalf("usage after withdraw %d %d", r, m)
+	}
+}
+
+// TestADeletionRemovesOnlyTheCopyItPublishedNeverAByteIdenticalFileAtItsName
+// (B4): an agent replaces its copy with another file holding the same
+// bytes; the withdraw's deletion leaves that file alone, since it is not
+// the file a2p2 linked there.
+// Requirements: L1, T5
+func TestADeletionRemovesOnlyTheCopyItPublishedNeverAByteIdenticalFileAtItsName(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	tf := newTestFiles(t, s, 1, "", "the same bytes")
+	receive(t, s, tf.msg.ID(), tf.msha, tf.man, &tf.m)
+	receive(t, s, tf.msg.ID(), tf.sha, tf.data, nil)
+	q := CopyReq{Room: testRoom, Msg: tf.msg.ID(), SHA256: tf.sha, Agent: "alice", Name: "a.txt", Size: int64(len(tf.data))}
+	c, err := s.PublishCopy(ctx, q, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := s.CopyPath(c.Path)
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, tf.data, 0o600); err != nil { // same name, size and bytes; another file
+		t.Fatal(err)
+	}
+	wd := mk(t, fileKey, core.RecordFields{Seq: 2, Prev: tf.msg.ID(), Kind: core.KindWithdraw, Ref: tf.msg.ID()})
+	wantOutcome(t, put(t, s, wd, t0), OutcomeStored)
+	if _, err := s.SweepFiles(ctx, testRoom, "", t0); err != nil {
+		t.Fatal(err)
+	}
+	s.RunTrash(ctx)
+	if b, err := os.ReadFile(p); err != nil || string(b) != string(tf.data) {
+		t.Fatalf("a file a2p2 did not publish was removed: %q %v", b, err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM file_trash`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("queue entries left: %d %v", n, err)
+	}
+}
+
+// TestPublishingAgainHandsOutANewCopyAndQueuesTheOldOne (B3): a second
+// fetch writes and checks a new copy; the earlier one is not handed out
+// again and goes with the queue.
+// Requirements: L1
+func TestPublishingAgainHandsOutANewCopyAndQueuesTheOldOne(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	tf := newTestFiles(t, s, 1, "", "copied twice")
+	receive(t, s, tf.msg.ID(), tf.sha, tf.data, nil)
+	q := CopyReq{Room: testRoom, Msg: tf.msg.ID(), SHA256: tf.sha, Agent: "alice", Name: "a.txt", Size: int64(len(tf.data))}
+	c1, err := s.PublishCopy(ctx, q, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.CopyPath(c1.Path), []byte("edited by the agent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	asked := 0
+	c2, err := s.PublishCopy(ctx, q, func() Gate { return func(*Reader) (bool, error) { asked++; return true, nil } }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asked != 2 || c2.Path == c1.Path {
+		t.Fatalf("asked %d, paths %s %s", asked, c1.Path, c2.Path)
+	}
+	if b, _ := os.ReadFile(s.CopyPath(c2.Path)); string(b) != string(tf.data) {
+		t.Fatalf("the new copy holds %q", b)
+	}
+	// the edited copy is no longer the file a2p2 wrote: it stays, its row goes
+	if b, _ := os.ReadFile(s.CopyPath(c1.Path)); string(b) != "edited by the agent" {
+		t.Fatalf("the edited earlier copy holds %q", b)
+	}
+	// an unchanged earlier copy is removed
+	c3, err := s.PublishCopy(ctx, q, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists(s.CopyPath(c2.Path)) || !exists(s.CopyPath(c3.Path)) {
+		t.Fatal("the unchanged earlier copy was not removed, or the new one is missing")
 	}
 }
 

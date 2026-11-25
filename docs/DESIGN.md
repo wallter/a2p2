@@ -703,7 +703,8 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    manifest that matches its hash but breaks a rule is `invalid` for good,
    since no holder can have other bytes, and nothing it lists is fetched.
    File bytes move only when an agent that was shown the version listing
-   them asks, or the machine carries or keeps them (item 5).
+   them asks (on the author's machine too, except the agent that wrote
+   it), or the machine carries or keeps them (item 5).
 3. **Content lives while the text may [F1, F8].** A machine keeps the
    manifest and the files for a message while the message's winning
    version (by header) commits to them and its text is one the machine may
@@ -787,7 +788,12 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    bytes are safe, so a send is never published without them. Temporary
    files have a recognisable name. Deletions are by rows, queued in the
    sweep transaction that decides them (item 3), and never remove a path a live row
-   names; a start completes the queue and removes files no row names.
+   names; a copy's deletion removes only the file a2p2 linked there (by
+   its file identity). A start completes the queue, removes files no row
+   names and drops every partial transfer, which starts again from zero.
+   Permission is decided once under one view of membership and rows, held
+   by the transfer and asked again in the transaction that makes bytes or
+   a copy live; each fetch writes and checks a new copy.
 
 **Who can reach whom.** Text and files take the same connections; what
 files add is item 5.
@@ -824,9 +830,12 @@ record of a stream may have a header of 8,192 bytes; `files` adds 75.
 **Limits, said plainly.** The confirmation is a guard rail (P3): an agent
 running as the same user can call `confirm` itself, or read a file and
 paste it as text. Withdrawing after others fetched removes the copies a2p2
-keeps; a copy an agent moved is out of reach. A removed machine keeps what
+keeps; a copy an agent moved or changed is out of reach (a copy is known by
+its file number and modification time). A removed machine keeps what
 it fetched (T5). F2 binds honest machines: a member holding bytes can hand
 them to anyone. A member that may read a message can tell from the answers
 ("not yet", "gave up") whether a listener carries or keeps; machines that
-may not read it cannot. Attacks on the program that later opens a file are out of
+may not read it cannot. A refusal's timing is not made equal: a member
+that may read a message can tell from how long a `not_held` takes whether
+this machine holds its header. Attacks on the program that later opens a file are out of
 scope, since a2p2 opens nothing.

@@ -363,7 +363,7 @@ func TestAWantGoesOnlyToTheMessagesAuthorNeverToAnotherHolder(t *testing.T) {
 }
 
 // Requirements: L1, T3
-func TestEveryNotHeldAnswerIsTheSameBytesAndTimingClass(t *testing.T) {
+func TestEveryNotHeldAnswerIsTheSameBytes(t *testing.T) {
 	ns := filesNet(t, "a", "b", "c")
 	a, b, c := ns[0], ns[1], ns[2]
 	room := fileRoom(t, a, b, c)
@@ -639,7 +639,7 @@ func (n *fnode) sendWithManifest(room, agent, text, msha string, man []byte) str
 		n.t.Fatal(err)
 	}
 	p.Have = int64(len(man))
-	if err := n.st.CommitPart(context.Background(), p, store.HowSent, nil, *n.clock); err != nil {
+	if err := n.st.CommitPart(context.Background(), p, store.HowSent, nil, *n.clock, nil); err != nil {
 		n.t.Fatal(err)
 	}
 	return s.ID

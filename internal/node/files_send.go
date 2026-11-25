@@ -75,12 +75,16 @@ func (f *Files) RequestSend(ctx context.Context, s FileSend) (FileSendResult, er
 	if len(s.Choices) > 0 {
 		return res, userErr("a send with files carries no choices")
 	}
-	if _, err := f.r.State(s.Room); err != nil {
+	mst, err := f.r.State(s.Room)
+	if err != nil {
 		return res, err
 	}
 	now := f.m.now()
 	d := store.SendDraft{Agent: s.Agent, Text: s.Text, To: s.To, Everyone: s.Everyone, Parent: s.ReplyTo,
 		AskHandled: s.AskHandled, Replaces: s.Replaces}
+	if d.Everyone || len(d.To) == 0 {
+		d.Members = len(mst.Members) // "everyone", as many as that is now [fix-files-b 5]
+	}
 	var mf *store.MessageFiles
 	if s.Replaces != "" {
 		if !validRecordID(s.Replaces) {
@@ -112,6 +116,9 @@ func (f *Files) RequestSend(ctx context.Context, s FileSend) (FileSendResult, er
 	for i, p := range s.Files {
 		if strings.HasPrefix(p, KeptPrefix) || !filepath.IsAbs(p) {
 			continue
+		}
+		if store.RemoteOrDevice(p) { // before anything touches the path [fix-files-b 7]
+			return res, badFile("a remote or device path is not sent")
 		}
 		st, err := os.Stat(p)
 		if err != nil {
@@ -198,21 +205,26 @@ func draftManifest(d store.SendDraft, salt string) core.Manifest {
 }
 
 // SendTerms is what a person approves (PROTOCOL 10.6): the SHA-256 over
-// "a2p2 send files 1", the room, the agent, the recipients, replaces,
-// the text's hash and each file's path, size and SHA-256.
+// "a2p2 send files 2", the room, the agent, the effective recipients
+// (each one, or everyone with the member count), the thread parent, the
+// message replaced and the version of it replaced, the whole text's hash
+// and each file's path, size and SHA-256 [fix-files-b 5].
 func SendTerms(room string, d store.SendDraft) string {
 	h := sha256.New()
 	put := func(s string) { h.Write([]byte(strconv.Itoa(len(s)) + ":" + s + "\n")) }
-	put("a2p2 send files 1")
+	put("a2p2 send files 2")
 	put(room)
 	put(d.Agent)
 	if d.Everyone || len(d.To) == 0 {
 		put("everyone")
+		put(strconv.Itoa(d.Members))
 	}
 	for _, a := range d.To {
 		put(a.Node + "/" + a.Agent)
 	}
+	put(d.Parent)
 	put(d.Replaces)
+	put(d.Base)
 	put(core.SHA256Hex([]byte(d.Text)))
 	for _, x := range d.Files {
 		path := x.Path
@@ -224,6 +236,27 @@ func SendTerms(room string, d store.SendDraft) string {
 		put(x.SHA256)
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// ErrorTermsChanged: the terms a surface showed are not the request's
+// current ones; nothing is sent and the request stays pending.
+const ErrorTermsChanged = "terms_changed"
+
+// ApproveSend approves the send with files id only if terms is the digest
+// of the terms the person was shown (SendTerms, as the request exposes
+// it) [fix-files-b 5]. Surfaces approve sends with files through it.
+func (f *Files) ApproveSend(ctx context.Context, id, terms string) (Confirmation, error) {
+	q, err := f.m.st.GetRequest(ctx, id)
+	if err != nil {
+		return Confirmation{}, err
+	}
+	if q.Kind != store.RequestSendFiles {
+		return Confirmation{}, &UserError{Code: ErrorTermsChanged, Msg: "not a send with files"}
+	}
+	if q.State == store.RequestPending && (terms == "" || terms != q.Terms) {
+		return Confirmation{}, &UserError{Code: ErrorTermsChanged, Msg: "the terms shown are not the request's; show it again"}
+	}
+	return f.confirmSend(ctx, q, true)
 }
 
 // confirmSend is a person's decision on a send with files.
@@ -253,7 +286,7 @@ func (f *Files) confirmSend(ctx context.Context, q store.Request, approve bool) 
 	}
 	for _, x := range d.Files {
 		if !x.Kept && f.m.st.CheckStaged(q.ID, x.N, x.SHA256, x.Size) != nil {
-			return decide(store.RequestFailed, "a staged file changed or is gone")
+			return decide(store.RequestFailed, store.ReasonSendChanged)
 		}
 	}
 	if d.Replaces != "" {
@@ -268,7 +301,7 @@ func (f *Files) confirmSend(ctx context.Context, q store.Request, approve bool) 
 			return decide(store.RequestFailed, store.ReasonSendReplaced)
 		}
 	}
-	sf := store.SendFiles{Request: q.ID, Room: q.Room}
+	sf := store.SendFiles{Request: q.ID, Room: q.Room, Clock: f.m.now} // the expiry by the clock inside the transaction [B6]
 	var man core.Manifest
 	var fields func(*roomView, *core.RecordFields) error
 	if d.Replaces != "" {
@@ -311,6 +344,7 @@ func (f *Files) confirmSend(ctx context.Context, q store.Request, approve bool) 
 	}
 	sent, err := f.m.writeWith(ctx, q.Room, d.Agent, decideAll, func(ctx context.Context, now time.Time,
 		build func(*store.Reader) (*core.VerifiedRecord, error)) (*core.VerifiedRecord, error) {
+		_ = hookAt("files:publish") // tests: time spent putting the bytes in place
 		return f.m.st.WriteWithFiles(ctx, now, sf, man, build)
 	})
 	switch {
@@ -318,6 +352,8 @@ func (f *Files) confirmSend(ctx context.Context, q store.Request, approve bool) 
 		return decide(store.RequestFailed, store.ReasonSendReplaced)
 	case errors.Is(err, store.ErrSendExpired):
 		return decide(store.RequestDeclined, store.ReasonSendExpired)
+	case errors.Is(err, store.ErrStagingChanged):
+		return decide(store.RequestFailed, store.ReasonSendChanged)
 	case err != nil:
 		return Confirmation{}, err
 	}

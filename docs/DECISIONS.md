@@ -1228,6 +1228,11 @@ each is needed now:
   manifest's want and pace repeats; `file_parts.at` dates a part;
   `file_copies.size` and `tmp` let a start remove only the files a row
   proves a2p2 wrote.
+- **Migration 14** (`file_copies.ident`, `file_trash.ident`,
+  `file_trash.unlinked`): a copy's deletion removes only the file a2p2
+  linked there, by its file identity, never a byte-identical file an agent
+  put at the name; `unlinked` marks a removal whose directory could not
+  be synced, retried at start (Windows).
 - **`want` in the pull answer** and **`GET`/`PUT /p/v2/file/...`**: as
   PROTOCOL 10.3 to 10.5; old machines ignore `want` (tested with the 0.1.0
   decoder).
@@ -1239,9 +1244,39 @@ Departures, each the smallest that keeps the model's rules:
 - F1's deletions run in their own transaction (`SweepFiles`) after each
   pull, each replace or withdraw written here, each background tick and
   at start, not inside the record's transaction. Serving, fetching,
-  uploading and publishing a copy all ask the rules again from rows at
-  the moment they act, and a response or upload asks before every read
-  of at most 64 KiB, so a sweep that has not run yet widens nothing.
+  uploading and publishing a copy each decide under one view: the
+  membership and the rows read with no commit between (retried, and
+  refused if it never settles; an undecided permission is a refusal).
+  The decision is held as a lease that asks again before every read of
+  at most 64 KiB when anything was committed or the clock passed its
+  bound, and a watcher ends it, cutting a read or write blocked on the
+  network. The rule is asked once more inside the transaction that makes
+  bytes or a copy live, so a sweep that has not run yet widens nothing.
+- A manifest's list is bound to its message: a record whose header
+  commits to another message's manifest gets no list, no want and no
+  bytes of its own (fix-files-a2 B1).
+- **Removed, for 0.2** (fix-files-a2): resuming a transfer across a
+  restart (every part is dropped at start and a transfer starts from
+  zero; within a run a transfer also starts from zero); reusing a copy
+  already written for an agent (each fetch writes and checks a new one,
+  and the earlier one is queued); copying a manifest's items from another
+  record. Fewer states, and the findings that lived in them go too.
+- File requests are admitted by their own per-machine bucket, so file
+  traffic never spends the pull exchange's; no transaction is held across
+  a network read.
+- A send with files checks its request's expiry by the machine clock
+  read inside the publishing transaction, after its bytes are in place.
+- Approval (fix-files-b) never links staging into place: each staged file
+  is copied into a new private file while hashed and published only at
+  the approved size and digest. The terms digest (`a2p2 send files 2`)
+  adds the thread parent, the version replaced and, for everyone, the
+  member count (`SendDraft.Members`); `Files.ApproveSend` refuses a digest
+  that is not the request's (`terms_changed`). Staging refuses Windows
+  remote and device paths by name before any I/O and shows the path the
+  open handle reports (standard library only: `F_GETPATH`,
+  `/proc/self/fd`, `GetFinalPathNameByHandleW`). File errors are
+  `store.FileError` (operation and code, never a path). On the author's
+  machine only the agent that wrote a message fetches it unshown.
 - Staged bytes are counted from the pending request's draft, and a
   request being staged holds an in-memory reservation, instead of a
   `files` row in state `staged`.

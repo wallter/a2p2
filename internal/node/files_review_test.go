@@ -99,65 +99,6 @@ func (n *fnode) manifestBytes(room, msg string) []byte {
 	return out
 }
 
-// TestTwoTransfersOfTheSameFileNeverWriteTheSamePart (finding 2): while
-// one transfer holds (room, message, hash), another is refused, whoever
-// its peer.
-// Requirements: L1, T3
-func TestTwoTransfersOfTheSameFileNeverWriteTheSamePart(t *testing.T) {
-	ns := filesNet(t, "a", "b", "c")
-	a, b, c := ns[0], ns[1], ns[2]
-	room := fileRoom(t, a, b, c)
-	msg, res := a.sendFiles(room, "alice", "x", writeSource(t, "x.txt", "written once"))
-	sha := res.Files[0].SHA256
-	b.pullAll(room, a)
-	b.tickFiles()
-	size := int64(len("written once"))
-	started, release := make(chan struct{}), make(chan struct{})
-	slow := &blockOnce{started: started, release: release, data: []byte("writ")}
-	done := make(chan error, 1)
-	go func() {
-		_, err := b.f.receive(context.Background(), a.id, room, msg, sha, size, 0, 4, false, slow, nil)
-		done <- err
-	}()
-	<-started
-	if _, err := b.f.receive(context.Background(), c.id, room, msg, sha, size, 0, 4, false, strings.NewReader("XXXX"), nil); !errors.Is(err, errWriting) {
-		t.Fatalf("a second writer of the same part: %v", err)
-	}
-	close(release)
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	var p store.FilePart
-	_ = b.st.View(context.Background(), func(rd *store.Reader) (err error) {
-		p, _, err = rd.FilePart(room, msg, sha)
-		return err
-	})
-	if got, _ := b.st.PartBytes(p, 4); string(got) != "writ" {
-		t.Fatalf("the part holds %q", got)
-	}
-}
-
-// blockOnce signals started at its first read and waits for release.
-type blockOnce struct {
-	started, release chan struct{}
-	data             []byte
-	once             bool
-}
-
-func (b *blockOnce) Read(p []byte) (int, error) {
-	if !b.once {
-		b.once = true
-		close(b.started)
-		<-b.release
-	}
-	if len(b.data) == 0 {
-		return 0, io.EOF
-	}
-	n := copy(p, b.data)
-	b.data = b.data[n:]
-	return n, nil
-}
-
 // TestARefusalOfAMessageThePeerMayNotReadLooksUpNoAttachment (finding 7):
 // for a member without history, a known message with files and an unknown
 // one are refused before any attachment row is read.

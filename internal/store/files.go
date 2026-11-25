@@ -671,17 +671,17 @@ func (s *Store) AskListAgain(ctx context.Context, room, record string) error {
 	})
 }
 
-// MarkListInvalid records that the manifest sha matched its hash and
-// broke a rule: invalid for good for every record of room that commits to
-// it, with nothing it lists fetched.
-func (s *Store) MarkListInvalid(ctx context.Context, room, sha string) error {
+// MarkListInvalid records that the manifest sha, obtained for message msg,
+// matched its hash and broke a rule: invalid for good for msg's versions
+// that commit to it, with nothing it lists fetched.
+func (s *Store) MarkListInvalid(ctx context.Context, room, msg, sha string) error {
 	return s.tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.Exec(`INSERT INTO file_lists (room, record, state) SELECT room, record, ? FROM file_sets
-			WHERE room = ? AND manifest = ? ON CONFLICT (room, record) DO UPDATE SET state = excluded.state`, ListInvalid, room, sha)
+		_, err := tx.Exec(`INSERT INTO file_lists (room, record, state) SELECT ?3, record, ?1 FROM (`+versionsSQL+`)
+			WHERE true ON CONFLICT (room, record) DO UPDATE SET state = excluded.state`, ListInvalid, nil, room, sha, msg)
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(`DELETE FROM file_wants WHERE room = ? AND sha256 = ? AND list = 1`, room, sha)
+		_, err = tx.Exec(`DELETE FROM file_wants WHERE room = ? AND msg = ? AND sha256 = ? AND list = 1`, room, msg, sha)
 		return err
 	})
 }
@@ -816,86 +816,13 @@ func (s *Store) DropPart(ctx context.Context, room, msg, sha string, now time.Ti
 			return err
 		}
 		if n, _ := res.RowsAffected(); n > 0 {
-			return trash(tx, partRel(room, msg, sha), "part", room, msg, sha, 0, now)
+			return trash(tx, partRel(room, msg, sha), "part", room, msg, sha, 0, "", now)
 		}
 		return nil
 	})
 	if err == nil {
 		s.RunTrash(ctx)
 	}
-	return err
-}
-
-// CommitPart makes a complete, verified part live for msg [F10]: under
-// fileMu, the part is renamed to the room's blob (or dropped if the blob
-// is held already), the directory synced, and then one transaction
-// records the bytes as held for msg (how), drops the part row and the
-// want, and, for a manifest (items not nil), records its list for every
-// record of the room that commits to it.
-//
-// ok, if set, is the caller's authorisation, asked again inside that
-// transaction with the part's row: if the part is gone, not complete, or
-// ok says no, nothing is recorded, the bytes are queued for deletion and
-// ErrNotFound returned (finding 2).
-func (s *Store) CommitPart(ctx context.Context, p FilePart, how string, items *core.Manifest, now time.Time,
-	ok ...func(*Reader) (bool, error)) error {
-	if !checkIDs(p.Room, p.Msg, p.SHA256) {
-		return ErrBadPath
-	}
-	s.fileMu.Lock()
-	defer s.fileMu.Unlock()
-	blob := s.blobPath(p.Room, p.SHA256)
-	if err := s.mkdirSynced(filepath.Dir(blob)); err != nil {
-		return err
-	}
-	part := s.abs(partRel(p.Room, p.Msg, p.SHA256))
-	if _, err := os.Stat(blob); err == nil {
-		if err := os.Remove(part); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
-	} else if err := os.Rename(part, blob); err != nil {
-		return err
-	}
-	if err := syncDir(filepath.Dir(blob)); err != nil {
-		return err
-	}
-	err := s.tx(ctx, func(tx *sql.Tx) error {
-		var size, have int64
-		if err := tx.QueryRow(`SELECT size, have FROM file_parts WHERE room = ? AND msg = ? AND sha256 = ?`,
-			p.Room, p.Msg, p.SHA256).Scan(&size, &have); err != nil || size != p.Size || have != p.Size {
-			return ErrNotFound
-		}
-		for _, f := range ok {
-			good, err := f(&Reader{tx: tx})
-			if err != nil {
-				return err
-			}
-			if !good {
-				return ErrNotFound
-			}
-		}
-		if _, err := tx.Exec(`DELETE FROM file_parts WHERE room = ? AND msg = ? AND sha256 = ?`, p.Room, p.Msg, p.SHA256); err != nil {
-			return err
-		}
-		if err := holdTx(tx, p.Room, p.SHA256, p.Msg, how, p.Size); err != nil {
-			return err
-		}
-		if items != nil {
-			return listTx(tx, p.Room, p.SHA256, *items)
-		}
-		return nil
-	})
-	if errors.Is(err, ErrNotFound) {
-		// Refused at publication: the part row goes, and the bytes unless
-		// a live row names them.
-		_ = s.tx(ctx, func(tx *sql.Tx) error {
-			if _, err := tx.Exec(`DELETE FROM file_parts WHERE room = ? AND msg = ? AND sha256 = ?`, p.Room, p.Msg, p.SHA256); err != nil {
-				return err
-			}
-			return trash(tx, blobRel(p.Room, p.SHA256), "blob", p.Room, "", p.SHA256, 0, now)
-		})
-	}
-	s.runTrashLocked(ctx)
 	return err
 }
 
@@ -938,15 +865,26 @@ func holdTx(tx *sql.Tx, room, sha, msg, how string, size int64) error {
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(`DELETE FROM file_lists WHERE room = ? AND state != ? AND record IN
-		(SELECT record FROM file_sets WHERE room = ? AND manifest = ?)`, room, ListInvalid, room, sha)
+	_, err = tx.Exec(`DELETE FROM file_lists WHERE room = ?1 AND state != ?2 AND record IN (`+versionsSQL+`)`,
+		room, ListInvalid, room, sha, msg)
 	return err
 }
 
-// listTx records manifest m (bytes sha, verified and valid) as the list of
-// every record of room that commits to it.
-func listTx(tx *sql.Tx, room, sha string, m core.Manifest) error {
-	rows, err := tx.Query(`SELECT record FROM file_sets WHERE room = ? AND manifest = ? AND ok = 0`, room, sha)
+// versionsSQL selects the versions of message ?5 in room ?3 that commit to
+// manifest ?4: the message itself and its author's replacements. A manifest
+// is bound to the message it was obtained for [B1]: these, and no other
+// record with the same commitment, get its list.
+const versionsSQL = `SELECT s.record FROM file_sets s JOIN records r ON r.room = s.room AND r.id = s.record
+	WHERE s.room = ?3 AND s.manifest = ?4 AND (r.id = ?5 AND r.kind = 'message' OR r.kind = 'replace' AND r.ref = ?5
+	  AND r.author = (SELECT author FROM records WHERE room = ?3 AND id = ?5 AND kind = 'message'))`
+
+// listTx records manifest m (bytes sha, verified and valid, obtained for
+// message msg) as the list of msg's versions that commit to it, and of no
+// other record: another message that copies the commitment gets nothing
+// from it [B1].
+func listTx(tx *sql.Tx, room, msg, sha string, m core.Manifest) error {
+	rows, err := tx.Query(`SELECT record FROM file_sets WHERE room = ?1 AND ok = 0 AND record IN (`+versionsSQL+`)`,
+		room, nil, room, sha, msg)
 	if err != nil {
 		return err
 	}
@@ -1002,198 +940,6 @@ func (s *Store) OpenBlob(room, sha string) (*os.File, error) {
 	return os.Open(s.blobPath(room, sha))
 }
 
-// trash queues path for deletion after the commit.
-func trash(tx *sql.Tx, rel, kind, room, msg, sha string, size int64, now time.Time) error {
-	_, err := tx.Exec(`INSERT INTO file_trash (path, at, kind, room, msg, sha256, size) VALUES (?,?,?,?,?,?,?)
-		ON CONFLICT (path) DO NOTHING`, rel, ms(now), kind, room, msg, sha, size)
-	return err
-}
-
-// RunTrash deletes what the queue names, skipping any path a live row
-// names again; best effort, and run again at every start.
-func (s *Store) RunTrash(ctx context.Context) {
-	s.fileMu.Lock()
-	defer s.fileMu.Unlock()
-	s.runTrashLocked(ctx)
-}
-
-type trashRow struct {
-	path, kind, room, msg, sha string
-	size                       int64
-}
-
-func (s *Store) runTrashLocked(ctx context.Context) {
-	var rows []trashRow
-	_ = s.View(ctx, func(rd *Reader) error {
-		q, err := rd.tx.Query(`SELECT path, kind, room, msg, sha256, size FROM file_trash ORDER BY path`)
-		if err != nil {
-			return err
-		}
-		defer q.Close()
-		for q.Next() {
-			var t trashRow
-			if err := q.Scan(&t.path, &t.kind, &t.room, &t.msg, &t.sha, &t.size); err != nil {
-				return err
-			}
-			rows = append(rows, t)
-		}
-		return q.Err()
-	})
-	for _, t := range rows {
-		live := false
-		_ = s.View(ctx, func(rd *Reader) error {
-			var err error
-			live, err = livePath(rd.tx, t)
-			return err
-		})
-		if !live && !s.unlink(t) {
-			continue // kept: tried again at the next run and at every start
-		}
-		_ = s.tx(ctx, func(tx *sql.Tx) error {
-			_, err := tx.Exec(`DELETE FROM file_trash WHERE path = ?`, t.path)
-			return err
-		})
-	}
-}
-
-// livePath says whether a live row names t's path again.
-func livePath(tx *sql.Tx, t trashRow) (bool, error) {
-	var n int
-	var err error
-	switch t.kind {
-	case "blob":
-		err = tx.QueryRow(`SELECT count(*) FROM files WHERE room = ? AND sha256 = ?`, t.room, t.sha).Scan(&n)
-	case "part":
-		err = tx.QueryRow(`SELECT count(*) FROM file_parts WHERE room = ? AND msg = ? AND sha256 = ?`, t.room, t.msg, t.sha).Scan(&n)
-	case "copy":
-		err = tx.QueryRow(`SELECT count(*) FROM file_copies WHERE room = ? AND path = ?`, t.room, t.path).Scan(&n)
-	case "stage":
-		err = tx.QueryRow(`SELECT count(*) FROM requests WHERE id = ? AND state = ?`, t.msg, RequestPending).Scan(&n)
-	}
-	return n > 0, err
-}
-
-// unlink removes one queued path and reports whether the entry is done:
-// the path is gone and its directory synced, or (a copy) it is no longer
-// the file a2p2 wrote (another size or SHA-256), which is never removed.
-// A failure (a file still open on Windows, an error syncing) keeps the
-// entry (finding 5).
-func (s *Store) unlink(t trashRow) bool {
-	p := s.abs(t.path)
-	switch t.kind {
-	case "copy":
-		return s.unlinkCopy(t)
-	case "stage":
-		if err := os.RemoveAll(p); err != nil {
-			return false
-		}
-		return syncDir(filepath.Dir(p)) == nil
-	}
-	err := os.Remove(p)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return true
-	case err != nil:
-		return false
-	}
-	if syncDir(filepath.Dir(p)) != nil {
-		return false
-	}
-	if t.kind == "part" {
-		_ = os.Remove(filepath.Dir(p)) // the message's part directory, if now empty
-	}
-	return true
-}
-
-// unlinkCopy removes a copy through the room's files directory, opened
-// without following a link (copyDir).
-func (s *Store) unlinkCopy(t trashRow) bool {
-	if !validRoomID(t.room) || !strings.HasPrefix(t.path, copyDirRel(t.room)+"/") {
-		return true
-	}
-	root, err := s.copyDir(t.room, false)
-	if errors.Is(err, fs.ErrNotExist) {
-		return true
-	}
-	if err != nil {
-		return errors.Is(err, ErrBadPath) // a link where the directory was: nothing of a2p2's is behind it
-	}
-	defer root.Close()
-	name := path.Base(t.path)
-	st, err := root.Lstat(name)
-	if errors.Is(err, fs.ErrNotExist) {
-		return true
-	}
-	if err != nil {
-		return false
-	}
-	if !st.Mode().IsRegular() || st.Size() != t.size {
-		return true
-	}
-	f, err := root.Open(name)
-	if err != nil {
-		return false
-	}
-	h := sha256.New()
-	_, err = io.Copy(h, f)
-	f.Close()
-	if err != nil {
-		return false
-	}
-	if hex.EncodeToString(h.Sum(nil)) != t.sha {
-		return true
-	}
-	if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return false
-	}
-	return syncDir(s.abs(copyDirRel(t.room))) == nil
-}
-
-// copyDir opens files/<room> under the home as an os.Root, refusing a
-// link or anything but a directory at files and at files/<room>
-// (ErrBadPath), and checking that what was opened is what was looked at.
-// With create it makes what is missing, synced into its parent (finding
-// 4).
-func (s *Store) copyDir(room string, create bool) (*os.Root, error) {
-	if !validRoomID(room) {
-		return nil, ErrBadPath
-	}
-	home, err := os.OpenRoot(s.root)
-	if err != nil {
-		return nil, err
-	}
-	defer home.Close()
-	var last fs.FileInfo
-	for _, rel := range []string{"files", "files/" + room} {
-		st, err := home.Lstat(rel)
-		if errors.Is(err, fs.ErrNotExist) && create {
-			if err := home.Mkdir(rel, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
-				return nil, err
-			}
-			if err := syncDir(s.abs(path.Dir(rel))); err != nil {
-				return nil, err
-			}
-			st, err = home.Lstat(rel)
-		}
-		if err != nil {
-			return nil, err
-		}
-		if st.Mode()&fs.ModeSymlink != 0 || !st.IsDir() {
-			return nil, ErrBadPath
-		}
-		last = st
-	}
-	root, err := home.OpenRoot("files/" + room)
-	if err != nil {
-		return nil, err
-	}
-	if st, err := root.Stat("."); err != nil || !os.SameFile(st, last) {
-		root.Close()
-		return nil, ErrBadPath // swapped for a link between the look and the open
-	}
-	return root, nil
-}
-
 func fileSHA256(p string) (string, error) {
 	f, err := os.Open(p)
 	if err != nil {
@@ -1208,186 +954,6 @@ func fileSHA256(p string) (string, error) {
 }
 
 // ---- copies for agents ----
-
-// ReserveCopy chooses the path of a copy of sha for msg for agent, under
-// files/<room>/, from name sanitised (SafeName), with " (2)" and so on for
-// a clash, and records it as being written. A copy already written for
-// the agent is returned with done set. ErrNoSpace if it does not fit.
-func (s *Store) ReserveCopy(ctx context.Context, room, msg, sha, agent, name string, size int64) (c FileCopy, done bool, err error) {
-	if !checkIDs(room, msg, sha) {
-		return FileCopy{}, false, ErrBadPath
-	}
-	err = s.tx(ctx, func(tx *sql.Tx) error {
-		err := tx.QueryRow(`SELECT path, state, size FROM file_copies WHERE room = ? AND msg = ? AND sha256 = ? AND agent = ? AND state = 'done'`,
-			room, msg, sha, agent).Scan(&c.Path, &c.State, &c.Size)
-		if err == nil {
-			c.Room, c.Msg, c.SHA256, c.Agent, done = room, msg, sha, agent, true
-			return nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		ok, err := s.fits(tx, room, size)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return ErrNoSpace
-		}
-		base := SafeName(name)
-		for i := 1; i < 1000; i++ {
-			cand := base
-			if i > 1 {
-				cand = numbered(base, i)
-			}
-			rel := copyRel(room, cand)
-			var n int
-			if err := tx.QueryRow(`SELECT count(*) FROM file_copies WHERE room = ? AND path = ?`, room, rel).Scan(&n); err != nil {
-				return err
-			}
-			if _, err := os.Lstat(s.abs(rel)); n > 0 || err == nil {
-				continue
-			}
-			c = FileCopy{Room: room, Msg: msg, SHA256: sha, Agent: agent, Path: rel, State: "writing", Size: size}
-			_, err := tx.Exec(`INSERT INTO file_copies (room, msg, sha256, agent, path, state, size) VALUES (?,?,?,?,?,?,?)`,
-				room, msg, sha, agent, rel, c.State, size)
-			return err
-		}
-		return errors.New("files: no free name for the copy")
-	})
-	return c, done, err
-}
-
-// WriteCopy writes and publishes the copy c with no further check; see
-// PublishCopy.
-func (s *Store) WriteCopy(c FileCopy) error { return s.PublishCopy(context.Background(), c, nil) }
-
-// CopyDone is kept for callers that wrote with WriteCopy: the copy is
-// already marked written by the publication.
-func (s *Store) CopyDone(ctx context.Context, c FileCopy) error {
-	var state string
-	err := s.View(ctx, func(rd *Reader) error {
-		return rd.tx.QueryRow(`SELECT state FROM file_copies WHERE room = ? AND path = ?`, c.Room, c.Path).Scan(&state)
-	})
-	if errors.Is(err, sql.ErrNoRows) || err == nil && state != "done" {
-		return ErrNotFound
-	}
-	return err
-}
-
-// ErrCopyRefused: the copy was not published because ok said no or its
-// row is gone; nothing of it is left.
-var ErrCopyRefused = errors.New("files: the copy may no longer be written")
-
-// PublishCopy writes the copy c from the room's blob and publishes it in
-// one step, under fileMu, which every deletion also takes (finding 3):
-// the bytes go under a temporary name in files/<room> (opened by
-// copyDir, never through a link), synced and checked against the hash,
-// and the temporary name is recorded with the row; then one transaction
-// asks ok again (the permission and the version shown), links the final
-// name to the temporary file (a hard link, which fails on an existing
-// name and so never replaces a file, on every system), and marks the
-// copy written. The temporary name is removed after. A failure after the
-// final name exists removes it at once, or queues it.
-func (s *Store) PublishCopy(ctx context.Context, c FileCopy, ok func(*Reader) (bool, error)) error {
-	if !validRoomID(c.Room) || !strings.HasPrefix(c.Path, copyDirRel(c.Room)+"/") || strings.Count(c.Path, "/") != 2 {
-		return ErrBadPath
-	}
-	s.fileMu.Lock()
-	defer s.fileMu.Unlock()
-	root, err := s.copyDir(c.Room, true)
-	if err != nil {
-		return err
-	}
-	defer root.Close()
-	dir := s.abs(copyDirRel(c.Room))
-	name := path.Base(c.Path)
-	src, err := s.OpenBlob(c.Room, c.SHA256)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-	tmp := tmpName()
-	if err := s.tx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.Exec(`UPDATE file_copies SET tmp = ? WHERE room = ? AND path = ? AND state = 'writing'`, tmp, c.Room, c.Path)
-		if err != nil {
-			return err
-		}
-		if n, _ := res.RowsAffected(); n != 1 {
-			return ErrCopyRefused
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	out, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(out, h), src)
-	if err == nil {
-		err = out.Sync()
-	}
-	if cerr := out.Close(); err == nil {
-		err = cerr
-	}
-	if err == nil && (n != c.Size || hex.EncodeToString(h.Sum(nil)) != c.SHA256) {
-		err = ErrBadBytes
-	}
-	if err == nil {
-		linked := false
-		err = s.tx(ctx, func(tx *sql.Tx) error {
-			if ok != nil {
-				good, err := ok(&Reader{tx: tx})
-				if err != nil {
-					return err
-				}
-				if !good {
-					return ErrCopyRefused
-				}
-			}
-			res, err := tx.Exec(`UPDATE file_copies SET state = 'done', tmp = '' WHERE room = ? AND path = ? AND state = 'writing' AND tmp = ?`,
-				c.Room, c.Path, tmp)
-			if err != nil {
-				return err
-			}
-			if n, _ := res.RowsAffected(); n != 1 {
-				return ErrCopyRefused
-			}
-			if err := root.Link(tmp, name); err != nil {
-				return err
-			}
-			linked = true
-			return syncDir(dir)
-		})
-		if err != nil && linked {
-			// not committed: the final name is this copy's; remove it
-			if rerr := root.Remove(name); rerr != nil {
-				_ = s.tx(ctx, func(tx *sql.Tx) error {
-					return trash(tx, c.Path, "copy", c.Room, c.Msg, c.SHA256, c.Size, time.Now())
-				})
-			}
-		}
-	}
-	_ = root.Remove(tmp)
-	_ = syncDir(dir)
-	return err
-}
-
-// DropCopy removes a copy row whose write failed, and its file.
-func (s *Store) DropCopy(ctx context.Context, c FileCopy, now time.Time) error {
-	err := s.tx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.Exec(`DELETE FROM file_copies WHERE room = ? AND path = ?`, c.Room, c.Path); err != nil {
-			return err
-		}
-		return trash(tx, c.Path, "copy", c.Room, c.Msg, c.SHA256, c.Size, now)
-	})
-	if err == nil {
-		s.RunTrash(ctx)
-	}
-	return err
-}
 
 // windowsReserved are names Windows will not create, with any extension.
 var windowsReserved = map[string]bool{"CON": true, "PRN": true, "AUX": true, "NUL": true,
@@ -1445,7 +1011,7 @@ type Staged struct {
 }
 
 // ErrNotRegular: the path, once opened, is not a regular file.
-var ErrNotRegular = errors.New("files: not a regular file")
+var ErrNotRegular = &FileError{Op: "stat", Code: "not_regular"}
 
 // StageFile opens path once (following links), refuses anything but a
 // regular file from the handle's own information, and copies and hashes
@@ -1457,14 +1023,20 @@ func (s *Store) StageFile(req string, n int, path string, max int64) (Staged, er
 	if !validReqID(req) || n < 0 || n >= core.MaxFiles || !filepath.IsAbs(path) {
 		return Staged{}, ErrBadPath
 	}
+	if RemoteOrDevice(path) {
+		return Staged{}, ErrRemoteOrDevice
+	}
 	f, err := openSource(path)
 	if err != nil {
-		return Staged{}, err
+		return Staged{}, fileErr("open", err)
 	}
 	defer f.Close()
+	if stageOpened != nil {
+		stageOpened()
+	}
 	st, err := f.Stat()
 	if err != nil {
-		return Staged{}, err
+		return Staged{}, fileErr("stat", err)
 	}
 	if !st.Mode().IsRegular() {
 		return Staged{}, ErrNotRegular
@@ -1472,24 +1044,66 @@ func (s *Store) StageFile(req string, n int, path string, max int64) (Staged, er
 	if st.Size() > max {
 		return Staged{}, ErrTooLarge
 	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err == nil {
-		resolved, err = filepath.Abs(resolved)
+	// the path shown is the one the system reports for the open handle
+	resolved, err := handlePath(f)
+	if err != nil {
+		return Staged{}, fileErr("path", err)
 	}
+	staged, err := s.stageCopy(req, n, f, max)
 	if err != nil {
 		return Staged{}, err
 	}
-	if rs, err := os.Stat(resolved); err != nil || !os.SameFile(rs, st) {
-		return Staged{}, errors.New("files: the file changed while it was opened")
+	staged.Path = resolved
+	return staged, nil
+}
+
+// stageOpened, in tests, runs after a source is opened.
+var stageOpened func()
+
+// RemoteOrDevice reports a path that is refused before any I/O: on
+// Windows a UNC path, a \\?\ or \\.\ namespace or a reserved device name
+// [fix-files-b 7]. Callers check it before anything else touches the path.
+func RemoteOrDevice(path string) bool { return remoteOrDevice(path) }
+
+// FileError is an error of a file operation that names the operation and
+// a code, never a path [fix-files-b 8].
+type FileError struct {
+	Op   string // open, stat, path, read, write
+	Code string // not_found, permission, not_regular, too_large, remote_or_device, changed, empty, io
+	err  error  // a sentinel without a path, for errors.Is
+}
+
+func (e *FileError) Error() string { return "files: " + e.Op + ": " + e.Code }
+func (e *FileError) Unwrap() error { return e.err }
+
+// fileErr turns an error of the os package (which names its path) into a
+// FileError that does not.
+func fileErr(op string, err error) error {
+	var fe *FileError
+	switch {
+	case err == nil:
+		return nil
+	case errors.As(err, &fe):
+		return err
+	case errors.Is(err, fs.ErrNotExist):
+		return &FileError{Op: op, Code: "not_found", err: fs.ErrNotExist}
+	case errors.Is(err, fs.ErrPermission):
+		return &FileError{Op: op, Code: "permission", err: fs.ErrPermission}
 	}
+	return &FileError{Op: op, Code: "io"}
+}
+
+// stageCopy copies the opened source into staging file n of req, hashing
+// as it copies.
+func (s *Store) stageCopy(req string, n int, f *os.File, max int64) (Staged, error) {
 	dir := s.abs(stageDirRel(req))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return Staged{}, err
+	if err := s.mkdirSynced(dir); err != nil { // each new directory synced into its parent [B5]
+		return Staged{}, fileErr("write", err)
 	}
 	tmp := filepath.Join(dir, tmpName())
 	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return Staged{}, err
+		return Staged{}, fileErr("write", err)
 	}
 	h := sha256.New()
 	size, err := io.Copy(io.MultiWriter(out, h), io.LimitReader(f, max+1))
@@ -1497,7 +1111,7 @@ func (s *Store) StageFile(req string, n int, path string, max int64) (Staged, er
 		err = ErrTooLarge
 	}
 	if err == nil && size == 0 {
-		err = errors.New("files: the file is empty")
+		err = ErrEmptyFile
 	}
 	if err == nil {
 		err = out.Sync()
@@ -1513,13 +1127,19 @@ func (s *Store) StageFile(req string, n int, path string, max int64) (Staged, er
 	}
 	if err != nil {
 		_ = os.Remove(tmp)
-		return Staged{}, err
+		return Staged{}, fileErr("write", err)
 	}
-	return Staged{Path: resolved, Size: size, SHA256: hex.EncodeToString(h.Sum(nil))}, nil
+	return Staged{Size: size, SHA256: hex.EncodeToString(h.Sum(nil))}, nil
 }
 
 // ErrTooLarge: a file over the size limit.
-var ErrTooLarge = errors.New("files: over the size limit")
+var ErrTooLarge = &FileError{Op: "read", Code: "too_large"}
+
+// ErrEmptyFile: an empty file is not sent.
+var ErrEmptyFile = &FileError{Op: "read", Code: "empty"}
+
+// ErrRemoteOrDevice: a path refused before any I/O (RemoteOrDevice).
+var ErrRemoteOrDevice = &FileError{Op: "open", Code: "remote_or_device"}
 
 // DropStaging removes the staging of a request that was never stored
 // (refused before its row).
@@ -1603,6 +1223,9 @@ type SendFiles struct {
 	Room     string
 	Manifest []byte
 	Files    []StagedFile
+	// Clock is read inside the transaction that publishes, for the
+	// request's expiry [B6]; nil uses the time WriteWithFiles was given.
+	Clock func() time.Time
 }
 
 // WriteWithFiles is Write for a send with files [F10]. Under fileMu, the
@@ -1623,7 +1246,7 @@ func (s *Store) WriteWithFiles(ctx context.Context, now time.Time, sf SendFiles,
 	defer s.fileMu.Unlock()
 	msha := core.SHA256Hex(sf.Manifest)
 	dir := s.abs("blobs/" + sf.Room)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := s.mkdirSynced(dir); err != nil { // each new directory synced into its parent [B5]
 		return nil, err
 	}
 	if err := s.putBlob(sf.Room, msha, func(w io.Writer) error { _, err := w.Write(sf.Manifest); return err }); err != nil {
@@ -1633,23 +1256,11 @@ func (s *Store) WriteWithFiles(ctx context.Context, now time.Time, sf SendFiles,
 		if f.Kept {
 			continue
 		}
-		src := s.abs(stageRel(sf.Request, f.N))
-		dst := s.blobPath(sf.Room, f.SHA256)
-		if _, err := os.Stat(dst); err == nil {
-			continue
-		}
-		if err := os.Link(src, dst); err != nil {
-			if err := s.putBlob(sf.Room, f.SHA256, func(w io.Writer) error {
-				in, err := os.Open(src)
-				if err != nil {
-					return err
-				}
-				defer in.Close()
-				_, err = io.Copy(w, in)
-				return err
-			}); err != nil {
-				return nil, err
-			}
+		// A fresh private copy, hashed as it is written, put in place only
+		// if its size and digest are the approved ones; staging is read
+		// once, here, and never linked [fix-files-b 3].
+		if err := s.copyApproved(sf.Room, stageRel(sf.Request, f.N), f.SHA256, f.Size); err != nil {
+			return nil, err
 		}
 	}
 	if err := syncDir(dir); err != nil {
@@ -1657,7 +1268,12 @@ func (s *Store) WriteWithFiles(ctx context.Context, now time.Time, sf SendFiles,
 	}
 	var r *core.VerifiedRecord
 	err := s.tx(ctx, func(tx *sql.Tx) error {
-		// the request's expiry, in the transaction that publishes (finding 9)
+		// the request's expiry, by the clock read in the transaction that
+		// publishes, after the bytes were put in place [B6]
+		at := now
+		if sf.Clock != nil {
+			at = sf.Clock()
+		}
 		var created int64
 		var state string
 		if err := tx.QueryRow(`SELECT created_at, state FROM requests WHERE id = ?`, sf.Request).Scan(&created, &state); err != nil {
@@ -1666,7 +1282,7 @@ func (s *Store) WriteWithFiles(ctx context.Context, now time.Time, sf SendFiles,
 		if state != RequestPending {
 			return ErrNotFound
 		}
-		if !now.Before(fromMS(created).Add(core.StagingLife)) {
+		if !at.Before(fromMS(created).Add(core.StagingLife)) {
 			return ErrSendExpired
 		}
 		var err error
@@ -1696,7 +1312,7 @@ func (s *Store) WriteWithFiles(ctx context.Context, now time.Time, sf SendFiles,
 				return err
 			}
 		}
-		if err := listTx(tx, sf.Room, msha, m); err != nil {
+		if err := listTx(tx, sf.Room, msg, msha, m); err != nil {
 			return err
 		}
 		res, err := tx.Exec(`UPDATE requests SET state = ?, decided_at = ?, entries = ? WHERE id = ? AND state = ?`,
@@ -1707,17 +1323,56 @@ func (s *Store) WriteWithFiles(ctx context.Context, now time.Time, sf SendFiles,
 		if n, _ := res.RowsAffected(); n != 1 {
 			return ErrNotFound
 		}
-		return trash(tx, stageDirRel(sf.Request), "stage", "", sf.Request, "", 0, now)
+		return trash(tx, stageDirRel(sf.Request), "stage", "", sf.Request, "", 0, "", now)
 	})
 	if err != nil {
 		return nil, err
 	}
-	s.runTrashLocked(ctx)
+	s.runTrashLocked(ctx, false)
 	return r, nil
 }
 
 // putBlob writes a blob under a temporary name, syncs it and renames it
 // into place; the caller holds fileMu and syncs the directory.
+// ErrStagingChanged: a staged file no longer has the size and digest a
+// person approved; nothing is published.
+var ErrStagingChanged = &FileError{Op: "read", Code: "changed"}
+
+// copyApproved copies the staged file rel into a temporary file beside the
+// room's blob for sha, hashing while it copies, and renames it into place
+// only if exactly size bytes with digest sha were copied.
+func (s *Store) copyApproved(room, rel, sha string, size int64) error {
+	in, err := os.OpenFile(s.abs(rel), os.O_RDONLY|oNoFollow, 0)
+	if err != nil {
+		return ErrStagingChanged
+	}
+	defer in.Close()
+	dst := s.blobPath(room, sha)
+	tmp := filepath.Join(filepath.Dir(dst), tmpName())
+	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fileErr("write", err)
+	}
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(out, h), io.LimitReader(in, size+1))
+	if err == nil {
+		err = out.Sync()
+	}
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil && (n != size || hex.EncodeToString(h.Sum(nil)) != sha) {
+		err = ErrStagingChanged
+	}
+	if err == nil {
+		err = os.Rename(tmp, dst)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+	}
+	return fileErr("write", err)
+}
+
 func (s *Store) putBlob(room, sha string, write func(io.Writer) error) error {
 	dst := s.blobPath(room, sha)
 	if _, err := os.Stat(dst); err == nil {
@@ -1759,7 +1414,7 @@ func (s *Store) DecideSend(ctx context.Context, id, state, reason string, now ti
 		if n, _ := res.RowsAffected(); n != 1 {
 			return ErrNotFound
 		}
-		return trash(tx, stageDirRel(id), "stage", "", id, "", 0, now)
+		return trash(tx, stageDirRel(id), "stage", "", id, "", 0, "", now)
 	})
 	if err == nil {
 		s.RunTrash(ctx)
@@ -1768,27 +1423,12 @@ func (s *Store) DecideSend(ctx context.Context, id, state, reason string, now ti
 }
 
 // fileSetTx records, when a record with files is stored, the manifest it
-// commits to; if that manifest is held and its list known here (another
-// version listed the same one), the list is the record's too.
+// commits to. Its list is pending until the manifest is obtained for its
+// own message: a list verified for another record is never copied, even
+// with the same commitment [B1].
 func fileSetTx(tx *sql.Tx, room, record, manifest string) error {
-	if _, err := tx.Exec(`INSERT INTO file_sets (room, record, manifest) VALUES (?,?,?) ON CONFLICT DO NOTHING`,
-		room, record, manifest); err != nil {
-		return err
-	}
-	var other string
-	err := tx.QueryRow(`SELECT record FROM file_sets WHERE room = ? AND manifest = ? AND ok = 1 AND record != ? LIMIT 1`,
-		room, manifest, record).Scan(&other)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`INSERT INTO file_items (room, record, n, sha256, name, size, type)
-		SELECT room, ?, n, sha256, name, size, type FROM file_items WHERE room = ? AND record = ?`, record, room, other); err != nil {
-		return err
-	}
-	_, err = tx.Exec(`UPDATE file_sets SET ok = 1 WHERE room = ? AND record = ?`, room, record)
+	_, err := tx.Exec(`INSERT INTO file_sets (room, record, manifest) VALUES (?,?,?) ON CONFLICT DO NOTHING`,
+		room, record, manifest)
 	return err
 }
 
@@ -1796,10 +1436,10 @@ func fileSetTx(tx *sql.Tx, room, record, manifest string) error {
 // paths: nothing of it may be kept.
 func leaveFiles(tx *sql.Tx, room string, now time.Time) error {
 	for _, q := range []struct{ sql, kind string }{
-		{`SELECT '', sha256, 0, '' FROM files WHERE room = ?`, "blob"},
-		{`SELECT msg, sha256, 0, '' FROM file_parts WHERE room = ?`, "part"},
-		{`SELECT msg, sha256, size, path FROM file_copies WHERE room = ?`, "copy"},
-		{`SELECT id, '', 0, '' FROM requests WHERE room = ? AND kind = 'send_files' AND state = 'pending'`, "stage"},
+		{`SELECT '', sha256, 0, '', '' FROM files WHERE room = ?`, "blob"},
+		{`SELECT msg, sha256, 0, '', '' FROM file_parts WHERE room = ?`, "part"},
+		{`SELECT msg, sha256, size, path, ident FROM file_copies WHERE room = ?`, "copy"},
+		{`SELECT id, '', 0, '', '' FROM requests WHERE room = ? AND kind = 'send_files' AND state = 'pending'`, "stage"},
 	} {
 		rows, err := tx.Query(q.sql, room)
 		if err != nil {
@@ -1808,7 +1448,7 @@ func leaveFiles(tx *sql.Tx, room string, now time.Time) error {
 		var ts []trashRow
 		for rows.Next() {
 			var t trashRow
-			if err := rows.Scan(&t.msg, &t.sha, &t.size, &t.path); err != nil {
+			if err := rows.Scan(&t.msg, &t.sha, &t.size, &t.path, &t.ident); err != nil {
 				rows.Close()
 				return err
 			}
@@ -1825,7 +1465,7 @@ func leaveFiles(tx *sql.Tx, room string, now time.Time) error {
 			case "stage":
 				rel = stageDirRel(t.msg)
 			}
-			if err := trash(tx, rel, q.kind, room, t.msg, t.sha, t.size, now); err != nil {
+			if err := trash(tx, rel, q.kind, room, t.msg, t.sha, t.size, t.ident, now); err != nil {
 				return err
 			}
 		}
@@ -1835,184 +1475,6 @@ func leaveFiles(tx *sql.Tx, room string, now time.Time) error {
 		`DELETE FROM file_lists WHERE room = ?`, `DELETE FROM file_copies WHERE room = ?`, `DELETE FROM file_sets WHERE room = ?`,
 		`DELETE FROM file_items WHERE room = ?`, `DELETE FROM room_files WHERE room = ?`} {
 		if _, err := tx.Exec(q, room); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// ---- the start ----
-
-// ReconcileFiles is what a start does [F10]: finish the deletion queue,
-// remove every temporary file, every file under blobs/ that no row names
-// (a part longer than its row is cut back), staging that no pending
-// request names, and every copy still being written, with its row.
-func (s *Store) ReconcileFiles(ctx context.Context) error {
-	s.fileMu.Lock()
-	defer s.fileMu.Unlock()
-	s.runTrashLocked(ctx)
-	type writingCopy struct {
-		FileCopy
-		tmp string
-	}
-	var writing []writingCopy
-	if err := s.View(ctx, func(rd *Reader) error {
-		rows, err := rd.tx.Query(`SELECT room, msg, sha256, agent, path, size, tmp FROM file_copies WHERE state = 'writing'`)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var c writingCopy
-			if err := rows.Scan(&c.Room, &c.Msg, &c.SHA256, &c.Agent, &c.Path, &c.Size, &c.tmp); err != nil {
-				return err
-			}
-			writing = append(writing, c)
-		}
-		return rows.Err()
-	}); err != nil {
-		return err
-	}
-	for _, c := range writing {
-		// Only what the row proves it wrote: its temporary file, and the
-		// final name if it is a link to that same file (a crash between
-		// the link and the commit). Anything else at the name is not ours.
-		if root, err := s.copyDir(c.Room, false); err == nil {
-			if c.tmp != "" && strings.HasPrefix(c.tmp, tmpPrefix) && !strings.ContainsAny(c.tmp, `/\`) {
-				ts, terr := root.Lstat(c.tmp)
-				fsI, ferr := root.Lstat(path.Base(c.Path))
-				if terr == nil && ferr == nil && os.SameFile(ts, fsI) {
-					_ = root.Remove(path.Base(c.Path))
-				}
-				_ = root.Remove(c.tmp)
-				_ = syncDir(s.abs(copyDirRel(c.Room)))
-			}
-			root.Close()
-		}
-		if err := s.tx(ctx, func(tx *sql.Tx) error {
-			_, err := tx.Exec(`DELETE FROM file_copies WHERE room = ? AND path = ? AND state = 'writing'`, c.Room, c.Path)
-			return err
-		}); err != nil {
-			return err
-		}
-	}
-	if err := s.reconcileParts(ctx); err != nil {
-		return err
-	}
-	for _, top := range []string{"blobs"} { // files/ holds only what rows prove (above)
-		base := s.abs(top)
-		_ = filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.IsDir() || !strings.HasPrefix(d.Name(), tmpPrefix) {
-				return nil
-			}
-			_ = os.Remove(p)
-			return nil
-		})
-	}
-	return s.removeUnnamed(ctx)
-}
-
-// removeUnnamed removes files under blobs/ no row names.
-func (s *Store) removeUnnamed(ctx context.Context) error {
-	base := s.abs("blobs")
-	return filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		rel, rerr := filepath.Rel(s.root, p)
-		if rerr != nil {
-			return nil
-		}
-		parts := strings.Split(filepath.ToSlash(rel), "/")
-		if d.IsDir() {
-			if len(parts) == 3 && parts[1] == ".staging" {
-				live := false
-				_ = s.View(ctx, func(rd *Reader) error {
-					var e error
-					live, e = livePath(rd.tx, trashRow{kind: "stage", msg: parts[2]})
-					return e
-				})
-				if !live {
-					_ = os.RemoveAll(p)
-					return filepath.SkipDir
-				}
-			}
-			return nil
-		}
-		var t trashRow
-		switch {
-		case len(parts) == 3 && validRoomID(parts[1]) && core.ValidSHA256(parts[2]):
-			t = trashRow{kind: "blob", room: parts[1], sha: parts[2]}
-		case len(parts) == 5 && validRoomID(parts[1]) && parts[2] == "part" && validMsgID(parts[3]) && core.ValidSHA256(parts[4]):
-			t = trashRow{kind: "part", room: parts[1], msg: parts[3], sha: parts[4]}
-			var have int64 = -1
-			_ = s.View(ctx, func(rd *Reader) error {
-				return rd.tx.QueryRow(`SELECT have FROM file_parts WHERE room = ? AND msg = ? AND sha256 = ?`,
-					t.room, t.msg, t.sha).Scan(&have)
-			})
-			if have >= 0 {
-				_ = os.Truncate(p, have)
-				return nil
-			}
-		case len(parts) == 4 && parts[1] == ".staging":
-			return nil // within a live staging directory
-		default:
-			_ = os.Remove(p) // nothing a2p2 writes has this name
-			return nil
-		}
-		live := false
-		_ = s.View(ctx, func(rd *Reader) error {
-			var e error
-			live, e = livePath(rd.tx, t)
-			return e
-		})
-		if !live {
-			_ = os.Remove(p)
-		}
-		return nil
-	})
-}
-
-// reconcileParts sets every part row back to what its file holds: a part
-// whose file is missing restarts from 0, a shorter one from its length
-// (finding 6).
-func (s *Store) reconcileParts(ctx context.Context) error {
-	var ps []FilePart
-	if err := s.View(ctx, func(rd *Reader) error {
-		rows, err := rd.tx.Query(`SELECT room, msg, sha256, size, have FROM file_parts`)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var p FilePart
-			if err := rows.Scan(&p.Room, &p.Msg, &p.SHA256, &p.Size, &p.Have); err != nil {
-				return err
-			}
-			ps = append(ps, p)
-		}
-		return rows.Err()
-	}); err != nil {
-		return err
-	}
-	for _, p := range ps {
-		if !checkIDs(p.Room, p.Msg, p.SHA256) {
-			continue
-		}
-		var have int64
-		if st, err := os.Lstat(s.abs(partRel(p.Room, p.Msg, p.SHA256))); err == nil && st.Mode().IsRegular() {
-			have = min(st.Size(), p.Have)
-		}
-		if have == p.Have {
-			continue
-		}
-		if err := s.tx(ctx, func(tx *sql.Tx) error {
-			_, err := tx.Exec(`UPDATE file_parts SET have = ? WHERE room = ? AND msg = ? AND sha256 = ?`, have, p.Room, p.Msg, p.SHA256)
-			return err
-		}); err != nil {
 			return err
 		}
 	}

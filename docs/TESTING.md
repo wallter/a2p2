@@ -213,6 +213,26 @@ Rows marked "model" include tests of the rules in `internal/members` or
 | Fake UPnP router that accepts finite leases, or refuses them (725); removing an entry already gone (714) | A finite lease is asked first, a permanent one only after 725; 714 counts as removed | `TestUPnPAsksForAPermanentLeaseOnlyWhenRefusedAFiniteOne` |
 | `--map-port` with a listener on one address the router does not forward to | No mapping; status says why | `TestNoMappingForAListenerThatDoesNotCoverTheAddressTheRouterForwardsTo` |
 | The listener stops while the daemon runs | The mapping is removed with it | `TestTheMappingIsRemovedWhenTheListenerStops` |
+| A record's header commits to another message's manifest | No list, no want and no bytes for it, from any machine | `TestACopiedCommitmentGetsNoListNoWantAndNoBytes` |
+| A removal commits between reading the membership and the rows | The decision reads both again; the removed machine is refused | `TestARemovalCommittedBetweenTheMembershipAndTheRowsIsSeen` |
+| This machine's own permission for an author is undecided | Its files are neither kept nor served | `TestAnUndecidedGrantIsARefusal` |
+| A requester stops reading, then the message is withdrawn | The response ends without another read | `TestAResponseBlockedOnTheNetworkIsCutWhenItsPermissionEnds` |
+| An uploader stalls mid-body, then the want ends | The body is closed, nothing is kept | `TestAnUploadBlockedOnTheNetworkIsCutWhenTheWantEnds` |
+| The want ends after the last byte, before the bytes go live | Not promoted; the part goes | `TestAnUploadWhoseWantEndsJustBeforeItGoesLiveIsNotPromoted` |
+| The agent edits its copy, then fetches again | A new copy with the verified bytes | `TestAFetchAfterTheAgentEditedItsCopyGetsVerifiedBytes`, `TestPublishingAgainHandsOutANewCopyAndQueuesTheOldOne` |
+| An agent puts a byte-identical file at its copy's name, then the message is withdrawn | That file stays | `TestADeletionRemovesOnlyTheCopyItPublishedNeverAByteIdenticalFileAtItsName` |
+| A queued deletion fails, then nothing happens in the room | Kept, and the next file tick completes it | `TestAQueuedDeletionThatFailsIsKeptAndTriedAgain`, `TestADeletionThatFailedIsCompletedByTheNextIdleTick` |
+| A restart with parts recorded complete, missing or short | Every part is dropped; the transfer completes from zero | `TestAStartDropsEveryPartSoATransferCutByACrashStartsFromZero` |
+| A send's request expires while its files are put in place | Not published | `TestARequestThatExpiresWhileItsFilesArePutInPlaceIsNotPublished` |
+| A burst of file requests from one machine | Refused past the file bucket; its pulls still admitted | `TestFileRequestsDoNotSpendThePullExchangesAdmission` |
+| A transfer's body stalls on the network | The database stays free | `TestTheDatabaseIsFreeWhileATransferWaitsOnTheNetwork` |
+| A requester on loopback stops reading a large response | Cut by the minimum rate, long before the total time | `TestAnOutboundResponseToAReaderBelowTheMinimumRateIsCut` |
+| A schedule of pulls, fetches, a withdraw, a removal and an expiry, some landing inside a fetch, on the model and on three machines | After every step: the same holders and copies, the bytes each would serve and each copy hash to the file and equal the model's, and the same machines received the file (from the network's transfer events) | `TestImplementationAgreesWithTheModelOnAttachmentSchedules` |
+| Staging changed after the digests were checked, before the bytes are put in place | Not published; the request fails | `TestAnApprovalOfStagingChangedAfterItWasShownPublishesNothing` |
+| An approval sent with a terms digest that is not the request's | Refused, `terms_changed`; nothing sent | `TestTheApprovedTermsCoverEveryEffectiveTermAndAStaleDigestIsRefused` |
+| Another agent on the author's machine fetches a file it was not shown | Refused until it is shown | `TestOnTheAuthorsMachineOnlyTheSendingAgentMayFetchWithoutBeingShown` |
+| A file moved right after it was opened for staging; a UNC or device path on Windows | Shown where the handle is; refused by name before any I/O | `TestThePathShownIsTheOpenedFilesNotTheNameAskedFor`, `TestRemoteAndDevicePathsAreRefusedByNameBeforeAnyIO` (Windows only) |
+| Staging a missing file | The error names the operation and a code, never the path | `TestAFileErrorNamesItsOperationAndCodeNeverThePath` |
 | A crash left a mapping on the router and in the record; the next start has networking off, and the removal first fails | It is removed at the next start whatever the decision; a failure is shown in status and retried at stop | `TestAMappingLeftByACrashIsRemovedAtTheNextStartAndAFailureIsShown` |
 | A networking decision recorded before IPv6 | It stays IPv4 only, says so, advertises no IPv6, not even a configured `advertise` entry, which `net check` names with why; a new decision covers IPv6 and its prompt says so | `TestANetworkingDecisionFromBeforeIPv6StaysIPv4OnlyUntilDecidedAgain`, `TestAnIPv4OnlyDecisionAdvertisesNoIPv6`, `TestAConfiguredIPv6AddressIsNotAdvertisedUnderAnIPv4OnlyDecision` |
 | Two addresses of this machine in the gateway's subnet, the system choosing the second | The router forwards to the address the system selects; one off the gateway's network is refused; the route lookup sends nothing and is tried only on loopback | `TestTheMappedAddressIsTheSourceTheSystemSelectsForTheGateway` |
@@ -438,6 +458,14 @@ containers through kills, pauses and network splits (see
 
 ## Test gaps
 
+- What the attachment differential test cannot catch: it has one message
+  and one small file of one chunk on three machines over memory, so it
+  says nothing of replacements, several files, carry and keep modes,
+  uploads by an outbound-only author, budgets, restarts or a crash
+  between steps; an event lands only at a fetch's first decision, never
+  between two chunks of a body (the lease tests above cover that); it
+  compares who received the file, not how often or from whom; and where
+  the model and the code share a mistaken rule, both agree.
 - Automated tests of the local page's JavaScript in a browser. The page
   has been checked by hand in headless Chrome at 1280 and 390 pixels wide,
   in light and dark themes, and with the keyboard.
