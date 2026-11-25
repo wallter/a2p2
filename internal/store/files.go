@@ -428,6 +428,8 @@ const usageSQL = `SELECT
 	(SELECT coalesce(sum(size), 0) FROM files WHERE ?1 = '' OR room = ?1) +
 	(SELECT coalesce(sum(size), 0) FROM file_parts WHERE ?1 = '' OR room = ?1) +
 	(SELECT coalesce(sum(size), 0) FROM file_copies WHERE ?1 = '' OR room = ?1) +
+	(SELECT coalesce(sum(t.size), 0) FROM file_trash t WHERE t.kind = 'blob' AND t.size > 0 AND (?1 = '' OR t.room = ?1)
+	  AND NOT EXISTS (SELECT 1 FROM files f WHERE f.room = t.room AND f.sha256 = t.sha256)) +
 	(SELECT coalesce(sum(w.size), 0) FROM file_wants w WHERE (?1 = '' OR w.room = ?1) AND w.lapsed_at = 0
 	  AND NOT EXISTS (SELECT 1 FROM file_parts p WHERE p.room = w.room AND p.msg = w.msg AND p.sha256 = w.sha256))`
 
@@ -573,11 +575,13 @@ func (s *Store) LapseWant(ctx context.Context, room, msg, sha string, now time.T
 // manifests first, each at most once per repeat. A want already sent and
 // still here counts a try; one with WantTries tries lapses instead of
 // going out. ok, if set, filters the candidates (the node's check that the
-// want is still for the winning version).
-func (s *Store) WantsToSend(ctx context.Context, room, author string, now time.Time, max int, repeat time.Duration,
-	ok func(*Reader, FileWant) (bool, error)) ([]FileWant, error) {
+// want is still for the winning version), at the time read inside the
+// transaction from clock, which every decision here uses [W4].
+func (s *Store) WantsToSend(ctx context.Context, room, author string, clock func() time.Time, max int, repeat time.Duration,
+	ok func(*Reader, FileWant, time.Time) (bool, error)) ([]FileWant, error) {
 	var out []FileWant
 	err := s.tx(ctx, func(tx *sql.Tx) error {
+		now := clock()
 		rows, err := tx.Query(`SELECT `+wantCols+` FROM file_wants WHERE room = ? AND author = ? AND lapsed_at = 0
 			ORDER BY list DESC, at, msg, sha256`, room, author)
 		if err != nil {
@@ -605,7 +609,7 @@ func (s *Store) WantsToSend(ctx context.Context, room, author string, now time.T
 				continue
 			}
 			if ok != nil {
-				good, err := ok(rd, w)
+				good, err := ok(rd, w, now)
 				if err != nil {
 					return err
 				}
@@ -941,7 +945,22 @@ func (s *Store) OpenBlob(room, sha string) (*os.File, error) {
 	if !validRoomID(room) || !core.ValidSHA256(sha) {
 		return nil, ErrBadPath
 	}
-	return os.Open(s.blobPath(room, sha))
+	f, err := os.Open(s.blobPath(room, sha))
+	if err != nil || !s.unverifiedHas(room, sha) {
+		return f, err
+	}
+	// The last start could not examine it: hashed through the handle that
+	// is served, before a byte is served, and only then trusted [W1].
+	ok, err := handleHash(f, sha, -1)
+	if err == nil && ok {
+		_, err = f.Seek(0, io.SeekStart)
+	}
+	if err != nil || !ok {
+		f.Close()
+		return nil, errUnverifiedBlob
+	}
+	s.unverifiedClear(room, sha)
+	return f, nil
 }
 
 func fileSHA256(p string) (string, error) {
@@ -1257,8 +1276,17 @@ func (s *Store) WriteWithFiles(ctx context.Context, now time.Time, sf SendFiles,
 	if err := s.mkdirSynced(dir); err != nil { // each new directory synced into its parent [B5]
 		return nil, fileErr("write", err) // an operation and a code, never a path [S3]
 	}
-	if err := s.putBlob(sf.Room, msha, func(w io.Writer) error { _, err := w.Write(sf.Manifest); return err }); err != nil {
+	// Every blob path this publication may write, and whether it held
+	// nothing before: if the publication fails they go in the same step
+	// (failed), counted against the budget until removed [L3].
+	var wrote []putPath
+	failed := func(err error) (*core.VerifiedRecord, error) {
+		s.unpublish(context.WithoutCancel(ctx), sf.Room, wrote, now)
 		return nil, err
+	}
+	wrote = append(wrote, s.willPut(sf.Room, msha, int64(len(sf.Manifest))))
+	if err := s.putBlob(sf.Room, msha, func(w io.Writer) error { _, err := w.Write(sf.Manifest); return err }); err != nil {
+		return failed(err)
 	}
 	for _, f := range sf.Files {
 		if f.Kept {
@@ -1267,12 +1295,13 @@ func (s *Store) WriteWithFiles(ctx context.Context, now time.Time, sf SendFiles,
 		// A fresh private copy, hashed as it is written, put in place only
 		// if its size and digest are the approved ones; staging is read
 		// once, here, and never linked [fix-files-b 3].
+		wrote = append(wrote, s.willPut(sf.Room, f.SHA256, f.Size))
 		if err := s.copyApproved(sf.Room, stageRel(sf.Request, f.N), f.SHA256, f.Size); err != nil {
-			return nil, err
+			return failed(err)
 		}
 	}
 	if err := syncDir(dir); err != nil {
-		return nil, fileErr("write", err)
+		return failed(fileErr("write", err))
 	}
 	var r *core.VerifiedRecord
 	err := s.tx(ctx, func(tx *sql.Tx) error {
@@ -1334,10 +1363,53 @@ func (s *Store) WriteWithFiles(ctx context.Context, now time.Time, sf SendFiles,
 		return trash(tx, stageDirRel(sf.Request), "stage", "", sf.Request, "", 0, "", now)
 	})
 	if err != nil {
-		return nil, err
+		return failed(err)
 	}
 	s.runTrashLocked(ctx, false)
 	return r, nil
+}
+
+// putPath is a blob path a publication writes: fresh if nothing was there.
+type putPath struct {
+	sha   string
+	size  int64
+	fresh bool
+}
+
+func (s *Store) willPut(room, sha string, size int64) putPath {
+	_, err := os.Lstat(s.blobPath(room, sha))
+	return putPath{sha: sha, size: size, fresh: errors.Is(err, fs.ErrNotExist)}
+}
+
+// unpublish undoes the blobs a publication that failed put in place; the
+// caller holds fileMu, so no other writer of a blob runs meanwhile. They
+// are queued for deletion in one transaction with their sizes, which
+// count against the room's budget until they are removed (usageSQL), and
+// the queue is run: a path a live row names is kept, as always. If the
+// queue cannot be written, the paths that held nothing before are removed
+// at once: no row can name bytes this publication alone put there.
+func (s *Store) unpublish(ctx context.Context, room string, ps []putPath, now time.Time) {
+	if len(ps) == 0 {
+		return
+	}
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		for _, p := range ps {
+			if err := trash(tx, blobRel(room, p.sha), "blob", room, "", p.sha, p.size, "", now); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		for _, p := range ps {
+			if p.fresh {
+				_ = os.Remove(s.blobPath(room, p.sha))
+			}
+		}
+		_ = syncDir(s.abs("blobs/" + room))
+		return
+	}
+	s.runTrashLocked(ctx, false)
 }
 
 // putBlob writes a blob under a temporary name, syncs it and renames it

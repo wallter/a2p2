@@ -96,6 +96,14 @@ type Rooms struct {
 	// from ever waiting for mu (K4; the lock order is in store.Store).
 	smu    sync.Mutex
 	states map[string]members.State
+	// pubs, under smu, is per room a count raised when a commit that may
+	// change the room's membership begins and again once its state is
+	// published (odd: in between), so that a reader that pairs the
+	// store's change count with State can tell a membership committed
+	// but not yet published (L1). Only ingest opens one, and nothing it
+	// does inside waits for the store's file lock; so a reader may wait
+	// for one to end under that lock.
+	pubs map[string]*publication
 	// files, set by NewFiles, is the machine's attachment part (nil: none).
 	files *Files
 	// signs counts membership entries signed (create entries excluded);
@@ -467,14 +475,21 @@ func (r *Rooms) CheckGen(room string, gen int64) error {
 func (r *Rooms) Leave(ctx context.Context, room string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.rooms[room] == nil {
+	rl := r.rooms[room]
+	if rl == nil {
 		return ErrNoRoom
 	}
+	// The room is gone for State before the commit, so no decision is
+	// taken against membership the store no longer has [L1]; LeaveRoom
+	// then waits for the file lock with no publication open.
+	end := r.beginPublish(room)
+	r.setState(room, nil)
+	end()
 	if _, err := r.m.st.LeaveRoom(ctx, room, r.m.now()); err != nil {
+		r.setState(room, &rl.st)
 		return err
 	}
 	delete(r.rooms, room)
-	r.setState(room, nil)
 	r.fmu.Lock()
 	delete(r.fronts, room)
 	r.fmu.Unlock()
@@ -528,6 +543,66 @@ func (r *Rooms) setState(room string, st *members.State) {
 		return
 	}
 	r.states[room] = *st
+}
+
+// publication is one room's count of membership publications (pubs).
+type publication struct {
+	n    int64
+	wait chan struct{} // closed when the one in progress ends; nil if none
+}
+
+// beginPublish marks a commit that may change room's membership as in
+// progress; the returned end, called once its state is published (or
+// restored), ends it. The caller holds mu.
+func (r *Rooms) beginPublish(room string) (end func()) {
+	r.smu.Lock()
+	if r.pubs == nil {
+		r.pubs = map[string]*publication{}
+	}
+	p := r.pubs[room]
+	if p == nil {
+		p = &publication{}
+		r.pubs[room] = p
+	}
+	p.n++
+	p.wait = make(chan struct{})
+	r.smu.Unlock()
+	return func() {
+		r.smu.Lock()
+		defer r.smu.Unlock()
+		p.n++
+		close(p.wait)
+		p.wait = nil
+	}
+}
+
+// stateAt is State with the count of room's publications it was read at.
+// While a publication is in progress it returns only wait, closed when it
+// ends: the state then may be older than what the store has committed.
+func (r *Rooms) stateAt(room string) (st members.State, n int64, wait <-chan struct{}, err error) {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	if p := r.pubs[room]; p != nil {
+		if p.wait != nil {
+			return members.State{}, p.n, p.wait, nil
+		}
+		n = p.n
+	}
+	st, ok := r.states[room]
+	if !ok {
+		return members.State{}, n, nil, ErrNoRoom
+	}
+	return st, n, nil, nil
+}
+
+// published is the count of room's publications begun or ended.
+func (r *Rooms) published(room string) int64 {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	if p := r.pubs[room]; p != nil {
+		return p.n
+	}
+	return 0
 }
 
 func (r *Rooms) room(room string) (*roomLog, error) {
@@ -689,6 +764,10 @@ func (r *Rooms) ingestWith(ctx context.Context, rl *roomLog, gen int64, wires []
 			b.Now, b.Clock = r.m.now(), r.m.now // read again inside the write: an approval is judged against its invite's expiry then
 		}
 		var n int64
+		// From before the commit until its state is published, a reader
+		// of the membership waits (stateAt) [L1]: the store's change count
+		// moves at the commit, State only at publish.
+		end := r.beginPublish(rl.id)
 		switch {
 		case err != nil:
 		case commit != nil:
@@ -702,9 +781,12 @@ func (r *Rooms) ingestWith(ctx context.Context, rl *roomLog, gen int64, wires []
 		}
 		if err != nil {
 			r.restore(rl)
+			end()
 			return nil, err
 		}
+		_ = hookAt("ingest:publish") // tests: committed, not yet published
 		publish(n)
+		end()
 		r.m.wakes.touch(rl.id)
 		fill()
 		// After the commit memory and disk agree: a failure here changes

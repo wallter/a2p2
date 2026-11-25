@@ -31,7 +31,10 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   still the file a2p2 wrote there. Approving needs the terms shown
   (`terms_changed` otherwise). A file is asked for only from machines
   that may read its message; a start removes only files a2p2 named and
-  `status` counts any other file under `blobs/` as unknown. The confirmation is a guard rail for an
+  `status` counts any other file under `blobs/` as unknown. A send to
+  everyone is approved for the set of members shown, and a replacement
+  for the audience of the message it replaces; a send whose message
+  cannot be written is refused before anything is copied. The confirmation is a guard rail for an
   agent running as your user. Not yet tried with a real harness (DESIGN
   section 12, PROTOCOL section 10).
 - **`a2p2 net check`** says whether this machine can talk to the members

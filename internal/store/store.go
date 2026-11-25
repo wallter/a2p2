@@ -91,6 +91,10 @@ type Store struct {
 	// unknownFiles counts what the last start left under blobs/ because
 	// a2p2 does not generate its name [K3].
 	unknownFiles atomic.Int64
+	// unverified, under vmu (a leaf), names the held blobs the last start
+	// could not examine: OpenBlob hashes one before serving it [W1].
+	vmu        sync.Mutex
+	unverified map[[2]string]bool
 	// stageMu serialises staging reservations; resMu guards staging, the
 	// bytes reserved by requests being staged (finding 9).
 	stageMu, resMu            sync.Mutex

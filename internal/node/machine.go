@@ -469,44 +469,9 @@ func (m *Machine) writeWith(ctx context.Context, room, agent string, decide func
 	defer m.mu.Unlock()
 	now := m.now()
 	var epoch string
-	r, err := put(ctx, now, func(rd *store.Reader) (*core.VerifiedRecord, error) {
-		v := m.newView(rd, room, now)
-		if err := v.load(); err != nil {
-			return nil, err
-		}
-		if err := v.requireAgent(agent); err != nil {
-			return nil, err
-		}
-		f := core.RecordFields{Room: room, Agent: agent}
-		if err := decide(v, &f); err != nil {
-			return nil, err
-		}
-		epoch = m.out[room]
-		var contig int64
-		for _, s := range v.streams {
-			if s.Author == m.ID && s.Epoch == epoch {
-				contig = s.Contig
-			}
-		}
-		if epoch == "" || contig == 0 {
-			links, err := v.ownHeads(m.ID)
-			if err != nil {
-				return nil, err
-			}
-			epoch, f.Seq, f.Links = m.newEpoch(), 1, links
-		} else {
-			last, err := v.at(streamKey{m.ID, epoch}, contig)
-			if err != nil || last == nil {
-				return nil, errors.Join(err, errors.New("own stream lost its last record"))
-			}
-			f.Seq, f.Prev = contig+1, last.id
-		}
-		f.Epoch, f.Created = epoch, now
-		rec, err := core.NewRecord(m.key, f)
-		if err != nil {
-			return nil, writeErr(err)
-		}
-		return rec.Verified()
+	r, err := put(ctx, now, func(rd *store.Reader) (rec *core.VerifiedRecord, err error) {
+		rec, epoch, err = m.buildRecord(rd, room, agent, now, decide, m.newEpoch)
+		return rec, err
 	})
 	if err != nil {
 		return Sent{}, err
@@ -517,6 +482,69 @@ func (m *Machine) writeWith(ctx context.Context, room, agent string, decide func
 		m.filesChanged(ctx, room) // [F1]: files the new version no longer lists
 	}
 	return Sent{ID: r.ID(), Room: room, Created: r.Fields().Created}, nil
+}
+
+// buildRecord builds and signs, in rd's transaction, the record a write of
+// agent in room would store at now: decide fills in its content, then its
+// stream, position, links and time. A new stream's epoch comes from
+// epochFn. The caller holds mu.
+func (m *Machine) buildRecord(rd *store.Reader, room, agent string, now time.Time, decide func(*roomView, *core.RecordFields) error,
+	epochFn func() string) (*core.VerifiedRecord, string, error) {
+	v := m.newView(rd, room, now)
+	if err := v.load(); err != nil {
+		return nil, "", err
+	}
+	if err := v.requireAgent(agent); err != nil {
+		return nil, "", err
+	}
+	f := core.RecordFields{Room: room, Agent: agent}
+	if err := decide(v, &f); err != nil {
+		return nil, "", err
+	}
+	epoch := m.out[room]
+	var contig int64
+	for _, s := range v.streams {
+		if s.Author == m.ID && s.Epoch == epoch {
+			contig = s.Contig
+		}
+	}
+	if epoch == "" || contig == 0 {
+		links, err := v.ownHeads(m.ID)
+		if err != nil {
+			return nil, "", err
+		}
+		epoch, f.Seq, f.Links = epochFn(), 1, links
+	} else {
+		last, err := v.at(streamKey{m.ID, epoch}, contig)
+		if err != nil || last == nil {
+			return nil, "", errors.Join(err, errors.New("own stream lost its last record"))
+		}
+		f.Seq, f.Prev = contig+1, last.id
+	}
+	f.Epoch, f.Created = epoch, now
+	rec, err := core.NewRecord(m.key, f)
+	if err != nil {
+		return nil, "", writeErr(err)
+	}
+	vr, err := rec.Verified()
+	return vr, epoch, err
+}
+
+// checkWrite builds and signs, in one read transaction, the record write
+// would store now and stores nothing: every rule the record's encoding
+// and decide apply is asked before anything else is done for it [L3]. A
+// new stream is given a placeholder epoch of the same length.
+func (m *Machine) checkWrite(ctx context.Context, room, agent string, decide func(*roomView, *core.RecordFields) error) error {
+	if err := checkAgent(agent); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	return m.st.View(ctx, func(rd *store.Reader) error {
+		_, _, err := m.buildRecord(rd, room, agent, now, decide, func() string { return "0000000000000001" })
+		return err
+	})
 }
 
 // newEpoch is 16 random hex digits, not all zeros (PROTOCOL section 0).

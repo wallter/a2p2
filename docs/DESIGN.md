@@ -780,11 +780,19 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    without it or with other terms is refused (`terms_changed`) and
    decides nothing. There is one way to approve a send with files
    (`Files.ApproveSend`, with the terms); the general confirm path can
-   only decline one. The member count shown for "everyone" is the one
-   the terms were made with, and an implicit reply's terms name the
-   parent's author it goes to. If the room's membership differs at
-   publication from the count approved, nothing is sent and the request
-   ends `terms_changed`. Approval re-checks the staged digests and sends them;
+   only decline one. For "everyone" the terms bind the set of members
+   when the agent asked (a digest of their sorted keys) and show its
+   size; an implicit reply's terms name the parent's author it goes to;
+   a replacement's terms and display name the audience of the message
+   it replaces (a reply sent to everyone stays a send to everyone). If
+   the member set, read in the publishing transaction, differs from the
+   one approved, nothing is sent and the request ends `terms_changed`.
+   The whole record is built and checked when the agent asks, before
+   anything is staged, and again at approval before any byte is copied
+   into place; a publication that still fails queues the blobs it wrote
+   for deletion in the same step, counted against the budget until they
+   are removed. A replacement's eligibility is decided by the clock read
+   in the publishing transaction. Approval re-checks the staged digests and sends them;
    the source is never read again. Declined, expired after 24 hours,
    failed, or after this machine's own admission is voided, nothing is
    written and staging is deleted.
@@ -808,19 +816,32 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    from zero, and removes only what carries a name a2p2 generates (a
    blob, a part, a request's staging, a temporary file) that no row
    names; any other file under `blobs/` is left and counted in `status`
-   as unknown. Bytes are never adopted unverified: a file already at a
+   as unknown. An orphan staging directory loses only the files a2p2
+   names there; if anything else is left, it and the directory stay and
+   are counted. Where a directory cannot be synced (Windows), a removal
+   stays queued until a start finds its path gone; an entry whose path
+   holds a file a2p2 did not publish is finished at once. Bytes are never adopted unverified: a file already at a
    blob's path is hashed before it counts as that blob, and replaced by
    the verified bytes if it does not match; a start hashes every held
-   blob and removes one that fails, to be fetched again. Serving does not
+   blob and removes one that fails, to be fetched again. A held blob the
+   start could not examine (any error but its absence) keeps its row and
+   is hashed, through the handle that serves it, the first time it is
+   opened; it is served only if it matches. Serving does not otherwise
    hash again. A request names the file's hash in its path, so a fetch,
    a list fetch and a carry go only to the author or a member this
    machine can affirm may read the message and its winning version, by
-   the rule the serving side applies. The clock for a promotion is read
-   inside the transaction that makes the bytes live; a want past its
-   life is not advertised before the sweep lapses it.
-   Permission is decided once under one view of membership and rows, held
-   by the transfer and asked again in the transaction that makes bytes or
-   a copy live; each fetch writes and checks a new copy.
+   the rule the serving side applies, asked again immediately before
+   each request (a fetch holds a lease on it). The clock for a promotion,
+   and for choosing the wants of a pull answer, is read inside the
+   transaction; a want past its life is not advertised before the sweep
+   lapses it. Answers from a machine that is no longer a member do not
+   count in a fetch's state. Permission is decided once under one view
+   of membership and rows, held by the transfer and asked again in the
+   transaction that makes bytes or a copy live. A commit that changes a
+   room's membership is counted from before the commit until its new
+   state is published in memory, and a decision waits while one is in
+   progress, so no lease is taken against membership older than the
+   database; each fetch writes and checks a new copy.
 
 **Who can reach whom.** Text and files take the same connections; what
 files add is item 5.
@@ -870,7 +891,10 @@ refusal's timing is not made equal: a member that may read a message can
 tell from how long a `not_held` takes whether this machine holds its
 header. After a revocation, one buffer may still be written in the 25 ms
 the lease takes to cut a response: bounded, and less than a machine that
-has not yet learned of the revocation serves (T5). Every version of one
+has not yet learned of the revocation serves (T5). Likewise a fetch asks
+its rule immediately before each request; a removal that commits between
+that check and the request's write is ordered as if it arrived a moment
+later. Every version of one
 message that carries the same commitment shares its list, since the hash
 makes the content identical. On Unix the last symbolic link of a path to
 attach is followed; the person is shown the path of the file actually

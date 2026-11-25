@@ -426,9 +426,21 @@ func TestADeletionRemovesOnlyTheCopyItPublishedNeverAByteIdenticalFileAtItsName(
 	if b, err := os.ReadFile(p); err != nil || string(b) != string(tf.data) {
 		t.Fatalf("a file a2p2 did not publish was removed: %q %v", b, err)
 	}
+	// Where a directory cannot be synced (Windows) a2p2's own removals stay
+	// queued, marked unlinked, until a start finds their paths gone [W6];
+	// the entry of the file a2p2 did not publish is finished at once.
 	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM file_trash WHERE unlinked = 0`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("queue entries neither finished nor unlinked: %d %v", n, err)
+	}
+	if err := s.ReconcileFiles(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.db.QueryRow(`SELECT count(*) FROM file_trash`).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("queue entries left: %d %v", n, err)
+		t.Fatalf("queue entries left after a start: %d %v", n, err)
+	}
+	if b, err := os.ReadFile(p); err != nil || string(b) != string(tf.data) {
+		t.Fatalf("a start removed a file a2p2 did not publish: %q %v", b, err)
 	}
 }
 
