@@ -98,7 +98,7 @@ GO_IMAGE ?= golang:$(shell awk '/^go /{print $$2}' go.mod)
 LINUX_SHARDS ?= 8
 check-linux:      ## go vet and the race tests on Linux in a container, sharded as make test (needs Docker)
 	docker run --rm -v "$(CURDIR)":/src:ro -v a2p2-gomod:/go/pkg/mod -v a2p2-gocache:/root/.cache/go-build \
-	  -e SHARDS=$(LINUX_SHARDS) -w /work $(GO_IMAGE) sh -c 'cp -a /src/. /work/ && rm -rf /work/bin /work/dist /work/.chaos /work/.prerelease /work/.a2p2-dev /work/.claude && go vet ./... && scripts/gotest.sh'
+	  -e SHARDS=$(LINUX_SHARDS) -w /work $(GO_IMAGE) sh -c 'tar -C /src --exclude=./bin --exclude=./dist --exclude=./.chaos --exclude=./.prerelease --exclude=./.a2p2-dev --exclude=./.claude -cf - . | tar -C /work -xf - && go vet ./... && scripts/gotest.sh'
 
 # check, lint, vuln, check-linux and chaos at the same time, each to its
 # own log in .prerelease/; on a pass on a clean tree it writes
