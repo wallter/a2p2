@@ -31,10 +31,11 @@ a list of commits. A change that a user or an agent would notice adds a
 line under `[Unreleased]` in the same change. At release time that section
 becomes the version's section, with the date, and the release workflow
 publishes it as the release notes (`scripts/changelog.sh <tag>` prints
-the section). The notes begin with the install block in
-`scripts/release-notes-head.md`; `scripts/release-notes.sh <tag>` prints
-the whole notes, and `make verify-release` checks that the published
-notes begin with that block.
+the section). The notes are the section's first paragraph (its summary),
+then the install block in `scripts/release-notes-head.md`, then the rest;
+`scripts/release-notes.sh <tag>` prints the whole notes, and
+`make verify-release` checks that the published notes contain that block.
+The release is titled `a2p2 <tag>`.
 
 ## What is tested where
 

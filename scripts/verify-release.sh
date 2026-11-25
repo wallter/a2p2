@@ -59,8 +59,11 @@ out=$("$dir/$asset" version) || no "$asset version failed"
 echo "verify-release: $asset version: $out"
 notes=$(gh release view ${REPO:+--repo "$REPO"} "$v" --json body --jq .body | tr -d '\r')
 head=$(cat "$(dirname "$0")/release-notes-head.md")
-[ "${notes:0:${#head}}" = "$head" ] || no "the notes of $v do not begin with scripts/release-notes-head.md"
-echo "verify-release: the notes begin with the install block"
+case "$notes" in
+  *"$head"*) ;;
+  *) no "the notes of $v do not contain scripts/release-notes-head.md" ;;
+esac
+echo "verify-release: the notes contain the install block"
 echo "verify-release: notes of $v (first lines):"
 printf '%s\n' "$notes" | head -20 | sed 's/^/  /'
 echo "verify-release: $v ok"

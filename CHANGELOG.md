@@ -8,6 +8,17 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-25
+
+The local web page loads. It did not in any earlier release: `a2p2 ui`
+showed "Could not load page data". Nothing changes on the wire; 0.2.0 to
+0.2.3 machines work together.
+
+Known limits: the limits of 0.2.2 still apply. The page is tested by
+running its script in Node, not in a browser; three smaller page problems
+are open as issue 8. `install.ps1` has not been run on Windows. A run
+between two physical machines has still not been recorded.
+
 ### Fixed
 
 - **The web page did not load in 0.1.0, 0.2.0, 0.2.1 and 0.2.2.** `a2p2 ui`
@@ -72,9 +83,13 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   protocol, and its links are absolute. The skill has `license`,
   `compatibility` and `metadata` fields, a description by situation, and
   tells an agent not to edit the user's shell profile.
-- **Release notes begin with how to install.** The block is in
+- **Release notes begin with a summary and how to install.** The summary
+  is the first paragraph of the version's section; the install block is in
   `scripts/release-notes-head.md`, used by the release workflow and by
-  `make verify-release`.
+  `make verify-release`. A release is titled `a2p2 <tag>`.
+- **A way to install from a fixed version.** [docs/INSTALL.md](docs/INSTALL.md)
+  shows how to take `install.sh` from a release tag, not from `main`, and
+  says the binaries are not signed.
 
 ## [0.2.2] - 2026-11-25
 

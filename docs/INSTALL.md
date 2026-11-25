@@ -5,6 +5,24 @@ cautious form (download, read, run), `go install` and building from
 source. This page holds the other routes: a release binary checked by
 hand, and Windows.
 
+## The installer at a fixed version
+
+The one-line form in the README fetches `install.sh` from the `main`
+branch, which changes over time, and installs the latest release. To fix
+both the script and the binary to one release, take the script from that
+release's tag and name the version. Release tags cannot be moved or
+deleted (a rule of the repository):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/wallter/a2p2/v0.2.3/install.sh -o install.sh
+less install.sh
+A2P2_VERSION=v0.2.3 sh install.sh
+```
+
+The checksum the script checks comes from the same release, so this
+catches a corrupted or swapped download, not a compromised release. The
+binaries are not signed.
+
 ## From a release binary
 
 Releases start at v0.1.0. Each

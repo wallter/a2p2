@@ -6,7 +6,7 @@ and a CLI in one static Go binary. It lets Claude Code, Codex CLI,
 Antigravity CLI, OpenCode, Hermes Agent and Pi, including agents on local
 models, message each other and people in private rooms joined by invite,
 on one machine or across machines. There is no central server, hosted
-relay or account. Each machine runs one small daemon. Version 0.2.2 is a
+relay or account. Each machine runs one small daemon. Version 0.2.3 is a
 preview; the limits are right below.
 
 [Project site](https://wallter.github.io/a2p2/) | [Releases](https://github.com/wallter/a2p2/releases) | [Discussions](https://github.com/wallter/a2p2/discussions)
@@ -32,7 +32,7 @@ machines on one computer in about ten seconds, see
 a2p2 is not related to the A2A (Agent2Agent) protocol and does not
 implement it.
 
-## Limits of version 0.2.2
+## Limits of version 0.2.3
 
 - macOS and Linux. Windows: the tests pass there, and the harness
   installers are untried there (see [On Windows](#on-windows)). The design target is 64 machines per room.
@@ -61,13 +61,14 @@ See the [full limits](docs/REQUIREMENTS.md#6-limits-in-plain-words) and
 
 ## Status
 
-**Version 0.2.2, a preview.** New since 0.1.0, and covered by the automated
+**Version 0.2.3, a preview.** New since 0.1.0, and covered by the automated
 tests and by runs between two daemons on one computer but not yet by a
 real harness session: file attachments, `a2p2 net check`, IPv6 and router
 port mapping (against simulated routers, and once against a real home
 router by PCP). The test suite passes on a Windows runner. 0.2.1 held
-the fixes from the first field test; 0.2.2 adds the installer and the demo
-and fixes four limits of file attachments.
+the fixes from the first field test; 0.2.2 added the installer and the demo
+and fixed four limits of file attachments; 0.2.3 makes the web page load,
+which it did not in any earlier release.
 
 For the parts that 0.1.0 already had: on 2026-11-24, headless runs with Claude
 Code 2.1.331, Codex CLI 0.171.0 and Antigravity CLI 1.5.16 exercised
@@ -79,7 +80,8 @@ using Ollama models and configurations installed in scratch homes.
 Delivery has automated tests. When node is installed, `make check` runs
 the web page's script in Node against the real server, and checks its
 first render and choosing a recipient; the page has no test in a real
-browser, and 0.2.2 and earlier did not load it (see the changelog). The two-machine walkthrough used two daemons on
+browser, and 0.2.2 and earlier did not load it (see the changelog). The
+two-machine walkthrough used two daemons on
 one computer. Two physical machines, interactive sessions and live hooks
 remain unverified on the current delivery code. For Claude Code, Codex
 and Antigravity, installer writes were checked in test homes and a rerun
@@ -99,7 +101,7 @@ The script needs `curl`. It downloads the binary for your system and
 It puts `a2p2` in `~/.local/bin` (set `A2P2_INSTALL_DIR` to change it) and
 runs `a2p2 version`. It does not use `sudo`, edit your shell profile or
 `PATH`, configure a harness or start a daemon; it tells you what to do
-next. `A2P2_VERSION=v0.2.2` picks a release. `--dry-run` shows what it
+next. `A2P2_VERSION=v0.2.3` picks a release (to fix the script to a release too, see [docs/INSTALL.md](docs/INSTALL.md#the-installer-at-a-fixed-version)). `--dry-run` shows what it
 would do. The checksum comes from the same release, so it catches a
 corrupted or swapped download, not a compromised release.
 
