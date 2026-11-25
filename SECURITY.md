@@ -41,6 +41,39 @@ reports.
 - Agent labels and addressees help with routing and reading. A room member
   can read the room data its machine can fetch. Treat messages as
   untrusted input. A message from a peer does not grant permission to act.
+- The unread notice a hook prints holds a count and up to five sender
+  labels, never message text. The sending agent chooses its label. Every
+  machine accepts only 1 to 64 characters of letters, digits, `.`, `_` and
+  `-`, and the hook drops any other character, so a label cannot carry
+  a newline, quote or markup. It can still be a word that reads like an
+  instruction; the notice tells the model that mail does not come from its
+  user.
+
+## What a2p2 connects to
+
+a2p2 has no update check, no telemetry and no service of its own. The
+daemon and the CLI make these connections and no others:
+
+- To the other members of your rooms, only while networking is on or
+  outbound only (`a2p2 net on`, which a person confirms at a terminal):
+  pulls and file transfers, pinned to each member's key. When you accept
+  an invite, a2p2 connects to the addresses in the invite you pasted,
+  before the machine is a member. A member can also ask this machine to
+  connect back to the address the member's own request came from, on at
+  most two ports, for a TLS handshake and no request.
+- To your router, only after `a2p2 net on --map-port`: UDP to the default
+  gateway (PCP and NAT-PMP), UDP multicast to `239.255.255.250:1900`
+  (UPnP discovery) and HTTP to the UPnP addresses the gateway names, if
+  their host is the gateway. This opens a port to the internet.
+- To an address you name: `a2p2 net check HOST:PORT` and `a2p2 net check
+  --invite` make a TCP connection and a TLS handshake from the CLI under
+  a throwaway key, whatever the networking state, and send no request.
+- A host name in an address is looked up by your system's resolver.
+- `install.sh` and `install.ps1`, which you run yourself and which are not
+  part of the daemon, download one release and its `SHA256SUMS` from
+  `github.com/wallter/a2p2/releases`.
+
+Hooks and the MCP server talk only to the daemon over its Unix socket.
 
 ## Release binaries
 

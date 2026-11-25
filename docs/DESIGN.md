@@ -195,9 +195,19 @@ Compared with the model, they reach the server later or only in part if
 the difference persists. The differential test counts the reports it
 leaves uncompared for this reason.
 
-Measured with 64 machines after 30 days of daily restarts, an idle pull
-takes 177 bytes up and 72 down. One new message takes 1.7 KB up and
-14.9 KB down in three requests.
+Measured with `TestPullSizesInASixtyFourMachineRoomAfterThirtyDaysOfDailyRestarts`
+(skipped unless `A2P2_MODEL_DEEP=1`; the log lines say "64 machines", but
+no 64 machines run). Two real nodes, `a` and `b`, in one process, joined
+by the in-memory network. The other 62 members are synthetic keys that
+only sign records, which both nodes are handed directly; they run no
+node. Each key writes one record a day for 30 days, a new stream each day:
+62 authors times 30 streams is 1,860 streams (the test's log label says
+1,920). Counted are the bytes of each pull request and response as JSON,
+inside the process: no TLS, no HTTP framing, no compression. In that
+setup an idle pull of `b` from `a` takes 177 bytes up and 72 down. One
+new message takes 1.7 KB up and 14.9 KB down in three requests. These
+are sizes of the summary exchange, not a measurement of 64 machines or
+of a network.
 
 **Not modelled: when and from whom.**
 
@@ -237,8 +247,8 @@ deletes withdrawn text when it stores the withdraw [R6].
 The inbox is the model's walk from each agent's cursors [R7]: winning text,
 `expired`, withdraw and replace notices, `late`, and what it waits for. Only
 Seen moves a cursor, confirming exactly the keys and versions a full inbox
-read listed (its receipts, below); the hook prints counts only and never
-message text. Claude Code,
+read listed (its receipts, below); the hook prints a count and sender labels, never
+message text ([harness notes](HARNESSES.md#what-the-hook-prints)). Claude Code,
 Codex and Antigravity get the MCP server and a hook; OpenCode and Hermes
 Agent get the MCP server only, and Pi, which has no MCP, a skill that
 points its model at the CLI ([harness notes](HARNESSES.md)). Install
@@ -337,11 +347,19 @@ so the branch under a message this machine does not hold, or holds only as
 a header, still lists them, their parent marked missing (D10). A reply
 below a reply that is not held is still not reached: gap G3.
 
-Reasons shown (A4) in `a2p2 trace`, the page and tool results: *missing*
-(being fetched, expired, withdrawn, before admission); *refused* (does not
-verify, not the next position, fork, author never admitted, dated ahead,
-peer not a member); *pending* (needs a second admin, waits for a person,
-waits for an entry it had seen); and every `members.Resolve` reason. Every
+Reasons shown (A4). `a2p2 trace ID` needs a message whose header this
+machine holds (an unknown id is an error) and prints the state of its text
+here: available, waiting for a copy, outside this machine's permitted room
+history, withdrawn or expired. It shows no refusal and no fork evidence.
+The reasons a log entry has no effect (every `members.Resolve` reason,
+including a fork refused) and the entries waiting for a second admin show
+in `room list` and the page. A record refused on receipt (does not
+verify, not the next position, fork, author never admitted, dated ahead)
+is counted per peer and room in the `refusals` table, and the second record
+of a forked stream is kept in the `forks` table; no command, tool or page
+reads either yet (a gap in A4, TRACE.md). A fork of a log key is shown: in
+`room list` as conflicting membership entries, settled or unresolved, and
+while unresolved as a `fork` alert (`a2p2 alerts`, the page). Every
 refusal of the local API and the tools is a sentence, one of a few stable
 codes and whether repeating the call later may succeed (PROTOCOL 7).
 
@@ -357,7 +375,7 @@ marks nothing seen. Results are compact JSON with `<`, `>` and `&` as
 written. Copy and handled reports stay in `a2p2 trace` and the page.
 
 A2 is checked by a proxy, compact definition bytes divided by four and
-rounded up: 3,984 bytes, 996 of the 1,000 allowed. `TestToolsGolden` checks
+rounded up: 3,979 bytes, 995 of the 1,000 allowed. `TestToolsGolden` checks
 the definitions match the protocol, and `TestToolDefinitionsFitTheTokenBudget`
 enforces the 4,000-byte limit. The count by each model family's own
 tokenizer has not been measured.
@@ -437,7 +455,7 @@ applies. Rejoining needs a new invite; an admin removes it from the list.
 | Clock back / forward | Expired stays expired / expires early; future-dated records wait | `TestTextExpiredHereStaysExpiredWhenTheClockIsSetBack`, `TestExpiryWithDifferingClocksIsByEachHoldersOwnClockAndNeverResurrects`; waiting not covered |
 | Removed machine | Refused as a peer once known; its records kept, marked | `TestMessageOfARemovedAuthorReachesAMachineThatNeverMetItMarked`, `TestHeldResponseIsNotReleasedToAPeerRemovedWhileItWaited` |
 | Forked log key | First branch kept, evidence passed on, alert | `TestStolenCreatorKeyForkFromFirstEntryIsRefusedByEveryMember`; the alert not covered |
-| Forked record stream | Second record refused | Q8 checks closure only; passing on and alerting not covered |
+| Forked record stream | Second record refused and kept as evidence; nothing shows or passes it on, and there is no alert | Q8 checks closure only; showing, passing on and alerting not built |
 | Relay alters or strips | Refused, or text repaired | `TestRelayThatAltersARecordIsRefused`, `TestRelayThatStripsTextAndClaimsWithdrawalCannotLoseIt` |
 | Peer withholds | Other streams progress; rotation reaches other holders | `TestARefusedStreamDoesNotStarveOthersUnderAPageLimit` covers paging; rotation not covered (G4) |
 
@@ -489,8 +507,10 @@ What remains partly resolved, as REQUIREMENTS section 6 limits:
 | A removed machine is not told; its pulls are refused with an answer that says nothing | It sees refusals from every member; `poll` on its invite says `removed` (PROTOCOL 5.3) |
 
 Open: P3 against a same-user agent; stream state grows until compaction is
-designed (1,920 streams per 64-machine room after 30 days,
-`TestStreamCostForSixtyFourMachinesOverThirtyDays`); one pull per peer for
+designed (1,920 streams per 64-machine room after 30 days, from 64
+machines of the delivery model, not real nodes;
+`TestStreamCostForSixtyFourMachinesOverThirtyDays`, which runs with
+`A2P2_MODEL_DEEP=1`; the real-node size test seeds 62 authors, 1,860 streams); one pull per peer for
 all shared rooms may be needed at 100 rooms; posting policy (T6) is
 deferred to stage 3 and needs a new entry kind [M14].
 
@@ -511,6 +531,15 @@ unreachable) and the time taken. It ends with one sentence saying what to do. It
 observes and decides nothing; with networking off it dials nothing.
 `a2p2 net check HOST:PORT` and `--invite` test addresses before any room
 exists, from the CLI process under a throwaway key (PROTOCOL 4.7).
+
+**Everything a2p2 contacts.** Members' addresses (pulls, files, dial-back,
+and an invite's addresses at a join), only while networking is on or
+outbound only; the local router after `net on --map-port`; the address a
+person names to `net check HOST:PORT` or `--invite`, from the CLI and
+whatever the networking state; and, for `install.sh`, GitHub's release
+page, run by a person and not the daemon. No other code opens a
+connection: no update check, no telemetry, no lookup of its own (D11, with
+its 2026-11-25 note; [SECURITY](../SECURITY.md#what-a2p2-connects-to)).
 
 **Two diagnoses.** The checks accept and refuse as before; only what the
 tool says differs. When the far end presents more than one certificate,

@@ -20,6 +20,19 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   `SUPPORT.md` and `docs/MAINTAINING.md`, which says how a maintainer
   treats public input as untrusted text.
 
+### Fixed
+
+- **Documents corrected to match the code.** `a2p2 trace` shows the state of
+  a held message's text, copies and handled reports, not refusals or fork
+  evidence (DESIGN 6, PROTOCOL 2, TRACE); refusal counts and a record
+  stream's fork evidence are kept and shown nowhere. The pull-size figures
+  came from two real nodes and 62 synthetic keys (1,860 streams), not 64
+  machines (DESIGN 4, 10). The unread hook prints a count and up to five
+  sanitised sender labels, not "counts only" (DESIGN, HARNESSES, SECURITY).
+  The tool definitions are 3,979 bytes, not 3,984 (DESIGN, TRACE). D11
+  gained a note listing every connection the program makes, and SECURITY a
+  section saying the same.
+
 ## [0.2.1] - 2026-11-25
 
 Fixes from the first field test: a home network with a real router, and a
