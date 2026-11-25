@@ -1,0 +1,21 @@
+# Findings gitleaks should skip. None of these is a real secret.
+# One line per finding: FILE:RULE:LINE, or COMMIT:FILE:RULE:LINE for versions
+# of gitleaks that match a finding only with its commit.
+
+# Invite-token test vectors: made-up secrets that the decoder tests read
+# (internal/core/token_test.go). The "secret" field is on line 4 of each file.
+internal/core/testdata/tokens/valid-eight-addresses.json:generic-api-key:4
+internal/core/testdata/tokens/valid-folded.json:generic-api-key:4
+internal/core/testdata/tokens/valid-one-address.json:generic-api-key:4
+internal/core/testdata/tokens/valid-protocol-example.json:generic-api-key:4
+internal/core/testdata/tokens/valid-whitespace-around.json:generic-api-key:4
+2699e0dab2c775b749bbcd3430bbee0a2c734d23:internal/core/testdata/tokens/valid-eight-addresses.json:generic-api-key:4
+2699e0dab2c775b749bbcd3430bbee0a2c734d23:internal/core/testdata/tokens/valid-folded.json:generic-api-key:4
+2699e0dab2c775b749bbcd3430bbee0a2c734d23:internal/core/testdata/tokens/valid-one-address.json:generic-api-key:4
+2699e0dab2c775b749bbcd3430bbee0a2c734d23:internal/core/testdata/tokens/valid-protocol-example.json:generic-api-key:4
+2699e0dab2c775b749bbcd3430bbee0a2c734d23:internal/core/testdata/tokens/valid-whitespace-around.json:generic-api-key:4
+14725a452bfe13f604b4c799cd946d65fc3f4f3f:internal/core/testdata/tokens/valid-protocol-example.json:generic-api-key:4
+
+# The same made-up example token in an early draft of the protocol document,
+# which exists only in history.
+6459f5124527c537e2dec21a5da53f79c0c45b43:docs/PROTOCOL-next.md:generic-api-key:269
