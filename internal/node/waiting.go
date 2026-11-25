@@ -31,13 +31,16 @@ func (x *Exchange) hold(ctx context.Context, peer string, q *PullRequest, b *bui
 		close(old) // replaced: the older one is released now
 	}
 	x.waiting[key] = mine
-	for _, c := range x.nextHold[key] {
-		close(c)
-	}
+	notify := x.nextHold[key]
 	delete(x.nextHold, key)
 	x.mu.Unlock()
 	if f, _ := ctx.Value(holdNoticeKey{}).(func()); f != nil {
 		f() // the HTTP layer gives up this request's concurrency slot
+	}
+	// NextHold's watchers learn of the hold only once all of it is done,
+	// the slot given up included.
+	for _, c := range notify {
+		close(c)
 	}
 	defer func() {
 		x.mu.Lock()
@@ -83,7 +86,8 @@ func WithHoldNotice(ctx context.Context, f func()) context.Context {
 }
 
 // NextHold returns a channel closed when the next hold of a request from
-// peer for room is registered: what a test waits on instead of sleeping.
+// peer for room is registered and its concurrency slot given up: what a
+// test waits on instead of sleeping.
 func (x *Exchange) NextHold(room, peer string) <-chan struct{} {
 	c := make(chan struct{})
 	x.mu.Lock()

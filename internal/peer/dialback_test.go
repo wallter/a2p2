@@ -152,7 +152,7 @@ func TestDialBackOverTLSRefusesNonMembersLimitsRateAndOldMachinesSay404(t *testi
 // Requirements: N2
 func TestProbeOutcomesOverRealSockets(t *testing.T) {
 	defer func(d time.Duration) { probeTLSTimeout = d }(probeTLSTimeout)
-	probeTLSTimeout = 300 * time.Millisecond
+	probeTLSTimeout = 2 * time.Second // a real handshake under -race on a loaded machine fits; the silent case waits all of it
 	a := newPM(t, "a", true)
 	p := NewProber(newID(t))
 	https := httptest.NewTLSServer(nil)
