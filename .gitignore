@@ -10,3 +10,4 @@
 /.chaos/
 /.model-sweep/
 /.prerelease/
+__pycache__/
