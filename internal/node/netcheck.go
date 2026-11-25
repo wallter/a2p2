@@ -23,6 +23,7 @@ const (
 	ProbeTimeout     = "timed_out"   // no answer within the dial or handshake timeout
 	ProbeWrongKey    = "wrong_key"   // the certificate offered names another key than expected (not proof that key is held)
 	ProbeNotA2P2     = "not_a2p2"    // something answered TCP, but not an a2p2 machine's TLS
+	ProbeIntercepted = "intercepted" // a TLS-inspecting proxy answered: re-signed certificate (Issuer says by whom)
 	ProbeUnreachable = "unreachable" // no route, network down, or another dial error
 	ProbeNotTried    = "not_tried"   // over the limit of one check, or not routable from here (Detail says)
 )
@@ -42,6 +43,14 @@ type AddrCheck struct {
 	// Node is the key that answered, when an a2p2 machine did.
 	Node   string `json:"node,omitempty"`
 	Detail string `json:"detail,omitempty"`
+	// Issuer is the name of the CA that issued the certificate of an
+	// intercepted connection: bounded and escaped, from an untrusted
+	// certificate.
+	Issuer string `json:"issuer,omitempty"`
+	// OnLink: unreachable with "no route to host" at an address inside a
+	// network this machine is attached to (local-network access is blocked
+	// here, often by a VPN or firewall).
+	OnLink bool `json:"on_link,omitempty"`
 }
 
 // Prober tries one address of node now (internal/peer).

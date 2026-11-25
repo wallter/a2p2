@@ -227,11 +227,15 @@ func (p *Prober) ProbeWith(ctx context.Context, addr string, check func(node str
 		case isTimeout(err):
 			return done(node.ProbeTimeout, fmt.Sprintf("no TCP answer within %s", probeDialTimeout))
 		}
+		if host, _, herr := net.SplitHostPort(addr); herr == nil && noRouteOnLink(err, host, attachedNets()) {
+			out.OnLink = true
+		}
 		return done(node.ProbeUnreachable, dialText(err))
 	}
 	defer raw.Close()
 	var got string
 	var checkErr error
+	var icpt *Intercepted
 	cfg := &tls.Config{
 		MinVersion:   tls.VersionTLS13,
 		Certificates: []tls.Certificate{p.cert},
@@ -241,6 +245,7 @@ func (p *Prober) ProbeWith(ctx context.Context, addr string, check func(node str
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			n, err := certNode(rawCerts)
 			if err != nil {
+				errors.As(err, &icpt)
 				return err
 			}
 			got = n
@@ -259,6 +264,13 @@ func (p *Prober) ProbeWith(ctx context.Context, addr string, check func(node str
 	case checkErr != nil:
 		return done(node.ProbeWrongKey, "certificate key mismatch: the certificate offered there names key "+
 			core.ShortNode(got)+" (not proven to be held)")
+	case icpt != nil:
+		out.Issuer = icpt.Issuer
+		what := "a certificate issued by another party, not by the other machine"
+		if icpt.Issuer != "" {
+			what = "certificate issued by \"" + icpt.Issuer + "\", not by the other machine"
+		}
+		return done(node.ProbeIntercepted, what)
 	case err != nil && got != "":
 		return done(node.ProbeNotA2P2, "handshake failed: "+err.Error())
 	case err != nil && isTimeout(err):

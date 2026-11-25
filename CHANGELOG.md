@@ -17,6 +17,17 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   could join. An invite now also carries the live mapped address, first in
   its list, whether or not a member has reached it. What the machine
   advertises to members is unchanged.
+- **A TLS-inspecting proxy was called "not an a2p2 machine".** When a
+  network re-signs the other machine's certificate, `a2p2 net check` now
+  says `intercepted`, names the issuer, and says a2p2 refuses intercepted
+  connections because it could not tell the other machine from the proxy,
+  with what to do. A join or a pull that meets the same condition says
+  the same. What is accepted and refused is unchanged. (Issue 1.)
+- **"No route to host" on the local network blamed the address.** When a
+  VPN or firewall on this machine blocks local-network access, the system
+  answers "no route to host" for addresses on the network it is attached
+  to. `a2p2 net check` now says so, and no longer tells the reader to
+  check the address. (Issue 2.)
 
 ## [0.2.0] - 2026-11-24
 

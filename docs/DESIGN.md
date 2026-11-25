@@ -506,11 +506,32 @@ have to ask a colleague. `a2p2 net check` reports the networking state,
 whether the listener is bound, the addresses advertised, and for every
 other member of every room each known address tried now: a TCP connection,
 then the pinned TLS handshake, closed without a request, with the outcome
-(reached, refused, timed out, wrong key, not an a2p2 machine, unreachable)
-and the time taken. It ends with one sentence saying what to do. It
+(reached, refused, timed out, wrong key, intercepted, not an a2p2 machine,
+unreachable) and the time taken. It ends with one sentence saying what to do. It
 observes and decides nothing; with networking off it dials nothing.
 `a2p2 net check HOST:PORT` and `--invite` test addresses before any room
 exists, from the CLI process under a throwaway key (PROTOCOL 4.7).
+
+**Two diagnoses.** The checks accept and refuse as before; only what the
+tool says differs. When the far end presents more than one certificate,
+or a leaf that holds another kind of key or is not signed by its own
+key, and the leaf's subject is a machine's key, a TLS-inspecting proxy has re-signed the
+listener's certificate: the result is `intercepted`, with the issuer's
+name (cut to 64 characters, controls and bidirectional marks written as
+`\u{...}`), and the advice names the proxy, says a2p2 refuses intercepted
+connections because it could not tell the other machine from the proxy,
+and offers: use a2p2 between machines inside the network, ask whether the
+destination can be exempt from inspection, or connect from another
+network. A join or a pull that meets the same condition fails with the
+same words. A server whose certificate does not name a machine's key (a
+web server on the wrong port) and a plain TCP answer stay "not an a2p2
+machine". When the dial fails with "no route to host" (`EHOSTUNREACH`;
+`WSAEHOSTUNREACH` on Windows) at an address inside a subnet attached to
+one of this machine's interfaces (up, not loopback, not point-to-point),
+the system has the route and refuses it, so the advice says a VPN or
+firewall on this machine is probably blocking local-network access. Which
+interface holds the default route is not read: it is not available
+cheaply on every platform, and a tunnel interface name proves nothing.
 
 **The dial-back.** Only another machine can say whether this one is
 reachable. A member asks a member to connect back to the addresses it
