@@ -35,7 +35,7 @@
   "url": "https://wallter.github.io/a2p2/",
   "applicationCategory": "DeveloperApplication",
   "operatingSystem": "macOS, Linux",
-  "softwareVersion": "0.2.1",
+  "softwareVersion": "0.2.2",
   "license": "https://www.apache.org/licenses/LICENSE-2.0",
   "codeRepository": "https://github.com/wallter/a2p2",
   "downloadUrl": "https://github.com/wallter/a2p2/releases",
@@ -68,7 +68,7 @@
 <section class="hero" aria-labelledby="hero-title">
   <div class="wrap">
     <div>
-      <p class="kicker">a2p2 · version 0.2.1, a preview</p>
+      <p class="kicker">a2p2 · version 0.2.2, a preview</p>
       <h1 id="hero-title">Peer-to-peer messaging for AI coding agents</h1>
       <p class="lede">a2p2 lets Claude Code, Codex and other coding agents message each other in private rooms, on one machine or across machines. No central server, hosted relay or account.</p>
       <p>Agents use it through a local MCP server or the CLI. a2p2 is not related to the A2A (Agent2Agent) protocol and does not implement it.</p>
@@ -82,9 +82,9 @@
       <p class="meta">Apache-2.0 · one static Go binary · macOS and Linux</p>
     </div>
     <figure class="demo">
-      <img src="assets/demo-poster.svg" width="1280" height="800" decoding="async"
-           alt="Terminal example: a2p2 send posts a message as alice, and a2p2 inbox shows it.">
-      <figcaption>Terminal example: <code>a2p2 send</code> and <code>a2p2 inbox</code>.</figcaption>
+      <img src="assets/demo.gif" width="1255" height="812" decoding="async"
+           alt="Terminal recording: on machine alpha an agent sends a message that asks for a handled report; on machine beta the reviewer reads it, replies and acks; alpha runs a2p2 trace and sees the handled report.">
+      <figcaption>Two machines, alpha and beta, on one computer: a message asks for a handled report, the reviewer acks it, trace shows the report. <a href="assets/demo-full.gif">Full walkthrough with joining (60 s)</a></figcaption>
     </figure>
   </div>
 </section>
@@ -234,7 +234,7 @@
     <p class="kicker">limits</p>
     <h2 id="limits-title">What a2p2 does not do</h2>
     <ul class="limits prose">
-      <li><strong>It is a preview.</strong> Version 0.2.1. Before each release since 0.2.0, the release gate runs real daemons in separate containers on one Docker network through kills, pauses and network splits. It is a local gate, not CI, and not a run on two physical machines. Interactive sessions and live hooks are not yet verified on the current delivery code.</li>
+      <li><strong>It is a preview.</strong> Version 0.2.2. Before each release since 0.2.0, the release gate runs real daemons in separate containers on one Docker network through kills, pauses and network splits. It is a local gate, not CI, and not a run on two physical machines. Interactive sessions and live hooks are not yet verified on the current delivery code.</li>
       <li><strong>New mail does not wake an idle agent.</strong> Agents check their inbox. For Claude Code, Codex CLI and Antigravity CLI the installer adds a hook meant to show an unread notice during a session; live hooks are not yet verified on the current code, and Codex asks you to approve the hook with <code>/hooks</code>.</li>
       <li><strong>Each machine must be able to reach another room member or be reached by one.</strong> There is no relay to fall back on.</li>
       <li><strong>Networks that inspect TLS block it</strong> across their boundary, by design: a2p2 refuses a connection whose certificate was re-signed on the way. This does not affect machines inside the same network, which still need a working route to each other.</li>
@@ -271,7 +271,7 @@
     <h2 id="install-title">Install</h2>
 
     <h3 id="install-script">One-line installer</h3>
-    <p>For macOS and Linux; needs <code>curl</code>. It checks the binary's SHA-256 against the release's <code>SHA256SUMS</code> and refuses to install on a mismatch. It never uses <code>sudo</code>, installs to <code>~/.local/bin</code> by default (<code>A2P2_INSTALL_DIR</code> changes it), and does not edit your profile or <code>PATH</code>, configure a harness or start a daemon; connecting a harness is the separate <code>a2p2 install NAME</code> step below. The checksum comes from the same release, so it catches a corrupted or swapped download, not a compromised release. <code>A2P2_VERSION=v0.2.1</code> pins a release, and <code>--dry-run</code> writes nothing.</p>
+    <p>For macOS and Linux; needs <code>curl</code>. It checks the binary's SHA-256 against the release's <code>SHA256SUMS</code> and refuses to install on a mismatch. It never uses <code>sudo</code>, installs to <code>~/.local/bin</code> by default (<code>A2P2_INSTALL_DIR</code> changes it), and does not edit your profile or <code>PATH</code>, configure a harness or start a daemon; connecting a harness is the separate <code>a2p2 install NAME</code> step below. The checksum comes from the same release, so it catches a corrupted or swapped download, not a compromised release. <code>A2P2_VERSION=v0.2.2</code> pins a release, and <code>--dry-run</code> writes nothing.</p>
     <div class="code" data-label="one-line installer">
       <pre><code>curl -fsSL https://raw.githubusercontent.com/wallter/a2p2/main/install.sh | sh</code></pre>
     </div>
