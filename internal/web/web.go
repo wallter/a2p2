@@ -329,6 +329,8 @@ func (sv *server) confirm(r *http.Request) (any, error) {
 		Text    string `json:"text"`
 		// The second approval after a first answered not_caught_up.
 		NotCaughtUpOK bool `json:"not_caught_up_ok"`
+		// Terms is the digest the page showed, for a send with files.
+		Terms string `json:"terms"`
 	}
 	if err := decode(r, &in); err != nil {
 		return nil, err
@@ -349,7 +351,7 @@ func (sv *server) confirm(r *http.Request) (any, error) {
 	if !shown {
 		return nil, &node.UserError{Msg: "no such request is waiting"}
 	}
-	c, err := sv.s.Confirm(r.Context(), in.ID, in.Approve, in.NotCaughtUpOK)
+	c, err := sv.s.Confirm(r.Context(), in.ID, in.Approve, in.NotCaughtUpOK, in.Terms)
 	return localapi.ConfirmResp{ID: c.ID, State: c.State, Reason: c.Reason, Entries: c.Entries, Effect: c.Effect}, err
 }
 
@@ -381,9 +383,10 @@ const fileWait = 10 * time.Second
 // the browser saves and never renders: application/octet-stream, nosniff,
 // a sandboxing CSP and Content-Disposition attachment with the name
 // sanitised. Any other state is answered 409 with the fetch's JSON
-// (localapi.FetchResp without a path), so the page can say why. The copy
-// is checked against its SHA-256 before a byte is sent, since a copy under
-// files/ is one a person or program may have changed.
+// (localapi.FetchResp without a path), so the page can say why. What is
+// served is a private snapshot of the copy (snapshot), checked against the
+// file's size and SHA-256 before a byte is sent, since a copy under files/
+// is one a person or program may change; a copy that fails is answered 404.
 func (sv *server) file(w http.ResponseWriter, r *http.Request) error {
 	q := r.URL.Query()
 	sha := q.Get("sha")
@@ -399,24 +402,18 @@ func (sv *server) file(w http.ResponseWriter, r *http.Request) error {
 		writeJSON(w, http.StatusConflict, out)
 		return nil
 	}
-	f, err := os.Open(res.Path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	h := sha256.New()
-	n, err := io.Copy(h, f)
-	if err != nil {
-		return err
-	}
-	if hex.EncodeToString(h.Sum(nil)) != sha || n != res.Size {
-		writeJSON(w, http.StatusConflict, map[string]string{"state": "changed",
-			"error": "this machine's copy of the file no longer matches its sha256"})
+	fileHook("fetched", res.Path)
+	snap, n, ok := snapshot(res.Path, res.Size, sha)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"state": "changed",
+			"error": "this machine's copy of the file is not the file verified; fetch it again"})
 		return nil
 	}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
+	defer func() {
+		snap.Close()
+		os.Remove(snap.Name())
+	}()
+	fileHook("verified", res.Path)
 	hd := w.Header()
 	hd.Set("Content-Type", "application/octet-stream")
 	hd.Set("Content-Disposition", "attachment; filename*=UTF-8''"+percentName(safeName(res.Name)))
@@ -424,8 +421,47 @@ func (sv *server) file(w http.ResponseWriter, r *http.Request) error {
 	hd.Set("X-Content-Type-Options", "nosniff")
 	hd.Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(w, f) // the status is sent; a cut copy is the browser's to discard
+	_, _ = io.Copy(w, snap) // the status is sent; a cut copy is the browser's to discard
 	return nil
+}
+
+// fileHook lets a test change the copy at a stage of file: "fetched"
+// (before it is opened), "opened" (opened, before it is read) and
+// "verified" (the snapshot checked, before it is served).
+var fileHook = func(stage, path string) {}
+
+// snapshot takes a private copy of the file at path to serve: path is
+// opened once, without following a link and without blocking on a FIFO;
+// it must be a regular file of exactly size bytes (checked on the open
+// handle); at most size+1 bytes are copied into a new temporary file,
+// mode 0600, while they are hashed. Only a copy of size bytes whose
+// SHA-256 is sha is returned, rewound; anything else is removed. Since
+// the bytes served are the snapshot's, a change to path after this
+// cannot reach the response.
+func snapshot(path string, size int64, sha string) (*os.File, int64, bool) {
+	f, err := openFile(path)
+	if err != nil {
+		return nil, 0, false
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() || st.Size() != size {
+		return nil, 0, false
+	}
+	fileHook("opened", path)
+	tmp, err := os.CreateTemp("", "a2p2-download-")
+	if err != nil {
+		return nil, 0, false
+	}
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(f, size+1))
+	if err == nil && n == size && hex.EncodeToString(h.Sum(nil)) == sha {
+		if _, err = tmp.Seek(0, io.SeekStart); err == nil {
+			return tmp, n, true
+		}
+	}
+	tmp.Close()
+	os.Remove(tmp.Name())
+	return nil, 0, false
 }
 
 // safeName is a file's name as a download offers it: no controls, format

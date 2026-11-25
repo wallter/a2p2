@@ -266,10 +266,13 @@ function sendTerms(r) {
   const to = r.to || [];
   if (to.length === 1 && to[0] === "everyone") row("to", "everyone in the room (" + (r.members || 0) + " members)");
   else if (to.length) row("to", to.join(", "));
-  else if (r.reply_to) row("to", "the author of message " + r.reply_to);
+  else if (r.reply_to) row("to", (r.reply_author ? r.reply_author + ", " : "") + "the author of message " + r.reply_to);
+  if (r.reply_to) row("reply to", r.reply_to);
   if (r.replaces) row("replaces", r.replaces.id + ": \"" + r.replaces.line + "\"",
-    el("div", "sub", "the replacement has only the files listed here"));
-  row("text", "\"" + (r.text_line || "") + "\"");
+    ...(r.replaces.version ? [el("div", "sub", "its version " + r.replaces.version)] : []),
+    el("div", "sub", "the replacement keeps its recipients and has only the files listed here"));
+  // the whole text, each line escaped by the daemon; shown as text, never markup
+  row("text", el("pre", "body", r.body || r.text_line || ""));
   (r.files || []).forEach((f, i) => row("file " + (i + 1), el("div", "path", f.path),
     el("div", "sub", f.name + ", " + sizeText(f.size) + ", sha256 " + f.sha256 + (f.kept ? ", kept from the message replaced" : ""))));
   row("terms", r.terms || "");
@@ -348,7 +351,9 @@ const NOT_CAUGHT_UP = "This machine has not checked the room's log with another 
 async function decide(r, approve, row, notCaughtUpOK) {
   for (const b of row.querySelectorAll("button")) b.disabled = true;
   try {
-    const o = await api("/api/confirm", { id: r.id, approve, text: r.text, not_caught_up_ok: !!notCaughtUpOK });
+    // terms: the digest the card showed; the daemon refuses an approval of a
+    // send with files whose terms are not the request's current ones
+    const o = await api("/api/confirm", { id: r.id, approve, text: r.text, terms: r.terms || "", not_caught_up_ok: !!notCaughtUpOK });
     if (o.reason === "not_caught_up") {
       S.risky.add(r.id);
       S.outcome = "Request " + fp(r.id) + " is not decided: this machine has not caught up with the room. Read the warning below.";

@@ -6,6 +6,8 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -90,6 +92,40 @@ func requestEntry(es []Entry) *Entry {
 	return nil
 }
 
+// approve approves request id with the terms requests shows for it.
+func (m *filesMachine) approve(t *testing.T, id string) ConfirmResp {
+	t.Helper()
+	for _, q := range call[RequestsResp](t, m.c, "requests", Empty{}).Requests {
+		if q.ID == id {
+			return call[ConfirmResp](t, m.c, "confirm", ConfirmReq{ID: id, Approve: true, Terms: q.Terms})
+		}
+	}
+	t.Fatalf("no request %s", id)
+	return ConfirmResp{}
+}
+
+// P3, DESIGN 12: an approval of a send with files carries the terms the
+// person was shown; without them, or with others, nothing is sent. A
+// decline needs none.
+func TestAnApprovalWithoutTheTermsShownIsRefused(t *testing.T) {
+	m := newFilesMachine(t)
+	w := call[SendFilesResp](t, m.c, "send", SendReq{Agent: m.alice, Room: "team", Text: "x", Files: []string{writeFile(t, "a.txt", "abc")}})
+	q := call[RequestsResp](t, m.c, "requests", Empty{}).Requests[0]
+	for _, terms := range []string{"", strings.Repeat("0", 64), strings.ToUpper(q.Terms)} {
+		userError(t, m.c, "confirm", ConfirmReq{ID: w.Request, Approve: true, Terms: terms})
+	}
+	if qs := call[RequestsResp](t, m.c, "requests", Empty{}); len(qs.Requests) != 1 {
+		t.Fatalf("a refused approval decided the request: %+v", qs)
+	}
+	if c := m.approve(t, w.Request); c.State != store.RequestApproved {
+		t.Fatalf("approve with the terms shown = %+v", c)
+	}
+	w = call[SendFilesResp](t, m.c, "send", SendReq{Agent: m.alice, Room: "team", Text: "y", Files: []string{writeFile(t, "b.txt", "b")}})
+	if c := call[ConfirmResp](t, m.c, "confirm", ConfirmReq{ID: w.Request}); c.State != store.RequestDeclined {
+		t.Fatalf("decline = %+v", c)
+	}
+}
+
 // L1, P3: an agent's send with a file waits for the person; requests
 // shows every term; approval writes the message; a reader sees the file
 // and fetches a verified copy; the agent that asked is told it was sent.
@@ -97,10 +133,14 @@ func TestASendWithAFileWaitsForThePersonAndTheReaderFetchesIt(t *testing.T) {
 	m := newFilesMachine(t)
 	body := "line one\nline two\n"
 	p := writeFile(t, "build.log", body)
-	w := call[SendFilesResp](t, m.c, "send", SendReq{Agent: m.alice, Room: "team", Text: "the log", Files: []string{p}})
-	if w.State != "waiting" || w.Request == "" || w.RoomLabel != "team" || len(w.Files) != 1 ||
-		w.Files[0].Name != "build.log" || w.Files[0].Size != int64(len(body)) || w.Files[0].SHA256 != sha(body) {
-		t.Fatalf("send = %+v", w)
+	var w SendFilesResp
+	raw, err := m.c.CallRaw(context.Background(), "send", SendReq{Agent: m.alice, Room: "team", Text: "the log", Files: []string{p}}, &w)
+	if err != nil || w.State != "waiting" || w.Request == "" {
+		t.Fatalf("send = %+v %v", w, err)
+	}
+	// the agent that asked learns the request and nothing of the file
+	if want := `{"request":"` + w.Request + `","state":"waiting"}`; strings.TrimSpace(string(raw)) != want {
+		t.Fatalf("send answered %s, want %s", raw, want)
 	}
 	if in := call[InboxResp](t, m.c, "inbox", InboxReq{Agent: m.bob}); len(in.Entries) != 0 {
 		t.Fatalf("nothing is written before approval: %+v", in.Entries)
@@ -118,7 +158,7 @@ func TestASendWithAFileWaitsForThePersonAndTheReaderFetchesIt(t *testing.T) {
 		f.Size != int64(len(body)) || f.SHA256 != sha(body) {
 		t.Fatalf("request file = %+v", f)
 	}
-	c := call[ConfirmResp](t, m.c, "confirm", ConfirmReq{ID: q.ID, Approve: true})
+	c := call[ConfirmResp](t, m.c, "confirm", ConfirmReq{ID: q.ID, Approve: true, Terms: q.Terms})
 	if c.State != store.RequestApproved || c.Effect == "" {
 		t.Fatalf("confirm = %+v", c)
 	}
@@ -163,13 +203,13 @@ func TestASendWithAFileWaitsForThePersonAndTheReaderFetchesIt(t *testing.T) {
 }
 
 // L1: a room-wide message with a file shown in history may have its file
-// fetched; showing it does not let the reader report it handled. (On the
-// author's machine any agent may fetch; the rule for a reader elsewhere
-// is node's TestAnAgentShownAFileInAThreadViewMayFetchItButNotReportItHandled.)
+// fetched; showing it does not let the reader report it handled. (A
+// reader on another machine: node's
+// TestOnAReadersMachineAFileShownInHistoryOrSkippedMayBeFetched.)
 func TestAFileShownInHistoryMayBeFetchedButNotReportedHandled(t *testing.T) {
 	m := newFilesMachine(t)
 	w := call[SendFilesResp](t, m.c, "send", SendReq{Agent: m.alice, Room: "team", Text: "for all", Files: []string{writeFile(t, "a.txt", "abc")}})
-	c := call[ConfirmResp](t, m.c, "confirm", ConfirmReq{ID: w.Request, Approve: true})
+	c := m.approve(t, w.Request)
 	h := call[Entries](t, m.c, "history", HistoryReq{Agent: m.bob, Room: "team"})
 	if len(h.Entries) != 1 || len(h.Entries[0].Files) != 1 {
 		t.Fatalf("history = %+v", h.Entries)
@@ -185,11 +225,8 @@ func TestADeclinedSendWithAFileTellsTheAgentThatAsked(t *testing.T) {
 	m := newFilesMachine(t)
 	w := call[SendFilesResp](t, m.c, "send", SendReq{Agent: m.alice, Room: "team", Text: "x", To: []string{m.bob},
 		Files: []string{writeFile(t, "a.txt", "a")}})
-	if len(w.To) != 1 || w.To[0] != m.bob {
-		t.Fatalf("send = %+v", w)
-	}
 	q := call[RequestsResp](t, m.c, "requests", Empty{}).Requests[0]
-	if len(q.To) != 1 || q.To[0] != m.bob || q.Members != 0 {
+	if w.Request != q.ID || len(q.To) != 1 || q.To[0] != m.bob || q.Members != 0 {
 		t.Fatalf("request names its addressee: %+v", q)
 	}
 	if c := call[ConfirmResp](t, m.c, "confirm", ConfirmReq{ID: q.ID}); c.State != store.RequestDeclined {
@@ -225,21 +262,64 @@ func TestASendWithFilesRefusesBadPathsAndTooManyFiles(t *testing.T) {
 	}
 }
 
+// DESIGN 12, limits: a path that cannot be staged gets one refusal,
+// whatever the reason, so an agent cannot tell a missing file from a
+// directory, an oversized file or two files with the same bytes.
+func TestEveryPathThatCannotBeStagedGetsTheSameRefusal(t *testing.T) {
+	m := newFilesMachine(t)
+	big := filepath.Join(t.TempDir(), "big")
+	if err := os.WriteFile(big, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(big, 257<<20); err != nil { // sparse: nothing is written
+		t.Fatal(err)
+	}
+	unreadable := writeFile(t, "a.txt", "abc")
+	twice := writeFile(t, "b.txt", "abc")
+	for name, files := range map[string][]string{
+		"missing":    {filepath.Join(t.TempDir(), "missing")},
+		"directory":  {t.TempDir()},
+		"too large":  {big},
+		"same bytes": {unreadable, twice},
+	} {
+		err := m.c.Call(context.Background(), "send", SendReq{Agent: m.alice, Room: "team", Text: "x", Files: files}, nil)
+		var e *Error
+		if !errors.As(err, &e) || e.Code != node.ErrorInvalid || e.Msg != node.CannotAttach {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if qs := call[RequestsResp](t, m.c, "requests", Empty{}); len(qs.Requests) != 0 {
+		t.Fatalf("a refused send raised a request: %+v", qs)
+	}
+}
+
+// An internal error about a file reaches the log and the answer as its
+// operation and cause, without the path.
+func TestAnInternalFileErrorIsLoggedAndAnsweredWithoutItsPath(t *testing.T) {
+	secret := filepath.Join(t.TempDir(), "private-report.txt")
+	_, err := os.Open(secret)
+	for _, e := range []error{err, fmt.Errorf("stage: %w", err), &os.LinkError{Op: "link", Old: secret, New: secret + "2", Err: os.ErrExist}} {
+		if got := scrub(e); strings.Contains(got, "private-report") || got == "" {
+			t.Errorf("scrub(%v) = %q", e, got)
+		}
+	}
+}
+
 // PROTOCOL 10.11: the approval display shows the path in full with
 // bidirectional characters escaped, and names the message replaced.
 func TestTheRequestEscapesBidiCharactersInThePathAndNamesTheReplacedMessage(t *testing.T) {
 	m := newFilesMachine(t)
 	first := call[SendFilesResp](t, m.c, "send", SendReq{Agent: m.alice, Room: "team", Text: "first version\nmore",
 		Files: []string{writeFile(t, "a.txt", "a")}})
-	c := call[ConfirmResp](t, m.c, "confirm", ConfirmReq{ID: first.Request, Approve: true})
+	c := m.approve(t, first.Request)
 	// "report\u202etxt.exe" shows as "reportexe.txt" unescaped
 	p := writeFile(t, "report\u202etxt.exe", "b")
 	w := call[SendFilesResp](t, m.c, "send", SendReq{Agent: m.alice, Text: "second", Replaces: c.Effect,
 		Files: []string{p, "sha256:" + sha("a")}})
-	if w.Replaces != c.Effect || len(w.Files) != 2 {
-		t.Fatalf("send = %+v", w)
-	}
 	q := call[RequestsResp](t, m.c, "requests", Empty{}).Requests[0]
+	if q.ID != w.Request {
+		t.Fatalf("request %s, send answered %s", q.ID, w.Request)
+	}
 	if q.Replaces == nil || q.Replaces.ID != c.Effect || q.Replaces.Line != "first version" || q.TextLine != "second" ||
 		!strings.Contains(q.Text, "replace message "+c.Effect) {
 		t.Fatalf("request = %+v", q)

@@ -31,22 +31,29 @@ func TestASendWithFilesWaitsForThePersonAndFetchReturnsAPathNotBytes(t *testing.
 	sha := hex.EncodeToString(h[:])
 
 	var w struct {
-		Request string              `json:"request"`
-		State   string              `json:"state"`
-		Files   []localapi.FileInfo `json:"files"`
-		Note    string              `json:"note"`
+		Request string `json:"request"`
+		State   string `json:"state"`
+		Note    string `json:"note"`
 	}
 	out := ok(t, a, "send", map[string]any{"text": "the log", "files": []string{file}})
-	if err := json.Unmarshal([]byte(out), &w); err != nil || w.State != "waiting" || w.Request == "" || len(w.Files) != 1 ||
-		w.Files[0].SHA256 != sha || !strings.Contains(w.Note, "nothing is sent until then") {
+	if err := json.Unmarshal([]byte(out), &w); err != nil || w.State != "waiting" || w.Request == "" ||
+		!strings.Contains(w.Note, "nothing is sent until then") {
 		t.Fatalf("send with files = %s", out)
+	}
+	// the agent learns the request, not the size or hash of what was staged
+	if strings.Contains(out, sha) || strings.Contains(out, "size") || strings.Contains(out, "build.log") {
+		t.Fatalf("send with files told the agent about the file: %s", out)
 	}
 	if s := ok(t, b, "inbox", nil); !isEmpty(t, s) {
 		t.Fatalf("a file was sent before the person approved: %s", s)
 	}
 	// the person, on this machine
+	var qs localapi.RequestsResp
+	if err := c.Call(context.Background(), "requests", localapi.Empty{}, &qs); err != nil || len(qs.Requests) != 1 {
+		t.Fatalf("requests: %+v %v", qs, err)
+	}
 	var cr localapi.ConfirmResp
-	if err := c.Call(context.Background(), "confirm", localapi.ConfirmReq{ID: w.Request, Approve: true}, &cr); err != nil || cr.Effect == "" {
+	if err := c.Call(context.Background(), "confirm", localapi.ConfirmReq{ID: w.Request, Approve: true, Terms: qs.Requests[0].Terms}, &cr); err != nil || cr.Effect == "" {
 		t.Fatalf("confirm: %+v %v", cr, err)
 	}
 	es := parseEntries(t, ok(t, b, "inbox", nil))

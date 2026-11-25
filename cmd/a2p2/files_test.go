@@ -17,8 +17,8 @@ import (
 func TestConfirmShowsEveryTermOfASendWithFiles(t *testing.T) {
 	sha := strings.Repeat("ab", 32)
 	q := localapi.Request{ID: "q_1", Kind: store.RequestSendFiles, Room: "r_1", RoomLabel: "team", Agent: "bot@1a2b3c4d",
-		To: []string{"everyone"}, Members: 3, Replaces: &localapi.Replaced{ID: "m1", Line: "old \\u{202e}line"},
-		TextLine: "new text", Terms: strings.Repeat("cd", 32), Deadline: "2026-11-25T12:00:00Z",
+		To: []string{"everyone"}, Members: 3, Replaces: &localapi.Replaced{ID: "m1", Version: "v2", Line: "old \\u{202e}line"},
+		TextLine: "new text", Body: "new text\nsecond \\u{202e}line", Terms: strings.Repeat("cd", 32), Deadline: "2026-11-25T12:00:00Z",
 		Text: "replace message m1 in room team (r_1), by agent bot@1a2b3c4d, with new text and 2 files (2062 bytes)",
 		Files: []localapi.RequestFile{
 			{Path: `/home/me/report\u{202e}txt.exe`, Name: `report\u{202e}txt.exe`, Size: 2048, SHA256: sha},
@@ -28,7 +28,8 @@ func TestConfirmShowsEveryTermOfASendWithFiles(t *testing.T) {
 	printTerms(&out, q)
 	got := out.String()
 	for _, want := range []string{q.Text, "bot@1a2b3c4d", "team (r_1)", "everyone in the room (3 members)",
-		`replaces  m1: "old \u{202e}line"`, "only the files listed", `"new text"`,
+		`replaces  m1: "old \u{202e}line"`, "its version v2", "keeps its recipients and has only the files listed",
+		"text      | new text\n", "          | second \\u{202e}line\n",
 		`file 1    /home/me/report\u{202e}txt.exe`, "2.0 KiB (2048 bytes)", "sha256 " + sha, "14 bytes",
 		"kept from the message replaced", "terms     " + q.Terms, "declined unless approved"} {
 		if !strings.Contains(got, want) {
@@ -62,6 +63,12 @@ func TestFetchPrintsThePathAloneAndSaysItWasNotOpened(t *testing.T) {
 	printFetch(&out, &notes, localapi.FetchResp{State: node.FetchHere, Path: "/h/files/r/a.log", Size: 3})
 	if out.String() != "/h/files/r/a.log\n" || !strings.Contains(notes.String(), "not opened") {
 		t.Fatalf("here: %q, %q", out.String(), notes.String())
+	}
+	// a path is escaped for a person (--json prints the exact one)
+	out.Reset()
+	printFetch(&out, &notes, localapi.FetchResp{State: node.FetchHere, Path: "/h/files/r/report\u202etxt.exe\nx", Size: 3})
+	if out.String() != `/h/files/r/report\u{202e}txt.exe\u{a}x`+"\n" {
+		t.Fatalf("escaped path: %q", out.String())
 	}
 	out.Reset()
 	printFetch(&out, &notes, localapi.FetchResp{State: node.FetchUnavailable, Reason: "not_carried",

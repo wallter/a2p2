@@ -394,7 +394,16 @@ func (s *Surface) Requests(ctx context.Context) ([]store.Request, error) { retur
 // state failed with reason not_caught_up, the request stays pending, and
 // the surface shows the risk and may repeat with notCaughtUpOK, the
 // person's second, explicit approval, which is recorded (PROTOCOL 7).
-func (s *Surface) Confirm(ctx context.Context, id string, approve, notCaughtUpOK bool) (Confirmation, error) {
+//
+// The approval of a send with files must carry terms, the digest the
+// person was shown; one that is not the request's current terms is
+// refused, so that what is approved is what was displayed.
+func (s *Surface) Confirm(ctx context.Context, id string, approve, notCaughtUpOK bool, terms string) (Confirmation, error) {
+	if approve {
+		if err := s.sameTerms(ctx, id, terms); err != nil {
+			return Confirmation{}, err
+		}
+	}
 	c, err := s.r.ConfirmWith(ctx, id, approve, ConfirmOpts{NotCaughtUpOK: notCaughtUpOK})
 	if errors.Is(err, ErrNotCaughtUp) {
 		return Confirmation{ID: id, State: store.RequestFailed, Reason: ReasonNotCaughtUp}, nil

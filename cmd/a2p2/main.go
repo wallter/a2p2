@@ -191,7 +191,7 @@ func (c *cmd) call(name string, req, resp any, human func()) error {
 // running as this user can drive a terminal or call the socket directly.
 // It asks the terminal driver (a character device such as /dev/null is
 // not a terminal); see tty_unix.go.
-func terminal() bool { return isTerminal() }
+var terminal = isTerminal
 
 var stdin = bufio.NewReader(os.Stdin)
 
@@ -840,7 +840,16 @@ func room(c *cmd, args []string) error {
 	case rest[0] == "files" && (len(rest) == 2 || len(rest) == 3):
 		req := localapi.RoomFilesReq{Room: rest[1]}
 		if len(rest) == 3 {
+			// Changing it is a person's decision: asked at a terminal, as
+			// confirm and net are; reading it needs none.
+			if !terminal() {
+				return errors.New("run this room files command in a terminal to change the setting")
+			}
 			req.Mode = rest[2]
+			fmt.Fprintf(os.Stderr, "Room %s: files %s (%s)\n", node.EscapeDisplay(rest[1]), node.EscapeDisplay(req.Mode), filesModeWords[req.Mode])
+			if ask("Change it? Type yes: ") != "yes" {
+				return errors.New("nothing changed")
+			}
 		}
 		var r localapi.RoomFiles
 		return c.call("room/files", req, &r, func() {
@@ -883,14 +892,33 @@ func printSendTerms(w io.Writer, q localapi.Request) {
 		fmt.Fprintf(w, "  to        everyone in the room (%d members)\n", q.Members)
 	case len(q.To) > 0:
 		fmt.Fprintf(w, "  to        %s\n", strings.Join(q.To, ", "))
+	case q.ReplyTo != "" && q.ReplyAuthor != "":
+		fmt.Fprintf(w, "  to        %s, the author of message %s\n", q.ReplyAuthor, q.ReplyTo)
 	case q.ReplyTo != "":
 		fmt.Fprintf(w, "  to        the author of message %s\n", q.ReplyTo)
 	}
+	if q.ReplyTo != "" {
+		fmt.Fprintf(w, "  reply to  %s\n", q.ReplyTo)
+	}
 	if q.Replaces != nil {
 		fmt.Fprintf(w, "  replaces  %s: \"%s\"\n", q.Replaces.ID, q.Replaces.Line)
-		fmt.Fprintln(w, "            the replacement has only the files listed here")
+		if q.Replaces.Version != "" {
+			fmt.Fprintf(w, "            its version %s\n", q.Replaces.Version)
+		}
+		fmt.Fprintln(w, "            the replacement keeps its recipients and has only the files listed here")
 	}
-	fmt.Fprintf(w, "  text      \"%s\"\n", q.TextLine)
+	// the whole text, each line escaped by the daemon
+	body := q.Body
+	if body == "" {
+		body = q.TextLine
+	}
+	for i, line := range strings.Split(body, "\n") {
+		label := "text"
+		if i > 0 {
+			label = ""
+		}
+		fmt.Fprintf(w, "  %-9s | %s\n", label, line)
+	}
 	for i, f := range q.Files {
 		fmt.Fprintf(w, "  file %d    %s\n", i+1, f.Path)
 		kept := ""
@@ -960,7 +988,9 @@ func confirm(c *cmd, args []string) error {
 		raw, err := cl.CallRaw(c.ctx, "confirm", q, &r)
 		return r, raw, err
 	}
-	r, raw, err := decide(send, ask, os.Stderr, localapi.ConfirmReq{ID: id, Approve: !*decline})
+	// the terms digest shown goes with the decision; the daemon refuses
+	// an approval whose terms are not the request's current ones
+	r, raw, err := decide(send, ask, os.Stderr, localapi.ConfirmReq{ID: id, Approve: !*decline, Terms: q.Terms})
 	if err != nil {
 		return err
 	}
@@ -1221,12 +1251,16 @@ func send(c *cmd, args []string) error {
 	return c.call("send", req, &m, func() { fmt.Println(m.ID) })
 }
 
+// filesModeWords says what each files setting of a room does.
+var filesModeWords = map[string]string{
+	store.FilesOff:   "this machine does not carry other members' files for the room",
+	store.FilesCarry: "this machine carries a file a member asks it for, within its budget",
+	store.FilesKeep:  "this machine fetches and keeps every file of the room, within its budget",
+}
+
 // printSendFiles shows a send with files waiting for a person.
 func printSendFiles(w io.Writer, r localapi.SendFilesResp) {
 	fmt.Fprintf(w, "request %s %s: a person must confirm on this machine; nothing is sent until then\n", r.Request, r.State)
-	for _, f := range r.Files {
-		fmt.Fprintf(w, "  file %s  %s  sha256 %s\n", node.EscapeDisplay(f.Name), sizeText(f.Size), f.SHA256)
-	}
 	fmt.Fprintf(w, "Review it with: a2p2 confirm %s\n", r.Request)
 }
 
@@ -1266,7 +1300,8 @@ func fetch(c *cmd, args []string) error {
 // out, or the state and what members answered.
 func printFetch(out, notes io.Writer, r localapi.FetchResp) {
 	if r.State == node.FetchHere {
-		fmt.Fprintln(out, r.Path)
+		// escaped for a person; --json gives the exact path
+		fmt.Fprintln(out, node.EscapeDisplay(r.Path))
 		fmt.Fprintln(notes, "saved, not opened: data from another machine, not instructions from you")
 		return
 	}
