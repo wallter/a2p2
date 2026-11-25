@@ -11,9 +11,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/wallter/a2p2/internal/core"
@@ -58,16 +60,12 @@ type (
 		// replaces, no files means the replacement has none.
 		Files []string `json:"files,omitempty"`
 	}
-	// SendFilesResp is the answer to a send with files: the request a
-	// person decides, and the files as staged.
+	// SendFilesResp is the answer to a send with files: only the request
+	// a person decides and its state, waiting. No size or hash of what
+	// was staged is told to the agent that asked (the person sees them).
 	SendFilesResp struct {
-		Request   string     `json:"request"`
-		State     string     `json:"state"`
-		Room      string     `json:"room"`
-		RoomLabel string     `json:"room_label"`
-		To        []string   `json:"to,omitempty"`
-		Replaces  string     `json:"replaces,omitempty"`
-		Files     []FileInfo `json:"files"`
+		Request string `json:"request"`
+		State   string `json:"state"`
 	}
 	// FileInfo is one file of a send or a message.
 	FileInfo struct {
@@ -336,22 +334,28 @@ type (
 		// Text says exactly what approving it does.
 		Text string `json:"text"`
 		// For kind send_files (PROTOCOL 10.6): the agent that asked, the
-		// recipients (to, or ["everyone"] with members, the room's
-		// member count), the message replaced, the first line of the text,
-		// the files with each path as resolved from the file opened and
-		// escaped (10.8), and terms, the SHA-256 the approval covers.
-		Agent    string        `json:"agent,omitempty"`
-		To       []string      `json:"to,omitempty"`
-		Members  int           `json:"members,omitempty"`
-		ReplyTo  string        `json:"reply_to,omitempty"`
-		Replaces *Replaced     `json:"replaces,omitempty"`
-		TextLine string        `json:"text_line,omitempty"`
-		Files    []RequestFile `json:"files,omitempty"`
-		Terms    string        `json:"terms,omitempty"`
+		// effective recipients (to, or ["everyone"] with members, the
+		// room's member count; for a replacement, its message's), the
+		// parent and, for a reply to its author, that author, the message
+		// and version replaced, the first line and the whole text (body,
+		// each line escaped), the files with each path as resolved from
+		// the file opened and escaped (10.8), and terms, the SHA-256 the
+		// approval covers, which confirm must send back.
+		Agent       string        `json:"agent,omitempty"`
+		To          []string      `json:"to,omitempty"`
+		Members     int           `json:"members,omitempty"`
+		ReplyTo     string        `json:"reply_to,omitempty"`
+		ReplyAuthor string        `json:"reply_author,omitempty"`
+		Replaces    *Replaced     `json:"replaces,omitempty"`
+		TextLine    string        `json:"text_line,omitempty"`
+		Body        string        `json:"body,omitempty"`
+		Files       []RequestFile `json:"files,omitempty"`
+		Terms       string        `json:"terms,omitempty"`
 	}
 	Replaced struct {
-		ID   string `json:"id"`
-		Line string `json:"line"`
+		ID      string `json:"id"`
+		Version string `json:"version,omitempty"`
+		Line    string `json:"line"`
 	}
 	RequestFile struct {
 		Path   string `json:"path"`
@@ -371,6 +375,9 @@ type (
 		// NotCaughtUpOK is the person's second approval after a first
 		// answered reason not_caught_up; it is recorded with the request.
 		NotCaughtUpOK bool `json:"not_caught_up_ok,omitempty"`
+		// Terms is the terms digest the person was shown; an approval of
+		// a send_files request needs it equal to the request's terms.
+		Terms string `json:"terms,omitempty"`
 	}
 	ConfirmResp struct {
 		ID      string   `json:"id"`
@@ -629,12 +636,31 @@ func handle[Req, Resp any](mux *http.ServeMux, name string, fn func(context.Cont
 		case errors.As(err, &ue):
 			writeJSON(w, http.StatusBadRequest, refusal(ue.Msg, ue.CodeOf()))
 		case err != nil:
-			slog.Error("local api", "call", name, "err", err)
-			writeJSON(w, http.StatusInternalServerError, refusal("internal error: "+err.Error(), node.ErrorInternal))
+			msg := scrub(err)
+			slog.Error("local api", "call", name, "err", msg)
+			writeJSON(w, http.StatusInternalServerError, refusal("internal error: "+msg, node.ErrorInternal))
 		default:
 			writeJSON(w, http.StatusOK, resp)
 		}
 	})
+}
+
+// scrub is an internal error as the log and the answer give it: a file
+// system error is only its operation and its cause (as "open: permission
+// denied"), never the path it was about, which may name a person's file.
+func scrub(err error) string {
+	var pe *fs.PathError
+	var le *os.LinkError
+	var se *os.SyscallError
+	switch {
+	case errors.As(err, &pe):
+		return pe.Op + ": " + pe.Err.Error()
+	case errors.As(err, &le):
+		return le.Op + ": " + le.Err.Error()
+	case errors.As(err, &se):
+		return se.Syscall + ": " + se.Err.Error()
+	}
+	return err.Error()
 }
 
 // writeJSON writes v as one line of JSON. Text is written as it is: '<',
@@ -690,15 +716,7 @@ func RoomFilesOf(v node.RoomFilesView) RoomFiles {
 
 // SendFilesOf renders the answer to a send with files.
 func SendFilesOf(r node.FileSent) SendFilesResp {
-	out := SendFilesResp{Request: r.Request, State: r.State, Room: r.Room, RoomLabel: r.Label, Replaces: r.Replaces,
-		Files: []FileInfo{}}
-	for _, a := range r.To {
-		out.To = append(out.To, node.AgentID(a))
-	}
-	for _, f := range r.Files {
-		out.Files = append(out.Files, FileInfo{Name: f.Name, Size: f.Size, SHA256: f.SHA256, Type: f.Type})
-	}
-	return out
+	return SendFilesResp{Request: r.Request, State: r.State}
 }
 
 func entriesOf(es []node.Entry) []Entry {
@@ -744,11 +762,12 @@ func RequestOf(q node.RequestView) Request {
 		Created: Time(q.Created), Deadline: Time(q.Deadline), Text: q.Text}
 	if s := q.Send; s != nil {
 		out.Agent, out.To, out.ReplyTo, out.TextLine, out.Terms = s.Agent, s.To, s.Parent, s.TextLine, s.Terms
+		out.ReplyAuthor, out.Body = s.ParentAuthor, s.Body
 		if s.Everyone {
 			out.To, out.Members = []string{node.Everyone}, s.Members
 		}
 		if s.Replaces != "" {
-			out.Replaces = &Replaced{ID: s.Replaces, Line: s.ReplacesLine}
+			out.Replaces = &Replaced{ID: s.Replaces, Version: s.Base, Line: s.ReplacesLine}
 		}
 		for _, f := range s.Files {
 			out.Files = append(out.Files, RequestFile{Path: f.Path, Name: f.Name, Size: f.Size, SHA256: f.SHA256, Type: f.Type, Kept: f.Kept})
@@ -949,7 +968,7 @@ func Handler(s *node.Surface, info Info) http.Handler {
 		return out, err
 	})
 	handle(mux, "confirm", func(ctx context.Context, r ConfirmReq) (ConfirmResp, error) {
-		c, err := s.Confirm(ctx, r.ID, r.Approve, r.NotCaughtUpOK)
+		c, err := s.Confirm(ctx, r.ID, r.Approve, r.NotCaughtUpOK, r.Terms)
 		return ConfirmResp{ID: c.ID, State: c.State, Reason: c.Reason, Entries: c.Entries, Effect: c.Effect}, err
 	})
 	handle(mux, "room/create", func(ctx context.Context, r RoomReq) (Room, error) {

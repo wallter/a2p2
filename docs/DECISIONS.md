@@ -1329,9 +1329,15 @@ without it L1 cannot be used:
   agent that asked whether its send was `sent` or `declined`; it is
   confirmed with `seen` like any entry, recorded as a row of the `shown`
   table with key `q:<request id>` (no new table or column).
-- **CLI:** `a2p2 send --file`, `a2p2 fetch` and `a2p2 room files`. The
-  files setting is a person's command, like `room create`; it asks for no
-  terminal confirmation, since it moves no bytes off this machine.
+- **CLI:** `a2p2 send --file`, `a2p2 fetch` and `a2p2 room files`.
+  Changing the files setting is asked at a terminal with a "yes", as
+  `confirm` and `net` are (after review: `keep` makes this machine fetch
+  and hold every file, `off` stops it carrying, so it is a person's
+  decision); reading it is not.
+- **Confirm:** `confirm` takes `terms`; an approval of a `send_files`
+  request must carry the terms the CLI or the page showed (no new call).
+  The request adds `body`, `reply_author` and `replaces.version`, so that
+  the whole text and the effective recipients are shown.
 - **MCP:** no new tool; `send` has `files` and `inbox` has `fetch`, and
   hints equal to the MCP default are left out of `tools/list` by a
   middleware, because SDK 1.7 and later write them and the list would
@@ -1348,5 +1354,4 @@ message the agent confirmed answers `gone`, since a confirmed read
 replaces the receipt it looked for.
 
 **Revisit if** agents need to be told of a decided request without
-reading their inbox (a hook line), or the files setting should need a
-terminal like `net`.
+reading their inbox (a hook line).

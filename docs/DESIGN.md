@@ -751,7 +751,8 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    text lives. A lapsed job is answered "gave up" for a day, and the
    reader is told `unavailable`. A per-room setting has three values:
    `off`, `carry` (default, since every member already carries the room's
-   text for others) and `keep` (want every file).
+   text for others) and `keep` (want every file); the CLI asks for a
+   change at a terminal, as for any decision of the person.
 6. **Nothing unverified is exposed [F3].** The declared total must equal
    the manifest's size (at most 16 KiB for a manifest) before a byte is
    taken; a partial download is hidden; the whole must match the SHA-256,
@@ -770,7 +771,9 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    request shows each path as resolved from the opened file, in full,
    with control and bidirectional characters escaped, its size and
    SHA-256, the room, the recipients, and for a replacement which message
-   it replaces. Approval re-checks the staged digests and sends them;
+   it replaces. The CLI and the page show the whole text, every line
+   escaped, and send back the terms digest they showed; an approval with
+   other terms is refused. Approval re-checks the staged digests and sends them;
    the source is never read again. Declined, expired after 24 hours,
    failed, or after this machine's own admission is voided, nothing is
    written and staging is deleted.
@@ -823,7 +826,10 @@ record of a stream may have a header of 8,192 bytes; `files` adds 75.
 
 **Limits, said plainly.** The confirmation is a guard rail (P3): an agent
 running as the same user can call `confirm` itself, or read a file and
-paste it as text. Withdrawing after others fetched removes the copies a2p2
+paste it as text. A send with files tells the agent only the request and
+that it waits, and refuses every path that cannot be staged with one
+message, but an agent can still learn that a path can be staged at all,
+which its other tools could tell it anyway. Withdrawing after others fetched removes the copies a2p2
 keeps; a copy an agent moved is out of reach. A removed machine keeps what
 it fetched (T5). F2 binds honest machines: a member holding bytes can hand
 them to anyone. A member that may read a message can tell from the answers

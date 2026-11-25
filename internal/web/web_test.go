@@ -145,7 +145,7 @@ func (e *env) sendFile(t *testing.T, alice, name, body string) localapi.Request 
 // approve decides q from the page and returns the message written.
 func (e *env) approve(t *testing.T, q localapi.Request) string {
 	t.Helper()
-	c, b := e.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": q.Text}, origin)
+	c, b := e.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": q.Text, "terms": q.Terms}, origin)
 	var cf localapi.ConfirmResp
 	if c != 200 || json.Unmarshal(b, &cf) != nil || cf.State != store.RequestApproved || cf.Effect == "" {
 		t.Fatalf("approve: %d %s", c, b)
@@ -688,7 +688,7 @@ func TestThePageListsASendWithFilesWithEveryTermAndApprovesIt(t *testing.T) {
 	// The page shows the same terms as a2p2 confirm (cmd/a2p2 printSendTerms).
 	js, _ := assets.ReadFile("static/app.js")
 	for _, want := range []string{`r.kind === "send_files"`, "everyone in the room (", "the author of message ",
-		"the replacement has only the files listed here", "kept from the message replaced", "r.terms", "f.path", "f.sha256",
+		"the replacement keeps its recipients and has only the files listed here", "r.body", "reply_author", "terms: r.terms", "kept from the message replaced", "r.terms", "f.path", "f.sha256",
 		"declined unless approved"} {
 		if !strings.Contains(string(js), want) {
 			t.Errorf("app.js lacks %q", want)
@@ -729,9 +729,57 @@ func TestTheFileRouteServesAHereFileAsAnAttachmentWithItsExactBytes(t *testing.T
 	if err := os.WriteFile(res.Path, []byte("tampered"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if resp, b := e.get(t, fileURL("team", msg, shaOf(body))); resp.StatusCode != 409 || bytes.Contains(b, []byte("tampered")) ||
+	fileHook = func(stage, path string) {
+		if stage == "fetched" {
+			_ = os.WriteFile(path, []byte("tampered"), 0o600)
+		}
+	}
+	t.Cleanup(func() { fileHook = func(string, string) {} })
+	if resp, b := e.get(t, fileURL("team", msg, shaOf(body))); resp.StatusCode != 404 || bytes.Contains(b, []byte("tampered")) ||
 		resp.Header.Get("Content-Type") != "application/json" {
 		t.Fatalf("a changed copy: %d %s", resp.StatusCode, b)
+	}
+}
+
+// PROTOCOL 10.8: the bytes served are a snapshot verified before a byte
+// is sent. A copy changed in place (same size) after it was opened is
+// refused with 404; one changed after the snapshot was verified does not
+// change what is served. No snapshot is left behind.
+func TestADownloadRacedWithAChangeServesOnlyVerifiedBytes(t *testing.T) {
+	e, alice := setupFiles(t)
+	t.Cleanup(func() { fileHook = func(string, string) {} })
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	t.Setenv("TMP", tmp)
+	t.Setenv("TEMP", tmp)
+	for _, stage := range []string{"opened", "verified"} {
+		body := "the verified bytes of " + stage
+		evil := strings.ToUpper(body)
+		msg := e.approve(t, e.sendFile(t, alice, stage+".txt", body))
+		fileHook = func(s, path string) {
+			if s != stage {
+				return
+			}
+			f, err := os.OpenFile(path, os.O_WRONLY, 0)
+			if err != nil {
+				t.Errorf("%s: %v", stage, err)
+				return
+			}
+			_, _ = f.WriteAt([]byte(evil), 0)
+			f.Close()
+		}
+		resp, b := e.get(t, fileURL("team", msg, shaOf(body)))
+		switch {
+		case bytes.Contains(b, []byte(evil)):
+			t.Errorf("changed at %s: served the changed bytes", stage)
+		case stage == "opened" && resp.StatusCode != 404:
+			t.Errorf("changed after the open: %d %s", resp.StatusCode, b)
+		case stage == "verified" && (resp.StatusCode != 200 || string(b) != body):
+			t.Errorf("changed after the check: %d %q", resp.StatusCode, b)
+		}
+		if left, _ := os.ReadDir(tmp); len(left) != 0 {
+			t.Errorf("changed at %s: %d snapshots left", stage, len(left))
+		}
 	}
 }
 
@@ -757,6 +805,26 @@ func TestTheFileRouteDoesNotServeAFileThatIsNotHere(t *testing.T) {
 	if resp, _ := e.get(t, fileURL("team", msg, "nothex")); resp.StatusCode != 400 {
 		t.Fatalf("a bad hash: %d", resp.StatusCode)
 	}
+}
+
+// Finding 5: the page's approval of a send with files carries the terms
+// the card showed, and the whole text is on the card; without the terms,
+// or with others, nothing is sent.
+func TestThePageApprovesASendWithFilesOnlyWithTheTermsItShowed(t *testing.T) {
+	e, alice := setupFiles(t)
+	q := e.sendFile(t, alice, "a.txt", "abc")
+	if q.Body != "the log\nmore" {
+		t.Fatalf("body = %q", q.Body)
+	}
+	for _, terms := range []string{"", strings.Repeat("0", 64)} {
+		if c, b := e.do(t, "POST", "/api/confirm", map[string]any{"id": q.ID, "approve": true, "text": q.Text, "terms": terms}, origin); c != 400 {
+			t.Fatalf("terms %q: %d %s", terms, c, b)
+		}
+	}
+	if st := e.state(t); len(st.Requests) != 1 {
+		t.Fatalf("a refused approval decided the request: %+v", st.Requests)
+	}
+	e.approve(t, q)
 }
 
 // The room's files setting is shown from state and changed from the page.

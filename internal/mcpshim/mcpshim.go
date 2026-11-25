@@ -121,8 +121,10 @@ func add[In any](s *mcp.Server, name, desc string, ann *mcp.ToolAnnotations, h f
 	mcp.AddTool(s, &mcp.Tool{Name: name, Description: desc, Annotations: ann}, func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
 		text, err := h(ctx, in)
 		if err != nil {
-			slog.Warn("tool failed", "tool", name, "err", err)
-			text, _ = jsonOut(refusalOf(err))
+			r := refusalOf(err)
+			// the code only: a refusal's words may name a file
+			slog.Warn("tool failed", "tool", name, "code", r.Code)
+			text, _ = jsonOut(r)
 			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil, nil
 		}
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil, nil
@@ -456,17 +458,13 @@ func (sh *shim) sendFiles(ctx context.Context, req localapi.SendReq, files []str
 	if err != nil {
 		return "", err
 	}
+	// Only the request and its state: no size or hash of what was staged.
 	type out struct {
 		Request string `json:"request"`
 		State   string `json:"state"`
-		roomRef
-		To       []string            `json:"to,omitempty"`
-		Replaces string              `json:"replaces,omitempty"`
-		Files    []localapi.FileInfo `json:"files"`
-		Note     string              `json:"note"`
+		Note    string `json:"note"`
 	}
-	return jsonOut(out{Request: w.Request, State: w.State, roomRef: roomRef{w.Room, clip(w.RoomLabel, 64)}, To: w.To,
-		Replaces: w.Replaces, Files: w.Files, Note: noteConfirm})
+	return jsonOut(out{Request: w.Request, State: w.State, Note: noteConfirm})
 }
 
 // fetch is inbox with fetch: the state of one file and, when it is here,
