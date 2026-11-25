@@ -31,7 +31,10 @@ a list of commits. A change that a user or an agent would notice adds a
 line under `[Unreleased]` in the same change. At release time that section
 becomes the version's section, with the date, and the release workflow
 publishes it as the release notes (`scripts/changelog.sh <tag>` prints
-them).
+the section). The notes begin with the install block in
+`scripts/release-notes-head.md`; `scripts/release-notes.sh <tag>` prints
+the whole notes, and `make verify-release` checks that the published
+notes begin with that block.
 
 ## What is tested where
 

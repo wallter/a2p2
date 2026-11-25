@@ -247,6 +247,30 @@ func TestDoctor(t *testing.T) {
 	}
 }
 
+func TestAnyConnectedIsFalseUntilAHarnessIsInstalled(t *testing.T) {
+	o, _ := setup(t)
+	o.Run = fakeCLI(o.HomeDir)
+	o.LookPath = func(f string) (string, error) {
+		if f != "claude" {
+			return "", errors.New("no")
+		}
+		return f, nil
+	}
+	if AnyConnected(nil) || AnyConnected(Doctor(o)) {
+		t.Fatalf("connected before install: %+v", Doctor(o))
+	}
+	if _, err := Install("claude", o); err != nil {
+		t.Fatal(err)
+	}
+	if !AnyConnected(Doctor(o)) {
+		t.Fatalf("not connected after install: %+v", Doctor(o))
+	}
+	o.Binary = "/new/a2p2" // a stale install is still a connected harness, with a fault to fix
+	if !AnyConnected(Doctor(o)) {
+		t.Fatalf("a stale install counts as not connected: %+v", Doctor(o))
+	}
+}
+
 // --- Hook ---
 
 // hookEnv serves the local API over a machine with three hook agents in

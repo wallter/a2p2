@@ -35,8 +35,8 @@ jobs:
           cache: false
       # A short sanity check of the tagged source; the full gate ran locally.
       - run: go vet ./...
-      - name: the changelog has a section for this version
-        run: scripts/changelog.sh "$GITHUB_REF_NAME" > notes.md && test -s notes.md
+      - name: the changelog has a section for this version; the notes start with the install block
+        run: scripts/release-notes.sh "$GITHUB_REF_NAME" > notes.md && test -s notes.md
       - run: make release VERSION="$GITHUB_REF_NAME"
       - name: the binary reports the tag
         run: test "$(dist/a2p2_linux_amd64 version)" = "a2p2 $GITHUB_REF_NAME"

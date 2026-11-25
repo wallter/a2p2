@@ -580,6 +580,22 @@ type Check struct {
 	OK   bool   `json:"ok"`
 	Info string `json:"info"`
 	Fix  string `json:"fix,omitempty"`
+
+	// NotConnected marks a harness that is present but not set up by a2p2,
+	// which is a choice and not a fault. It is not part of the JSON output.
+	NotConnected bool `json:"-"`
+}
+
+// AnyConnected reports whether any of the checks belongs to a harness that
+// is connected, fully or partly. With no checks at all (no harness command
+// on the PATH) it is false.
+func AnyConnected(checks []Check) bool {
+	for _, c := range checks {
+		if !c.NotConnected {
+			return true
+		}
+	}
+	return false
 }
 
 // Doctor reports whether each installed harness is wired correctly: its
@@ -612,8 +628,8 @@ func Doctor(o Options) []Check {
 		isReg, command, regErr := registered(name, o)
 		if err == nil && regErr == nil && found == "" && !isReg {
 			// Not connecting a harness is a choice, not a fault.
-			hook.OK, hook.Info, hook.Fix = true, "not connected (to connect: a2p2 install "+name+")", ""
-			reg.OK, reg.Info, reg.Fix = true, "not connected", ""
+			hook.OK, hook.Info, hook.Fix, hook.NotConnected = true, "not connected (to connect: a2p2 install "+name+")", "", true
+			reg.OK, reg.Info, reg.Fix, reg.NotConnected = true, "not connected", "", true
 			out = append(out, hook, reg)
 			continue
 		}

@@ -195,7 +195,7 @@ func (a fileAdapter) doctor(name string, o Options) Check {
 	case err != nil:
 		c.Info = "cannot read the configuration: " + err.Error()
 	case !found:
-		c.OK, c.Info, c.Fix = true, "not connected (to connect: a2p2 install "+name+")", ""
+		c.OK, c.Info, c.Fix, c.NotConnected = true, "not connected (to connect: a2p2 install "+name+")", "", true
 	case command != "" && command != o.Binary:
 		c.Info = "the entry points at a different a2p2 binary: " + command
 	default:

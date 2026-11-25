@@ -95,6 +95,7 @@ This machine
   a2p2 hook --harness NAME --event EVENT     unread notice (launched by harness hooks)
 
 Most commands accept --json. State lives in $A2P2_HOME (default ~/.a2p2).
+Docs and source: https://github.com/wallter/a2p2
 `
 
 func main() {
@@ -140,11 +141,15 @@ func newCmd(ctx context.Context, name string) *cmd {
 	return c
 }
 
+// connectDaemon is daemon.Connect; tests replace it so that no test starts a
+// daemon.
+var connectDaemon = daemon.Connect
+
 func (c *cmd) client() (*localapi.Client, error) {
 	if c.cl != nil {
 		return c.cl, nil
 	}
-	cl, err := daemon.Connect(c.ctx, c.home)
+	cl, err := connectDaemon(c.ctx, c.home)
 	c.cl = cl
 	return cl, err
 }
@@ -1145,6 +1150,19 @@ func doctor(c *cmd, args []string) error {
 	if err := c.fs.Parse(args); err != nil {
 		return errUsage
 	}
+	exe, _ := os.Executable()
+	return runDoctor(c, os.Stdout, harness.Options{Binary: exe})
+}
+
+// noHarnessHint is the closing line of doctor when no harness is connected.
+// The harness list is the one install accepts.
+func noHarnessHint() string {
+	return "No harness is connected. Run: a2p2 install " + harness.Names[0] +
+		" (or " + strings.Join(harness.Names[1:], ", ") + "), then a2p2 doctor again."
+}
+
+// runDoctor writes the checks to w. o says how to look for harnesses.
+func runDoctor(c *cmd, w io.Writer, o harness.Options) error {
 	checks := []harness.Check{}
 	add := func(name string, err error, info, fix string) {
 		ch := harness.Check{Name: name, OK: err == nil, Info: info}
@@ -1153,28 +1171,35 @@ func doctor(c *cmd, args []string) error {
 		}
 		checks = append(checks, ch)
 	}
-	add("state directory", daemon.PrepareHome(c.home), c.home, "fix the permissions shown above")
-	cl, err := c.client()
-	add("daemon", err, "running", "see "+c.home+"/daemon.log")
-	if err == nil {
-		var st localapi.Status
-		err = cl.Call(c.ctx, "status", nil, &st)
-		add("local API", err, fmt.Sprintf("machine %s, %d room(s), %d agent(s)", short(st.Node), len(st.Rooms), len(st.Agents)), "")
-		if len(st.Listen) == 0 {
-			add("network", nil, "off: this machine only (a2p2 net on to enable)", "")
-		} else {
-			add("network", nil, "reachable at "+strings.Join(st.Listen, ", "), "")
-		}
-		for _, p := range st.Peers {
-			info := "heard from at " + clock(p.LastHeard)
-			if p.LastHeard == "" {
-				info = "not heard from in this run"
+	homeErr := daemon.PrepareHome(c.home)
+	add("state directory", homeErr, c.home, "fix the permissions shown above")
+	if homeErr != nil {
+		// The daemon cannot be reached through an unsafe directory, so its
+		// line says it was not looked at rather than pointing at a log.
+		checks = append(checks, harness.Check{Name: "daemon", Info: "not checked: fix the state directory first"})
+	} else {
+		cl, err := c.client()
+		add("daemon", err, "running", "see "+c.home+"/daemon.log")
+		if err == nil {
+			var st localapi.Status
+			err = cl.Call(c.ctx, "status", nil, &st)
+			add("local API", err, fmt.Sprintf("machine %s, %d room(s), %d agent(s)", short(st.Node), len(st.Rooms), len(st.Agents)), "")
+			if len(st.Listen) == 0 {
+				add("network", nil, "off: this machine only (a2p2 net on to enable)", "")
+			} else {
+				add("network", nil, "reachable at "+strings.Join(st.Listen, ", "), "")
 			}
-			add("machine "+p.Name+" ("+short(p.Node)+")", nil, info, "")
+			for _, p := range st.Peers {
+				info := "heard from at " + clock(p.LastHeard)
+				if p.LastHeard == "" {
+					info = "not heard from in this run"
+				}
+				add("machine "+p.Name+" ("+short(p.Node)+")", nil, info, "")
+			}
 		}
 	}
-	exe, _ := os.Executable()
-	checks = append(checks, harness.Doctor(harness.Options{Binary: exe})...)
+	hs := harness.Doctor(o)
+	checks = append(checks, hs...)
 	bad := 0
 	for _, ch := range checks {
 		if !ch.OK {
@@ -1182,7 +1207,7 @@ func doctor(c *cmd, args []string) error {
 		}
 	}
 	if *c.json {
-		if err := writeJSON(os.Stdout, checks); err != nil {
+		if err := writeJSON(w, checks); err != nil {
 			return err
 		}
 	} else {
@@ -1191,10 +1216,13 @@ func doctor(c *cmd, args []string) error {
 			if !ch.OK {
 				mark = "FAIL"
 			}
-			fmt.Printf("%s  %-28s %s\n", mark, ch.Name, ch.Info)
+			fmt.Fprintf(w, "%s  %-28s %s\n", mark, ch.Name, ch.Info)
 			if ch.Fix != "" {
-				fmt.Printf("      fix: %s\n", ch.Fix)
+				fmt.Fprintf(w, "      fix: %s\n", ch.Fix)
 			}
+		}
+		if !harness.AnyConnected(hs) {
+			fmt.Fprintln(w, noHarnessHint())
 		}
 	}
 	if bad > 0 {

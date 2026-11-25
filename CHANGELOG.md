@@ -8,6 +8,32 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- **A hint from `a2p2 doctor` on a fresh machine.** When no harness is
+  connected, doctor ends with the `a2p2 install` command for each harness
+  and says to run doctor again. When the state directory check fails, the
+  daemon line says it was not checked instead of pointing at the log. Exit
+  codes are the same. `a2p2 --help` ends with the address of the docs and
+  source.
+
+### Changed
+
+- **The README starts with what a2p2 is and a try-it block.** It has a
+  recording of the demo and the installer commands on its first screen.
+  The manual release-binary steps and the Windows section moved to
+  [docs/INSTALL.md](docs/INSTALL.md); the README keeps short `Install` and
+  `On Windows` sections that link to it. The `go install` text now says
+  which Go it needs and where the binary lands.
+- **Try two machines on one computer works without Go.** The README says
+  how to run `scripts/demo.sh` from a shallow clone with the installed
+  binary, and the demo trims the single-admin warning.
+- **The agent skill and `llms.txt` give the installer address** and the
+  download, read, run steps.
+- **Release notes begin with how to install.** The block is in
+  `scripts/release-notes-head.md`, used by the release workflow and by
+  `make verify-release`.
+
 ## [0.2.2] - 2026-11-25
 
 A one-line installer, a demo that runs on one computer, feedback through
