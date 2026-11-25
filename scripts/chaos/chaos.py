@@ -699,15 +699,20 @@ def drain(cl, book, nm, me):
         return res
 
 
-def wait_shown(book, key, author, stop, wait=45):
+def wait_shown(book, key, author, stop, wait=45, read=None):
     # Only makes the notice path likely; the checker decides from what the
     # inbox reads show whether it was exercised.
     """Waits until another member's agent was shown key, so that the replace
-    or withdraw that follows has to reach it as a notice."""
+    or withdraw that follows has to reach it as a notice. The waiting agent
+    keeps reading its own inbox (read): every member reaches this point at
+    about the same moment, and if none read while waiting, each would wait
+    for the others and no original would ever be shown."""
     deadline = now() + wait
     while now() < deadline and not stop.is_set():
         if book.shown_elsewhere(key, author):
             return True
+        if read:
+            read()
         time.sleep(0.5)
     return False
 
@@ -717,6 +722,13 @@ def workload(cl, book, nm, seed, duration, t0, stop, me):
     n = 0
     seen = []  # message ids this agent was shown, to reply to
     did_replace = did_withdraw = False
+
+    def read():
+        res = drain(cl, book, nm, me)
+        for e in (res or {}).get("entries", []):
+            if e.get("kind") == "message":
+                seen.append(e["id"])
+
     while not stop.is_set() and now() - t0 < duration:
         time.sleep(rng.uniform(0.3, 1.5))
         frac = (now() - t0) / duration
@@ -725,7 +737,7 @@ def workload(cl, book, nm, seed, duration, t0, stop, me):
             n += 1
             r = send(cl, book, nm, "o", n, "original")
             if r["ok"]:
-                shown = wait_shown(book, r["id"], nm, stop)
+                shown = wait_shown(book, r["id"], nm, stop, read=read)
                 new = "o %s %d replaced" % (nm, n)
                 x = send(cl, book, nm, "o", n, replaces=r["id"], text=new)
                 book.add("replaced", {"node": nm, "id": r["id"], "text": new, "ok": x["ok"], "err": x["err"],
@@ -737,7 +749,7 @@ def workload(cl, book, nm, seed, duration, t0, stop, me):
             secret = "secret-%s-%08x" % (nm, rng.getrandbits(32))
             r = send(cl, book, nm, "s", n, secret)
             if r["ok"]:
-                shown = wait_shown(book, r["id"], nm, stop)
+                shown = wait_shown(book, r["id"], nm, stop, read=read)
                 x = send(cl, book, nm, "s", n, replaces=r["id"], text="")
                 book.add("withdrawn", {"node": nm, "id": r["id"], "secret": secret, "ok": x["ok"], "err": x["err"],
                                        "shown_before": shown})
@@ -753,10 +765,7 @@ def workload(cl, book, nm, seed, duration, t0, stop, me):
             n += 1
             send(cl, book, nm, "r", n, reply_to=rng.choice(seen[-20:]))
         else:
-            res = drain(cl, book, nm, me)
-            for e in (res or {}).get("entries", []):
-                if e.get("kind") == "message":
-                    seen.append(e["id"])
+            read()
     return n
 
 
