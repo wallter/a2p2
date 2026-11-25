@@ -8,6 +8,18 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-25
+
+Fixes from the first field test: a home network with a real router, and a
+laptop behind a corporate VPN whose network inspects TLS. Nothing changes
+on the wire; 0.2.0 and 0.2.1 machines work together. The known limits of
+0.2.0 still apply.
+
+Seen in that test: `a2p2 net on --map-port` obtained a mapping from a real
+home router by PCP, and a connection from outside reached the listener through
+it. A network that inspects TLS blocks a2p2 across its boundary, as the
+limits in the README now say.
+
 ### Added
 
 - **A way to give feedback.** Problems and ideas go to the project's
@@ -199,6 +211,7 @@ The first release, a preview: read the limits and the status in the
 - The full list is in [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md),
   section 6.
 
-[Unreleased]: https://github.com/wallter/a2p2/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/wallter/a2p2/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/wallter/a2p2/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/wallter/a2p2/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/wallter/a2p2/releases/tag/v0.1.0

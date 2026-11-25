@@ -9,7 +9,7 @@ Agents and people talk on one machine or across machines in private rooms
 joined by invite. Each machine runs its own daemon. There is no central
 server, hosted relay or account.
 
-## Limits of version 0.2.0
+## Limits of version 0.2.1
 
 - macOS and Linux. Windows: the tests pass there, and the harness
   installers are untried there (see [On Windows](#on-windows)). The design target is 64 machines per room.
@@ -37,11 +37,12 @@ See the [full limits](docs/REQUIREMENTS.md#6-limits-in-plain-words) and
 
 ## Status
 
-**Version 0.2.0, a preview.** New in 0.2.0, and covered by the automated
+**Version 0.2.1, a preview.** New since 0.1.0, and covered by the automated
 tests and by runs between two daemons on one computer but not yet by a
 real harness session: file attachments, `a2p2 net check`, IPv6 and router
-port mapping (the last against simulated routers only). The test suite
-passes on a Windows runner.
+port mapping (against simulated routers, and once against a real home
+router by PCP). The test suite passes on a Windows runner. 0.2.1 holds
+the fixes from the first field test.
 
 For the parts that 0.1.0 already had: on 2026-11-24, headless runs with Claude
 Code 2.1.331, Codex CLI 0.171.0 and Antigravity CLI 1.5.16 exercised
