@@ -112,7 +112,10 @@ func TestAnApprovalWithoutTheTermsShownIsRefused(t *testing.T) {
 	w := call[SendFilesResp](t, m.c, "send", SendReq{Agent: m.alice, Room: "team", Text: "x", Files: []string{writeFile(t, "a.txt", "abc")}})
 	q := call[RequestsResp](t, m.c, "requests", Empty{}).Requests[0]
 	for _, terms := range []string{"", strings.Repeat("0", 64), strings.ToUpper(q.Terms)} {
-		userError(t, m.c, "confirm", ConfirmReq{ID: w.Request, Approve: true, Terms: terms})
+		err := m.c.Call(context.Background(), "confirm", ConfirmReq{ID: w.Request, Approve: true, Terms: terms}, nil)
+		if r := RefusalOf(err); r.Code != node.ErrorTermsChanged || r.Retryable {
+			t.Fatalf("terms %q: %+v", terms, r)
+		}
 	}
 	if qs := call[RequestsResp](t, m.c, "requests", Empty{}); len(qs.Requests) != 1 {
 		t.Fatalf("a refused approval decided the request: %+v", qs)

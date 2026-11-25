@@ -25,6 +25,8 @@ type memFiles struct {
 	served [][3]string
 	// puts records each upload accepted: sender, receiver, sha.
 	puts [][3]string
+	// asked records each GET sent, answered or not: requester, server, sha.
+	asked [][3]string
 }
 
 func newMemFiles(net *memNet) *memFiles { return &memFiles{net: net, nodes: map[string]*Files{}} }
@@ -47,6 +49,9 @@ func (l memFileLink) server(peer string) *Files {
 }
 
 func (l memFileLink) GetFile(ctx context.Context, peer string, q FileGet) (*FileReply, error) {
+	l.n.mu.Lock()
+	l.n.asked = append(l.n.asked, [3]string{l.from, peer, q.SHA256})
+	l.n.mu.Unlock()
 	s := l.server(peer)
 	if s == nil || !l.CanDial(peer) {
 		return nil, errUnreachable
@@ -129,7 +134,7 @@ func (n *fnode) sendFiles(room, agent, text string, paths ...string) (string, Fi
 	if err != nil {
 		n.t.Fatal(err)
 	}
-	c, err := n.r.Confirm(context.Background(), res.Request, true)
+	c, err := n.f.ApproveSend(context.Background(), res.Request, res.Terms)
 	if err != nil || c.State != store.RequestApproved {
 		n.t.Fatalf("approve: %+v %v", c, err)
 	}
@@ -137,7 +142,11 @@ func (n *fnode) sendFiles(room, agent, text string, paths ...string) (string, Fi
 }
 
 func (n *fnode) fetch(room, agent, sha string) (FetchResult, error) {
-	r, err := n.f.Fetch(context.Background(), FetchOpts{Agent: agent, Room: room, SHA256: sha, Wait: time.Second})
+	// Fetch returns as soon as its download ends (done, refused, or no
+	// holder to dial); the wait is the longest the local API allows, which
+	// only a real hang reaches, so a loaded machine never cuts a download.
+	r, err := n.f.Fetch(context.Background(), FetchOpts{Agent: agent, Room: room, SHA256: sha,
+		Wait: time.Duration(core.MaxFetchWaitMS) * time.Millisecond})
 	n.f.Wait()
 	return r, err
 }

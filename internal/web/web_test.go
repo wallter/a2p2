@@ -153,6 +153,17 @@ func (e *env) approve(t *testing.T, q localapi.Request) string {
 	return cf.Effect
 }
 
+// shown loads the room's history as the page does to render it: the
+// reading path that records the messages as shown to the person without
+// marking them seen. On the author's machine the person's id may fetch a
+// file only after that (DESIGN 12, fix-files-b 6).
+func (e *env) shown(t *testing.T) {
+	t.Helper()
+	if c, b := e.do(t, "GET", "/api/history?room=team", nil, nil); c != 200 {
+		t.Fatalf("history: %d %s", c, b)
+	}
+}
+
 func shaOf(body string) string {
 	h := sha256.Sum256([]byte(body))
 	return hex.EncodeToString(h[:])
@@ -702,6 +713,7 @@ func TestTheFileRouteServesAHereFileAsAnAttachmentWithItsExactBytes(t *testing.T
 	e, alice := setupFiles(t)
 	body := "<html><script>alert(1)</script>\x00\xff"
 	msg := e.approve(t, e.sendFile(t, alice, "résumé page.html", body))
+	e.shown(t)
 	resp, b := e.get(t, fileURL("team", msg, shaOf(body)))
 	if resp.StatusCode != 200 || string(b) != body {
 		t.Fatalf("file: %d %q", resp.StatusCode, b)
@@ -721,7 +733,8 @@ func TestTheFileRouteServesAHereFileAsAnAttachmentWithItsExactBytes(t *testing.T
 	if resp, b := e.get(t, fileURL("", "", shaOf(body))); resp.StatusCode != 200 || string(b) != body {
 		t.Fatalf("by hash: %d %q", resp.StatusCode, b)
 	}
-	// A copy changed on disk since it was verified is not served.
+	// An earlier copy changed on disk is not reused: the fetch writes a
+	// fresh copy, verified, and that is what is served.
 	res, err := e.s.Fetch(e.ctx, e.s.HumanID(), "team", shaOf(body), msg, 0)
 	if err != nil || res.State != node.FetchHere {
 		t.Fatalf("fetch: %+v %v", res, err)
@@ -729,6 +742,11 @@ func TestTheFileRouteServesAHereFileAsAnAttachmentWithItsExactBytes(t *testing.T
 	if err := os.WriteFile(res.Path, []byte("tampered"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if resp, b := e.get(t, fileURL("team", msg, shaOf(body))); resp.StatusCode != 200 || string(b) != body {
+		t.Fatalf("after an earlier copy was changed: %d %q", resp.StatusCode, b)
+	}
+	// The copy the fetch hands the page, changed before the page opens
+	// it, is not served: the page's own snapshot and hash refuse it.
 	fileHook = func(stage, path string) {
 		if stage == "fetched" {
 			_ = os.WriteFile(path, []byte("tampered"), 0o600)
@@ -756,6 +774,7 @@ func TestADownloadRacedWithAChangeServesOnlyVerifiedBytes(t *testing.T) {
 		body := "the verified bytes of " + stage
 		evil := strings.ToUpper(body)
 		msg := e.approve(t, e.sendFile(t, alice, stage+".txt", body))
+		e.shown(t)
 		fileHook = func(s, path string) {
 			if s != stage {
 				return
@@ -784,11 +803,13 @@ func TestADownloadRacedWithAChangeServesOnlyVerifiedBytes(t *testing.T) {
 }
 
 // F1, PROTOCOL 10.6: a file whose state is not here is not served; the
-// page is told the state. A file no message lists is refused.
+// page is told the state. A file no message lists is refused, and so is
+// one whose message the page never showed.
 func TestTheFileRouteDoesNotServeAFileThatIsNotHere(t *testing.T) {
 	e, alice := setupFiles(t)
 	body := "old bytes"
 	msg := e.approve(t, e.sendFile(t, alice, "a.txt", body))
+	e.shown(t)
 	// A replacement without files: the file belongs to a version that lost.
 	if _, err := e.s.Send(e.ctx, node.SendInput{Agent: alice, Replaces: msg, Text: "no file now"}); err != nil {
 		t.Fatal(err)
@@ -804,6 +825,18 @@ func TestTheFileRouteDoesNotServeAFileThatIsNotHere(t *testing.T) {
 	}
 	if resp, _ := e.get(t, fileURL("team", msg, "nothex")); resp.StatusCode != 400 {
 		t.Fatalf("a bad hash: %d", resp.StatusCode)
+	}
+	// A file here whose message the page has not shown is refused, on the
+	// author's machine too; once shown, the same request serves it.
+	unseen := "never shown"
+	msg2 := e.approve(t, e.sendFile(t, alice, "b.txt", unseen))
+	if resp, b := e.get(t, fileURL("team", msg2, shaOf(unseen))); resp.StatusCode != 400 ||
+		!strings.Contains(string(b), "read it first") || bytes.Contains(b, []byte(unseen)) {
+		t.Fatalf("a file never shown: %d %s", resp.StatusCode, b)
+	}
+	e.shown(t)
+	if resp, b := e.get(t, fileURL("team", msg2, shaOf(unseen))); resp.StatusCode != 200 || string(b) != unseen {
+		t.Fatalf("the same file once shown: %d %q", resp.StatusCode, b)
 	}
 }
 

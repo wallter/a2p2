@@ -201,7 +201,8 @@ type SendDraft struct {
 	Parent     string           `json:"parent,omitempty"`
 	AskHandled bool             `json:"ask_handled,omitempty"`
 	Replaces   string           `json:"replaces,omitempty"`
-	Base       string           `json:"base,omitempty"` // the winning version of Replaces when the agent asked
+	Base       string           `json:"base,omitempty"`    // the winning version of Replaces when the agent asked
+	Members    int              `json:"members,omitempty"` // for everyone: the member count when the agent asked
 	Files      []DraftFile      `json:"files"`
 }
 
@@ -281,6 +282,7 @@ const (
 	ReasonSendExpired  = "expired: nobody confirmed it within a day"
 	ReasonSendVoided   = "this machine's admission to the room was voided"
 	ReasonSendReplaced = "the message it replaces changed, or a file it keeps is gone"
+	ReasonSendChanged  = "a staged file changed or is gone"
 )
 
 // SweepFiles applies [F1], the staging rules of [F6] and [F8], and [F11]
@@ -389,22 +391,22 @@ func sweepTx(tx *sql.Tx, room, self string, now time.Time) (int, error) {
 			if err := exec(`DELETE FROM file_parts WHERE room = ? AND msg = ? AND sha256 = ?`, room, d.k.msg, d.k.sha); err != nil {
 				return 0, err
 			}
-			if err := trash(tx, partRel(room, d.k.msg, d.k.sha), "part", room, d.k.msg, d.k.sha, 0, now); err != nil {
+			if err := trash(tx, partRel(room, d.k.msg, d.k.sha), "part", room, d.k.msg, d.k.sha, 0, "", now); err != nil {
 				return 0, err
 			}
 		case "copy":
-			rows, err := tx.Query(`SELECT path, size FROM file_copies WHERE room = ? AND msg = ? AND sha256 = ?`, room, d.k.msg, d.k.sha)
+			rows, err := tx.Query(`SELECT path, size, ident FROM file_copies WHERE room = ? AND msg = ? AND sha256 = ?`, room, d.k.msg, d.k.sha)
 			if err != nil {
 				return 0, err
 			}
 			type cp struct {
-				path string
-				size int64
+				path, ident string
+				size        int64
 			}
 			var cps []cp
 			for rows.Next() {
 				var c cp
-				if err := rows.Scan(&c.path, &c.size); err != nil {
+				if err := rows.Scan(&c.path, &c.size, &c.ident); err != nil {
 					rows.Close()
 					return 0, err
 				}
@@ -412,7 +414,7 @@ func sweepTx(tx *sql.Tx, room, self string, now time.Time) (int, error) {
 			}
 			rows.Close()
 			for _, c := range cps {
-				if err := trash(tx, c.path, "copy", room, d.k.msg, d.k.sha, c.size, now); err != nil {
+				if err := trash(tx, c.path, "copy", room, d.k.msg, d.k.sha, c.size, c.ident, now); err != nil {
 					return 0, err
 				}
 			}
@@ -434,7 +436,7 @@ func sweepTx(tx *sql.Tx, room, self string, now time.Time) (int, error) {
 			if err := exec(`DELETE FROM files WHERE room = ? AND sha256 = ?`, room, sha); err != nil {
 				return 0, err
 			}
-			if err := trash(tx, blobRel(room, sha), "blob", room, "", sha, 0, now); err != nil {
+			if err := trash(tx, blobRel(room, sha), "blob", room, "", sha, 0, "", now); err != nil {
 				return 0, err
 			}
 		}
@@ -584,7 +586,7 @@ func sweepTx(tx *sql.Tx, room, self string, now time.Time) (int, error) {
 			state, reason, ms(now), q.ID, RequestPending); err != nil {
 			return 0, err
 		}
-		if err := trash(tx, stageDirRel(q.ID), "stage", "", q.ID, "", 0, now); err != nil {
+		if err := trash(tx, stageDirRel(q.ID), "stage", "", q.ID, "", 0, "", now); err != nil {
 			return 0, err
 		}
 	}

@@ -17,6 +17,7 @@ func TestADownloadWithAFIFOOrALinkInPlaceOfTheCopyIsRefusedWithoutBlocking(t *te
 	body := "the verified bytes"
 	msg := e.approve(t, e.sendFile(t, alice, "a.txt", body))
 	t.Cleanup(func() { fileHook = func(string, string) {} })
+	e.shown(t)
 	other := writeTemp(t, body) // the same bytes, elsewhere: a link to them is still refused
 	for name, swap := range map[string]func(string) error{
 		"fifo": func(p string) error { return syscall.Mkfifo(p, 0o600) },

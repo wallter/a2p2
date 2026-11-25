@@ -583,6 +583,9 @@ func status(c *cmd) error {
 			fmt.Printf("requests %d pending. Run a2p2 confirm to review.\n", st.Waiting)
 		}
 		fmt.Printf("files    %s held of %s on this machine\n", sizeText(st.Files.Held), sizeText(st.Files.Budget))
+		if st.Files.Unknown > 0 {
+			fmt.Printf("         %d unknown files under blobs/ in the state directory, left alone: a2p2 did not write them\n", st.Files.Unknown)
+		}
 		fmt.Println("ui       run a2p2 ui to open the local page")
 		fmt.Println("rooms")
 		labels := make(map[string]int, len(st.Rooms))

@@ -81,7 +81,7 @@ func TestAFileIsSentOnlyAfterAPersonApprovesTheBytesStagedWhenTheAgentAsked(t *t
 	if err := os.WriteFile(src, []byte("other bytes"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c, err := a.r.Confirm(context.Background(), res.Request, true)
+	c, err := a.f.ApproveSend(context.Background(), res.Request, res.Terms)
 	if err != nil || c.State != store.RequestApproved {
 		t.Fatalf("%+v %v", c, err)
 	}
@@ -93,9 +93,42 @@ func TestAFileIsSentOnlyAfterAPersonApprovesTheBytesStagedWhenTheAgentAsked(t *t
 		t.Fatalf("records %+v", rs)
 	}
 	// a second decision changes nothing
-	if _, err := a.r.Confirm(context.Background(), res.Request, true); err == nil {
+	if _, err := a.f.ApproveSend(context.Background(), res.Request, res.Terms); err == nil {
 		t.Fatal("approved twice")
 	}
+}
+
+// Requirements: L1, P3. There is one way to approve a send with files:
+// with the terms the person was shown. Rooms.Confirm, which carries no
+// terms, may decline one but not approve it; nothing is decided.
+func TestASendWithFilesIsApprovedOnlyWithTheTermsShown(t *testing.T) {
+	ns := filesNet(t, "a", "b")
+	a, b := ns[0], ns[1]
+	room := fileRoom(t, a, b)
+	res, err := a.f.RequestSend(context.Background(), FileSend{Draft: Draft{Room: room, Agent: "alice", Text: "x"},
+		Files: []string{writeSource(t, "a.bin", "bytes")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ue *UserError
+	if _, err := a.r.Confirm(context.Background(), res.Request, true); !errors.As(err, &ue) || ue.Code != ErrorTermsChanged {
+		t.Fatalf("approved without terms: %v", err)
+	}
+	for _, terms := range []string{"", strings.Repeat("0", 64)} {
+		if _, err := a.f.ApproveSend(context.Background(), res.Request, terms); !errors.As(err, &ue) || ue.Code != ErrorTermsChanged {
+			t.Fatalf("approved with terms %q: %v", terms, err)
+		}
+	}
+	if q, err := a.m.st.GetRequest(context.Background(), res.Request); err != nil || q.State != store.RequestPending {
+		t.Fatalf("a refused approval decided the request: %+v %v", q, err)
+	}
+	if n := len(a.records(room)); n != 0 {
+		t.Fatalf("%d records after refused approvals", n)
+	}
+	if c, err := a.f.ApproveSend(context.Background(), res.Request, res.Terms); err != nil || c.State != store.RequestApproved {
+		t.Fatalf("%+v %v", c, err)
+	}
+	_ = b
 }
 
 // Requirements: L1, P3
@@ -363,7 +396,7 @@ func TestAWantGoesOnlyToTheMessagesAuthorNeverToAnotherHolder(t *testing.T) {
 }
 
 // Requirements: L1, T3
-func TestEveryNotHeldAnswerIsTheSameBytesAndTimingClass(t *testing.T) {
+func TestEveryNotHeldAnswerIsTheSameBytes(t *testing.T) {
 	ns := filesNet(t, "a", "b", "c")
 	a, b, c := ns[0], ns[1], ns[2]
 	room := fileRoom(t, a, b, c)
@@ -639,7 +672,7 @@ func (n *fnode) sendWithManifest(room, agent, text, msha string, man []byte) str
 		n.t.Fatal(err)
 	}
 	p.Have = int64(len(man))
-	if err := n.st.CommitPart(context.Background(), p, store.HowSent, nil, *n.clock); err != nil {
+	if err := n.st.CommitPart(context.Background(), p, store.HowSent, nil, *n.clock, nil); err != nil {
 		n.t.Fatal(err)
 	}
 	return s.ID
@@ -718,7 +751,7 @@ func TestAReplacementListsOnlyTheFilesItsWriterListsAgain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c, err := a.r.Confirm(context.Background(), r2.Request, true); err != nil || c.State != store.RequestApproved {
+	if c, err := a.f.ApproveSend(context.Background(), r2.Request, r2.Terms); err != nil || c.State != store.RequestApproved {
 		t.Fatalf("%+v %v", c, err)
 	}
 	if heldFor(t, a, room, keep, msg) == "" || heldFor(t, a, room, drop, msg) != "" {
@@ -741,7 +774,7 @@ func TestKeepingAFileFailsIfTheReplacedVersionChangesBeforeApproval(t *testing.T
 	if _, err := a.m.Replace(context.Background(), room, "alice", msg, "meanwhile"); err != nil {
 		t.Fatal(err)
 	}
-	c, err := a.r.Confirm(context.Background(), r2.Request, true)
+	c, err := a.f.ApproveSend(context.Background(), r2.Request, r2.Terms)
 	if err != nil || c.State != store.RequestFailed {
 		t.Fatalf("%+v %v", c, err)
 	}

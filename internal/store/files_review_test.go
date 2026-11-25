@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -24,78 +23,81 @@ func TestACopyIsNotPublishedWhenItsPermissionEndsWhileItIsWritten(t *testing.T) 
 	ctx := context.Background()
 	tf := newTestFiles(t, s, 1, "", "revoked copy")
 	receive(t, s, tf.msg.ID(), tf.sha, tf.data, nil)
-	c, _, err := s.ReserveCopy(ctx, testRoom, tf.msg.ID(), tf.sha, "alice", "a.txt", int64(len(tf.data)))
-	if err != nil {
-		t.Fatal(err)
+	// the gate says yes when the name is reserved and no at publication
+	calls := 0
+	gate := func() Gate {
+		return func(*Reader) (bool, error) { calls++; return calls == 1, nil }
 	}
-	err = s.PublishCopy(ctx, c, func(*Reader) (bool, error) { return false, nil })
-	if !errors.Is(err, ErrCopyRefused) {
-		t.Fatalf("publish: %v", err)
+	_, err := s.PublishCopy(ctx, CopyReq{Room: testRoom, Msg: tf.msg.ID(), SHA256: tf.sha, Agent: "alice", Name: "a.txt",
+		Size: int64(len(tf.data))}, gate, nil)
+	if !errors.Is(err, ErrCopyRefused) || calls != 2 {
+		t.Fatalf("publish: %v after %d asks", err, calls)
 	}
-	dir := filepath.Dir(s.CopyPath(c.Path))
+	dir := filepath.Join(s.FileRoot(), "files", testRoom)
 	ents, _ := os.ReadDir(dir)
 	if len(ents) != 0 {
 		t.Fatalf("left in the files directory: %v", ents)
 	}
-	if err := s.CopyDone(ctx, c); err == nil {
-		t.Fatal("the copy is marked written")
-	}
-}
-
-// TestAQueuedDeletionThatFailsIsKeptAndTriedAgain (finding 5).
-// Requirements: L1
-func TestAQueuedDeletionThatFailsIsKeptAndTriedAgain(t *testing.T) {
-	s, _ := openTest(t)
-	ctx := context.Background()
-	rel := partRel(testRoom, strings.Repeat("1", 32), strings.Repeat("f", 64))
-	p := s.abs(rel)
-	// a path that cannot be removed now: a directory with something in it
-	if err := os.MkdirAll(filepath.Join(p, "x"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.tx(ctx, func(tx *sql.Tx) error {
-		return trash(tx, rel, "part", testRoom, strings.Repeat("1", 32), strings.Repeat("f", 64), 0, t0)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	s.RunTrash(ctx)
 	var n int
-	if err := s.db.QueryRow(`SELECT count(*) FROM file_trash WHERE path = ?`, rel).Scan(&n); err != nil || n != 1 {
-		t.Fatalf("a failed deletion was forgotten: %d %v", n, err)
-	}
-	if err := os.RemoveAll(filepath.Join(p, "x")); err != nil {
-		t.Fatal(err)
-	}
-	s.RunTrash(ctx)
-	if err := s.db.QueryRow(`SELECT count(*) FROM file_trash WHERE path = ?`, rel).Scan(&n); err != nil || n != 0 || exists(p) {
-		t.Fatalf("the retry did not complete: %d %v", n, err)
+	if err := s.db.QueryRow(`SELECT count(*) FROM file_copies`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("copy rows %d %v", n, err)
 	}
 }
 
-// TestAStartResetsAPartWhoseFileIsMissingOrShort (finding 6).
+// TestAStartDropsEveryPartSoATransferCutByACrashStartsFromZero (finding 6,
+// B5): parts recorded complete but not promoted, with or without their
+// file (a crash after the rename), or short, are all gone after a start,
+// row and file, so the next transfer starts from 0 and can complete.
 // Requirements: L1
-func TestAStartResetsAPartWhoseFileIsMissingOrShort(t *testing.T) {
-	s, _ := openTest(t)
+func TestAStartDropsEveryPartSoATransferCutByACrashStartsFromZero(t *testing.T) {
+	s, path := openTest(t)
 	ctx := context.Background()
 	tf := newTestFiles(t, s, 1, "", "a part of a file")
-	p, err := s.ReservePart(ctx, testRoom, tf.msg.ID(), tf.sha, int64(len(tf.data)), t0)
+	other := newTestFiles(t, s, 2, tf.msg.ID(), "another part")
+	short := newTestFiles(t, s, 3, other.msg.ID(), "a short part")
+	var paths []string
+	for i, x := range []testFiles{tf, other, short} {
+		p, err := s.ReservePart(ctx, testRoom, x.msg.ID(), x.sha, int64(len(x.data)), t0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i > 0 { // the bytes are on disk
+			f, err := s.OpenPart(p, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			n := len(x.data)
+			if i == 2 {
+				n = 3
+			}
+			f.Write(x.data[:n])
+			f.Close()
+		}
+		// the row says complete (or, for the short one, more than is there)
+		if err := s.PartHave(ctx, p, int64(len(x.data))); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, s.abs(partRel(testRoom, x.msg.ID(), x.sha)))
+	}
+	s.Close()
+	s, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.PartHave(ctx, p, int64(len(tf.data))); err != nil { // the row says complete; no file (a crash after a rename)
-		t.Fatal(err)
-	}
+	defer s.Close()
 	if err := s.ReconcileFiles(ctx); err != nil {
 		t.Fatal(err)
 	}
-	var got FilePart
-	_ = s.View(ctx, func(rd *Reader) (err error) {
-		got, _, err = rd.FilePart(testRoom, tf.msg.ID(), tf.sha)
-		return err
-	})
-	if got.Have != 0 {
-		t.Fatalf("a part with no file kept have %d", got.Have)
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM file_parts`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("parts after the start: %d %v", n, err)
 	}
+	for _, p := range paths {
+		if exists(p) {
+			t.Fatalf("a part file survived the start: %s", p)
+		}
+	}
+	receive(t, s, other.msg.ID(), other.sha, other.data, nil) // from zero, to the end
 }
 
 // TestAWithdrawnListDoesNotSeedAnotherRecordsList (finding 8).

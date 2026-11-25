@@ -69,7 +69,7 @@ func sendFile(t *testing.T, p *pm, f *node.Files, room, name, data string) (stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := p.r.Confirm(bg, res.Request, true)
+	c, err := f.ApproveSend(bg, res.Request, res.Terms)
 	if err != nil || c.State != store.RequestApproved {
 		t.Fatalf("%+v %v", c, err)
 	}
@@ -170,7 +170,7 @@ func rawFile(t *testing.T, from *Identity, to *pm, method, path, rng string) (in
 	return resp.StatusCode, resp.Header.Get("Content-Type"), b
 }
 
-// TestEveryNotHeldAnswerIsTheSameBytesAndTimingClass, on the wire: an
+// TestEveryNotHeldAnswerOnTheWireIsTheSameBytes: an
 // unknown hash, an unknown message, a file of a message the peer may not
 // read and a malformed path all get one status, type and body, decided
 // before any file is opened; HEAD is not served and a range of 16 digits

@@ -69,3 +69,46 @@ func TestStagingCopiesFromTheHandleItOpenedAndRefusesAFifo(t *testing.T) {
 		t.Fatalf("over the limit: %v", err)
 	}
 }
+
+// TestThePathShownIsTheOpenedFilesNotTheNameAskedFor (fix-files-b 7): a
+// file moved right after it was opened is shown where it now is, with
+// the bytes read from the handle.
+// Requirements: L1, P3
+func TestThePathShownIsTheOpenedFilesNotTheNameAskedFor(t *testing.T) {
+	s, _ := openTest(t)
+	dir := t.TempDir()
+	asked, moved := filepath.Join(dir, "asked.txt"), filepath.Join(dir, "moved.txt")
+	if err := os.WriteFile(asked, []byte("opened bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageOpened = func() {
+		if err := os.Rename(asked, moved); err != nil {
+			t.Error(err)
+		}
+	}
+	defer func() { stageOpened = nil }()
+	st, err := s.StageFile("q_"+strings.Repeat("4", 32), 0, asked, core.MaxFileSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := filepath.EvalSymlinks(moved)
+	if st.Path != want || st.SHA256 != core.SHA256Hex([]byte("opened bytes")) {
+		t.Fatalf("staged %+v, want path %s", st, want)
+	}
+}
+
+// TestAFileErrorNamesItsOperationAndCodeNeverThePath (fix-files-b 8).
+// Requirements: L1
+func TestAFileErrorNamesItsOperationAndCodeNeverThePath(t *testing.T) {
+	s, _ := openTest(t)
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "secret-project-name.txt")
+	_, err := s.StageFile("q_"+strings.Repeat("5", 32), 0, missing, core.MaxFileSize)
+	var fe *FileError
+	if !errors.As(err, &fe) || fe.Op != "open" || fe.Code != "not_found" || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing: %#v", err)
+	}
+	if strings.Contains(err.Error(), "secret-project-name") || strings.Contains(err.Error(), dir) {
+		t.Fatalf("the error names the path: %v", err)
+	}
+}
