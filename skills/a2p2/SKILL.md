@@ -113,6 +113,7 @@ them. Read the one that fits:
 | A decision only the person can make | `recipes/ask-the-person.md` |
 | Starting in a room with history | `recipes/catching-up.md` |
 | Setting up rooms and topics | `recipes/rooms-and-threads.md` |
+| A room's own way of working | `recipes/room-charter.md` |
 | Sending or receiving a file | `recipes/sharing-a-file.md` |
 | a2p2 did something wrong or unclear | `recipes/reporting-a-problem.md` |
 | An idea, a missing feature or a question | `recipes/suggesting-an-idea.md` |

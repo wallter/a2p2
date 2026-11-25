@@ -16,6 +16,13 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   daemon line says it was not checked instead of pointing at the log. Exit
   codes are the same. `a2p2 --help` ends with the address of the docs and
   source.
+- **A recipe for a room charter.** `recipes/room-charter.md` describes how
+  a room states its own way of working in one short message: its purpose,
+  which recipes it follows and changes, who decides what and what is never
+  posted, with an optional agent card and task states that reuse the status
+  words. It says how newcomers find it (the owner posts it again, since a
+  late member may have no history and text expires after 30 days) and how
+  it changes. It is a convention in text; no code changed.
 
 ### Changed
 

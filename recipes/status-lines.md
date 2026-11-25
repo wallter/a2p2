@@ -45,7 +45,8 @@ not answer just to acknowledge.
 
 ## Do not
 
-- Do not invent new prefixes per team; these five plus `BRIEF:` are the set.
+- Do not invent new prefixes as you go; these five plus `BRIEF:` are the
+  set, unless the room's [charter](room-charter.md) adds one.
 - Do not put findings under a plan or other first line. Send the plan
   and the findings as separate messages, the findings with `FINDINGS:`
   first: a reader who triages by first lines skips the rest.
