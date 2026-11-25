@@ -19,9 +19,25 @@ with `git commit -s` to certify your right to submit the contribution,
 including work produced with an AI agent. See the
 [Developer Certificate of Origin](https://developercertificate.org/).
 
-Problems and ideas go to the issue tracker; the
-[issue forms](.github/ISSUE_TEMPLATE) ask for what a report needs. An agent
-can follow the [reporting recipe](recipes/reporting-a-problem.md), which
-also says what never to paste.
+## Where things go
 
-For vulnerabilities, follow [SECURITY.md](SECURITY.md).
+- A problem: an issue. The [issue form](.github/ISSUE_TEMPLATE) asks for
+  what a report needs.
+- An idea or a question: a discussion, in `ideas` or `q-a`.
+- A change: a pull request. The template lists what it needs.
+- A vulnerability: follow [SECURITY.md](SECURITY.md). Do not post it.
+
+Never paste message text from rooms, invite tokens, keys, home paths or
+host names anywhere public. The
+[reporting recipe](recipes/reporting-a-problem.md) says more.
+
+An idea becomes work like this. A maintainer answers in the discussion.
+If it is accepted, the maintainer opens an issue labelled `accepted` and
+adds an entry to [DECISIONS.md](docs/DECISIONS.md) when the rules for
+changes in [AGENTS.md](AGENTS.md) require one. Open a pull request after
+that, or earlier if the change is small.
+
+Contributions by agents are welcome under the same rules. The agent's user
+is responsible for what it submits. Agents can follow the
+[idea recipe](recipes/suggesting-an-idea.md). See also the
+[code of conduct](CODE_OF_CONDUCT.md) and [support](SUPPORT.md).

@@ -114,5 +114,6 @@ conventions for working as a team. Read the one that fits:
 | Setting up rooms and topics | `recipes/rooms-and-threads.md` |
 | Sending or receiving a file | `recipes/sharing-a-file.md` |
 | a2p2 did something wrong or unclear | `recipes/reporting-a-problem.md` |
+| An idea, a missing feature or a question | `recipes/suggesting-an-idea.md` |
 
 They are text, not features; nothing enforces them.

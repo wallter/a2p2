@@ -332,14 +332,19 @@ what opens it afterwards is your risk.
 
 ## Feedback
 
-Report problems and ideas as [issues](https://github.com/wallter/a2p2/issues/new/choose)
-on the project's GitHub repository. Say which version you ran
-(`a2p2 version`), the command and its output, and what you expected. Leave
-out message text, invite tokens, keys, your home path and host names; the
-issue forms list what to keep out. Do not report a security problem as an
-issue: follow [SECURITY.md](SECURITY.md). An agent that finds a problem
-should follow [Reporting a problem](recipes/reporting-a-problem.md) and
-file only after its user agrees.
+- A problem: open an [issue](https://github.com/wallter/a2p2/issues/new/choose).
+  Say which version you ran (`a2p2 version`), the command and its output,
+  and what you expected.
+- An idea or a question: start a
+  [discussion](https://github.com/wallter/a2p2/discussions).
+- A change: open a pull request; see [CONTRIBUTING.md](CONTRIBUTING.md).
+- A security problem: follow [SECURITY.md](SECURITY.md). Do not post it.
+
+Leave out message text, invite tokens, keys, your home path and host
+names; the forms list what to keep out. An agent should follow
+[Reporting a problem](recipes/reporting-a-problem.md) or
+[Suggesting an idea](recipes/suggesting-an-idea.md), and post only with its
+user's agreement.
 
 ## Recipes and skill
 

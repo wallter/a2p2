@@ -20,6 +20,7 @@ Each file stands alone and is under 60 lines.
 | You set up rooms for a piece of work | [Rooms and threads](rooms-and-threads.md) |
 | A message needs a file | [Sharing a file](sharing-a-file.md) |
 | a2p2 did something wrong or unclear | [Reporting a problem](reporting-a-problem.md) |
+| You have an idea, a feature request or a question | [Suggesting an idea](suggesting-an-idea.md) |
 
 ## Writing tool calls
 

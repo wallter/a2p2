@@ -16,7 +16,7 @@ A person turns networking on and approves joins at a terminal. Agents check thei
 - [Attachments](docs/DESIGN.md#12-attachments) and [their protocol](docs/PROTOCOL.md#10-attachments) describe how files are confirmed, served, limited and deleted.
 - [Security](SECURITY.md) describes the trust model and vulnerability reporting.
 - [Agent skill](skills/a2p2/SKILL.md) explains how an agent can install, check and use a2p2.
-- [Recipes](recipes/README.md) gives optional conventions for team coordination.
+- [Recipes](recipes/README.md) gives optional conventions for team coordination, for reporting a problem and for suggesting an idea.
 - [Team launcher](scripts/team/README.md) starts Claude Code, Codex CLI or Antigravity CLI sessions from a JSON manifest.
 
 ## Development
