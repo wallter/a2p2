@@ -164,7 +164,7 @@ func (s *Store) CommitPart(ctx context.Context, p FilePart, how string, items *c
 				return err
 			}
 			if moved {
-				return trash(tx, blobRel(p.Room, p.SHA256), "blob", p.Room, "", p.SHA256, 0, "", now)
+				return trash(tx, blobRel(p.Room, p.SHA256), "blob", p.Room, "", p.SHA256, p.Size, "", now) // counted until removed
 			}
 			return nil
 		})
@@ -484,12 +484,25 @@ func (s *Store) runTrashLocked(ctx context.Context, atStart bool) {
 		}
 		return q.Err()
 	})
+	// A queued blob is left out of the budgets only while its file is known
+	// to be absent (unlinked); whenever a run, a start's included, cannot
+	// show it absent or remove it, the mark is cleared, so the row is
+	// charged again and retried by every run like any pending removal.
+	charge := func(t trashRow) {
+		if t.unlinked {
+			_ = s.tx(ctx, func(tx *sql.Tx) error {
+				_, err := tx.Exec(`UPDATE file_trash SET unlinked = 0 WHERE path = ?`, t.path)
+				return err
+			})
+		}
+	}
 	for _, t := range rows {
 		live := true
 		if err := s.View(ctx, func(rd *Reader) (err error) {
 			live, err = livePath(rd.tx, t)
 			return err
 		}); err != nil {
+			charge(t)
 			continue // fail closed: tried again later
 		}
 		done, durable := true, true
@@ -498,6 +511,7 @@ func (s *Store) runTrashLocked(ctx context.Context, atStart bool) {
 		}
 		switch {
 		case !done:
+			charge(t)
 			continue // kept: tried again at the next run and at every start
 		case !durable:
 			_ = s.tx(ctx, func(tx *sql.Tx) error {
@@ -632,10 +646,11 @@ func (s *Store) removeQueued(root *os.Root, t trashRow, name string) (keep, abse
 	return false, false, nil
 }
 
-// stagingName: a name a2p2 gives a file inside a request's staging
-// directory (a file's number, or a temporary file).
+// stagingName: exactly a name a2p2 gives a file inside a request's
+// staging directory (a file's number, or a temporary file's name as
+// tmpName makes it).
 func stagingName(n string) bool {
-	if strings.HasPrefix(n, tmpPrefix) {
+	if isTmpName(n) {
 		return true
 	}
 	i, err := strconv.Atoi(n)
@@ -738,7 +753,7 @@ func (s *Store) ReconcileFiles(ctx context.Context) error {
 	}
 	base := s.abs("blobs")
 	_ = filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasPrefix(d.Name(), tmpPrefix) {
+		if err != nil || d.IsDir() || !isTmpName(d.Name()) {
 			return nil
 		}
 		_ = os.Remove(p)
@@ -1003,12 +1018,12 @@ func (s *Store) removeUnnamed(ctx context.Context) error {
 				})
 				if !live {
 					// only what a2p2 generates in it; the rest stays and is
-					// counted, and so does the directory then [W2]
+					// counted, and so is the directory kept for it [W2, F4]
 					if root, err := s.openDir(false, "blobs", ".staging"); err == nil {
 						others, _, err := removeStaging(root, parts[2])
 						root.Close()
-						if err == nil {
-							unknown += others
+						if err == nil && others > 0 {
+							unknown += others + 1
 						}
 					}
 					return filepath.SkipDir

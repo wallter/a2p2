@@ -49,6 +49,30 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   gained a note listing every connection the program makes, and SECURITY a
   section saying the same.
 
+- **On Windows, deleted files counted against the storage budgets until
+  the next start.** Windows cannot make a removal durable at once, so the
+  entry stays in the deletion queue until a start. The bytes of such an
+  entry kept counting even though the file was gone. They now stop
+  counting as soon as the file is removed, on every system. If the file
+  is found again and cannot be removed, it counts again and is retried.
+- **A deleted file whose removal failed stopped counting against the
+  budgets.** A file withdrawn, expired or left with its room was queued
+  without its size, so while it stayed on disk its bytes were not
+  counted. It now counts until it is removed.
+- **A crash during a download from the page could leave a private copy
+  in the system's temporary directory.** The copy the page serves is now
+  written under the a2p2 home with a temporary file's name, and the next
+  start removes one a crash left behind.
+- **Approving a send that had expired copied its files first.** The
+  approval now checks the request's expiry before it copies any file, and
+  refuses an expired one without writing anything. The check inside the
+  publishing step stays.
+- **The start's cleanup took names that only resembled a2p2's own.** A
+  file in an orphan staging directory, or under `blobs/`, is removed as a
+  temporary file only if its name is exactly what a2p2 generates. Anything
+  else stays and is counted as unknown in `status`, and so is a staging
+  directory kept because of it.
+
 ## [0.2.1] - 2026-11-25
 
 Fixes from the first field test: a home network with a real router, and a

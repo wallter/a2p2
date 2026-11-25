@@ -873,7 +873,12 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    anything is staged, and again at approval before any byte is copied
    into place; a publication that still fails queues the blobs it wrote
    for deletion in the same step, counted against the budget until they
-   are removed. A replacement's eligibility is decided by the clock read
+   are removed. Every queued blob carries its size and counts until its
+   file is known absent: from the removal itself where a removal is not
+   known durable until a start, and again whenever a run or a start finds
+   the file there and cannot remove it. The request's expiry is checked by
+   the store's clock before any byte is copied into place and again in the
+   publishing transaction. A replacement's eligibility is decided by the clock read
    in the publishing transaction. Approval re-checks the staged digests and sends them;
    the source is never read again. Declined, expired after 24 hours,
    failed, or after this machine's own admission is voided, nothing is
@@ -889,7 +894,11 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    journal and repairs at start what a crash can lose); a
    send's record and its file rows commit in one transaction after its
    bytes are safe, so a send is never published without them. Temporary
-   files have a recognisable name. Deletions are by rows, queued in the
+   files have a recognisable name, `.a2p2-tmp-` and 24 lowercase
+   hexadecimal characters; only a name of exactly that form counts as one.
+   The snapshot a page download serves is such a file directly under
+   `blobs/`, never in the system's temporary directory, so one a crash
+   leaves is removed at the next start. Deletions are by rows, queued in the
    sweep transaction that decides them (item 3), and never remove a path a live row
    names; a copy's deletion removes only the file a2p2 linked there (by
    its file identity), and an entry leaves the queue only after its
@@ -987,11 +996,11 @@ is gone is fetched again. An upload goes only to a machine that asked
 for that file by hash, so a member removed at that instant learns nothing
 from it. While an approved send is being published, its staged copy and
 its new copy exist together: a machine needs free space for twice the
-size of a send, and its pulls may wait until that copy finishes. Known in
-0.2.0 and to be fixed: a request that expires while its approval is being
-published copies its files before it is refused; a page download's
-private snapshot is written to the system's temporary directory and is
-left there if the daemon crashes during the download; and on Windows the
-bytes of a deleted file count against the budgets until the daemon next
-starts. Attacks on the program that later opens a file
+size of a send, and its pulls may wait until that copy finishes. A send
+declined or expired after approval's first check of its expiry can still
+cost one copy of its files, which is then removed; one already expired
+when approval starts copies nothing. On Windows a download's snapshot
+still open at a start cannot be removed then and is left for a later
+start.
+Attacks on the program that later opens a file
 are out of scope, since a2p2 opens nothing.

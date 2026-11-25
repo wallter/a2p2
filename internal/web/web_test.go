@@ -797,7 +797,10 @@ func TestADownloadRacedWithAChangeServesOnlyVerifiedBytes(t *testing.T) {
 			t.Errorf("changed after the check: %d %q", resp.StatusCode, b)
 		}
 		if left, _ := os.ReadDir(tmp); len(left) != 0 {
-			t.Errorf("changed at %s: %d snapshots left", stage, len(left))
+			t.Errorf("changed at %s: %d files in the system's temporary directory", stage, len(left))
+		}
+		if left := e.snapshots(t); len(left) != 0 {
+			t.Errorf("changed at %s: snapshots left %v", stage, left)
 		}
 	}
 }

@@ -39,8 +39,8 @@ func TestAStartRemovesOnlyTheFilesA2p2GeneratesFromAnOrphanStagingDirectory(t *t
 	if !exists(filepath.Join(mixed, "notes.txt")) {
 		t.Fatal("a start removed a file a2p2 did not name, with its staging directory")
 	}
-	if n := s.UnknownFiles(); n != 1 {
-		t.Errorf("unknown files = %d, want 1", n)
+	if n := s.UnknownFiles(); n != 2 { // notes.txt and the directory kept for it
+		t.Errorf("unknown files = %d, want 2", n)
 	}
 }
 
