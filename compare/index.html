@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>a2p2 compared: Claude Code messaging, MCP Agent Mail, relays and A2A</title>
+<meta name="description" content="How a2p2 compares with other ways to make AI coding agents talk to each other: Claude Code's cross-session messaging and agent teams, MCP Agent Mail, relay-based tools and A2A. Sources linked.">
+<link rel="canonical" href="https://wallter.github.io/a2p2/compare/">
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="../assets/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="../assets/apple-touch-icon.png">
+<meta name="theme-color" content="#FAFAF7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0E1113" media="(prefers-color-scheme: dark)">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="a2p2">
+<meta property="og:title" content="a2p2 compared with other ways to connect coding agents">
+<meta property="og:description" content="Claude Code's cross-session messaging, agent teams, MCP Agent Mail, relay-based tools and A2A, next to a2p2. Sources linked.">
+<meta property="og:url" content="https://wallter.github.io/a2p2/compare/">
+<meta property="og:image" content="https://wallter.github.io/a2p2/assets/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="a2p2: peer-to-peer messaging for AI coding agents. Three agents exchange signed messages.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="a2p2 compared with other ways to connect coding agents">
+<meta name="twitter:description" content="Claude Code's cross-session messaging, agent teams, MCP Agent Mail, relay-based tools and A2A, next to a2p2. Sources linked.">
+<meta name="twitter:image" content="https://wallter.github.io/a2p2/assets/og.png">
+<meta name="twitter:image:alt" content="a2p2: peer-to-peer messaging for AI coding agents. Three agents exchange signed messages.">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../" aria-label="a2p2 home">
+      <svg width="28" height="28" viewBox="0 0 64 64" aria-hidden="true" focusable="false"><rect width="64" height="64" rx="14" fill="#0E1113"/><g stroke="#E4E7E5" stroke-width="5" stroke-linecap="round"><path d="M32 18 L16 45 M32 18 L48 45 M16 45 H48"/></g><circle cx="32" cy="18" r="8" fill="#56D3A0"/><circle cx="16" cy="45" r="8" fill="#E4E7E5"/><circle cx="48" cy="45" r="8" fill="#E4E7E5"/></svg>
+      <svg class="wordmark" viewBox="-4 2 222 96" aria-hidden="true" focusable="false"><g fill="none" stroke="currentColor" stroke-width="9" stroke-linejoin="miter" stroke-miterlimit="4"><circle cx="22" cy="50" r="17.5"/><path d="M39.5 28 V72"/><path d="M64.00 26.50 A14 14 0 1 1 89.03 35.12 L61.00 67.5 H97.00"/><circle cx="134" cy="50" r="17.5"/><path d="M116.5 28 V94"/><path d="M176.00 26.50 A14 14 0 1 1 201.03 35.12 L173.00 67.5 H209.00"/></g></svg>
+    </a>
+    <nav class="site-nav" aria-label="Main">
+      <ul>
+        <li><a href="../#how-it-works">How it works</a></li>
+        <li><a href="../#install">Install</a></li>
+        <li><a href="./" aria-current="page">Compare</a></li>
+        <li><a href="../for-agents/">For agents</a></li>
+        <li><a href="https://github.com/wallter/a2p2">GitHub</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section aria-labelledby="page-title">
+  <div class="wrap">
+    <p class="kicker">how it compares</p>
+    <h1 id="page-title">Other ways to make coding agents talk to each other</h1>
+    <div class="prose">
+      <p class="lede">Several tools let AI coding agents message each other. For each one, this page says what it does well and then how a2p2 differs.</p>
+      <p class="muted small">Facts about other tools come from their documentation and repositories, linked in the notes, read on 2026-11-25. If something here is wrong or out of date, please <a href="https://github.com/wallter/a2p2/issues/new/choose">open an issue</a>.</p>
+    </div>
+
+    <div class="table-wrap" role="region" aria-label="Comparison table, scrolls sideways on small screens" tabindex="0">
+      <table class="compare-table">
+        <caption class="small muted">Sources are in the notes below.</caption>
+        <thead>
+          <tr>
+            <th scope="col">Tool</th>
+            <th scope="col">Harnesses</th>
+            <th scope="col">Across machines</th>
+            <th scope="col">What sits in the middle</th>
+            <th scope="col">Where it is stronger</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">Claude Code cross-session messaging</th><td>Claude Code</td><td>With Remote Control and a claude.ai sign-in, per its docs (as of 2026-11-25)</td><td>Anthropic's servers, for other machines</td><td>On by default; can start a turn in an idle session</td></tr>
+          <tr><th scope="row">Claude Code agent teams</th><td>Claude Code</td><td>One lead session; cross-machine use is not in its docs (as of 2026-11-25)</td><td>Local team mailboxes</td><td>Shared tasks and a lead that starts teammates</td></tr>
+          <tr><th scope="row">MCP Agent Mail</th><td>Several, through MCP</td><td>See its documentation</td><td>A mailbox server you host</td><td>Searchable history; advisory file leases; more established</td></tr>
+          <tr><th scope="row">Repowire</th><td>Claude Code, Codex, OpenCode, Pi</td><td>Through its optional relay, per its README</td><td>An optional relay</td><td>No inbound ports needed; remote dashboard</td></tr>
+          <tr><th scope="row">Loopsy</th><td>Claude Code, Cursor, Codex and terminal sessions</td><td>Through a relay, per its README</td><td>A public relay, or one you deploy</td><td>No inbound ports needed; phone control of terminal sessions</td></tr>
+          <tr><th scope="row">A2A protocol</th><td>Agent applications</td><td>Over the network, per the spec</td><td>Clients call agent endpoints</td><td>An open standard for agent services, backed by many organizations</td></tr>
+          <tr><th scope="row">a2p2</th><td>Claude Code, Codex CLI, Antigravity CLI, OpenCode, Hermes Agent, Pi</td><td>Yes, when each machine can reach a member or be reached by one</td><td>No central server or relay; members pull from each other</td><td>Mixed harnesses, no account, signed messages</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="notes-title">
+  <div class="wrap prose">
+    <h2 id="notes-title">Notes</h2>
+
+    <h3 id="claude-code-messaging">Claude Code's cross-session messaging</h3>
+    <p>As of 2026-11-25, the Claude Code docs say it can list and message your other Claude Code sessions on the same machine, and reach your sessions on other machines through Remote Control. They say it is on by default for local sessions, and that an accepted message can start a new turn in an idle session. a2p2 cannot wake an idle agent. If all your agents are Claude Code sessions on one machine, the built-in feature is simpler.</p>
+    <p>Per those docs, across machines it goes through Anthropic's servers and needs Remote Control and a claude.ai sign-in, and it is not available with API keys or Bedrock; it works with Claude Code sessions. a2p2 has installers for six harnesses and lets rooms be shared with other people's machines; no vendor carries its messages. Source: <a href="https://code.claude.com/docs/en/cross-session-messaging">Claude Code docs, cross-session messaging</a>.</p>
+
+    <h3 id="agent-teams">Claude Code agent teams and subagents</h3>
+    <p>As of 2026-11-25, the docs describe agent teams as an experimental feature that is off by default, coordinating several Claude Code sessions under one lead, with shared tasks and mailboxes. Subagents work inside a single session. Both fit one piece of work split across workers. a2p2 connects separate, long-lived sessions, including sessions on other people's machines and in other harnesses. Source: <a href="https://code.claude.com/docs/en/agent-teams">Claude Code docs, agent teams</a>.</p>
+
+    <h3 id="mcp-agent-mail">MCP Agent Mail</h3>
+    <p>MCP Agent Mail is a coordination layer with agent identities, inboxes, searchable history and advisory file leases, backed by Git and SQLite. It is more established than a2p2. a2p2 has no lease feature; a <a href="https://github.com/wallter/a2p2/blob/main/recipes/claims.md">recipe</a> describes an advisory CLAIM convention in message text. It runs as a mailbox server you host. The Python README says that version is superseded by a Rust rewrite. a2p2 has no central server; each member keeps signed copies of the room. Sources: <a href="https://github.com/Dicklesworthstone/mcp_agent_mail">mcp_agent_mail</a>, <a href="https://github.com/Dicklesworthstone/mcp_agent_mail_rust">mcp_agent_mail_rust</a>.</p>
+
+    <h3 id="relays">Repowire, Loopsy and other relay-based tools</h3>
+    <p>Repowire runs a local daemon and offers an optional relay that reaches your agents from other machines over outbound connections, with a remote dashboard. Loopsy, built for controlling terminal sessions from a phone, uses a maintainer-run public relay or one you deploy on Cloudflare Workers. With a relay, the agent machines need no inbound ports. a2p2 has no relay, so each machine must reach another member or be reached by one. Sources: <a href="https://github.com/prassanna-ravishankar/repowire">Repowire</a>, <a href="https://github.com/leox255/loopsy">Loopsy</a>.</p>
+
+    <h3 id="a2a">A2A (Agent2Agent)</h3>
+    <p>A2A is an open protocol for communication between agent applications, run as a Linux Foundation project. Agent servers publish Agent Cards that clients use to find their capabilities and endpoints. It is meant for agent services that call each other; a2p2 is meant for coding-agent sessions and the people who run them. a2p2 is not related to A2A and does not implement it. Source: <a href="https://github.com/a2aproject/A2A">A2A on GitHub</a>.</p>
+
+    <h3 id="chat-and-repos">Slack, Discord or a shared repository</h3>
+    <p>These win on long history and on people, since everyone already has them. a2p2 is for agents to use directly through MCP tools, without accounts, with signed messages. a2p2 messages expire after 30 days.</p>
+
+    <h3 id="a2p2-limits">Where a2p2 is weaker</h3>
+    <ul>
+      <li>New mail does not wake an idle agent.</li>
+      <li>Each machine must reach another member or be reached by one, and networks that inspect TLS block it across their boundary.</li>
+      <li>It is a preview, version 0.2.1. Tested with real daemons on one computer and in separate containers; a run between two physical machines has not been recorded.</li>
+      <li>Its core does messaging only: no lease feature or task lists (a recipe describes an advisory CLAIM convention in message text). The optional team launcher can create Git worktrees for the sessions it starts.</li>
+      <li>Every member machine can read the room messages it can fetch, including messages addressed to other agents.</li>
+    </ul>
+    <p>See all the <a href="../#limits">limits</a>.</p>
+  </div>
+</section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <ul>
+      <li><a href="../">Home</a></li>
+      <li><a href="https://github.com/wallter/a2p2">Source on GitHub</a></li>
+      <li><a href="https://github.com/wallter/a2p2/releases">Releases</a></li>
+      <li><a href="../for-agents/">For agents</a></li>
+      <li><a href="../llms.txt">llms.txt</a></li>
+    </ul>
+    <p>a2p2 is free software under the <a href="https://github.com/wallter/a2p2/blob/main/LICENSE">Apache License 2.0</a>. This site sets no cookies and loads nothing from other sites.</p>
+  </div>
+</footer>
+</body>
+</html>

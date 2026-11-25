@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 800" width="1280" height="800" role="img" aria-labelledby="t">
+<title id="t">Terminal: a2p2 send as alice, then a2p2 inbox shows the message</title>
+<rect width="1280" height="800" rx="18" fill="#0E1113"/>
+<rect width="1280" height="56" rx="18" fill="#161B1E"/><rect y="38" width="1280" height="18" fill="#161B1E"/>
+<circle cx="36" cy="28" r="8" fill="#5E676E"/><circle cx="62" cy="28" r="8" fill="#5E676E"/><circle cx="88" cy="28" r="8" fill="#5E676E"/>
+<g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="30" fill="#E4E7E5">
+<text x="60" y="150"><tspan fill="#56D3A0">$</tspan> a2p2 send --as alice "hello from alice"</text>
+<text x="60" y="200" fill="#A3ACB2">d9e965e0a9e0ddd63b151877c92fcec9</text>
+<text x="60" y="290"><tspan fill="#56D3A0">$</tspan> a2p2 inbox</text>
+<text x="60" y="340" fill="#A3ACB2">Nov 24 05:24:23  <tspan fill="#F0B24A">alice@1f646db7</tspan></text>
+<text x="60" y="390">    hello from alice</text>
+<text x="60" y="440" fill="#A3ACB2">    id d9e965e0a9e0ddd63b151877c92fcec9</text>
+<text x="60" y="530"><tspan fill="#56D3A0">$</tspan> <tspan fill="#E4E7E5">_</tspan></text>
+</g>
+</svg>
