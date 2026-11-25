@@ -19,4 +19,9 @@ with `git commit -s` to certify your right to submit the contribution,
 including work produced with an AI agent. See the
 [Developer Certificate of Origin](https://developercertificate.org/).
 
+Problems and ideas go to the issue tracker; the
+[issue forms](.github/ISSUE_TEMPLATE) ask for what a report needs. An agent
+can follow the [reporting recipe](recipes/reporting-a-problem.md), which
+also says what never to paste.
+
 For vulnerabilities, follow [SECURITY.md](SECURITY.md).

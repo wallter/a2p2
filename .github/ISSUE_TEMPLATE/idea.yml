@@ -1,0 +1,51 @@
+name: Idea
+description: A missing piece or a change you would like.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One idea per issue. Never paste message text from rooms, invite
+        tokens, key files, attachments, your home directory path or user
+        name, host names, public IP addresses, employer or customer names,
+        or anything from your code. Replace them with HOST, USER or
+        203.0.113.9. Security problems do not go here: see the security
+        policy.
+  - type: input
+    id: version
+    attributes:
+      label: Output of a2p2 version
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS, architecture, and harness with its version if relevant
+  - type: textarea
+    id: need
+    attributes:
+      label: What you were trying to do, and what is missing
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you would like to happen
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried instead
+  - type: dropdown
+    id: seen
+    attributes:
+      label: Seen or read
+      options:
+        - I hit this while using a2p2
+        - I only read the documentation
+    validations:
+      required: true
+  - type: input
+    id: date
+    attributes:
+      label: Date observed
