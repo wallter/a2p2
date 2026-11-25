@@ -23,6 +23,7 @@ const (
 	ProbeTimeout     = "timed_out"   // no answer within the dial or handshake timeout
 	ProbeWrongKey    = "wrong_key"   // the certificate offered names another key than expected (not proof that key is held)
 	ProbeNotA2P2     = "not_a2p2"    // something answered TCP, but not an a2p2 machine's TLS
+	ProbeIntercepted = "intercepted" // a TLS-inspecting proxy answered: re-signed certificate (Issuer says by whom)
 	ProbeUnreachable = "unreachable" // no route, network down, or another dial error
 	ProbeNotTried    = "not_tried"   // over the limit of one check, or not routable from here (Detail says)
 )
@@ -42,6 +43,14 @@ type AddrCheck struct {
 	// Node is the key that answered, when an a2p2 machine did.
 	Node   string `json:"node,omitempty"`
 	Detail string `json:"detail,omitempty"`
+	// Issuer is the name of the CA that issued the certificate of an
+	// intercepted connection: bounded and escaped, from an untrusted
+	// certificate.
+	Issuer string `json:"issuer,omitempty"`
+	// OnLink: unreachable with "no route to host" at an address inside a
+	// network this machine is attached to (local-network access is blocked
+	// here, often by a VPN or firewall).
+	OnLink bool `json:"on_link,omitempty"`
 }
 
 // Prober tries one address of node now (internal/peer).
@@ -289,6 +298,39 @@ func behindAnotherNAT(external string, saw []string) bool {
 	return !slices.Contains(saw, host)
 }
 
+// InterceptedDetail is the address line's reason for an intercepted
+// result. issuer is the name the certificate claims, already bounded and
+// escaped (it is untrusted; nothing here verifies it).
+func InterceptedDetail(issuer string) string {
+	if issuer == "" {
+		return "the certificate there is not the other machine's own"
+	}
+	return "the certificate there claims the issuer \"" + issuer + "\"; it is not the other machine's own"
+}
+
+// InterceptedAdvice is the closing advice for an intercepted address, in
+// the CLI's HOST:PORT check and the daemon's member check alike. short
+// leaves out the options.
+func InterceptedAdvice(addr, issuer string, short bool) string {
+	s := "The certificate presented at " + addr + " is not the other machine's own"
+	if issuer != "" {
+		s += ": it claims to be issued by \"" + EscapeDisplay(issuer) + "\" (a name anyone can write)"
+	}
+	s += ". Most likely a TLS-inspecting proxy on this network re-signs connections. a2p2 refuses such a " +
+		"connection, because it could not tell the other machine from whatever answers."
+	if short {
+		return s
+	}
+	return s + " Options: use a2p2 between machines inside this network; ask the network's administrators whether " +
+		"this destination can be exempt from inspection; or connect from another network."
+}
+
+// OnLinkAdvice is the closing advice for an unreachable address on a
+// network this machine is attached to (AddrCheck.OnLink).
+const OnLinkAdvice = "The address is on a network this machine is attached to, yet cannot be reached: a VPN or " +
+	"firewall on this machine is probably blocking local-network access. Reach the other machine another way, " +
+	"for example its public address with a forwarded port, or a member both machines can reach."
+
 // Advice is the one sentence that ends a check: what to do.
 func Advice(nc NetCheck) string {
 	nodes, reached, in := map[string]bool{}, map[string]bool{}, map[string]bool{}
@@ -344,6 +386,11 @@ func Advice(nc NetCheck) string {
 		return fmt.Sprintf("No member has said where it listens, and none has connected in within the last %d "+
 			"minutes: each may connect out only and be asleep or offline; nothing to fix on this machine.",
 			int(InboundFor/time.Minute))
+	case len(reached) == 0 && firstAddr(nc, ProbeIntercepted, false) != nil:
+		a := firstAddr(nc, ProbeIntercepted, false)
+		return "No member could be reached. " + InterceptedAdvice(a.Addr, a.Issuer, true)
+	case len(reached) == 0 && firstAddr(nc, ProbeUnreachable, true) != nil:
+		return "No member could be reached. " + OnLinkAdvice
 	case len(reached) == 0:
 		return "No member could be reached from here: check that this network lets connections out (a firewall, " +
 			"proxy or VPN may block them) and that at least one member is running with networking on."
@@ -382,4 +429,17 @@ func Advice(nc NetCheck) string {
 			"asleep, offline or reachable only by connecting out themselves.", len(reached), len(nodes))
 	}
 	return "This machine reaches every member and they can reach it; nothing to do."
+}
+
+// firstAddr is the first member address tried with result (and, with
+// onLink, found on a network this machine is attached to), or nil.
+func firstAddr(nc NetCheck, result string, onLink bool) *AddrCheck {
+	for _, m := range nc.Members {
+		for i := range m.Addrs {
+			if a := &m.Addrs[i]; a.Result == result && (!onLink || a.OnLink) {
+				return a
+			}
+		}
+	}
+	return nil
 }

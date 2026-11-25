@@ -18,6 +18,9 @@ server, hosted relay or account.
 - Each machine must be able to reach another room member or be reached
   by one. If two machines are never online at the same time, a third
   member has to carry the messages between them.
+- Networks that inspect TLS block a2p2 across their boundary, by design:
+  a2p2 refuses a connection whose certificate was re-signed on the way.
+  Machines inside the same network are not affected.
 - Messages hold up to about 16 KiB of text. A message can also
   carry files, with the limits in [Share files](#share-files). Text and files expire after 30 days.
 - Every member machine can read the room's messages, including messages

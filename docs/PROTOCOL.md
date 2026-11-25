@@ -542,8 +542,14 @@ hourly limit. It answers `{"state","listening","listen"?,"fault"?,
 "connects_in"?}],
 "reach":{…},"mapping"?,"forward"?,"advice"}`. `result` is `reached`,
 `refused`, `timed_out`, `wrong_key` (the certificate offered names another
-key; the server has not proved it holds that key), `not_a2p2`,
-`unreachable` or `not_tried`; `not_advertised` is each `advertise` entry
+key; the server has not proved it holds that key), `intercepted` (more
+than one certificate, or a leaf with another kind of key or not signed by
+its own key, with a machine's key as subject: not the other machine's own
+certificate, most likely a TLS-inspecting proxy; the address carries
+`issuer`, the name the certificate claims, cut and reduced to plain
+characters, never verified), `not_a2p2`, `unreachable` (the
+address carries `on_link` when the error was "no route to host" within
+250 ms inside a subnet attached to this machine, not link-local) or `not_tried`; `not_advertised` is each `advertise` entry
 of `config.json` that the listener cannot serve under the recorded
 decision (an IPv6 address under an IPv4-only decision or listener), which
 is left out, with why; `advice` is one sentence saying what to do.

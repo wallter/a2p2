@@ -16,8 +16,10 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/wallter/a2p2/internal/core"
 	"github.com/wallter/a2p2/internal/node"
@@ -66,12 +68,75 @@ func selfSigned(id *Identity) (tls.Certificate, error) {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: id.Key}, nil
 }
 
+// Intercepted is the certificate check's refusal when the far end is not
+// a machine's own one-key certificate but something that re-signed it, as a
+// TLS-inspecting proxy does: more than one certificate, or a leaf issued by
+// a CA or not signed by its own key, with a machine's key as the subject
+// (a server that is not an a2p2 machine at all keeps the plain refusal).
+type Intercepted struct {
+	// Issuer is the leaf's issuer name, from an untrusted certificate:
+	// bounded and escaped (node.EscapeDisplay), so it is safe to show.
+	Issuer string
+}
+
+func (e *Intercepted) Error() string {
+	s := "peer: the certificate presented is not the other machine's own"
+	if e.Issuer != "" {
+		s += ": it claims the issuer \"" + e.Issuer + "\" (a name anyone can write)"
+	}
+	return s + "; most likely a TLS-inspecting proxy re-signs the connection; a2p2 refuses it, because it could " +
+		"not tell the other machine from whatever answers"
+}
+
+// maxIssuerRunes bounds the issuer name shown.
+const maxIssuerRunes = 64
+
+// issuerText is the name of c's issuer for display: its common name, else
+// its first organisation; cut to maxIssuerRunes, then only letters, digits,
+// a space and .-_,()&'/@:+ kept, every other character a "?", so no quote,
+// line break or control can change what a person reads around it.
+func issuerText(c *x509.Certificate) string {
+	s := c.Issuer.CommonName
+	if s == "" && len(c.Issuer.Organization) > 0 {
+		s = c.Issuer.Organization[0]
+	}
+	r := []rune(s)
+	more := len(r) > maxIssuerRunes
+	if more {
+		r = r[:maxIssuerRunes]
+	}
+	for i, x := range r {
+		if !unicode.IsLetter(x) && !unicode.IsDigit(x) && !strings.ContainsRune(" .-_,()&'/@:+", x) {
+			r[i] = '?'
+		}
+	}
+	s = string(r)
+	if more {
+		s += "..."
+	}
+	return node.EscapeDisplay(s)
+}
+
 // certNode checks that the peer presented exactly one self-signed Ed25519
 // certificate whose CN is its own public key, and returns that node id.
 // crypto/tls has already checked, separately, that the peer holds the private
 // key (the CertificateVerify signature), so a valid result here proves the
-// peer is that node.
+// peer is that node. What is accepted is ownCert's rule alone; a refusal is
+// then named *Intercepted when it looks re-signed, which changes only what
+// the person is told.
 func certNode(rawCerts [][]byte) (string, error) {
+	id, err := ownCert(rawCerts)
+	if err != nil {
+		if icpt := resigned(rawCerts); icpt != nil {
+			return "", icpt
+		}
+		return "", err
+	}
+	return id, nil
+}
+
+// ownCert is the acceptance rule.
+func ownCert(rawCerts [][]byte) (string, error) {
 	if len(rawCerts) != 1 {
 		return "", errors.New("peer: want exactly one certificate")
 	}
@@ -91,6 +156,27 @@ func certNode(rawCerts [][]byte) (string, error) {
 		return "", errors.New("peer: certificate CN does not match its key")
 	}
 	return id, nil
+}
+
+// resigned says whether refused certificates look like a machine's
+// certificate re-signed on the way, as a TLS-inspecting proxy does: the
+// leaf still names a machine's key as its CN, but it comes with a chain,
+// holds another kind of key, or is not signed by its own key. A single
+// certificate signed by its own key is not that, whatever its CN; nor is a
+// server whose leaf names no machine key.
+func resigned(rawCerts [][]byte) *Intercepted {
+	if len(rawCerts) == 0 {
+		return nil
+	}
+	c, err := x509.ParseCertificate(rawCerts[0])
+	if err != nil || !core.ValidNode(c.Subject.CommonName) {
+		return nil
+	}
+	if _, ok := c.PublicKey.(ed25519.PublicKey); ok && len(rawCerts) == 1 &&
+		c.CheckSignature(c.SignatureAlgorithm, c.RawTBSCertificate, c.Signature) == nil {
+		return nil
+	}
+	return &Intercepted{Issuer: issuerText(c)}
 }
 
 // validAddr accepts host:port with a non-empty host and a numeric port.
