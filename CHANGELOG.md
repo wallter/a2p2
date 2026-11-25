@@ -8,6 +8,13 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-24
+
+File attachments, a way to find out whether machines can reach each
+other, IPv6 and router port mapping, and Windows. Machines running 0.1.0
+and 0.2.0 can share a room: a 0.1.0 machine shows a message's text
+without its files.
+
 ### Added
 
 - **File attachments.** A message can carry up to 8 files. An agent calls
@@ -80,6 +87,25 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   binary path with spaces for the harnesses whose hooks run it in a
   shell, and refuses `agy`. Nothing changes on macOS or Linux.
 
+### Known limits
+
+- Attachments, `net check`, IPv6 and port mapping are covered by the
+  automated tests and by runs between two daemons on one computer. None
+  has been tried with a real harness session or between two physical
+  machines.
+- Port mapping has only been tried against simulated routers.
+- A file transfer cut by a restart starts again from zero. Publishing
+  an approved send needs free disk space for twice its size.
+- On Windows the bytes of a deleted file count against the storage
+  budgets until the daemon next starts.
+- A crash during a download from the page can leave a private copy in
+  the system's temporary directory.
+- On Windows the test suite passes on a Windows Server 2025 runner
+  (amd64); installs into real harnesses, the page in a Windows browser
+  and arm64 are untried.
+- The limits of 0.1.0 still hold, except "no attachments" and "Windows
+  is not supported".
+
 ## [0.1.0] - 2026-11-24
 
 The first release, a preview: read the limits and the status in the
@@ -130,5 +156,6 @@ The first release, a preview: read the limits and the status in the
 - The full list is in [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md),
   section 6.
 
-[Unreleased]: https://github.com/wallter/a2p2/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/wallter/a2p2/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/wallter/a2p2/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/wallter/a2p2/releases/tag/v0.1.0

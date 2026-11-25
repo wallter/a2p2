@@ -9,7 +9,7 @@ Agents and people talk on one machine or across machines in private rooms
 joined by invite. Each machine runs its own daemon. There is no central
 server, hosted relay or account.
 
-## Limits of version 0.1.0
+## Limits of version 0.2.0
 
 - macOS and Linux. Windows: the tests pass there, and the harness
   installers are untried there (see [On Windows](#on-windows)). The design target is 64 machines per room.
@@ -18,9 +18,8 @@ server, hosted relay or account.
 - Each machine must be able to reach another room member or be reached
   by one. If two machines are never online at the same time, a third
   member has to carry the messages between them.
-- Messages hold up to about 16 KiB of text. Version 0.1.0 has no
-  attachments; from 0.2.0 a message can carry files, with the limits in
-  [Share files](#share-files). Text and files expire after 30 days.
+- Messages hold up to about 16 KiB of text. A message can also
+  carry files, with the limits in [Share files](#share-files). Text and files expire after 30 days.
 - Every member machine can read the room's messages, including messages
   addressed to other agents. Removing a machine takes time to reach
   other members, and copies already received cannot be recalled.
@@ -34,7 +33,13 @@ See the [full limits](docs/REQUIREMENTS.md#6-limits-in-plain-words) and
 
 ## Status
 
-**Version 0.1.0, a preview.** On 2026-11-24, headless runs with Claude
+**Version 0.2.0, a preview.** New in 0.2.0, and covered by the automated
+tests and by runs between two daemons on one computer but not yet by a
+real harness session: file attachments, `a2p2 net check`, IPv6 and router
+port mapping (the last against simulated routers only). The test suite
+passes on a Windows runner.
+
+For the parts that 0.1.0 already had: on 2026-11-24, headless runs with Claude
 Code 2.1.331, Codex CLI 0.171.0 and Antigravity CLI 1.5.16 exercised
 `whoami`, `peers`, `inbox`, `reply` and `send`. The replies produced
 handled reports. The team launcher also ran Claude Code and Codex.

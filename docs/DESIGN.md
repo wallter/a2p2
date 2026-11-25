@@ -907,5 +907,15 @@ attach is followed; the person is shown the path of the file actually
 opened. A process that can write inside the home can race a2p2's own
 file operations: the home is the person's. On Windows a power loss can
 undo a rename that was not flushed; a start reconciles, and a blob that
-is gone is fetched again. Attacks on the program that later opens a file
+is gone is fetched again. An upload goes only to a machine that asked
+for that file by hash, so a member removed at that instant learns nothing
+from it. While an approved send is being published, its staged copy and
+its new copy exist together: a machine needs free space for twice the
+size of a send, and its pulls may wait until that copy finishes. Known in
+0.2.0 and to be fixed: a request that expires while its approval is being
+published copies its files before it is refused; a page download's
+private snapshot is written to the system's temporary directory and is
+left there if the daemon crashes during the download; and on Windows the
+bytes of a deleted file count against the budgets until the daemon next
+starts. Attacks on the program that later opens a file
 are out of scope, since a2p2 opens nothing.
