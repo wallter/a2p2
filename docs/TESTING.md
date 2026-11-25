@@ -59,16 +59,22 @@ are never written to disk. Test data under `testdata/` is only written
 with `-update`. No test needed a change.
 
 Running the steps together loads the machine more than running them one
-after another did, which can expose timing races. One was seen in
-`TestOverTLSAHeldPullGivesUpItsConcurrencySlot` (`internal/peer`), in
-the container during a `make prerelease`: the test's hold signal is sent
-before the held request gives up its concurrency slot, so a request
-sent at once can still be refused. Another was seen in
-`TestACrashAfterTheRouterMadeTheMappingIsUndoneFromTheRecordFile`
-(`internal/daemon/portmap`, the `pcp` case) during a `make check` with a
-load average of 14: its fake router must answer within the client's
-30-millisecond tries. Neither depends on the order of tests or on the
-shards; both are timing races of the tests.
+after another did, which exposes timing races. Two tests failed that way
+in November 2026, and both are fixed:
+`TestOverTLSAHeldPullGivesUpItsConcurrencySlot` was told of a hold before
+the held request had given up its concurrency slot (`NextHold` now
+signals after the slot is given up), and
+`TestACrashAfterTheRouterMadeTheMappingIsUndoneFromTheRecordFile` needed
+its fake router to answer within 30 ms. Two rules follow for tests:
+
+- a hook that tells a test that something happened fires after all of
+  it has happened, not when it begins;
+- a real-time budget a test must stay within is hundreds of
+  milliseconds or more, never tens. A wait that a test expects to run
+  out may be short. The portmap tests' client waits 250 ms for a fake
+  that answers at once (`testTry`), the dial-back tests use a 300 ms
+  deadline, the TLS probe test 2 s, and the nudge pacing test a pace of
+  one second.
 
 ## What the suite covers
 
@@ -260,7 +266,7 @@ While a fault schedule made from the seed runs, every node's agent sends
 numbered room-wide posts, posts that ask for handled reports, replies in
 threads, one replace and one withdraw, and reads its inbox and reports
 handled what it may. Before replacing or withdrawing, the author waits
-up to 20 seconds for another member's agent to be shown the original, so
+up to 45 seconds for another member's agent to be shown the original, so
 that the notice path is exercised. The faults are `docker kill -s KILL`
 and start, `docker pause` and unpause, `docker network disconnect` and
 connect, and a partition into two halves (blackhole routes inside the

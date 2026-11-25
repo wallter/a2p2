@@ -52,7 +52,10 @@ func dialBackRoom(t *testing.T) (a, b, c *lnode, fn *fakeNet, srv *DialBackServe
 	a.change(room, Change{Kind: core.EntryAdd, Target: b.id, Name: "bee", History: true})
 	fn = &fakeNet{at: map[string]string{}}
 	old := DialBackTimeout
-	DialBackTimeout = 50 * time.Millisecond
+	// Long enough that an answer with every address reached (the fake
+	// handshake is instant) comes well before it on a loaded machine;
+	// answers with an address not reached wait all of it.
+	DialBackTimeout = 300 * time.Millisecond
 	t.Cleanup(func() { DialBackTimeout = old })
 	return a, b, c, fn, NewDialBackServer(a.r, fn)
 }
@@ -268,6 +271,7 @@ func TestDialBackIsRateLimitedPerPeerAndForTheWholeMachine(t *testing.T) {
 	}
 	defer func(v float64) { dialBackAllBurst = v }(dialBackAllBurst)
 	dialBackAllBurst = 6
+	fn.at["203.0.113.9:7423"] = b.id // b's own answers come at once, not at the deadline
 	ask := func(from string) *PullError {
 		_, perr := srv.DialBack(context.Background(), from, "203.0.113.9:1",
 			&DialBackRequest{V: PullVersion, Addrs: []string{"203.0.113.9:7423"}})
@@ -305,6 +309,9 @@ func TestDialBackServesAtMostFourRequestsAtOnce(t *testing.T) {
 	a, b, _, fn, srv := dialBackRoom(t)
 	DialBackTimeout = 10 * time.Second // the four stay in flight until released
 	fn.block = make(chan struct{})
+	// Reached once released, so the four answer at once instead of at
+	// the deadline: the test waits for nothing but the release.
+	fn.at["203.0.113.9:7423"] = b.id
 	var wg sync.WaitGroup
 	for range dialBackConcurrent {
 		wg.Add(1)

@@ -212,7 +212,9 @@ func TestNetCheckGivesTheAdvertiseLineForAPortForwardedByHand(t *testing.T) {
 // allows.
 func TestNudgesToCheckThePortMappingArePaced(t *testing.T) {
 	defer func(f, n time.Duration) { reachFirst, reachNudgeEvery = f, n }(reachFirst, reachNudgeEvery)
-	reachFirst, reachNudgeEvery = time.Hour, 300*time.Millisecond
+	// A pace of a second: the five nudges below (about 50 ms of sleeps)
+	// stay inside it even on a loaded machine.
+	reachFirst, reachNudgeEvery = time.Hour, time.Second
 	f := &fakeDialBack{}
 	r := NewReacher(f, ReachOpts{Members: func() []string { return []string{"p"} },
 		Addrs: func() []string { return []string{"192.168.1.5:7423"} }})

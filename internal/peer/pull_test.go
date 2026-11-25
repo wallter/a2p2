@@ -711,7 +711,7 @@ func TestOverTLSTheWriteDeadlineOfAWaitingPullIsItsWaitPlusTheSlack(t *testing.T
 	room := group(t, a, b)
 	old := pullSlack
 	t.Cleanup(func() { pullSlack = old })
-	pullSlack = 50 * time.Millisecond
+	pullSlack = 2 * time.Second // a held answer is written well inside it
 	st, err := b.pull(room, a, node.PullOpts{WaitMS: 100})
 	if err != nil || st.Same != 1 {
 		t.Fatalf("within the deadline: %+v %v", st, err)

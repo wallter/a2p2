@@ -699,7 +699,7 @@ def drain(cl, book, nm, me):
         return res
 
 
-def wait_shown(book, key, author, stop, wait=20):
+def wait_shown(book, key, author, stop, wait=45):
     # Only makes the notice path likely; the checker decides from what the
     # inbox reads show whether it was exercised.
     """Waits until another member's agent was shown key, so that the replace

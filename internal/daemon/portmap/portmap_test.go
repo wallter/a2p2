@@ -125,8 +125,14 @@ func (r *pcpRouter) answer(q []byte) []byte {
 	return b
 }
 
+// testTry is the client's first wait for a UDP answer in tests. A fake
+// that answers does so at once, so this costs time only where nothing
+// answers (3*testTry); it is long enough that a loaded machine running
+// the race detector still delivers a fake's answer within it.
+const testTry = 250 * time.Millisecond
+
 func client(gw *fakeUDP) *Client {
-	return &Client{Gateway: loop, Local: loop, Port: gw.port(), SSDP: "127.0.0.1:9", Try: 30 * time.Millisecond, Tries: 2}
+	return &Client{Gateway: loop, Local: loop, Port: gw.port(), SSDP: "127.0.0.1:9", Try: testTry, Tries: 2}
 }
 
 func TestPCPMapsRenewsWithTheSameNonceAndRemoves(t *testing.T) {
@@ -219,14 +225,16 @@ func TestALateAnswerIsTakenAndOneTooLateFallsThrough(t *testing.T) {
 	r := &pcpRouter{extIP: netip.MustParseAddr("203.0.113.7"), extPort: 7423, maps: map[string]uint16{}}
 	gw := newFakeUDP(t, r.answer)
 	gw.mu.Lock()
-	gw.delay = 45 * time.Millisecond // after the first wait (30 ms), within the second (60 ms)
+	// After the first wait ends (testTry) by half a try, and a try and a
+	// half before the second ends (3*testTry).
+	gw.delay = testTry * 3 / 2
 	gw.mu.Unlock()
 	c := client(gw)
 	if m, err := c.Map(context.Background(), 7423, time.Hour, nil, nil); err != nil || m.Protocol != PCP {
 		t.Fatalf("late: %+v %v", m, err)
 	}
 	gw.mu.Lock()
-	gw.delay = 500 * time.Millisecond // after every try
+	gw.delay = testTry * 5 // after every try (the last ends at 3*testTry)
 	gw.mu.Unlock()
 	if _, err := c.Map(context.Background(), 7423, time.Hour, nil, nil); err == nil || !strings.Contains(err.Error(), "PCP: no answer") {
 		t.Fatalf("too late: %v", err)
@@ -722,7 +730,9 @@ func TestAMalformedUPnPFaultDrivesNoFallbackAndNoCleanup(t *testing.T) {
 func TestAFailedRenewalKeepsTheMappingAndAFailedRemovalIsReportedAndRetried(t *testing.T) {
 	defer func(d, w time.Duration) { retryAfter, minWait = d, w }(retryAfter, minWait)
 	retryAfter, minWait = 10*time.Millisecond, time.Millisecond
-	r := &pcpRouter{extIP: netip.MustParseAddr("203.0.113.7"), extPort: 40001, grant: 1, maps: map[string]uint16{}}
+	// A four-second lease, renewed at two: the failed renewal (PCP and
+	// UPnP each unanswered, 3*testTry apiece) ends well inside it.
+	r := &pcpRouter{extIP: netip.MustParseAddr("203.0.113.7"), extPort: 40001, grant: 4, maps: map[string]uint16{}}
 	c := client(newFakeUDP(t, r.answer))
 	rec := record(t)
 	k := NewKeeper(c, 7423, rec, nil)
