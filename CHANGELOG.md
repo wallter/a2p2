@@ -10,6 +10,13 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Fixed
 
+- **The team launcher marked a run ended before its last a2p2 calls.**
+  The supervisor wrote the roster's `ended` and then the report, which
+  calls a2p2, so anything that stopped the daemon and removed the home
+  once it saw `ended` had them started again by that call and left a daemon
+  running. The report is now written first and `ended` is set last. The
+  launcher's test now waits for the supervisor to exit before it stops the
+  daemon, and fails if any daemon, process or directory of its run is left.
 - **A first invite could not be used from outside the network.** With
   `a2p2 net on --map-port`, the router's external address is advertised
   to members only after one of them reaches it, so the first invite of a

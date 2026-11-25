@@ -650,10 +650,16 @@ class Supervisor:
             self.save()
             self.done.set()
         observer.join()
-        with self.lock:
-            self.roster["ended"] = time.time()
-        self.save()
-        write_report(self.man)
+        # The report calls a2p2, so it is written before the run is marked
+        # ended: whoever sees "ended" can rely on the supervisor making no
+        # further a2p2 call (a call would start a stopped daemon again).
+        ended = time.time()
+        try:
+            write_report(self.man, ended=ended)
+        finally:
+            with self.lock:
+                self.roster["ended"] = ended
+            self.save()
         log("all members finished")
 
 
@@ -904,8 +910,9 @@ def scan_logs(x):
     return codes, len(EMPTY_RE.findall(text))
 
 
-def build_report(man):
+def build_report(man, ended=None):
     r = load_roster(man)
+    r["ended"] = r["ended"] or ended
     hist = [e for e in history(man, since=r["started"]) if ts(e["created"]) >= r["started"] - 1]
     msgs = [e for e in hist if e.get("kind", "message") == "message"]
     member_ids = {x["id"] for x in r["members"]}
@@ -968,8 +975,8 @@ def markdown(rep):
     return "\n".join(out) + "\n"
 
 
-def write_report(man):
-    rep = build_report(man)
+def write_report(man, ended=None):
+    rep = build_report(man, ended)
     with open(os.path.join(man["state"], "report.json"), "w") as f:
         json.dump(rep, f, indent=2)
     md = markdown(rep)

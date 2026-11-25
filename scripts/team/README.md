@@ -52,7 +52,9 @@ Python 3 and nothing else.
   nothing. It never signals a pid read from disk.
 - **`team logs LABEL [-n N]`** prints a member's output and error logs.
 - **`team report`** writes `report.json` and `report.md` in the state
-  directory. For each member it gives the wall-clock time, how long the
+  directory. The supervisor writes them when the last member has ended and
+  only then marks the roster `ended`, so a run that shows `ended` has a
+  report and its supervisor makes no further a2p2 call. For each member it gives the wall-clock time, how long the
   tool server took to be seen connected, messages sent, replies that
   reached more than one inbox, questions to the person, refusals by code
   and empty inbox polls (both counted from the harness's log), the exit
