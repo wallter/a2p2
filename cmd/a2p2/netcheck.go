@@ -177,7 +177,7 @@ func mappingText(m *node.PortMapping) string {
 	if m.Reached {
 		s += "; a member reached it, so it is advertised"
 	} else {
-		s += "; not advertised until a member reaches it"
+		s += "; not advertised until a member reaches it; invites carry it"
 	}
 	return s + left
 }

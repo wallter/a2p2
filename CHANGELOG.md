@@ -8,6 +8,16 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A first invite could not be used from outside the network.** With
+  `a2p2 net on --map-port`, the router's external address is advertised
+  to members only after one of them reaches it, so the first invite of a
+  room carried only the machine's local addresses, and no one outside
+  could join. An invite now also carries the live mapped address, first in
+  its list, whether or not a member has reached it. What the machine
+  advertises to members is unchanged.
+
 ## [0.2.0] - 2026-11-24
 
 File attachments, a way to find out whether machines can reach each

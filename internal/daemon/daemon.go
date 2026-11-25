@@ -482,6 +482,7 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 		Addrs: adv.now, Network: netw, NetworkFault: r.getFault, NotMember: x.NotMemberSince,
 		Probe: prober, Reach: reach, Mapping: func() *node.PortMapping { return mappingView(keeper, mapErr) },
 		NotAdvertised: dropped,
+		InviteExtra:   func() []string { return mappedAddr(keeper) },
 		OnNetwork: func(node.Network) {
 			select {
 			case r.restart <- struct{}{}:

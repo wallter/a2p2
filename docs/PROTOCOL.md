@@ -577,7 +577,9 @@ person decides again, and `network` in `status` carries `ipv4_only`. A
 dialler skips a peer's unique-local address, on every dial path (pulls,
 dial-backs, probes, joins), unless it holds one in the same `/48` now.
 A peer's own list in a pull replaces the addresses earlier learned from
-that peer itself; an empty list changes nothing.
+that peer itself; an empty list changes nothing. An invite's list is the
+same, except that the router's mapped address, if live, goes first
+whether or not a member has reached it (DESIGN 11).
 
 **Mapped addresses.** `saw` is never a candidate: one lying member could
 otherwise make this machine publish someone else's address. The only

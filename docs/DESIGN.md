@@ -637,7 +637,16 @@ widen who can be reached, none of them a service run by anyone else.
   keeps changing asks members to check at most every five minutes. If it is
   not the address members see, the router is behind another NAT
   (carrier-grade NAT or a second router), and `net check` says the
-  mapping cannot help. Mapping is a decision like turning networking on:
+  mapping cannot help. An invite carries that address whether or not a
+  member has reached it, because a room's first invite is issued before
+  any member exists to reach it: it goes first in the token, ahead of the
+  advertised addresses, and keeps its place when the 8-address cap cuts
+  the list. The joiner dials a token's addresses in order, 3 seconds each,
+  and a joiner outside the network would otherwise wait out the private
+  ones; a wrong address costs a timeout, since the key's fingerprint is
+  checked before anything is sent. Only invites carry it before then; what
+  the machine advertises and asks members to dial back is unchanged.
+  Mapping is a decision like turning networking on:
   asked at a terminal, saying that it opens a port on the router to the
   internet and that only room members get anything from it, and recorded
   in the networking decision. It is never on by default and no agent tool

@@ -76,6 +76,11 @@ type SurfaceOpts struct {
 	Mapping func() *PortMapping
 	// NotAdvertised is the configured addresses left out, each with why.
 	NotAdvertised []string
+	// InviteExtra, if set, is the addresses an invite carries beyond the
+	// ones this machine advertises: the router's live mapped address, which
+	// is advertised only once a member has reached it, and which no member
+	// can reach before a first invite has been used (DESIGN 11).
+	InviteExtra func() []string
 }
 
 // MaybeRemovedAfter is how long every other member of a room must have
@@ -103,6 +108,7 @@ type Surface struct {
 	reach   *Reacher
 	mapping func() *PortMapping
 	notAdv  []string
+	extra   func() []string
 	// waiting, if set (tests), is called each time Inbox starts to wait:
 	// a readiness barrier.
 	waiting func()
@@ -114,7 +120,7 @@ type Surface struct {
 func OpenSurface(ctx context.Context, m *Machine, r *Rooms, o SurfaceOpts) (*Surface, error) {
 	s := &Surface{m: m, r: r, j: o.Joiner, book: o.Book, name: o.Name, addrs: o.Addrs, local: localRoomID(m.ID),
 		net: o.Network, fault: o.NetworkFault, onNet: o.OnNetwork, notMb: o.NotMember,
-		probe: o.Probe, reach: o.Reach, mapping: o.Mapping, notAdv: o.NotAdvertised}
+		probe: o.Probe, reach: o.Reach, mapping: o.Mapping, notAdv: o.NotAdvertised, extra: o.InviteExtra}
 	if s.fault == nil {
 		s.fault = func() string { return "" }
 	}
@@ -316,10 +322,30 @@ func (s *Surface) Invite(ctx context.Context, room, role string, history bool) (
 		return Invitation{}, codedErr(ErrorNetworkingOff, "networking is %s here, so no machine could reach this one to join; "+
 			"a person can turn the listener on at a terminal: a2p2 net on", s.net.State)
 	}
+	if s.extra != nil {
+		addrs = inviteAddrs(s.extra(), addrs)
+	}
 	if len(addrs) > MaxAddrs {
 		addrs = addrs[:MaxAddrs]
 	}
 	return s.r.Invite(ctx, id, role, history, addrs)
+}
+
+// inviteAddrs puts extra before the advertised addresses, without
+// repeats, at most MaxAddrs, so the cap cuts the last advertised address
+// and never the extra. The joiner dials a token's addresses in order, 3
+// seconds each, and gives up after 15; a joiner outside the network is the
+// one this address is for, and would otherwise wait out the private
+// addresses first. A wrong address costs a joiner a timeout and nothing
+// else: it checks the key's fingerprint before it sends anything.
+func inviteAddrs(extra, adv []string) []string {
+	out := make([]string, 0, MaxAddrs)
+	for _, x := range append(slices.Clone(extra), adv...) {
+		if !slices.Contains(out, x) && len(out) < MaxAddrs {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 // member resolves a machine named by its node id or a unique prefix of at

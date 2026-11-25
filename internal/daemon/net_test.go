@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wallter/a2p2/internal/core"
 	"github.com/wallter/a2p2/internal/daemon/portmap"
 	"github.com/wallter/a2p2/internal/localapi"
 	"github.com/wallter/a2p2/internal/node"
@@ -184,6 +185,33 @@ func TestPortMappingIsShownAndRemovedOnNetOffAnotherDecisionAndStop(t *testing.T
 	}
 	if _, err := os.Stat(filepath.Join(m.home, "portmap.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("record left after a clean stop: %v", err)
+	}
+}
+
+// A first invite is for a machine outside the network, and no member can
+// reach the mapped address before it is used, so the invite carries it
+// while the machine does not advertise it (DESIGN 11).
+func TestAFirstInviteCarriesTheRouterMappedAddressThatIsNotYetAdvertised(t *testing.T) {
+	m := newMachineWith(t, "a", nil)
+	r := newFakeRouter()
+	m.useRouter(r, "")
+	listen := m.ln.ln.Addr().String()
+	m.decide(localapi.NetReq{State: node.NetworkOn, Listen: listen, MapPort: true})
+	eventually(t, "the mapping in status", func() bool {
+		st := call[localapi.Status](m, "status", localapi.Empty{})
+		return st.Mapping != nil && st.Mapping.External == "198.51.100.7:40001"
+	})
+	call[localapi.Room](m, "room/create", localapi.RoomReq{Room: "team"})
+	inv := call[localapi.InviteResp](m, "room/invite", localapi.InviteReq{Room: "team"})
+	tok, err := core.DecodeToken(inv.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tok.Addrs) == 0 || tok.Addrs[0] != "198.51.100.7:40001" || !slices.Contains(tok.Addrs, listen) {
+		t.Fatalf("invite addresses %v, want the mapped address first and %s", tok.Addrs, listen)
+	}
+	if st := call[localapi.Status](m, "status", localapi.Empty{}); slices.Contains(st.Listen, "198.51.100.7:40001") {
+		t.Fatalf("advertised before a member reached it: %v", st.Listen)
 	}
 }
 
