@@ -209,6 +209,20 @@ started the a2p2 MCP server. In one session, call `send` with
 `{"room":"local","text":"hello"}`, then call `inbox` in the other. In Pi,
 use the installed skill's CLI steps to send and read.
 
+## Try two machines on one computer
+
+```sh
+make build && scripts/demo.sh
+```
+
+This starts two machines, `alpha` and `beta`, in throwaway folders under
+`/tmp`, listening on `127.0.0.1` only. It makes a room, joins, compares the
+fingerprint, sends a message, reads it, replies and traces the handled
+report in about ten seconds, then stops both and deletes the folders. It
+never touches `~/.a2p2` or any harness settings. `--file` also sends a
+file, `--pause` waits for Enter between steps and `--keep` leaves the
+machines running. It needs python3, to type `yes` where a person decides.
+
 ## Share a room across two machines
 
 Call the inviting machine A and the joining machine B. A person on each

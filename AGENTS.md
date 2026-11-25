@@ -29,6 +29,7 @@ make chaos                      # real daemons in Docker containers through kill
 make prerelease                 # before a tag: check, lint, vuln, check-linux and one chaos run at once; writes the stamp
 make tag VERSION=v1.2.3         # refuses without a passing prerelease on HEAD; tags and pushes
 make verify-release VERSION=v1.2.3  # waits for the release workflow; checks assets, checksum and version
+make demo-test                  # scripts/demo.sh, two runs at once: two daemons on one computer, loopback only (check runs it)
 make e2e HARNESS=claude         # real harness end to end; spends model tokens
 make review WHO=sol             # review of uncommitted changes by another model family
 ```
