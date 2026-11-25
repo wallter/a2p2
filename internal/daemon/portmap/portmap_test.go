@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -524,7 +525,9 @@ func TestTheMappingIsRecordedBeforeTheRouterIsAsked(t *testing.T) {
 	if held := get(t, rec); len(held) != 1 || held[0].External.String() != "203.0.113.7:40001" {
 		t.Fatalf("recorded %+v", held)
 	}
-	if fi, err := os.Stat(rec.Path); err != nil || fi.Mode().Perm() != 0o600 {
+	// A file's mode protects it on Unix; on Windows the home's access
+	// control list does (D47), and Go reports no such mode there.
+	if fi, err := os.Stat(rec.Path); err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
 		t.Fatalf("record mode %v %v", fi, err)
 	}
 	stop()
