@@ -34,7 +34,11 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   `status` counts any other file under `blobs/` as unknown. A send to
   everyone is approved for the set of members shown, and a replacement
   for the audience of the message it replaces; a send whose message
-  cannot be written is refused before anything is copied. The confirmation is a guard rail for an
+  cannot be written is refused before anything is copied. A file list is
+  asked for as soon as its message arrives, and a want ends the author's
+  waiting pull at once, so between a listener and a machine that only
+  connects out the list arrives in seconds, not after a minute; `fetch`
+  with a wait also waits for a file that is coming. The confirmation is a guard rail for an
   agent running as your user. Not yet tried with a real harness (DESIGN
   section 12, PROTOCOL section 10).
 - **`a2p2 net check`** says whether this machine can talk to the members

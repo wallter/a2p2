@@ -775,8 +775,9 @@ func (x *Exchange) Serve(ctx context.Context, peer string, q *PullRequest) (*Pul
 	if err != nil {
 		return nil, err
 	}
-	if q.WaitMS > 0 && b.resp.Same {
-		// Step 9: held while the answer would stay same (waiting.go).
+	if q.WaitMS > 0 && b.resp.Same && (x.files == nil || !x.files.wantsDue(ctx, q.Room, peer)) {
+		// Step 9: held while the answer would stay same (waiting.go), and
+		// not at all while a want for the puller is due (PROTOCOL 10.4).
 		if b, err = x.hold(ctx, peer, q, b); err != nil {
 			return nil, err
 		}
@@ -888,6 +889,9 @@ func (x *Exchange) serve(ctx context.Context, peer string, q *PullRequest) (*bui
 	}
 	if sv.stored {
 		r.m.wakes.touch(rl.id)
+		if x.files != nil {
+			x.files.Soon(rl.id) // manifests of headers the request brought (PROTOCOL 10.2)
+		}
 	}
 	b, err := x.respond(ctx, rl, peer, q, sv)
 	if err != nil {
@@ -1155,8 +1159,14 @@ func (x *Exchange) Pull(ctx context.Context, room, peer string, o PullOpts) (Pul
 	}
 	sent := map[string]bool{} // records and log entries given to the peer in this exchange
 	if x.files != nil {
-		// what the exchange stored may end files here [F1]
-		defer x.files.sweepRoom(context.WithoutCancel(ctx), room)
+		// what the exchange stored may end files here [F1], and the
+		// manifests of headers it brought are fetched now (PROTOCOL 10.2)
+		defer func() {
+			x.files.sweepRoom(context.WithoutCancel(ctx), room)
+			if st.Stored > 0 {
+				x.files.Soon(room)
+			}
+		}()
 	}
 	for st.Rounds < pullRoundsPerPull {
 		st.Rounds++

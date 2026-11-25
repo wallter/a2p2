@@ -43,15 +43,7 @@ func (f *Files) wantsFor(ctx context.Context, room, puller string, room0 int) []
 	// the clock read inside the transaction that chooses the wants [W4]
 	clock := func() time.Time { return f.m.now() }
 	_ = hookAt("files:wants") // tests: time passes while the transaction is waited for
-	ws, err := f.m.st.WantsToSend(ctx, room, puller, clock, max, core.WantRepeat, func(rd *store.Reader, w store.FileWant, now time.Time) (bool, error) {
-		mf, err := rd.MessageFiles(room, w.Msg, f.m.ID, now)
-		if err != nil {
-			return false, err
-		}
-		_, _, listed := mf.Listed(w.SHA256)
-		live := now.Before(w.At.Add(core.WantLife)) // past its life it is not advertised, swept or not [S6]
-		return live && listed && mf.Winner.ID == w.Version && mf.Author == puller, nil
-	})
+	ws, err := f.m.st.WantsToSend(ctx, room, puller, clock, max, core.WantRepeat, f.wantFor(room, puller))
 	if err != nil {
 		return nil
 	}
@@ -68,6 +60,63 @@ func (f *Files) wantsFor(ctx context.Context, room, puller string, room0 int) []
 		return nil
 	}
 	return out
+}
+
+// wantFor is the check that a want may go out in an answer to puller: it
+// is still for the winning version of puller's message, which lists it,
+// and it is within its life.
+func (f *Files) wantFor(room, puller string) func(*store.Reader, store.FileWant, time.Time) (bool, error) {
+	return func(rd *store.Reader, w store.FileWant, now time.Time) (bool, error) {
+		mf, err := rd.MessageFiles(room, w.Msg, f.m.ID, now)
+		if err != nil {
+			return false, err
+		}
+		_, _, listed := mf.Listed(w.SHA256)
+		live := now.Before(w.At.Add(core.WantLife)) // past its life it is not advertised, swept or not [S6]
+		return live && listed && mf.Winner != nil && mf.Winner.ID == w.Version && mf.Author == puller, nil
+	}
+}
+
+// wantsDue reports whether an answer to puller's pull of room would carry
+// a want now (wantsFor, without recording anything). A pull of puller held
+// at this machine ends when one is due, so a want reaches an author that
+// only dials out at once, not when the hold times out.
+func (f *Files) wantsDue(ctx context.Context, room, puller string) bool {
+	if f.t == nil || f.t.CanDial(puller) {
+		return false
+	}
+	var due bool
+	err := f.m.st.View(ctx, func(rd *store.Reader) (err error) {
+		due, err = rd.WantsDue(room, puller, f.m.now(), core.WantRepeat, f.wantFor(room, puller))
+		return err
+	})
+	return err == nil && due
+}
+
+// issueWant records w and, when it is new and its author cannot be
+// dialled, wakes the room, so that a pull of the author held here ends and
+// carries it (wantsDue).
+func (f *Files) issueWant(ctx context.Context, w store.FileWant) (bool, error) {
+	issued, err := f.m.st.IssueWant(ctx, w)
+	if err == nil && issued && (f.t == nil || !f.t.CanDial(w.Author)) {
+		f.m.wakes.touch(w.Room)
+	}
+	return issued, err
+}
+
+// Soon asks Run to do room's file work now: the manifests of headers that
+// just arrived are fetched after the pull that brought them, not at the
+// next tick (PROTOCOL 10.2). It never blocks.
+func (f *Files) Soon(room string) {
+	select {
+	case f.soon <- room:
+	default:
+	}
+}
+
+// soonAfter is Soon after d.
+func (f *Files) soonAfter(room string, d time.Duration) {
+	time.AfterFunc(d, func() { f.Soon(room) })
 }
 
 // checkWants is the response check of a want field.
@@ -457,12 +506,25 @@ func (f *Files) fetchList(ctx context.Context, room string, fr store.FileRecord,
 	if _, err := f.download(ctx, room, fr.Msg, fr.Manifest, hs); err == nil {
 		return
 	}
+	// The first ask after the header arrived is not a failed answer: a
+	// member that holds the list may be getting it at this moment (from an
+	// author only it can reach, by a want). It is asked again soon, once.
+	f.mu.Lock()
+	first := !f.tried[fr.Record]
+	f.tried[fr.Record] = true
+	f.mu.Unlock()
+	if first && len(hs) > 0 {
+		f.soonAfter(room, core.ListRetrySoon)
+	}
 	if c.mf.Author != f.m.ID && (f.t == nil || !f.t.CanDial(c.mf.Author)) {
-		_, _ = f.m.st.IssueWant(ctx, store.FileWant{Room: room, Msg: fr.Msg, Version: fr.Record, SHA256: fr.Manifest,
+		_, _ = f.issueWant(ctx, store.FileWant{Room: room, Msg: fr.Msg, Version: fr.Record, SHA256: fr.Manifest,
 			Author: c.mf.Author, List: true, At: now})
 		if !c.wanting {
 			return // the first answer to a want is not a failed answer
 		}
+	}
+	if first && !have {
+		return
 	}
 	_ = f.m.st.ListFailed(ctx, room, fr.Record, now)
 }
@@ -487,22 +549,27 @@ func (f *Files) keep(ctx context.Context, room string, recs []store.FileRecord) 
 				!c.fits || c.selfAuth {
 				continue
 			}
-			_, _ = f.m.st.IssueWant(ctx, store.FileWant{Room: room, Msg: fr.Msg, Version: fr.Record, SHA256: it.SHA256,
+			_, _ = f.issueWant(ctx, store.FileWant{Room: room, Msg: fr.Msg, Version: fr.Record, SHA256: it.SHA256,
 				Author: c.mf.Author, Size: it.Size, At: f.m.now()})
 		}
 	}
 }
 
-// Run does Tick every interval until ctx ends.
+// Run does Tick every interval until ctx ends, and one room's work at
+// once when Soon asks for it.
 func (f *Files) Run(ctx context.Context, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	f.Tick(ctx)
 	for {
-		f.Tick(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			f.Tick(ctx)
+		case room := <-f.soon:
+			f.sweepRoom(ctx, room)
+			f.tickRoom(ctx, room)
 		}
 	}
 }
@@ -706,10 +773,15 @@ func (f *Files) fetchOne(ctx context.Context, o FetchOpts, room, msg string, c f
 		dctx, cancel := context.WithTimeout(ctx, max(wait, time.Second))
 		from, _ = f.download(dctx, room, msg, o.SHA256, hs)
 		cancel()
-		if c, _ = f.check(ctx, room, msg, o.SHA256, ""); !c.listed {
+		_ = hookAt("files:downloaded") // tests: the room left during the download [F1 of the fifth review]
+		if c, err = f.check(ctx, room, msg, o.SHA256, ""); err != nil {
+			return res, err
+		}
+		if !c.listed || c.mf == nil || c.mf.Winner == nil {
 			if g := goneResult(c, room, msg); g != nil {
 				return *g, nil
 			}
+			return res, errNotShownFile
 		}
 		if c.how == "" {
 			return f.notHere(ctx, res, room, msg, o.SHA256, c)
@@ -753,6 +825,9 @@ func (f *Files) fetchOne(ctx context.Context, o FetchOpts, room, msg string, c f
 // notHere says why the bytes are not here yet, issuing a want to an
 // author nobody can dial [F9].
 func (f *Files) notHere(ctx context.Context, res FetchResult, room, msg, sha string, c fileCheck) (FetchResult, error) {
+	if c.mf == nil || c.mf.Winner == nil {
+		return res, errNotShownFile // no list obtained: nothing to say about it
+	}
 	// Only what current members answered, read in one transaction with
 	// the membership: a former holder's old "not yet" says nothing now [W5].
 	var obs []store.FileObs
@@ -791,7 +866,7 @@ func (f *Files) notHere(ctx context.Context, res FetchResult, room, msg, sha str
 	case c.wanting || notYet:
 		res.State = FetchComing
 	case !c.selfAuth && (f.t == nil || !f.t.CanDial(c.mf.Author)):
-		_, err := f.m.st.IssueWant(ctx, store.FileWant{Room: room, Msg: msg, Version: c.mf.Winner.ID, SHA256: sha,
+		_, err := f.issueWant(ctx, store.FileWant{Room: room, Msg: msg, Version: c.mf.Winner.ID, SHA256: sha,
 			Author: c.mf.Author, Size: c.ref.Size, At: f.m.now()})
 		switch {
 		case errors.Is(err, store.ErrNoSpace):

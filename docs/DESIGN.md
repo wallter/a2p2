@@ -697,7 +697,13 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    (D27).
 2. **The manifest travels like a file, at once [F4, F12].** A machine that
    may read the text fetches the manifest (at most 16 KiB) after the pull
-   that brought the header: it is U4's cheap first step. Until it arrives a
+   that brought the header, on either side of it (the exchange asks the
+   files part at once rather than waiting for its one-minute tick): it is
+   U4's cheap first step. The first ask that finds no list is not a failed
+   answer and is repeated once after 5 s, since a member may be getting
+   it from an author only it can reach. A want ends a pull of its author
+   held here, so it travels at once, and an agent's fetch with a wait
+   keeps waiting while the file is coming. Until it arrives a
    reader sees "has files; list not here yet". After 8 failed answers,
    with backoff, it is `unavailable` until a person or agent asks again. A
    manifest that matches its hash but breaks a rule is `invalid` for good,
