@@ -1118,6 +1118,9 @@ stdin. Without one, `join` prints the preview and stops.
 
 ## 8. Schema (migrations 2 to 12)
 
+Migration 13 adds the tables for attachments; they are in
+[section 10.8](#108-where-bytes-live-names-and-schema).
+
 | Table | Columns | Keys |
 |---|---|---|
 | `rooms` | `id`, `label`, `create_id` (pinned), `gen` int, `joined_at` | `id` |

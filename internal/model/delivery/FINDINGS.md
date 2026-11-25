@@ -58,10 +58,10 @@
    `TestRandomLevelChangesNeitherLoseNorRepeatAMessage`: every message for
    the agent is shown once or listed skipped, never both.
 
-## Attachments (0.2 draft)
+## Attachments
 
-Added 2026-11-24 for requirement L1 and revised twice the same day after review;
-not built (`attach.go`). The signed header of a message or a replacement
+Added 2026-11-24 for requirement L1 and revised twice the same day after review
+(`attach.go`); the daemon was then built to these rules (decision D49). The signed header of a message or a replacement
 with files holds only the SHA-256 of a salted manifest (`Record.Manifest`).
 The manifest (salt; name, size and hash of each file) and the bytes are
 content: they travel apart, on request, under the text's permission.
@@ -237,7 +237,7 @@ ancestor ids. T5 holds per member, as written. N1 holds with offers.
 
 Record fields: author, epoch, seq, prev, links, version, kind, agent, to,
 ask-handled, ref, parent, thread, created, body hash, signature, room;
-in the 0.2 draft, a manifest hash (L1).
+from version 0.2, a manifest hash (L1).
 
 ## Requirement to test
 
@@ -250,4 +250,4 @@ requirements in a comment. Examples, and the membership tests:
 | U3, T3 (R2) | `TestNewMachineInboxStartsEmpty…`, `TestNoHistoryNewcomer…`, `TestTwoGrantsThatDiffer…`, `TestHeldResponseIsChecked…` |
 | T5 (R1, R2) | `TestMessageOfARemovedAuthor…`, `TestWithdrawWrittenBeforeRemoval…`, `TestRecordWrittenAfterRemoval…`, `TestVoidedAdmission…`, `TestStaleViewHands…`, `TestHeldResponseIsNotReleased…` |
 | N1 (R3) | `TestStaleOfferCosts…`, `TestOffersDoNotStarve…`, `TestMachineThatOnlyOpensRequests…` |
-| L1 (F1–F12, 0.2 draft) | `TestAFileIsSentOnlyAfterAPersonApproves…`, `TestInARoomWithOneListenerAFile…`, `TestANewcomerWithoutHistoryGetsNeither…`, `TestWithdrawDeletesAFile…`, `TestRandomSchedulesWithFiles…` and the rest of `attach_test.go` |
+| L1 (F1–F12) | `TestAFileIsSentOnlyAfterAPersonApproves…`, `TestInARoomWithOneListenerAFile…`, `TestANewcomerWithoutHistoryGetsNeither…`, `TestWithdrawDeletesAFile…`, `TestRandomSchedulesWithFiles…` and the rest of `attach_test.go` |

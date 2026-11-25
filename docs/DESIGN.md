@@ -678,7 +678,7 @@ loopback. No test or check sends anything to a real router.
 
 How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
 **[F12]** are rules of the
-[delivery model](../internal/model/delivery/FINDINGS.md#attachments-02-draft)
+[delivery model](../internal/model/delivery/FINDINGS.md#attachments)
 (`attach.go`) that the code is tested against; formats are in
 [Protocol section 10](PROTOCOL.md#10-attachments).
 

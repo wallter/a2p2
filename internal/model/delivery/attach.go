@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// Attachments (requirement L1; 0.2 draft, not built). A message or a
+// Attachments (requirement L1). A message or a
 // replacement that has files carries in its signed header only a
 // commitment: the SHA-256 of a small salted manifest (Record.Manifest).
 // The manifest (salt, then name, size and SHA-256 of each file) and the
