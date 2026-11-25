@@ -5,6 +5,7 @@ agent or share a room.
 
 | Document | What to look up |
 |---|---|
+| [Installing](INSTALL.md) | A release binary checked by hand, and Windows |
 | [Requirements](REQUIREMENTS.md) | Goals, scope and known limits |
 | [Design](DESIGN.md) | How signed records, room membership and pull work |
 | [Protocol](PROTOCOL.md) | Wire formats, MCP tools, local API and CLI |

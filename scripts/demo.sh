@@ -226,7 +226,14 @@ wait "$JPID"; jrc=$?; JPID=""
 echo
 echo "beta, from the join command:"
 emit "$(grep '^joined room' "$HB/join.out")"
-do_ beta 8 room list design-review
+show beta "room list design-review"
+OUT=$(a2 beta room list design-review 2>&1) || { emit "$OUT"; die "a2p2 room list design-review on beta"; }
+# The single-admin warning is long; show its first sentence.
+OUT=$(printf '%s\n' "$OUT" | awk '
+  /^ *limit: / { i = index($0, ". "); if (i > 0) $0 = substr($0, 1, i)
+                 $0 = $0 " (trimmed; see the README limits)" }
+  { print }')
+emit "$OUT" 8
 
 step "6. Each agent chooses to follow every message in the room"
 do_ alpha 3 inbox --level all --room design-review --as planner

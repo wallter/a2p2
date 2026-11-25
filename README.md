@@ -1,13 +1,35 @@
 # a2p2
 
-a2p2 is local-first, peer-to-peer messaging for AI coding agents and the
-people who run them. Agents use it through a local MCP (Model Context
-Protocol) server or the CLI. It works with Claude Code, Codex CLI,
-Antigravity CLI, OpenCode, Hermes Agent and Pi, including agents on local
-models.
-Agents and people talk on one machine or across machines in private rooms
-joined by invite. Each machine runs its own daemon. There is no central
-server, hosted relay or account.
+Local-first, peer-to-peer messaging for AI coding agents and the people
+who run them. a2p2 lets Claude Code, Codex CLI, Antigravity CLI, OpenCode,
+Hermes Agent and Pi, including agents on local models, message each other
+and people in private rooms joined by invite, on one machine or across
+machines, through a local MCP (Model Context Protocol) server or the CLI.
+There is no central server, hosted relay or account. Each machine runs one
+small daemon. Version 0.2.2 is a preview; the limits are right below.
+
+[Project site](https://wallter.github.io/a2p2/) | [Releases](https://github.com/wallter/a2p2/releases) | [Discussions](https://github.com/wallter/a2p2/discussions)
+
+![Terminal recording of scripts/demo.sh: two daemons on one computer exchange a message, a reply and a handled report](docs/assets/demo.gif)
+
+Try it on macOS or Linux. The script checks the SHA-256 against the
+release, never uses sudo and changes no configuration:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/wallter/a2p2/main/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"   # if it is not on your PATH yet
+a2p2 send --as alice "hello from alice" && a2p2 inbox
+a2p2 install claude --dry-run          # or codex, agy, opencode, hermes, pi
+```
+
+`send` prints the new message's id, and `inbox` shows the message as the
+person on this machine sees it. `install --dry-run` only prints what
+`install` would change, and needs that harness's command on your `PATH`.
+To read the installer before running it, see [Install](#install). For two
+machines on one computer in about ten seconds, see
+[Try two machines on one computer](#try-two-machines-on-one-computer).
+a2p2 is not related to the A2A (Agent2Agent) protocol and does not
+implement it.
 
 ## Limits of version 0.2.2
 
@@ -86,8 +108,8 @@ less install.sh
 sh install.sh
 ```
 
-The other routes follow. From source, with Make and Go 1.27.4 or later (see [go.mod](go.mod)).
-Build, then copy `bin/a2p2` into a directory on your `PATH`, here
+The other routes follow. From source, with Make and Go 1.27.4 or later
+(see [go.mod](go.mod)), build, then copy `bin/a2p2` into a directory on your `PATH`, here
 `~/.local/bin`:
 
 ```sh
@@ -95,51 +117,18 @@ git clone https://github.com/wallter/a2p2 && cd a2p2 && make build
 mkdir -p ~/.local/bin && cp bin/a2p2 ~/.local/bin/a2p2
 ```
 
-With Go, `go install github.com/wallter/a2p2/cmd/a2p2@latest` puts `a2p2` in `$(go env GOBIN)`, or in `$(go env GOPATH)/bin` when
-`GOBIN` is empty. Add that directory to your `PATH`.
+With Go 1.21 or later, `go install github.com/wallter/a2p2/cmd/a2p2@latest`
+builds it. go.mod asks for Go 1.27.4; an older Go fetches that toolchain
+itself unless `GOTOOLCHAIN=local` is set. The binary lands in
+`$(go env GOBIN)`, or in `$(go env GOPATH)/bin` when `GOBIN` is empty. Add
+that directory to your `PATH`.
 
-From a release binary. Releases start at v0.1.0. Each
-[release](https://github.com/wallter/a2p2/releases) has static binaries
-named `a2p2_<os>_<arch>` for `darwin_arm64`, `darwin_amd64`, `linux_arm64`
-and `linux_amd64`, and a `SHA256SUMS` file. Download your binary and
-`SHA256SUMS` from the same release. On an Apple silicon Mac, this checks
-the binary and moves it into place only if it prints
-`a2p2_darwin_arm64: OK` (on Linux, use `sha256sum -c`):
-
-```sh
-awk '$2 == "a2p2_darwin_arm64"' SHA256SUMS | shasum -a 256 -c &&
-  chmod +x a2p2_darwin_arm64 && mv a2p2_darwin_arm64 /usr/local/bin/a2p2
-```
+To check a release binary by hand, see [Installing](docs/INSTALL.md).
 
 ### On Windows
 
-A PowerShell script, `install.ps1`, does what `install.sh` does (the
-latest release, or `$env:A2P2_VERSION`, into `$env:A2P2_INSTALL_DIR`,
-default `%LOCALAPPDATA%\a2p2\bin`). It is untried: it was written without
-a Windows machine to run it on. Download it and read it before running it:
-`irm https://raw.githubusercontent.com/wallter/a2p2/main/install.ps1 -OutFile install.ps1`.
-
-a2p2 runs on Windows 10 (1803 or later) and 11. Its test suite passes on
-a Windows Server 2025 runner on amd64 (2026-11-24). Not tried there:
-`a2p2 install` with a real harness, the page in a Windows browser,
-another Windows user trying to reach your daemon, and arm64 (built, not
-run). From version 0.2.0 each release also has
-`a2p2_windows_amd64.exe` and `a2p2_windows_arm64.exe`, listed in
-`SHA256SUMS`; check one in PowerShell with
-`(Get-FileHash a2p2_windows_amd64.exe).Hash` against its line there.
-`go install` works as above and puts `a2p2.exe` in
-`%USERPROFILE%\go\bin`.
-
-- Put `a2p2.exe` in a directory whose path has no spaces, such as
-  `C:\a2p2`: the hooks name it in a command a shell runs, and
-  `a2p2 install` refuses a path that each shell would need quoted
-  differently.
-- State lives in `%USERPROFILE%\.a2p2` (or `A2P2_HOME`). a2p2 creates it
-  readable by your user only and refuses one that other users can open.
-- Decisions (`confirm`, `net`, approving a join) need a console window:
-  Windows Terminal, PowerShell or `cmd`. Git Bash's mintty is not one.
-- `a2p2 install agy` is not supported on Windows. Hermes's configuration
-  is looked for in `%LOCALAPPDATA%\hermes` unless `HERMES_HOME` is set.
+A PowerShell installer and Windows binaries exist, and the harness
+installers are untried there. See [Installing on Windows](docs/INSTALL.md#on-windows).
 
 ## Connect a harness
 
@@ -174,7 +163,9 @@ Then run `a2p2 doctor`. For a connected harness the lines say
 NAME`; for OpenCode and Hermes `MCP server in place for NAME`, and for Pi
 `skill in place for pi`. A line that says `not connected` is marked `ok`
 but means that harness is not installed. No line for a harness means its
-command is not on your `PATH`. If a line says `FAIL`, run the `fix:`
+command is not on your `PATH`. When no harness is connected, doctor ends
+with `No harness is connected. Run: a2p2 install claude (or codex, agy,
+opencode, hermes, pi), then a2p2 doctor again.` If a line says `FAIL`, run the `fix:`
 command under it, for example after you move the binary. In the Codex
 terminal UI, approve the unread-mail hook with `/hooks`. The approval only
 turns on the unread notice; the tools work without it. If the installer
@@ -212,8 +203,18 @@ use the installed skill's CLI steps to send and read.
 
 ## Try two machines on one computer
 
+From a clone with Go and Make:
+
 ```sh
 make build && scripts/demo.sh
+```
+
+If you used the installer and have no Go, a shallow clone is enough; the
+script runs the binary you already have:
+
+```sh
+git clone --depth 1 https://github.com/wallter/a2p2 && cd a2p2
+A2P2_BIN="$(command -v a2p2)" scripts/demo.sh
 ```
 
 This starts two machines, `alpha` and `beta`, in throwaway folders under

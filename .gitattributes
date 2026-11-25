@@ -3,3 +3,4 @@
 # scripts and the Go sources are compared or run byte for byte, and Git
 # for Windows would otherwise convert them to CRLF (D47).
 * text=auto eol=lf
+*.gif binary
