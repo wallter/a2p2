@@ -703,7 +703,11 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    manifest that matches its hash but breaks a rule is `invalid` for good,
    since no holder can have other bytes, and nothing it lists is fetched.
    File bytes move only when an agent that was shown the version listing
-   them asks, or the machine carries or keeps them (item 5).
+   them asks (on the author's machine too, except the agent that wrote
+   the version fetched), or the machine carries or keeps them (item 5). The page fetches as
+   the person's own id, so it serves a file only of a message one of its
+   views (inbox, history, thread) has shown; those views mark it shown
+   without marking it seen.
 3. **Content lives while the text may [F1, F8].** A machine keeps the
    manifest and the files for a message while the message's winning
    version (by header) commits to them and its text is one the machine may
@@ -772,8 +776,15 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    with control and bidirectional characters escaped, its size and
    SHA-256, the room, the recipients, and for a replacement which message
    it replaces. The CLI and the page show the whole text, every line
-   escaped, and send back the terms digest they showed; an approval with
-   other terms is refused. Approval re-checks the staged digests and sends them;
+   escaped, and send back the terms digest they showed; an approval
+   without it or with other terms is refused (`terms_changed`) and
+   decides nothing. There is one way to approve a send with files
+   (`Files.ApproveSend`, with the terms); the general confirm path can
+   only decline one. The member count shown for "everyone" is the one
+   the terms were made with, and an implicit reply's terms name the
+   parent's author it goes to. If the room's membership differs at
+   publication from the count approved, nothing is sent and the request
+   ends `terms_changed`. Approval re-checks the staged digests and sends them;
    the source is never read again. Declined, expired after 24 hours,
    failed, or after this machine's own admission is voided, nothing is
    written and staging is deleted.
@@ -790,7 +801,26 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    bytes are safe, so a send is never published without them. Temporary
    files have a recognisable name. Deletions are by rows, queued in the
    sweep transaction that decides them (item 3), and never remove a path a live row
-   names; a start completes the queue and removes files no row names.
+   names; a copy's deletion removes only the file a2p2 linked there (by
+   its file identity), and an entry leaves the queue only after its
+   directory sync succeeds, even when the path is already gone. A start
+   completes the queue, drops every partial transfer, which starts again
+   from zero, and removes only what carries a name a2p2 generates (a
+   blob, a part, a request's staging, a temporary file) that no row
+   names; any other file under `blobs/` is left and counted in `status`
+   as unknown. Bytes are never adopted unverified: a file already at a
+   blob's path is hashed before it counts as that blob, and replaced by
+   the verified bytes if it does not match; a start hashes every held
+   blob and removes one that fails, to be fetched again. Serving does not
+   hash again. A request names the file's hash in its path, so a fetch,
+   a list fetch and a carry go only to the author or a member this
+   machine can affirm may read the message and its winning version, by
+   the rule the serving side applies. The clock for a promotion is read
+   inside the transaction that makes the bytes live; a want past its
+   life is not advertised before the sweep lapses it.
+   Permission is decided once under one view of membership and rows, held
+   by the transfer and asked again in the transaction that makes bytes or
+   a copy live; each fetch writes and checks a new copy.
 
 **Who can reach whom.** Text and files take the same connections; what
 files add is item 5.
@@ -829,10 +859,23 @@ running as the same user can call `confirm` itself, or read a file and
 paste it as text. A send with files tells the agent only the request and
 that it waits, and refuses every path that cannot be staged with one
 message, but an agent can still learn that a path can be staged at all,
-which its other tools could tell it anyway. Withdrawing after others fetched removes the copies a2p2
-keeps; a copy an agent moved is out of reach. A removed machine keeps what
-it fetched (T5). F2 binds honest machines: a member holding bytes can hand
-them to anyone. A member that may read a message can tell from the answers
-("not yet", "gave up") whether a listener carries or keeps; machines that
-may not read it cannot. Attacks on the program that later opens a file are out of
-scope, since a2p2 opens nothing.
+which its other tools could tell it anyway. Withdrawing after others
+fetched removes the copies a2p2 keeps; a copy an agent moved or changed is
+out of reach (a copy is known by its file number and modification time).
+A removed machine keeps what it fetched (T5). F2 binds honest machines: a
+member holding bytes can hand them to anyone. A member that may read a
+message can tell from the answers ("not yet", "gave up") whether a
+listener carries or keeps; machines that may not read it cannot. A
+refusal's timing is not made equal: a member that may read a message can
+tell from how long a `not_held` takes whether this machine holds its
+header. After a revocation, one buffer may still be written in the 25 ms
+the lease takes to cut a response: bounded, and less than a machine that
+has not yet learned of the revocation serves (T5). Every version of one
+message that carries the same commitment shares its list, since the hash
+makes the content identical. On Unix the last symbolic link of a path to
+attach is followed; the person is shown the path of the file actually
+opened. A process that can write inside the home can race a2p2's own
+file operations: the home is the person's. On Windows a power loss can
+undo a rename that was not flushed; a start reconciles, and a blob that
+is gone is fetched again. Attacks on the program that later opens a file
+are out of scope, since a2p2 opens nothing.

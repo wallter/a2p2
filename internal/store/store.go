@@ -64,7 +64,7 @@ CREATE TABLE marks (
 // of it the next version does not use.
 //
 // migrations[i] upgrades the schema from version i to i+1. Append only.
-var migrations = []string{schema, schemaRecords, schemaLog, schemaPull, schemaKnownFrom, schemaInvites, schemaJoinPaging, schemaPeerAddrs, schemaHistory, schemaDropV02, schemaLevels, schemaReading, schemaFiles}
+var migrations = []string{schema, schemaRecords, schemaLog, schemaPull, schemaKnownFrom, schemaInvites, schemaJoinPaging, schemaPeerAddrs, schemaHistory, schemaDropV02, schemaLevels, schemaReading, schemaFiles, schemaFiles2}
 
 // Store wraps the database. Safe for concurrent use.
 type Store struct {
@@ -76,8 +76,21 @@ type Store struct {
 	// root is the directory under which attachments live (files.go):
 	// the database's own directory. fileMu serialises putting bytes at a
 	// path with the deletion queue's run.
+	//
+	// Lock order [K4]. A lock may be taken while holding only those
+	// before it: node.Rooms.mu, then node.Machine.mu (a write), then
+	// fileMu or stageMu (never both), then a database transaction, then
+	// the leaves, each taken alone and never held while waiting for
+	// anything (node.Rooms.smu and fmu, node.Files.mu, resMu). So under
+	// fileMu nothing
+	// waits for Rooms.mu: a gate's prepare reads Rooms.State, which takes
+	// only smu; and a deletion run from under Rooms.mu (a leave) may wait
+	// for fileMu, since no holder of fileMu waits for Rooms.mu.
 	root   string
 	fileMu sync.Mutex
+	// unknownFiles counts what the last start left under blobs/ because
+	// a2p2 does not generate its name [K3].
+	unknownFiles atomic.Int64
 	// stageMu serialises staging reservations; resMu guards staging, the
 	// bytes reserved by requests being staged (finding 9).
 	stageMu, resMu            sync.Mutex

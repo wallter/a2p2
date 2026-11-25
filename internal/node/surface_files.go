@@ -6,13 +6,10 @@ package node
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -114,24 +111,6 @@ func (s *Surface) SendFiles(ctx context.Context, in SendInput, files []string) (
 	return out, err
 }
 
-// errSendTermsChanged refuses an approval of a send with files whose terms
-// are not the ones the request holds now.
-var errSendTermsChanged = codedErr(ErrorInvalid,
-	"the terms shown are not this request's current terms: list it again (a2p2 confirm) and review it before approving")
-
-// sameTerms checks the terms an approval of a send with files carries.
-// Other kinds of request carry none and are not checked.
-func (s *Surface) sameTerms(ctx context.Context, id, terms string) error {
-	q, err := s.m.st.GetRequest(ctx, id)
-	if err != nil || q.Kind != store.RequestSendFiles {
-		return nil // ConfirmWith answers a missing request
-	}
-	if subtle.ConstantTimeCompare([]byte(terms), []byte(q.Terms)) != 1 || terms == "" {
-		return errSendTermsChanged
-	}
-	return nil
-}
-
 // CannotAttach is the one refusal of a send whose paths cannot be staged,
 // whatever the reason (missing, unreadable, not a regular file, too large,
 // over a budget, the same bytes twice): an agent that asked learns
@@ -139,26 +118,23 @@ func (s *Surface) sameTerms(ctx context.Context, id, terms string) error {
 const CannotAttach = "cannot attach that path: not a readable regular file within the limits"
 
 // cannotAttachErr turns a refusal of staging into CannotAttach when the
-// send names a path. The reason goes to the debug log, without the path
-// or a file name (only the words before any colon, and the code).
+// send names a path. The reason goes to the debug log as the
+// store.FileError's op and code, or the refusal's code; never its text,
+// a path or a file name.
 func cannotAttachErr(err error, files []string) error {
 	paths := false
 	for _, p := range files {
 		paths = paths || !strings.HasPrefix(p, KeptPrefix)
 	}
+	var fe *store.FileError
 	var ue *UserError
-	var pe *fs.PathError
-	var le *os.LinkError
 	switch {
 	case !paths:
 		return err
+	case errors.As(err, &fe):
+		slog.Debug("send with files refused", "op", fe.Op, "code", fe.Code)
 	case errors.As(err, &ue) && (ue.Code == ErrorInvalid || ue.Code == ErrorTooLarge || ue.Code == ""):
-		reason, _, _ := strings.Cut(ue.Msg, ":")
-		slog.Debug("send with files refused", "code", ue.CodeOf(), "reason", reason)
-	case errors.As(err, &pe):
-		slog.Debug("send with files refused", "op", pe.Op, "err", pe.Err.Error())
-	case errors.As(err, &le):
-		slog.Debug("send with files refused", "op", le.Op, "err", le.Err.Error())
+		slog.Debug("send with files refused", "code", ue.CodeOf())
 	default:
 		return err
 	}
@@ -230,6 +206,9 @@ func (s *Surface) RoomFiles(ctx context.Context, room, mode string) (RoomFilesVi
 type FilesUsage struct {
 	Held   int64
 	Budget int64
+	// Unknown counts files under blobs/ whose names a2p2 does not
+	// generate: the last start left them alone.
+	Unknown int64
 }
 
 // filesStatus is the machine's file usage and each room's setting.
@@ -237,7 +216,7 @@ func (s *Surface) filesStatus(ctx context.Context, rooms []RoomInfo) (FilesUsage
 	var u FilesUsage
 	per := map[string]RoomFilesView{}
 	rb, mb := s.m.st.FileBudgets()
-	u.Budget = mb
+	u.Budget, u.Unknown = mb, s.m.st.UnknownFiles()
 	err := s.m.st.View(ctx, func(rd *store.Reader) error {
 		for _, r := range rooms {
 			v := RoomFilesView{Room: r.ID, Budget: rb}
@@ -305,7 +284,7 @@ type SendView struct {
 	Everyone     bool
 	Parent       string // a reply without To goes to the parent's author
 	ParentAuthor string // that author's agent id, when the parent is held
-	Members      int    // the room's members, for a post to everyone
+	Members      int    // the room's members when the agent asked, for a post to everyone
 	Replaces     string
 	Base         string // the version of Replaces the replacement replaces
 	ReplacesLine string // the first line of the replaced message as held now
@@ -340,9 +319,9 @@ func (s *Surface) describeSend(ctx context.Context, q store.Request, v *RequestV
 	for _, a := range d.To {
 		sv.To = append(sv.To, AgentID(a))
 	}
-	if st, err := s.r.State(q.Room); err == nil {
-		sv.Members = len(st.Members)
-	}
+	// The member count the terms were made with, not the live one: the
+	// person approves "everyone" as many as that was.
+	sv.Members = d.Members
 	_ = s.m.view(ctx, q.Room, func(rv *roomView) error {
 		if d.Replaces != "" {
 			// A replacement keeps its message's audience and parent: show them.

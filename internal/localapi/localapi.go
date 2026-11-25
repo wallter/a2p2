@@ -119,10 +119,13 @@ type (
 		Held   int64  `json:"held"`
 		Budget int64  `json:"budget"`
 	}
-	// FilesUsage is what files take on this machine, and its limit.
+	// FilesUsage is what files take on this machine, and its limit;
+	// unknown counts files under blobs/ with a name a2p2 does not
+	// generate, which the last start left alone.
 	FilesUsage struct {
-		Held   int64 `json:"held"`
-		Budget int64 `json:"budget"`
+		Held    int64 `json:"held"`
+		Budget  int64 `json:"budget"`
+		Unknown int64 `json:"unknown,omitempty"`
 	}
 	// SendResp: to is the message's addressees as written, empty for
 	// everyone (and for a replace or withdraw, which keep the original's).
@@ -820,7 +823,7 @@ func StatusOf(st node.StatusView, listen []string, info Info) Status {
 	if out.Levels == nil {
 		out.Levels = []store.AgentLevel{}
 	}
-	out.Files = FilesUsage{Held: st.Files.Held, Budget: st.Files.Budget}
+	out.Files = FilesUsage{Held: st.Files.Held, Budget: st.Files.Budget, Unknown: st.Files.Unknown}
 	for i := range out.Rooms {
 		for _, w := range st.Writers[out.Rooms[i].ID] {
 			out.Rooms[i].Agents = append(out.Rooms[i].Agents, Writer{Agent: w.Agent, LastSeen: Time(w.Last)})

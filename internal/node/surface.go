@@ -396,12 +396,13 @@ func (s *Surface) Requests(ctx context.Context) ([]store.Request, error) { retur
 // person's second, explicit approval, which is recorded (PROTOCOL 7).
 //
 // The approval of a send with files must carry terms, the digest the
-// person was shown; one that is not the request's current terms is
-// refused, so that what is approved is what was displayed.
+// person was shown; Files.ApproveSend refuses one that is not the
+// request's current terms (terms_changed), so that what is approved is
+// what was displayed.
 func (s *Surface) Confirm(ctx context.Context, id string, approve, notCaughtUpOK bool, terms string) (Confirmation, error) {
-	if approve {
-		if err := s.sameTerms(ctx, id, terms); err != nil {
-			return Confirmation{}, err
+	if approve && s.r.files != nil {
+		if q, err := s.m.st.GetRequest(ctx, id); err == nil && q.Kind == store.RequestSendFiles {
+			return s.r.files.ApproveSend(ctx, id, terms)
 		}
 	}
 	c, err := s.r.ConfirmWith(ctx, id, approve, ConfirmOpts{NotCaughtUpOK: notCaughtUpOK})

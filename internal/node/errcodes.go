@@ -31,6 +31,10 @@ const (
 	// ErrorNotCaughtUp is ReasonNotCaughtUp: signing needs the person's
 	// explicit second approval (not_caught_up_ok).
 	ErrorNotCaughtUp = ReasonNotCaughtUp
+	// ErrorTermsChanged: an approval of a send with files carries no
+	// terms or not the request's current ones; nothing is sent and the
+	// request stays pending. Showing it again gives the terms to approve.
+	ErrorTermsChanged = "terms_changed"
 	// ErrorRateLimited: another machine is limiting requests; try later.
 	ErrorRateLimited = "rate_limited"
 	// ErrorUnavailable: the daemon could not be reached (reported by the
@@ -52,6 +56,7 @@ var errorRetryable = map[string]bool{
 	ErrorTooLarge:      false,
 	ErrorNetworkingOff: false,
 	ErrorNotCaughtUp:   false,
+	ErrorTermsChanged:  false,
 	ErrorRateLimited:   true,
 	ErrorUnavailable:   true,
 	ErrorInternal:      true,
@@ -59,7 +64,7 @@ var errorRetryable = map[string]bool{
 
 // ErrorCodes lists every code, in the order above.
 var ErrorCodes = []string{ErrorInvalid, ErrorNotFound, ErrorNotAllowed, ErrorNotShown, ErrorAlreadyDone,
-	ErrorNotRegistered, ErrorTooLarge, ErrorNetworkingOff, ErrorNotCaughtUp, ErrorRateLimited, ErrorUnavailable,
+	ErrorNotRegistered, ErrorTooLarge, ErrorNetworkingOff, ErrorNotCaughtUp, ErrorTermsChanged, ErrorRateLimited, ErrorUnavailable,
 	ErrorInternal}
 
 // Retryable reports whether repeating a call refused with code may succeed

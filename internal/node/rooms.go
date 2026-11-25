@@ -88,6 +88,14 @@ type Rooms struct {
 	// waited for.
 	fmu    sync.Mutex
 	fronts map[string]readFront
+	// smu guards states, each held room's membership as its machine last
+	// decided it, for State. It is a leaf like fmu: taken alone, under mu
+	// (where states changes) or under the store's file lock (a gate's
+	// prepare reads State), and nothing is waited for while it is held.
+	// So State never waits for mu, which is what keeps the file lock
+	// from ever waiting for mu (K4; the lock order is in store.Store).
+	smu    sync.Mutex
+	states map[string]members.State
 	// files, set by NewFiles, is the machine's attachment part (nil: none).
 	files *Files
 	// signs counts membership entries signed (create entries excluded);
@@ -137,6 +145,7 @@ func OpenRooms(ctx context.Context, m *Machine) (*Rooms, error) {
 			return nil, err
 		}
 		r.rooms[rl.id] = rl
+		r.setState(rl.id, &rl.st)
 	}
 	return r, nil
 }
@@ -295,7 +304,10 @@ func (r *Rooms) restore(rl *roomLog) {
 		// Only a non-deterministic machine gets here; the next start
 		// reports it. Until then the room is not served.
 		delete(r.rooms, rl.id)
+		r.setState(rl.id, nil)
+		return
 	}
+	r.setState(rl.id, &rl.st)
 }
 
 func (rl *roomLog) lookup(fresh map[string]*core.VerifiedEntry) func(string) *core.VerifiedEntry {
@@ -417,6 +429,7 @@ func (r *Rooms) pinWith(ctx context.Context, v *core.VerifiedEntry, create func(
 	rl.state[v.ID()] = bare
 	rl.gen = gen
 	r.rooms[f.Room] = rl
+	r.setState(f.Room, &rl.st)
 	r.m.wakes.touch(f.Room, roomSet)
 	return gen, nil
 }
@@ -461,6 +474,7 @@ func (r *Rooms) Leave(ctx context.Context, room string) error {
 		return err
 	}
 	delete(r.rooms, room)
+	r.setState(room, nil)
 	r.fmu.Lock()
 	delete(r.fronts, room)
 	r.fmu.Unlock()
@@ -488,14 +502,32 @@ func (r *Rooms) Offer(room string) ([][]byte, error) {
 // State returns the room's resolved membership. Open fork evidence is not
 // part of it: until a removal settles a fork, the branch accepted first
 // stands here [M11], and the evidence counts only as a removal vote [M12].
+//
+// It reads the copy kept under smu, never waiting for mu, so that it may
+// be called with the store's file lock held (a gate's prepare) [K4].
 func (r *Rooms) State(room string) (members.State, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	rl := r.rooms[room]
-	if rl == nil {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	st, ok := r.states[room]
+	if !ok {
 		return members.State{}, ErrNoRoom
 	}
-	return rl.st, nil
+	return st, nil
+}
+
+// setState records room's membership for State; st nil drops it. The
+// caller holds mu, or is opening the rooms.
+func (r *Rooms) setState(room string, st *members.State) {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	if r.states == nil {
+		r.states = map[string]members.State{}
+	}
+	if st == nil {
+		delete(r.states, room)
+		return
+	}
+	r.states[room] = *st
 }
 
 func (r *Rooms) room(room string) (*roomLog, error) {
@@ -802,6 +834,7 @@ func (r *Rooms) stage(ctx context.Context, rl *roomLog, gen int64, batch []*core
 			delete(rl.state, id)
 		}
 		rl.st, rl.perm, rl.cache = st, perm, cache
+		r.setState(rl.id, &rl.st)
 		r.setFrontier(rl)
 	}
 	return b, publish, nil

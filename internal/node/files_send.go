@@ -51,6 +51,20 @@ const KeptPrefix = "sha256:"
 
 func badFile(msg string) error { return &UserError{Code: ErrorInvalid, Msg: msg} }
 
+// fileRefusal is badFile carrying the store.FileError behind it, so a
+// surface can log its op and code (never a path) without reading text.
+type fileRefusal struct {
+	*UserError
+	cause error
+}
+
+func (r fileRefusal) Unwrap() []error { return []error{r.UserError, r.cause} }
+
+// badFileFrom is badFile(msg) with cause, a FileError, behind it.
+func badFileFrom(msg string, cause error) error {
+	return fileRefusal{UserError: &UserError{Code: ErrorInvalid, Msg: msg}, cause: cause}
+}
+
 // RequestSend stages a send with files and raises a request for this
 // machine's person. Each path is opened once; a file that is not regular
 // once opened is refused; the bytes are copied and hashed from that handle
@@ -75,12 +89,34 @@ func (f *Files) RequestSend(ctx context.Context, s FileSend) (FileSendResult, er
 	if len(s.Choices) > 0 {
 		return res, userErr("a send with files carries no choices")
 	}
-	if _, err := f.r.State(s.Room); err != nil {
+	mst, err := f.r.State(s.Room)
+	if err != nil {
 		return res, err
 	}
 	now := f.m.now()
 	d := store.SendDraft{Agent: s.Agent, Text: s.Text, To: s.To, Everyone: s.Everyone, Parent: s.ReplyTo,
 		AskHandled: s.AskHandled, Replaces: s.Replaces}
+	if d.Parent != "" && len(d.To) == 0 && !d.Everyone {
+		// An implicit reply goes to the parent's author: the terms name
+		// that recipient, not everyone [S1]. The parent is immutable, so
+		// the record sends to the same one.
+		if err := f.m.view(ctx, s.Room, func(v *roomView) error {
+			p, err := v.get(d.Parent)
+			if err != nil {
+				return err
+			}
+			if p == nil || p.f.Kind != core.KindMessage {
+				return ErrNotHeld
+			}
+			d.To = []core.Addressee{{Node: p.author, Agent: p.f.Agent}}
+			return nil
+		}); err != nil {
+			return res, err
+		}
+	}
+	if d.Everyone || len(d.To) == 0 {
+		d.Members = len(mst.Members) // "everyone", as many as that is now [fix-files-b 5]
+	}
 	var mf *store.MessageFiles
 	if s.Replaces != "" {
 		if !validRecordID(s.Replaces) {
@@ -113,9 +149,12 @@ func (f *Files) RequestSend(ctx context.Context, s FileSend) (FileSendResult, er
 		if strings.HasPrefix(p, KeptPrefix) || !filepath.IsAbs(p) {
 			continue
 		}
+		if store.RemoteOrDevice(p) { // before anything touches the path [fix-files-b 7]
+			return res, badFileFrom("a remote or device path is not sent", store.ErrRemoteOrDevice)
+		}
 		st, err := os.Stat(p)
 		if err != nil {
-			return res, badFile("not a regular file once opened, or unreadable")
+			return res, badFileFrom("not a regular file once opened, or unreadable", store.FileErrorOf("stat", err))
 		}
 		if st.Size() > core.MaxFileSize {
 			return res, &UserError{Code: ErrorTooLarge, Msg: "a file is at most 256 MiB"}
@@ -150,7 +189,7 @@ func (f *Files) RequestSend(ctx context.Context, s FileSend) (FileSendResult, er
 			case errors.Is(err, store.ErrTooLarge):
 				return fail(&UserError{Code: ErrorTooLarge, Msg: "a file grew while it was staged; ask again"})
 			case err != nil:
-				return fail(badFile("not a regular file once opened, or unreadable"))
+				return fail(badFileFrom("not a regular file once opened, or unreadable", store.FileErrorOf("open", err)))
 			}
 			name := filepath.Base(sf.Path)
 			if !core.ValidFileName(name) {
@@ -198,21 +237,26 @@ func draftManifest(d store.SendDraft, salt string) core.Manifest {
 }
 
 // SendTerms is what a person approves (PROTOCOL 10.6): the SHA-256 over
-// "a2p2 send files 1", the room, the agent, the recipients, replaces,
-// the text's hash and each file's path, size and SHA-256.
+// "a2p2 send files 2", the room, the agent, the effective recipients
+// (each one, or everyone with the member count), the thread parent, the
+// message replaced and the version of it replaced, the whole text's hash
+// and each file's path, size and SHA-256 [fix-files-b 5].
 func SendTerms(room string, d store.SendDraft) string {
 	h := sha256.New()
 	put := func(s string) { h.Write([]byte(strconv.Itoa(len(s)) + ":" + s + "\n")) }
-	put("a2p2 send files 1")
+	put("a2p2 send files 2")
 	put(room)
 	put(d.Agent)
 	if d.Everyone || len(d.To) == 0 {
 		put("everyone")
+		put(strconv.Itoa(d.Members))
 	}
 	for _, a := range d.To {
 		put(a.Node + "/" + a.Agent)
 	}
+	put(d.Parent)
 	put(d.Replaces)
+	put(d.Base)
 	put(core.SHA256Hex([]byte(d.Text)))
 	for _, x := range d.Files {
 		path := x.Path
@@ -224,6 +268,27 @@ func SendTerms(room string, d store.SendDraft) string {
 		put(x.SHA256)
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// errSendNeedsTerms refuses an approval of a send with files that does
+// not go through ApproveSend: there is one way to approve one.
+var errSendNeedsTerms = &UserError{Code: ErrorTermsChanged, Msg: "the terms shown are not the request's; show it again"}
+
+// ApproveSend approves the send with files id only if terms is the digest
+// of the terms the person was shown (SendTerms, as the request exposes
+// it) [fix-files-b 5]. Surfaces approve sends with files through it.
+func (f *Files) ApproveSend(ctx context.Context, id, terms string) (Confirmation, error) {
+	q, err := f.m.st.GetRequest(ctx, id)
+	if err != nil {
+		return Confirmation{}, err
+	}
+	if q.Kind != store.RequestSendFiles {
+		return Confirmation{}, &UserError{Code: ErrorTermsChanged, Msg: "not a send with files"}
+	}
+	if q.State == store.RequestPending && (terms == "" || terms != q.Terms) {
+		return Confirmation{}, errSendNeedsTerms
+	}
+	return f.confirmSend(ctx, q, true)
 }
 
 // confirmSend is a person's decision on a send with files.
@@ -253,7 +318,7 @@ func (f *Files) confirmSend(ctx context.Context, q store.Request, approve bool) 
 	}
 	for _, x := range d.Files {
 		if !x.Kept && f.m.st.CheckStaged(q.ID, x.N, x.SHA256, x.Size) != nil {
-			return decide(store.RequestFailed, "a staged file changed or is gone")
+			return decide(store.RequestFailed, store.ReasonSendChanged)
 		}
 	}
 	if d.Replaces != "" {
@@ -268,7 +333,7 @@ func (f *Files) confirmSend(ctx context.Context, q store.Request, approve bool) 
 			return decide(store.RequestFailed, store.ReasonSendReplaced)
 		}
 	}
-	sf := store.SendFiles{Request: q.ID, Room: q.Room}
+	sf := store.SendFiles{Request: q.ID, Room: q.Room, Clock: f.m.now} // the expiry by the clock inside the transaction [B6]
 	var man core.Manifest
 	var fields func(*roomView, *core.RecordFields) error
 	if d.Replaces != "" {
@@ -296,6 +361,13 @@ func (f *Files) confirmSend(ctx context.Context, q store.Request, approve bool) 
 		if err := fields(v, rf); err != nil {
 			return err
 		}
+		// the approved recipients again, inside the write's transaction:
+		// "everyone" as many as the terms said [S1]
+		if d.Everyone || len(d.To) == 0 {
+			if st, err := f.r.State(q.Room); err != nil || len(st.Members) != d.Members {
+				return errTermsChangedMeanwhile
+			}
+		}
 		if d.Replaces != "" {
 			// the base again, inside the write's transaction [F8]
 			ok, err := store.StillReplaceable(v.rd, q.Room, f.m.ID, d, now)
@@ -311,13 +383,18 @@ func (f *Files) confirmSend(ctx context.Context, q store.Request, approve bool) 
 	}
 	sent, err := f.m.writeWith(ctx, q.Room, d.Agent, decideAll, func(ctx context.Context, now time.Time,
 		build func(*store.Reader) (*core.VerifiedRecord, error)) (*core.VerifiedRecord, error) {
+		_ = hookAt("files:publish") // tests: time spent putting the bytes in place
 		return f.m.st.WriteWithFiles(ctx, now, sf, man, build)
 	})
 	switch {
 	case errors.Is(err, errReplacedMeanwhile):
 		return decide(store.RequestFailed, store.ReasonSendReplaced)
+	case errors.Is(err, errTermsChangedMeanwhile):
+		return decide(store.RequestFailed, ErrorTermsChanged)
 	case errors.Is(err, store.ErrSendExpired):
 		return decide(store.RequestDeclined, store.ReasonSendExpired)
+	case errors.Is(err, store.ErrStagingChanged):
+		return decide(store.RequestFailed, store.ReasonSendChanged)
 	case err != nil:
 		return Confirmation{}, err
 	}
@@ -326,3 +403,7 @@ func (f *Files) confirmSend(ctx context.Context, q store.Request, approve bool) 
 }
 
 var errReplacedMeanwhile = errors.New("files: the replaced version changed before approval")
+
+// errTermsChangedMeanwhile: the room's membership is not the one the
+// approved terms counted for "everyone".
+var errTermsChangedMeanwhile = errors.New("files: the recipients changed before publication")

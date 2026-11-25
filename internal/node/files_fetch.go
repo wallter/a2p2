@@ -9,11 +9,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"slices"
 	"sort"
 	"time"
 
 	"github.com/wallter/a2p2/internal/core"
+	"github.com/wallter/a2p2/internal/members"
 	"github.com/wallter/a2p2/internal/store"
 )
 
@@ -45,7 +47,8 @@ func (f *Files) wantsFor(ctx context.Context, room, puller string, room0 int) []
 			return false, err
 		}
 		_, _, listed := mf.Listed(w.SHA256)
-		return listed && mf.Winner.ID == w.Version && mf.Author == puller, nil
+		live := now.Before(w.At.Add(core.WantLife)) // past its life it is not advertised, swept or not [S6]
+		return live && listed && mf.Winner.ID == w.Version && mf.Author == puller, nil
 	})
 	if err != nil {
 		return nil
@@ -102,8 +105,9 @@ func (f *Files) answerWants(room, peer string, ws []PullWant) {
 // Wait waits for the uploads and downloads started in the background.
 func (f *Files) Wait() { f.wg.Wait() }
 
-// upload sends w's bytes to peer in chunks, each continuing from the have
-// of the last answer.
+// upload sends w's bytes to peer in chunks from 0, each continuing from
+// the have of the last answer, under a lease on the decision that peer may
+// have them [F2, B2]: every read asks it, and its end stops the upload.
 func (f *Files) upload(ctx context.Context, room, peer string, w PullWant) error {
 	c, err := f.check(ctx, room, w.M, w.H, peer)
 	if err != nil {
@@ -117,6 +121,11 @@ func (f *Files) upload(ctx context.Context, room, peer string, w PullWant) error
 		return err
 	}
 	defer release()
+	l, err := f.grant(ctx, room, f.uploadRule(w.M, w.H, peer, w.V))
+	if err != nil {
+		return nil
+	}
+	defer l.end()
 	have := int64(0)
 	for have < c.size {
 		n := min(c.size-have, f.chunk)
@@ -131,17 +140,13 @@ func (f *Files) upload(ctx context.Context, room, peer string, w PullWant) error
 			b.Close()
 			return err
 		}
-		status, got, err := f.t.PutFile(ctx, peer, FilePut{Room: room, Msg: w.M, SHA256: w.H, Offset: have, Length: n, Total: c.size},
-			io.LimitReader(b, n))
+		status, got, err := f.t.PutFile(l.ctx, peer, FilePut{Room: room, Msg: w.M, SHA256: w.H, Offset: have, Length: n, Total: c.size},
+			&leasedReader{r: io.LimitReader(b, n), l: l})
 		b.Close()
-		if err != nil || status != 200 || got <= have {
+		if err != nil || status != 200 || got <= have || !l.valid() {
 			return err
 		}
 		have = got
-		// the permission again before the next chunk [F2]
-		if c, err = f.check(ctx, room, w.M, w.H, peer); err != nil || !c.servable() {
-			return err
-		}
 	}
 	return nil
 }
@@ -152,48 +157,67 @@ func (f *Files) upload(ctx context.Context, room, peer string, w PullWant) error
 // members whose last answer was that they hold or carry it, then other
 // current members; never this machine, a peer that cannot be dialled or
 // one marked old_version.
+//
+// K1: a request names the hash in its path, so it goes only to a machine
+// that may read the message. Each candidate other than the author must
+// pass the serving side's own rule from this machine's view (decide: a
+// member with a permission that reads the message and its winning
+// version), all decided under one consistent view; a peer this machine
+// cannot affirm is never asked.
 func (f *Files) holders(ctx context.Context, room, msg, sha, author string) ([]string, error) {
-	st, err := f.r.State(room)
-	if err != nil {
-		return nil, err
-	}
-	var obs []store.FileObs
-	if err := f.m.st.View(ctx, func(rd *store.Reader) (err error) {
-		obs, err = rd.FileObs(room, msg, sha)
-		return err
-	}); err != nil {
-		return nil, err
-	}
 	now := f.m.now()
-	ok := func(p string) bool {
-		if p == f.m.ID || !slices.Contains(st.Members, p) || f.t == nil || !f.t.CanDial(p) {
+	f.mu.Lock() // read before the view: f.mu is never taken inside a transaction
+	old := maps.Clone(f.old)
+	f.mu.Unlock()
+	dialable := func(p string) bool {
+		if p == f.m.ID || f.t == nil || !f.t.CanDial(p) {
 			return false
 		}
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		return !now.Before(f.old[p]) || f.old[p].IsZero()
+		return !now.Before(old[p]) || old[p].IsZero()
 	}
 	var out []string
-	add := func(p string) {
-		if ok(p) && !slices.Contains(out, p) {
+	err := f.within(ctx, room, now, func(v *roomView, st members.State, _ int64) error {
+		obs, err := v.rd.FileObs(room, msg, sha)
+		if err != nil {
+			return err
+		}
+		add := func(p string) error {
+			if slices.Contains(out, p) || !slices.Contains(st.Members, p) || !dialable(p) {
+				return nil
+			}
+			c, err := f.decide(v, st, msg, sha, p)
+			if err != nil {
+				return err
+			}
+			if !c.member || p != author && !c.mayRead {
+				return nil
+			}
 			out = append(out, p)
+			return nil
 		}
-	}
-	add(author)
-	sort.SliceStable(obs, func(i, j int) bool { return obs[i].At.After(obs[j].At) })
-	for _, o := range obs {
-		if o.Answer == store.AnswerHas || o.Answer == store.AnswerNotYet {
-			add(o.Peer)
+		if err := add(author); err != nil {
+			return err
 		}
-	}
-	for _, p := range st.Members {
-		add(p)
-	}
-	return out, nil
+		sort.SliceStable(obs, func(i, j int) bool { return obs[i].At.After(obs[j].At) })
+		for _, o := range obs {
+			if o.Answer == store.AnswerHas || o.Answer == store.AnswerNotYet {
+				if err := add(o.Peer); err != nil {
+					return err
+				}
+			}
+		}
+		for _, p := range st.Members {
+			if err := add(p); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return out, err
 }
 
 // download fetches sha for msg from the first of holders that serves it,
-// each asked at most once, resuming a part. It returns who served it.
+// each asked at most once, each from byte 0. It returns who served it.
 func (f *Files) download(ctx context.Context, room, msg, sha string, holders []string) (string, error) {
 	var last error = errNoHolder
 	for _, p := range holders {
@@ -213,31 +237,52 @@ func (f *Files) download(ctx context.Context, room, msg, sha string, holders []s
 
 var errNoHolder = errors.New("files: no holder served the file")
 
-// getFrom asks peer for the rest of sha of msg, chunk by chunk, while it
-// serves; done when the whole is verified and held.
+// getFrom asks peer for sha of msg from 0, chunk by chunk, while it
+// serves; done when the whole is verified and held. One transfer holds the
+// writer of (room, msg, sha) and a lease on this machine's permission to
+// keep the file from start to end [B2]; one that fails starts again from
+// zero (no part outlives its transfer).
 func (f *Files) getFrom(ctx context.Context, room, msg, sha, peer string) (bool, error) {
 	release, err := f.tr.take(peer, dirIn)
 	if err != nil {
 		return false, err
 	}
 	defer release()
+	unlock, ok := f.writer(room, msg, sha)
+	if !ok {
+		return false, errWriting
+	}
+	defer unlock()
 	note := func(a string) { _ = f.m.st.NoteFileObs(ctx, room, msg, sha, peer, a, f.m.now()) }
-	for {
-		c, err := f.check(ctx, room, msg, sha, "")
-		if err != nil {
+	c, err := f.check(ctx, room, msg, sha, "")
+	if err != nil {
+		return false, err
+	}
+	if !c.listed || c.listBad && c.isList {
+		return false, ErrFileGone
+	}
+	if c.how != "" {
+		return true, nil
+	}
+	if c.hasPart {
+		if err := f.m.st.DropPart(ctx, room, msg, sha, f.m.now()); err != nil {
 			return false, err
 		}
-		if !c.listed || c.listBad && c.isList {
-			return false, ErrFileGone
+	}
+	keep := f.keepRule(msg, sha)
+	l, err := f.grant(ctx, room, keep)
+	if err != nil {
+		return false, ErrFileGone
+	}
+	defer l.end()
+	offset, total, done := int64(0), c.ref.Size, false
+	defer func() {
+		if !done && offset > 0 {
+			_ = f.m.st.DropPart(context.WithoutCancel(ctx), room, msg, sha, f.m.now())
 		}
-		if c.how != "" {
-			return true, nil
-		}
-		offset := int64(0)
-		if c.hasPart {
-			offset = c.part.Have
-		}
-		rep, err := f.t.GetFile(ctx, peer, FileGet{Room: room, Msg: msg, SHA256: sha, Offset: offset})
+	}()
+	for {
+		rep, err := f.t.GetFile(l.ctx, peer, FileGet{Room: room, Msg: msg, SHA256: sha, Offset: offset})
 		if err != nil {
 			note(store.AnswerFailed)
 			return false, err
@@ -269,12 +314,8 @@ func (f *Files) getFrom(ctx context.Context, room, msg, sha, peer string) (bool,
 			note(store.AnswerFailed)
 			return false, nil
 		}
-		total := c.ref.Size
-		if c.isList {
-			total = rep.Total
-			if c.hasPart {
-				total = c.part.Size
-			}
+		if c.isList && offset == 0 {
+			total = rep.Total // a manifest's size is known from its first answer
 		}
 		bad := rep.Total != total || total < 1 || c.isList && total > core.MaxManifestBytes ||
 			rep.Offset != offset || rep.Length < 1 || rep.Length > core.FileChunk || offset+rep.Length > total
@@ -283,23 +324,24 @@ func (f *Files) getFrom(ctx context.Context, room, msg, sha, peer string) (bool,
 			note(store.AnswerFailed)
 			return false, nil
 		}
-		have, err := f.receive(ctx, peer, room, msg, sha, total, offset, rep.Length, c.isList, rep.Body, func() bool {
-			c, err := f.check(context.WithoutCancel(ctx), room, msg, sha, "")
-			return err == nil && c.listed
-		})
+		have, err := f.receive(peer, room, msg, sha, total, offset, rep.Length, c.isList, rep.Body, l, keep)
 		rep.Body.Close()
 		switch {
 		case errors.Is(err, store.ErrBadBytes):
+			offset = 0 // dropped by receive
 			return false, err
 		case err != nil:
+			offset = 0
 			note(store.AnswerFailed)
 			return false, err
 		case have >= total:
+			done = true
 			return true, nil
 		case have <= offset:
 			note(store.AnswerFailed)
 			return false, nil
 		}
+		offset = have
 	}
 }
 
@@ -322,6 +364,9 @@ func (f *Files) Tick(ctx context.Context) {
 		f.sweepRoom(ctx, room)
 		f.tickRoom(ctx, room)
 	}
+	// The deletion queue on a timer too, not only after a change: an entry
+	// that failed (a file still open on Windows) is tried again [B4].
+	f.m.st.RunTrash(ctx)
 }
 
 func (f *Files) tickRoom(ctx context.Context, room string) {
@@ -374,11 +419,9 @@ func (f *Files) fetchList(ctx context.Context, room string, fr store.FileRecord,
 	if have && (l.State == store.ListInvalid || l.State == store.ListUnavailable || now.Before(l.Next)) {
 		return
 	}
-	if c.held {
-		// the same bytes are held for another message: verified already
-		_ = f.m.st.UseHeld(ctx, room, fr.Manifest, fr.Msg)
-		return
-	}
+	// Bytes held for another message are not this message's list: it is
+	// obtained for this message, under its own permission, from its author
+	// or a holder that may serve it for this message [B1].
 	hs, err := f.holders(ctx, room, fr.Msg, fr.Manifest, c.mf.Author)
 	if err != nil {
 		return
@@ -564,26 +607,45 @@ func goneResult(c fileCheck, room, msg string) *FetchResult {
 	return r
 }
 
-// shown: the agent was shown the winning version, or its machine wrote it.
+// shown: the agent was shown the winning version, or it is the agent that
+// wrote that version on this machine. Every other agent on the author's
+// machine, the message's first sender included when another agent wrote
+// the winner, must have been shown it [fix-files-b 6, S2].
 func (f *Files) shown(ctx context.Context, agent, room string, c fileCheck) (bool, error) {
-	if c.selfAuth {
-		return true, nil
-	}
 	var ok bool
 	err := f.m.st.View(ctx, func(rd *store.Reader) (err error) {
-		ok, err = rd.ShownVersion(agent, room, c.mf.Msg, c.mf.Winner.ID)
+		ok, err = shownTo(rd, agent, room, c)
 		return err
 	})
 	return ok, err
 }
 
+func shownTo(rd *store.Reader, agent, room string, c fileCheck) (bool, error) {
+	if c.selfAuth {
+		// only the agent that wrote the version fetched (the message
+		// itself when it was not replaced), not the original sender when
+		// another agent wrote the winner [S2]
+		h, ok, err := rd.Record(room, c.mf.Winner.ID)
+		if err != nil {
+			return false, err
+		}
+		if ok && h.Record.Fields().Agent == agent {
+			return true, nil
+		}
+	}
+	return rd.ShownVersion(agent, room, c.mf.Msg, c.mf.Winner.ID)
+}
+
 // shownAny: the agent was shown some version of the message.
 func (f *Files) shownAny(ctx context.Context, agent, room string, c fileCheck) bool {
-	if c.selfAuth {
-		return true
-	}
 	var ok bool
 	_ = f.m.st.View(ctx, func(rd *store.Reader) (err error) {
+		if c.selfAuth { // the agent that sent it, on this machine
+			if h, held, err := rd.Record(room, c.mf.Msg); err != nil || held && h.Record.Fields().Agent == agent {
+				ok = err == nil
+				return err
+			}
+		}
 		// a confirmed read replaced its receipt: it counts too
 		if _, ok, err = rd.Read(agent, room, c.mf.Msg); err != nil || ok {
 			return err
@@ -625,39 +687,36 @@ func (f *Files) fetchOne(ctx context.Context, o FetchOpts, room, msg string, c f
 			return f.notHere(ctx, res, room, msg, o.SHA256, c)
 		}
 	}
-	cp, done, err := f.m.st.ReserveCopy(ctx, room, msg, o.SHA256, o.Agent, c.ref.Name, c.ref.Size)
+	// A new copy every time, decided like the first [B3]: under a lease on
+	// the rule (the version shown still wins, lists the file and may be
+	// kept), asked again inside each transaction of the publication.
+	r := f.copyRule(msg, o.SHA256, o.Agent, c.mf.Winner.ID)
+	refused := func() (FetchResult, error) {
+		if c, cerr := f.check(ctx, room, msg, o.SHA256, ""); cerr == nil {
+			if g := goneResult(c, room, msg); g != nil {
+				return *g, nil
+			}
+		}
+		return res, errNotShownFile
+	}
+	l, err := f.grant(ctx, room, r)
+	if errors.Is(err, errRevoked) {
+		return refused()
+	}
 	if err != nil {
 		return res, err
 	}
-	if !done {
-		version := c.mf.Winner.ID
-		err := f.m.st.PublishCopy(ctx, cp, func(rd *store.Reader) (bool, error) {
-			mf, err := rd.MessageFiles(room, msg, f.m.ID, f.m.now())
-			if err != nil {
-				return false, err
-			}
-			_, isList, listed := mf.Listed(o.SHA256)
-			if !listed || isList || mf.Winner.ID != version {
-				return false, nil
-			}
-			if mf.Author == f.m.ID {
-				return true, nil
-			}
-			return rd.ShownVersion(o.Agent, room, msg, version)
-		})
-		if err != nil {
-			_ = f.m.st.DropCopy(ctx, cp, f.m.now())
-			if errors.Is(err, store.ErrCopyRefused) {
-				if c, cerr := f.check(ctx, room, msg, o.SHA256, ""); cerr == nil {
-					if g := goneResult(c, room, msg); g != nil {
-						return *g, nil
-					}
-				}
-			}
-			return res, err
-		}
-		// the permission again: a withdraw committed meanwhile deletes it
-		f.sweepRoom(ctx, room)
+	defer l.end()
+	cp, err := f.m.st.PublishCopy(ctx, store.CopyReq{Room: room, Msg: msg, SHA256: o.SHA256, Agent: o.Agent, Name: c.ref.Name,
+		Size: c.ref.Size}, f.gate(room, r), l.valid)
+	switch {
+	case errors.Is(err, store.ErrCopyRefused):
+		return refused()
+	case errors.Is(err, store.ErrNoSpace):
+		res.State = FetchTooLarge
+		return res, nil
+	case err != nil:
+		return res, err
 	}
 	res.State, res.Path, res.From = FetchHere, f.m.st.CopyPath(cp.Path), from
 	return res, nil
