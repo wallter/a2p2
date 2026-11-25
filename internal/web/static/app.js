@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 // notice: the one-time upgrade notice, kept for the life of the page because
 // the server returns it only once. onscreen: key -> version of every entry as
 // rendered; only that is ever confirmed. qShown: the same for question cards.
-const S = { st: null, unread: [], questions: [], qKeys: new Set(), waiting: 0, alerts: [], requests: [], room: null, msgs: [], older: [], notes: [], more: true, reply: null, sigs: {}, toSig: "", gen: 0, shown: null, toRoom: null, outcome: "", notice: "", risky: new Set(), onscreen: new Map(), qShown: new Map(), notesShown: new Map(), boundary: "" };
+const S = { st: null, unread: [], questions: [], qKeys: new Set(), waiting: 0, alerts: [], requests: [], room: null, msgs: [], older: [], notes: [], more: true, reply: null, sigs: {}, toSig: "", gen: 0, shown: null, toRoom: null, outcome: "", notice: "", risky: new Set(), onscreen: new Map(), qShown: new Map(), notesShown: new Map(), boundary: "", toChosen: "" };
 let token = "";
 try { token = sessionStorage.getItem("a2p2.token") || ""; } catch (e) { /* storage blocked */ }
 if (location.hash.length > 1) {
@@ -171,12 +171,12 @@ function renderSide() {
   // Each agent's reading level per room (U1): only levels other than "all"
   // are listed. The person reads every room in full here, whatever any
   // agent's level.
-  const roomLabel = (id) => ((S.st.rooms || []).find((r) => r.id === id) || {}).label || id;
+  const levelRoom = (id) => ((S.st.rooms || []).find((r) => r.id === id) || {}).label || id;
   for (const a of S.st.agents || []) {
     box.append(el("div", "", a.label || a.id, " ", el("span", "sub", a.harness + " · " + ago(a.last_seen))));
     if (a.id === S.st.human) continue;
     const ls = (S.st.levels || []).filter((l) => l.agent === a.id);
-    const words = ls.map((l) => roomLabel(l.room) + ": " + l.level);
+    const words = ls.map((l) => levelRoom(l.room) + ": " + l.level);
     box.append(el("div", "sub", "level " + (words.length ? words.join(", ") + "; other rooms: all" : "all in every room")));
   }
 }
@@ -536,9 +536,13 @@ function renderHead() {
   note.hidden = !(r && r.may_be_removed);
   if (note.textContent !== REMOVED) note.textContent = REMOVED;
   updateCompose();
-  if (S.toRoom !== S.room) { S.toRoom = S.room; $("to").value = ""; }
+  if (S.toRoom !== S.room) { S.toRoom = S.room; S.toChosen = ""; $("to").value = ""; }
   const senders = new Set();
   for (const m of all()) if (m.from !== S.st.human) senders.add(m.from);
+  // A recipient the person chose stays in the list even when that author has
+  // fallen out of the loaded history, so a poll cannot turn the message
+  // into one for the whole room.
+  if (S.toChosen) senders.add(S.toChosen);
   const sig = JSON.stringify([S.room, S.reply && S.reply.from, [...senders]]);
   if (sig === S.toSig) return;
   S.toSig = sig;
@@ -548,6 +552,7 @@ function renderHead() {
   for (const s of senders) { const o = el("option", "", s); o.value = s; sel.append(o); }
   sel.value = cur;
 }
+$("to").addEventListener("change", () => { S.toChosen = $("to").value; });
 function setReply(m) {
   S.reply = m;
   renderHead();
@@ -699,6 +704,11 @@ async function submit() {
   if (!text || !S.room || S.shown !== S.room) return;
   const dest = S.shown, gen = S.gen;
   const body = { room: dest, text };
+  // Never send room-wide a message the person addressed to someone.
+  if (S.toChosen && $("to").value !== S.toChosen) {
+    $("err").textContent = "The recipient you chose is no longer in the list. Choose who it is for again; nothing was sent.";
+    return;
+  }
   if ($("to").value) body.to = [$("to").value];
   if (S.reply) body.reply_to = S.reply.id;
   try {

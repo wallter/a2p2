@@ -209,3 +209,35 @@ func TestFlagsAfterPositionalArgumentsAreParsed(t *testing.T) {
 		}
 	}
 }
+
+func TestUIPrintOnlyPrintsTheAddressAndOpensNothing(t *testing.T) {
+	const url = "http://127.0.0.1:7777/#token"
+	for _, tc := range []struct {
+		printOnly bool
+		opened    bool
+	}{{true, false}, {false, true}} {
+		var out bytes.Buffer
+		opened := false
+		showUI(&out, url, tc.printOnly, func(u string) { opened = u == url })
+		if out.String() != url+"\n" {
+			t.Errorf("--print=%v printed %q", tc.printOnly, out.String())
+		}
+		if opened != tc.opened {
+			t.Errorf("--print=%v: opened=%v, want %v", tc.printOnly, opened, tc.opened)
+		}
+	}
+}
+
+func TestUIPrintRefusesJSON(t *testing.T) {
+	// Refused before the daemon is asked, so nothing needs to run.
+	err := run(context.Background(), "ui", []string{"--print", "--json"})
+	if !errors.Is(err, errUsage) || !strings.Contains(err.Error(), "--json") {
+		t.Fatalf("a2p2 ui --print --json: %v", err)
+	}
+}
+
+func TestUIPrintIsAFlagOfUIOnly(t *testing.T) {
+	if err := run(context.Background(), "status", []string{"--print"}); err == nil {
+		t.Fatal("a2p2 status --print should be refused")
+	}
+}

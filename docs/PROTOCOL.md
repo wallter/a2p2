@@ -1094,7 +1094,8 @@ The socket is open to any program running as the same user: `confirm`, `net`
 and `room/join/accept` are kept out of the agent tools and hooks and every
 use is recorded, which is a guard rail and not a lock (REQUIREMENTS 6).
 
-The web page (`a2p2 ui`) uses its own routes on loopback, each requiring
+The web page (`a2p2 ui`; `a2p2 ui --print` prints its address and opens
+nothing) uses its own routes on loopback, each requiring
 the page's token as a bearer token: `GET /api/state`, `/api/history`, `/api/thread` and
 `/api/trace`, and `POST /api/send`, `/api/seen`, `/api/ack`,
 `/api/confirm` and `/api/notice-shown`. `GET /api/state` reads the status

@@ -8,7 +8,35 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The web page did not load in 0.1.0, 0.2.0, 0.2.1 and 0.2.2.** `a2p2 ui`
+  opened a page that showed "Could not load page data" and never drew the
+  sidebar, because a name declared later in `renderSide` hid the room-label
+  function the same function called first
+  (`Cannot access 'roomLabel' before initialization`). The command line
+  and the agents were not affected. The inner name is renamed and the page
+  behaves as intended. When `node` is installed, `make check` now
+  runs the page's script in Node against the real server (step `web-js`)
+  and fails on this kind of error. Without `node` the step is printed as
+  `skip` and counted in the last line as skipped, and `make prerelease`
+  fails. It is not run on Windows. The README had said
+  the page was checked in headless Chrome; that claim is replaced by what
+  is tested now.
+
+- **A message addressed to one author could be sent to the whole room.**
+  The page rebuilt the recipient list from the authors in the loaded
+  history; if the chosen author dropped out of it, the choice was lost and
+  the message went to everyone. A chosen recipient now stays in the list,
+  and a draft whose recipient is gone is refused with a message. This was
+  there before 0.2.3 but unreachable while the page did not load.
+
 ### Added
+
+- **`a2p2 ui --print`** prints the page's address and nothing else, and opens no browser;
+  it is refused together with `--json`. The
+  address carries the page's access token, so treat it like a password
+  and keep it out of logs.
 
 - **A hint from `a2p2 doctor` on a fresh machine.** When no harness is
   connected, doctor ends with the `a2p2 install` command for each harness
