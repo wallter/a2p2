@@ -56,9 +56,13 @@ demo-test:        ## scripts/demo.sh, plain and with --file, two runs at once on
 install-test:     ## install.sh against a fake release in a temporary directory, offline (about 10 seconds)
 	scripts/install-test.sh
 
+.PHONY: web-js
+web-js:           ## the web page's script runs in Node against the real handler (skips, and says so, without node)
+	scripts/web-js.sh
+
 # The steps of check run at the same time (scripts/gate.sh): one line per
 # step with its time, then the full log of any step that failed.
-CHECK_STEPS := fmt vet windows licences trace recipes install-test demo-test test team-test
+CHECK_STEPS := fmt vet windows licences trace recipes web-js install-test demo-test test team-test
 check:            ## everything CI runs except lint/vuln (which need network), steps at the same time
 	@scripts/gate.sh $(foreach s,$(CHECK_STEPS),$(s)='$(MAKE) --no-print-directory $(s)')
 

@@ -16,10 +16,12 @@ that need to replay the same steps.
 ## How make check and make test run
 
 `make check` runs its steps at the same time (`scripts/gate.sh`): fmt,
-vet, the Windows build gate, licences, trace, recipes, the race tests
-and the launcher's tests. It prints one line per step as it ends, with
-its time, then the full log of every step that failed, and exits non-zero
-naming each failed step.
+vet, the Windows build gate, licences, trace, recipes, web-js, the race
+tests and the launcher's tests. It prints one line per step as it ends,
+with its time, then the full log of every step that failed, and exits
+non-zero naming each failed step. A step whose first log line starts with
+`skip:` is printed as `skip`, not `ok`: `web-js` does that when `node` is
+not on PATH.
 
 `make test` (`scripts/gotest.sh`) runs every test once with
 `-race -count=1 -timeout 30m`, as `go test ./...` did. A package whose
@@ -87,6 +89,7 @@ its fake router to answer within 30 ms. Two rules follow for tests:
 | [`internal/peer`](../internal/peer) | Mutual TLS on loopback, joins, access checks, request limits, waiting pulls and address fallback. |
 | [`internal/localapi`](../internal/localapi), [`internal/mcpshim`](../internal/mcpshim), [`internal/web`](../internal/web), [`internal/daemon`](../internal/daemon) | Unix-socket API, MCP calls, web server checks and integration with two daemons. |
 | [`internal/harness`](../internal/harness) | Install and uninstall preserve the settings exercised by the tests. Hook tests check the output sent to the harness. |
+| [`internal/web/page_script_test.go`](../internal/web/page_script_test.go), [`testdata/page_harness.js`](../internal/web/testdata/page_harness.js) (`make web-js`, in `make check`) | `static/app.js`, unchanged, runs in Node against the real handler with a small hand-written stand-in for the DOM. The first refresh must end without an error and the sidebar must list every room (two with one label show their ids) and the agent list. It does not test layout, styling, clicks, typing, later polls or any browser behaviour; Node is not a browser. Without `node` it is skipped and `make check` prints `skip`; CI's runner has node. It was added after 0.2.2 shipped a page that never drew (`Cannot access 'roomLabel' before initialization`). |
 | [`scripts/recipes.sh`](../scripts/recipes.sh) (`make recipes`, in `make check`) | Every tool, tool argument and CLI command named in [`recipes/`](../recipes) and [`skills/`](../skills) exists in the golden tools file and `a2p2 help`, and each recipe and the skill stay short. |
 
 ## Fault matrix
@@ -505,9 +508,13 @@ containers through kills, pauses and network splits (see
   between two chunks of a body (the lease tests above cover that); it
   compares who received the file, not how often or from whom; and where
   the model and the code share a mistaken rule, both agree.
-- Automated tests of the local page's JavaScript in a browser. The page
-  has been checked by hand in headless Chrome at 1280 and 390 pixels wide,
-  in light and dark themes, and with the keyboard.
+- Automated tests of the local page in a browser. `make web-js` runs its
+  script in Node against the real handler and checks the first render
+  only (see the table above). Clicks, later polls, layout, themes and
+  keyboard use are not tested. Before this fix the page had been looked at by
+  hand in headless Chrome at 1280 and 390 pixels wide, in light and dark
+  themes and with the keyboard, but 0.2.2 did not load at all, so treat
+  that as not done for the current page until it is repeated.
 - The end-to-end runner after the delivery rewrite, interactive sessions,
   hooks inside a real session (including end-of-turn hooks and Codex and
   Antigravity models seeing hook text), and a real installed configuration.

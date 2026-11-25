@@ -8,7 +8,26 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The web page did not load in 0.1.0, 0.2.0, 0.2.1 and 0.2.2.** `a2p2 ui`
+  opened a page that showed "Could not load page data" and never drew the
+  sidebar, because a name declared later in `renderSide` hid the room-label
+  function the same function called first
+  (`Cannot access 'roomLabel' before initialization`). The command line
+  and the agents were not affected. The inner name is renamed and the page
+  behaves as intended. `make check` now runs the page's script in Node
+  against the real server (step `web-js`) and fails on this kind of
+  error; it needs `node` and prints `skip` without it, and `make
+  prerelease` fails without it. The README had said
+  the page was checked in headless Chrome; that claim is replaced by what
+  is tested now.
+
 ### Added
+
+- **`a2p2 ui --print`** prints the page's address and opens no browser. The
+  address carries the page's access token, so treat it like a password
+  and keep it out of logs.
 
 - **A hint from `a2p2 doctor` on a fresh machine.** When no harness is
   connected, doctor ends with the `a2p2 install` command for each harness

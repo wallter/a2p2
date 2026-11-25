@@ -38,7 +38,10 @@ while [ "$left" -gt 0 ]; do
     wait "${pids[$i]}"; rc=$?
     done_[$i]=1; left=$((left - 1))
     secs=$(( $(date +%s) - t0 ))
-    if [ "$rc" = 0 ]; then
+    if [ "$rc" = 0 ] && head -n 1 "$logdir/${names[$i]}.log" | grep -q '^skip:'; then
+      # A step that could not run says so on its first line; it did not pass.
+      printf 'skip  %-12s %4ss  (%s)\n' "${names[$i]}" "$secs" "$(head -n 1 "$logdir/${names[$i]}.log")"
+    elif [ "$rc" = 0 ]; then
       printf 'ok    %-12s %4ss\n' "${names[$i]}" "$secs"
     else
       printf 'FAIL  %-12s %4ss  (exit %s)\n' "${names[$i]}" "$secs" "$rc"

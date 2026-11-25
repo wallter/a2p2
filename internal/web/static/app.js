@@ -171,12 +171,12 @@ function renderSide() {
   // Each agent's reading level per room (U1): only levels other than "all"
   // are listed. The person reads every room in full here, whatever any
   // agent's level.
-  const roomLabel = (id) => ((S.st.rooms || []).find((r) => r.id === id) || {}).label || id;
+  const levelRoom = (id) => ((S.st.rooms || []).find((r) => r.id === id) || {}).label || id;
   for (const a of S.st.agents || []) {
     box.append(el("div", "", a.label || a.id, " ", el("span", "sub", a.harness + " · " + ago(a.last_seen))));
     if (a.id === S.st.human) continue;
     const ls = (S.st.levels || []).filter((l) => l.agent === a.id);
-    const words = ls.map((l) => roomLabel(l.room) + ": " + l.level);
+    const words = ls.map((l) => levelRoom(l.room) + ": " + l.level);
     box.append(el("div", "sub", "level " + (words.length ? words.join(", ") + "; other rooms: all" : "all in every room")));
   }
 }

@@ -531,7 +531,7 @@ func TestPageRendersOneAgentsOppositeLevelsInTwoRoomsFromItsState(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, use := range []string{"S.st = d.status", "(S.st.levels || []).filter((l) => l.agent === a.id)",
-		`roomLabel(l.room) + ": " + l.level`, `"; other rooms: all" : "all in every room"`, "(S.st.rooms || []).find((r) => r.id === id)"} {
+		`levelRoom(l.room) + ": " + l.level`, `"; other rooms: all" : "all in every room"`, "(S.st.rooms || []).find((r) => r.id === id)"} {
 		if !strings.Contains(string(js), use) {
 			t.Fatalf("app.js no longer renders levels with %q: update this test", use)
 		}

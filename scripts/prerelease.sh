@@ -13,6 +13,9 @@ rm -f "$dir/stamp"
 head0=$(git rev-parse HEAD)
 clean0=$(git status --porcelain)
 [ -z "$clean0" ] || echo "prerelease: the tree is not clean, so no stamp will be written (git status)"
+# A release is never made with the web page's script unrun: without node
+# the web-js step of check fails here instead of being skipped.
+export A2P2_REQUIRE_NODE=1
 
 scripts/gate.sh -l "$dir" \
   check="$MAKE --no-print-directory check" \

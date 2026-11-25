@@ -38,7 +38,8 @@ Getting started
   a2p2 install claude|codex|agy|opencode|hermes|pi [--on-stop] [--dry-run]
                                   connect a harness (undo with: a2p2 uninstall NAME)
                                   --on-stop also checks for messages when a turn ends.
-  a2p2 ui                         open the local web page
+  a2p2 ui [--print]               open the local web page; --print only prints its address
+                                  The address carries the page's access token: do not log or share it.
   a2p2 doctor                     check the daemon and harness connections
 
 Talking (as the human, or --as <label> for a script)
@@ -119,6 +120,15 @@ func main() {
 }
 
 var errUsage = errors.New("usage")
+
+// showUI prints the page's address, which carries its access token, and
+// opens it with open unless printOnly. The address goes only to w, never to a log.
+func showUI(w io.Writer, url string, printOnly bool, open func(string)) {
+	fmt.Fprintln(w, url)
+	if !printOnly {
+		open(url)
+	}
+}
 
 func usagef(format string, a ...any) error {
 	return fmt.Errorf("%w: %s", errUsage, fmt.Sprintf(format, a...))
@@ -306,6 +316,10 @@ func run(ctx context.Context, name string, args []string) (err error) {
 	}
 
 	// Everything below talks to the daemon.
+	printOnly := new(bool)
+	if name == "ui" {
+		printOnly = c.fs.Bool("print", false, "print the address and open nothing")
+	}
 	if err := c.fs.Parse(permute(c.fs, args)); err != nil {
 		return errUsage
 	}
@@ -318,8 +332,7 @@ func run(ctx context.Context, name string, args []string) (err error) {
 		if err := c.call("status", nil, &st, nil); err != nil {
 			return err
 		}
-		fmt.Println(st.UI)
-		openURL(st.UI) // tty_unix.go, tty_windows.go
+		showUI(os.Stdout, st.UI, *printOnly, openURL) // openURL: tty_unix.go, tty_windows.go
 		return nil
 	case "trace":
 		if len(rest) != 1 {
