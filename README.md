@@ -67,8 +67,8 @@ On macOS and Linux, one line installs the latest release:
 curl -fsSL https://raw.githubusercontent.com/wallter/a2p2/main/install.sh | sh
 ```
 
-The script downloads the binary for your system and `SHA256SUMS` from the
-release, checks the binary's SHA-256 and refuses to install on a mismatch.
+The script needs `curl`. It downloads the binary for your system and
+`SHA256SUMS` from the release, checks the binary's SHA-256 and refuses to install on a mismatch.
 It puts `a2p2` in `~/.local/bin` (set `A2P2_INSTALL_DIR` to change it) and
 runs `a2p2 version`. It does not use `sudo`, edit your shell profile or
 `PATH`, configure a harness or start a daemon; it tells you what to do

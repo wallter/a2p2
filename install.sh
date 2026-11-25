@@ -3,7 +3,7 @@
 #
 # What it does: downloads a2p2_<os>_<arch> and SHA256SUMS from one release,
 # checks the binary's SHA-256 against SHA256SUMS, then puts the binary in
-# the install directory and runs `a2p2 version`.
+# the install directory and runs `a2p2 version`. Needs curl.
 # What it never does: use sudo, edit a shell profile or PATH, configure a
 # harness, start a daemon, or install a file whose checksum did not match.
 #
@@ -16,7 +16,8 @@
 #   A2P2_INSTALL_DIR  where to put a2p2 (default: $HOME/.local/bin)
 #   A2P2_BASE_URL     for tests and mirrors: the releases URL (default
 #                     https://github.com/wallter/a2p2/releases). Must be
-#                     https, or file:// or http://127.0.0.1 / localhost.
+#                     https, or file:// or http://127.0.0.1 / localhost
+#                     (no redirects are followed for those).
 set -eu
 
 usage() {
@@ -38,42 +39,41 @@ die() {
 }
 
 TMP=""
-NEWFILE=""
+STAGE=""
 SECURE=1
+HASH=""
 cleanup() {
-  [ -z "$NEWFILE" ] || rm -f "$NEWFILE"
+  [ -z "$STAGE" ] || rm -f "$STAGE"
   [ -z "$TMP" ] || rm -rf "$TMP"
 }
 
 fetch() { # fetch URL OUTFILE
-  if command -v curl >/dev/null 2>&1; then
-    if [ "$SECURE" = 1 ]; then
-      curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 -o "$2" "$1"
-    else
-      curl -fsSL -o "$2" "$1"
-    fi
-  elif command -v wget >/dev/null 2>&1; then
-    if [ "$SECURE" = 1 ]; then
-      wget -q --https-only --secure-protocol=TLSv1_2 -O "$2" "$1"
-    else
-      case "$1" in
-        file://*) die "wget cannot read file:// URLs; install curl" ;;
-      esac
-      wget -q -O "$2" "$1"
-    fi
+  command -v curl >/dev/null 2>&1 || die "needs curl"
+  # -q (first argument) ignores any .curlrc; -g turns off URL globbing.
+  if [ "$SECURE" = 1 ]; then
+    curl -q -g -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 -o "$2" "$1"
   else
-    die "needs curl or wget"
+    # file:// or loopback http, for tests and mirrors: never follow a redirect.
+    curl -q -g -fsS --max-redirs 0 --proto '=file,http' -o "$2" "$1"
   fi
 }
 
-sha256_of() { # sha256_of FILE: prints the hash
+sha256_of() { # sha256_of FILE: sets HASH to 64 lower-case hex characters
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
+    HASH=$(sha256sum < "$1") || die "sha256sum failed; nothing was installed"
   elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
+    HASH=$(shasum -a 256 < "$1") || die "shasum failed; nothing was installed"
   else
     die "needs sha256sum or shasum to check the download; nothing was installed"
   fi
+  HASH=${HASH%% *}
+  is_hash "$HASH" || die "the hash tool gave no SHA-256; nothing was installed"
+}
+
+is_hash() { # exactly 64 lower-case hex characters
+  [ "${#1}" = 64 ] || return 1
+  case "$1" in *[!0-9a-f]*) return 1 ;; esac
+  return 0
 }
 
 main() {
@@ -103,6 +103,9 @@ main() {
 
   base=${A2P2_BASE_URL:-https://github.com/wallter/a2p2/releases}
   base=${base%/}
+  case "$base" in
+    *[[:space:]]* | *@* | *\?* | *\#*) die "A2P2_BASE_URL must not have whitespace, '@', '?' or '#': $base" ;;
+  esac
   case "$base" in
     https://*) ;;
     file:///* | http://127.0.0.1 | http://127.0.0.1[:/]* | http://localhost | http://localhost[:/]*) SECURE=0 ;;
@@ -140,14 +143,18 @@ main() {
     return 0
   fi
 
-  if [ ! -d "$dir" ]; then
-    mkdir -p "$dir" 2>/dev/null || die "cannot create $dir (no sudo is used). Set A2P2_INSTALL_DIR to a directory you can write"
-  fi
-  [ -w "$dir" ] || die "cannot write to $dir (no sudo is used). Set A2P2_INSTALL_DIR to a directory you can write"
-
-  TMP=$(mktemp -d "${TMPDIR:-/tmp}/a2p2-install.XXXXXX") || die "cannot make a temporary directory"
+  # The cleanup trap comes before anything it cleans up.
   trap cleanup EXIT
   trap 'exit 1' INT TERM HUP
+
+  if [ -d "$dir" ]; then
+    [ -w "$dir" ] || die "cannot write to $dir (no sudo is used). Set A2P2_INSTALL_DIR to a directory you can write"
+  fi
+  if [ -d "$target" ]; then
+    die "$target is a directory; remove it or set A2P2_INSTALL_DIR"
+  fi
+
+  TMP=$(mktemp -d "${TMPDIR:-/tmp}/a2p2-install.XXXXXX") || die "cannot make a temporary directory"
 
   echo "downloading $asset ($version)"
   fetch "$url/$asset" "$TMP/$asset" || die "could not download $url/$asset"
@@ -156,18 +163,35 @@ main() {
   want=$(awk -v n="$asset" '$2 == n || $2 == "*" n { print $1 }' "$TMP/SHA256SUMS")
   [ -n "$want" ] || die "SHA256SUMS has no line for $asset; nothing was installed"
   [ "$(printf '%s\n' "$want" | wc -l | tr -d ' ')" = 1 ] || die "SHA256SUMS has more than one line for $asset; nothing was installed"
-  got=$(sha256_of "$TMP/$asset")
   want=$(printf '%s' "$want" | tr 'A-F' 'a-f')
-  if [ "$got" != "$want" ]; then
-    die "checksum mismatch for $asset (expected $want, got $got); nothing was installed"
+  is_hash "$want" || die "SHA256SUMS has no valid SHA-256 for $asset; nothing was installed"
+  sha256_of "$TMP/$asset"
+  if [ "$HASH" != "$want" ]; then
+    die "checksum mismatch for $asset (expected $want, got $HASH); nothing was installed"
   fi
-  echo "checksum ok: $got"
+  echo "checksum ok: $HASH"
 
-  NEWFILE="$dir/.a2p2.new.$$"
-  cp "$TMP/$asset" "$NEWFILE" || die "cannot write to $dir"
-  chmod 755 "$NEWFILE"
-  mv -f "$NEWFILE" "$target"
-  NEWFILE=""
+  # Only now is the directory created, if it is missing.
+  if [ ! -d "$dir" ]; then
+    mkdir -p "$dir" 2>/dev/null || die "cannot create $dir (no sudo is used). Set A2P2_INSTALL_DIR to a directory you can write"
+  fi
+  [ -w "$dir" ] || die "cannot write to $dir (no sudo is used). Set A2P2_INSTALL_DIR to a directory you can write"
+
+  # Invariant: the bytes moved into place are bytes whose hash was checked
+  # after they were written there. The staging file is unique and made
+  # exclusively by mktemp, copied into, and hashed again before the rename.
+  STAGE=$(mktemp "$dir/.a2p2.new.XXXXXX") || die "cannot write to $dir"
+  cp "$TMP/$asset" "$STAGE" || die "cannot write to $dir"
+  sha256_of "$STAGE"
+  if [ "$HASH" != "$want" ]; then
+    die "the copy in $dir does not match the checksum; nothing was installed"
+  fi
+  chmod 755 "$STAGE"
+  if [ -L "$target" ]; then
+    echo "note: $target was a symbolic link; the link itself is replaced"
+  fi
+  mv -f "$STAGE" "$target"
+  STAGE=""
 
   echo "installed $target"
   "$target" version || die "installed $target but it did not run"
@@ -175,12 +199,21 @@ main() {
   case ":$PATH:" in
     *":$dir:"*) echo "$dir is on your PATH." ;;
     *)
-      echo "$dir is not on your PATH. Add this line to your shell profile:"
-      echo "  export PATH=\"$dir:\$PATH\""
+      case "$dir" in
+        *[!A-Za-z0-9/._-]*)
+          echo "$dir is not on your PATH. Add this directory to your PATH:"
+          echo "$dir"
+          ;;
+        *)
+          echo "$dir is not on your PATH. Add this line to your shell profile:"
+          echo "  export PATH=\"$dir:\$PATH\""
+          ;;
+      esac
       ;;
   esac
   echo "Next: connect a harness with  a2p2 install claude  (or codex, agy, opencode, hermes, pi),"
   echo "then run  a2p2 doctor"
 }
 
-main "$@"
+# One brace group, so the shell parses the whole call before it runs anything.
+{ main "$@"; exit $?; }

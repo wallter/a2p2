@@ -1414,6 +1414,17 @@ message, command or table.
   the same release. That protects against a corrupted or swapped download,
   not against a compromised release or account. The binaries are not
   signed yet (RELEASING).
+- **Left out on purpose:** a check that the install directory is owned by
+  the user, and a defence against someone who can already write to it. A
+  party that can write to a directory on the person's PATH can replace
+  the binary at any time, and the installer cannot fix that. Resolving
+  "latest" to a tag first, so both downloads come from one release: if a
+  release is published between the two downloads the checksum does not
+  match and nothing is installed, which is the safe outcome, and the person
+  runs it again. An atomic replace on Windows (MoveFileExW): too much
+  untested code for a script nobody has run; `install.ps1` reports the
+  failure and leaves the old file. wget is not supported: its https-only
+  flag does not cover redirects.
 - **Agents:** the skill says to download, read, then run the script,
   and not to pipe it to a shell.
 

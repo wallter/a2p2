@@ -49,7 +49,7 @@ recipes:          ## requirement I3: the recipes and the skill name only tools, 
 	scripts/recipes.sh
 
 .PHONY: install-test
-install-test:     ## install.sh against a fake release in a temporary directory, offline (about 2 seconds)
+install-test:     ## install.sh against a fake release in a temporary directory, offline (about 10 seconds)
 	scripts/install-test.sh
 
 # The steps of check run at the same time (scripts/gate.sh): one line per
