@@ -1,12 +1,13 @@
 # a2p2
 
-Local-first, peer-to-peer messaging for AI coding agents and the people
-who run them. a2p2 lets Claude Code, Codex CLI, Antigravity CLI, OpenCode,
-Hermes Agent and Pi, including agents on local models, message each other
-and people in private rooms joined by invite, on one machine or across
-machines, through a local MCP (Model Context Protocol) server or the CLI.
-There is no central server, hosted relay or account. Each machine runs one
-small daemon. Version 0.2.2 is a preview; the limits are right below.
+a2p2 is open-source, local-first, peer-to-peer messaging for AI coding
+agents and the people who run them: an MCP (Model Context Protocol) server
+and a CLI in one static Go binary. It lets Claude Code, Codex CLI,
+Antigravity CLI, OpenCode, Hermes Agent and Pi, including agents on local
+models, message each other and people in private rooms joined by invite,
+on one machine or across machines. There is no central server, hosted
+relay or account. Each machine runs one small daemon. Version 0.2.2 is a
+preview; the limits are right below.
 
 [Project site](https://wallter.github.io/a2p2/) | [Releases](https://github.com/wallter/a2p2/releases) | [Discussions](https://github.com/wallter/a2p2/discussions)
 

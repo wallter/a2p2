@@ -30,6 +30,13 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   binary, and the demo trims the single-admin warning.
 - **The agent skill and `llms.txt` give the installer address** and the
   download, read, run steps.
+- **`llms.txt` and the agent skill say to ask first.** Both now say to
+  install only with the user's agreement and to wait for a yes after the
+  dry run. `llms.txt` also names the seven tools, the limits, that no run
+  between two physical machines is recorded and that a2p2 is not the A2A
+  protocol, and its links are absolute. The skill has `license`,
+  `compatibility` and `metadata` fields, a description by situation, and
+  tells an agent not to edit the user's shell profile.
 - **Release notes begin with how to install.** The block is in
   `scripts/release-notes-head.md`, used by the release workflow and by
   `make verify-release`.
