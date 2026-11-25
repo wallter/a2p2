@@ -164,7 +164,7 @@ func (s *Store) CommitPart(ctx context.Context, p FilePart, how string, items *c
 				return err
 			}
 			if moved {
-				return trash(tx, blobRel(p.Room, p.SHA256), "blob", p.Room, "", p.SHA256, 0, "", now)
+				return trash(tx, blobRel(p.Room, p.SHA256), "blob", p.Room, "", p.SHA256, p.Size, "", now) // counted until removed
 			}
 			return nil
 		})
@@ -484,12 +484,25 @@ func (s *Store) runTrashLocked(ctx context.Context, atStart bool) {
 		}
 		return q.Err()
 	})
+	// A queued blob is left out of the budgets only while its file is known
+	// to be absent (unlinked); whenever a run, a start's included, cannot
+	// show it absent or remove it, the mark is cleared, so the row is
+	// charged again and retried by every run like any pending removal.
+	charge := func(t trashRow) {
+		if t.unlinked {
+			_ = s.tx(ctx, func(tx *sql.Tx) error {
+				_, err := tx.Exec(`UPDATE file_trash SET unlinked = 0 WHERE path = ?`, t.path)
+				return err
+			})
+		}
+	}
 	for _, t := range rows {
 		live := true
 		if err := s.View(ctx, func(rd *Reader) (err error) {
 			live, err = livePath(rd.tx, t)
 			return err
 		}); err != nil {
+			charge(t)
 			continue // fail closed: tried again later
 		}
 		done, durable := true, true
@@ -498,6 +511,7 @@ func (s *Store) runTrashLocked(ctx context.Context, atStart bool) {
 		}
 		switch {
 		case !done:
+			charge(t)
 			continue // kept: tried again at the next run and at every start
 		case !durable:
 			_ = s.tx(ctx, func(tx *sql.Tx) error {

@@ -436,10 +436,16 @@ func sweepTx(tx *sql.Tx, room, self string, now time.Time) (int, error) {
 			return 0, err
 		}
 		if n == 0 {
+			// queued with its size: its bytes count against the budgets
+			// until its file is removed (usageSQL)
+			var size int64
+			if err := tx.QueryRow(`SELECT size FROM files WHERE room = ? AND sha256 = ?`, room, sha).Scan(&size); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return 0, err
+			}
 			if err := exec(`DELETE FROM files WHERE room = ? AND sha256 = ?`, room, sha); err != nil {
 				return 0, err
 			}
-			if err := trash(tx, blobRel(room, sha), "blob", room, "", sha, 0, "", now); err != nil {
+			if err := trash(tx, blobRel(room, sha), "blob", room, "", sha, size, "", now); err != nil {
 				return 0, err
 			}
 		}

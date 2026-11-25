@@ -459,9 +459,11 @@ func (rd *Reader) FileMode(room string) (string, error) {
 
 // FileUsage returns the bytes counted against the room's budget and the
 // machine's [F7]: held, partial at its declared size, staged, copied, and
-// reserved by wants with no part yet. A queued blob counts only until its
-// file is removed: an entry marked unlinked (removed where a directory
-// cannot be synced, kept until a start sees it gone) counts nothing.
+// reserved by wants with no part yet. A queued blob is queued with its
+// size and counts until its file is known absent: an entry marked
+// unlinked (removed where a directory cannot be synced, kept until a start
+// sees it gone) counts nothing, and a run that cannot show it absent clears
+// the mark (runTrashLocked).
 func (rd *Reader) FileUsage(room string) (int64, int64, error) { return fileUsage(rd.tx, room) }
 
 // FileBudgets returns the budgets in force.
@@ -1606,7 +1608,7 @@ func fileSetTx(tx *sql.Tx, room, record, manifest string) error {
 // paths: nothing of it may be kept.
 func leaveFiles(tx *sql.Tx, room string, now time.Time) error {
 	for _, q := range []struct{ sql, kind string }{
-		{`SELECT '', sha256, 0, '', '' FROM files WHERE room = ?`, "blob"},
+		{`SELECT '', sha256, size, '', '' FROM files WHERE room = ?`, "blob"}, // counted until removed
 		{`SELECT msg, sha256, 0, '', '' FROM file_parts WHERE room = ?`, "part"},
 		{`SELECT msg, sha256, size, path, ident FROM file_copies WHERE room = ?`, "copy"},
 		{`SELECT id, '', 0, '', '' FROM requests WHERE room = ? AND kind = 'send_files' AND state = 'pending'`, "stage"},

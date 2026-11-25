@@ -26,7 +26,12 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   the next start.** Windows cannot make a removal durable at once, so the
   entry stays in the deletion queue until a start. The bytes of such an
   entry kept counting even though the file was gone. They now stop
-  counting as soon as the file is removed, on every system.
+  counting as soon as the file is removed, on every system. If the file
+  is found again and cannot be removed, it counts again and is retried.
+- **A deleted file whose removal failed stopped counting against the
+  budgets.** A file withdrawn, expired or left with its room was queued
+  without its size, so while it stayed on disk its bytes were not
+  counted. It now counts until it is removed.
 - **A crash during a download from the page could leave a private copy
   in the system's temporary directory.** The copy the page serves is now
   written under the a2p2 home with a temporary file's name, and the next

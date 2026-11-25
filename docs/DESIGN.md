@@ -844,8 +844,10 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    anything is staged, and again at approval before any byte is copied
    into place; a publication that still fails queues the blobs it wrote
    for deletion in the same step, counted against the budget until they
-   are removed (where a removal is not known durable until a start, from
-   the removal itself, not the start). The request's expiry is checked by
+   are removed. Every queued blob carries its size and counts until its
+   file is known absent: from the removal itself where a removal is not
+   known durable until a start, and again whenever a run or a start finds
+   the file there and cannot remove it. The request's expiry is checked by
    the store's clock before any byte is copied into place and again in the
    publishing transaction. A replacement's eligibility is decided by the clock read
    in the publishing transaction. Approval re-checks the staged digests and sends them;
@@ -965,9 +967,11 @@ is gone is fetched again. An upload goes only to a machine that asked
 for that file by hash, so a member removed at that instant learns nothing
 from it. While an approved send is being published, its staged copy and
 its new copy exist together: a machine needs free space for twice the
-size of a send, and its pulls may wait until that copy finishes. A
-request that expires while its bytes are being put in place still copies
-them before the publishing transaction refuses it, and they are then
-removed; one already expired when approval starts copies nothing.
+size of a send, and its pulls may wait until that copy finishes. A send
+declined or expired after approval's first check of its expiry can still
+cost one copy of its files, which is then removed; one already expired
+when approval starts copies nothing. On Windows a download's snapshot
+still open at a start cannot be removed then and is left for a later
+start.
 Attacks on the program that later opens a file
 are out of scope, since a2p2 opens nothing.
