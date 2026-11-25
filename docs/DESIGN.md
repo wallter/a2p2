@@ -514,22 +514,33 @@ exists, from the CLI process under a throwaway key (PROTOCOL 4.7).
 
 **Two diagnoses.** The checks accept and refuse as before; only what the
 tool says differs. When the far end presents more than one certificate,
-or a leaf that holds another kind of key or is not signed by its own
-key, and the leaf's subject is a machine's key, a TLS-inspecting proxy has re-signed the
-listener's certificate: the result is `intercepted`, with the issuer's
-name (cut to 64 characters, controls and bidirectional marks written as
-`\u{...}`), and the advice names the proxy, says a2p2 refuses intercepted
-connections because it could not tell the other machine from the proxy,
-and offers: use a2p2 between machines inside the network, ask whether the
-destination can be exempt from inspection, or connect from another
-network. A join or a pull that meets the same condition fails with the
-same words. A server whose certificate does not name a machine's key (a
-web server on the wrong port) and a plain TCP answer stay "not an a2p2
-machine". When the dial fails with "no route to host" (`EHOSTUNREACH`;
-`WSAEHOSTUNREACH` on Windows) at an address inside a subnet attached to
-one of this machine's interfaces (up, not loopback, not point-to-point),
-the system has the route and refuses it, so the advice says a VPN or
-firewall on this machine is probably blocking local-network access. Which
+or a leaf that holds another kind of key or is not signed by its own key,
+and the leaf's subject is a machine's key, the certificate is not the
+other machine's own: the result is `intercepted`. The line shows the
+issuer the certificate claims. That name is whatever the other end wrote,
+so it is cut to 64 characters, every character other than a letter, a
+digit, a space and `.-_,()&'/@:+` is shown as `?`, and the text is shown
+as claimed, never as verified. The advice says the certificate is not the
+other machine's own, that it most likely comes from a TLS-inspecting proxy
+on this network that re-signs connections, that a2p2 refuses such a
+connection because it could not tell the other machine from whatever
+answers, and offers: use a2p2 between machines inside the network, ask
+whether the destination can be exempt from inspection, or connect from
+another network. Bare `a2p2 net check` ends with the same sentences, in
+a short form without the options, when no member could be reached and a
+member's address was intercepted. A join or a pull that meets the same
+condition fails with the same substance. A server whose certificate does
+not name a machine's key (a web server on the wrong port) and a plain TCP
+answer stay "not an a2p2 machine". When the dial fails with "no route to
+host" (`EHOSTUNREACH`; `WSAEHOSTUNREACH` on Windows) within 250 ms, at an
+address inside a subnet attached to one of this machine's interfaces (up,
+not loopback, not point-to-point, with a plain mask longer than 0 and not
+link-local), the system has the route and refuses it at once, so the
+advice says a VPN or firewall on this machine is probably blocking
+local-network access. A neighbour that does not answer fails after
+seconds and keeps the ordinary advice; so does a link-local destination,
+whose zone is unknown. The same sentence ends the daemon's check when no
+member could be reached and a member's address failed that way. Which
 interface holds the default route is not read: it is not available
 cheaply on every platform, and a tunnel interface name proves nothing.
 

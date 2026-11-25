@@ -14,11 +14,11 @@ import (
 // Requirements: N2
 func TestNetCheckAdviceForAnInspectingProxyAndABlockedLocalNetwork(t *testing.T) {
 	proxy := addrCheckOut{Addrs: []node.AddrCheck{{Addr: "203.0.113.9:7423", Result: node.ProbeIntercepted, MS: 217,
-		Issuer: `Example Corp CA`, Detail: `certificate issued by "Example Corp CA", not by the other machine`}}}
+		Issuer: `Example Corp CA`, Detail: node.InterceptedDetail("Example Corp CA")}}}
 	proxy.Advice = addrAdvice(proxy)
-	for _, want := range []string{`A TLS-inspecting proxy answers between this machine and 203.0.113.9:7423 ` +
-		`(certificate issued by "Example Corp CA").`, "refuses intercepted connections", "exempt from inspection",
-		"another network"} {
+	for _, want := range []string{`The certificate presented at 203.0.113.9:7423 is not the other machine's own: ` +
+		`it claims to be issued by "Example Corp CA" (a name anyone can write). Most likely a TLS-inspecting proxy`,
+		"refuses such a connection", "exempt from inspection", "another network"} {
 		if !strings.Contains(proxy.Advice, want) {
 			t.Errorf("advice %q lacks %q", proxy.Advice, want)
 		}
@@ -26,7 +26,7 @@ func TestNetCheckAdviceForAnInspectingProxyAndABlockedLocalNetwork(t *testing.T)
 	if strings.Contains(proxy.Advice, "check the port") {
 		t.Errorf("advice sends the reader to the port: %q", proxy.Advice)
 	}
-	if line := addrLine(proxy.Addrs[0]); !strings.Contains(line, "intercepted in 217 ms: certificate issued by") {
+	if line := addrLine(proxy.Addrs[0]); !strings.Contains(line, `intercepted in 217 ms: the certificate there claims the issuer "Example Corp CA"; it is not the other machine's own`) {
 		t.Errorf("line %q", line)
 	}
 	// An issuer that arrives with a control character is written out.

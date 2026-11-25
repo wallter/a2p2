@@ -4,7 +4,13 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"time"
 )
+
+// onLinkFast is how quickly a local block answers: a VPN client or a
+// firewall on this machine refuses at once, while a neighbour that does
+// not answer takes seconds to fail.
+const onLinkFast = 250 * time.Millisecond
 
 // attachedNets are the subnets directly attached to this machine's
 // interfaces that are up: not loopback, not point-to-point (a tunnel's
@@ -24,35 +30,48 @@ func attachedNets() []netip.Prefix {
 			continue
 		}
 		for _, a := range addrs {
-			n, ok := a.(*net.IPNet)
-			if !ok {
-				continue
+			if p, ok := attachedPrefix(a); ok {
+				out = append(out, p)
 			}
-			ip, ok := netip.AddrFromSlice(n.IP)
-			if !ok {
-				continue
-			}
-			ones, bits := n.Mask.Size()
-			if ip.Is4In6() && bits == 128 {
-				ones -= 96
-			}
-			ip = ip.Unmap()
-			if ones < 0 || ones > ip.BitLen() {
-				continue
-			}
-			out = append(out, netip.PrefixFrom(ip, ones).Masked())
 		}
 	}
 	return out
 }
 
+// attachedPrefix is the subnet of one interface address. An address with
+// no mask or a mask that is not a plain prefix (Size says 0, 0), a prefix
+// length of 0 and a link-local subnet (whose zone is unknown) give none.
+func attachedPrefix(a net.Addr) (netip.Prefix, bool) {
+	n, ok := a.(*net.IPNet)
+	if !ok {
+		return netip.Prefix{}, false
+	}
+	ip, ok := netip.AddrFromSlice(n.IP)
+	if !ok {
+		return netip.Prefix{}, false
+	}
+	ones, bits := n.Mask.Size()
+	if bits == 0 || ones == 0 {
+		return netip.Prefix{}, false
+	}
+	if ip.Is4In6() && bits == 128 {
+		ones -= 96
+	}
+	ip = ip.Unmap()
+	if ones <= 0 || ones > ip.BitLen() || ip.IsLinkLocalUnicast() {
+		return netip.Prefix{}, false
+	}
+	return netip.PrefixFrom(ip, ones).Masked(), true
+}
+
 // noRouteOnLink reports whether a failed dial is "no route to host" at an
-// address inside one of nets, a subnet this machine is attached to: the
-// route exists, yet the system refuses it, which a VPN client or a
-// firewall on this machine does. The address is the one dialled (the
-// error's own, so a host name that was resolved counts), else host.
-func noRouteOnLink(err error, host string, nets []netip.Prefix) bool {
-	if err == nil || !isNoRoute(err) {
+// address inside one of nets, a subnet this machine is attached to, that
+// failed within onLinkFast: the route exists, yet the system refuses it at
+// once, which a VPN client or a firewall on this machine does. The address
+// is the one dialled (the error's own, so a host name that was resolved
+// counts), else host. A link-local address never counts.
+func noRouteOnLink(err error, host string, nets []netip.Prefix, took time.Duration) bool {
+	if err == nil || !isNoRoute(err) || took >= onLinkFast {
 		return false
 	}
 	var ip netip.Addr
@@ -60,17 +79,18 @@ func noRouteOnLink(err error, host string, nets []netip.Prefix) bool {
 	if errors.As(err, &oe) {
 		if ta, ok := oe.Addr.(*net.TCPAddr); ok {
 			ip, _ = netip.AddrFromSlice(ta.IP)
+			ip = ip.WithZone(ta.Zone)
 		}
 	}
 	if !ip.IsValid() {
 		ip, _ = netip.ParseAddr(host)
 	}
-	if !ip.IsValid() {
+	if !ip.IsValid() || ip.Unmap().IsLinkLocalUnicast() {
 		return false
 	}
 	ip = ip.Unmap().WithZone("")
 	for _, p := range nets {
-		if p.Contains(ip) {
+		if p.Bits() > 0 && p.Contains(ip) {
 			return true
 		}
 	}

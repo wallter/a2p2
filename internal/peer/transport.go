@@ -16,8 +16,10 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/wallter/a2p2/internal/core"
 	"github.com/wallter/a2p2/internal/node"
@@ -78,26 +80,39 @@ type Intercepted struct {
 }
 
 func (e *Intercepted) Error() string {
-	s := "peer: a TLS-inspecting proxy answers between this machine and the other machine"
+	s := "peer: the certificate presented is not the other machine's own"
 	if e.Issuer != "" {
-		s += " (certificate issued by \"" + e.Issuer + "\")"
+		s += ": it claims the issuer \"" + e.Issuer + "\" (a name anyone can write)"
 	}
-	return s + "; a2p2 refuses intercepted connections, because it could not tell the other machine from the proxy"
+	return s + "; most likely a TLS-inspecting proxy re-signs the connection; a2p2 refuses it, because it could " +
+		"not tell the other machine from whatever answers"
 }
 
 // maxIssuerRunes bounds the issuer name shown.
 const maxIssuerRunes = 64
 
 // issuerText is the name of c's issuer for display: its common name, else
-// its first organisation; cut to maxIssuerRunes, controls and bidirectional
-// marks escaped.
+// its first organisation; cut to maxIssuerRunes, then only letters, digits,
+// a space and .-_,()&'/@:+ kept, every other character a "?", so no quote,
+// line break or control can change what a person reads around it.
 func issuerText(c *x509.Certificate) string {
 	s := c.Issuer.CommonName
 	if s == "" && len(c.Issuer.Organization) > 0 {
 		s = c.Issuer.Organization[0]
 	}
-	if r := []rune(s); len(r) > maxIssuerRunes {
-		s = string(r[:maxIssuerRunes]) + "..."
+	r := []rune(s)
+	more := len(r) > maxIssuerRunes
+	if more {
+		r = r[:maxIssuerRunes]
+	}
+	for i, x := range r {
+		if !unicode.IsLetter(x) && !unicode.IsDigit(x) && !strings.ContainsRune(" .-_,()&'/@:+", x) {
+			r[i] = '?'
+		}
+	}
+	s = string(r)
+	if more {
+		s += "..."
 	}
 	return node.EscapeDisplay(s)
 }

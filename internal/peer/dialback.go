@@ -227,7 +227,7 @@ func (p *Prober) ProbeWith(ctx context.Context, addr string, check func(node str
 		case isTimeout(err):
 			return done(node.ProbeTimeout, fmt.Sprintf("no TCP answer within %s", probeDialTimeout))
 		}
-		if host, _, herr := net.SplitHostPort(addr); herr == nil && noRouteOnLink(err, host, attachedNets()) {
+		if host, _, herr := net.SplitHostPort(addr); herr == nil && noRouteOnLink(err, host, attachedNets(), time.Since(start)) {
 			out.OnLink = true
 		}
 		return done(node.ProbeUnreachable, dialText(err))
@@ -266,11 +266,7 @@ func (p *Prober) ProbeWith(ctx context.Context, addr string, check func(node str
 			core.ShortNode(got)+" (not proven to be held)")
 	case icpt != nil:
 		out.Issuer = icpt.Issuer
-		what := "a certificate issued by another party, not by the other machine"
-		if icpt.Issuer != "" {
-			what = "certificate issued by \"" + icpt.Issuer + "\", not by the other machine"
-		}
-		return done(node.ProbeIntercepted, what)
+		return done(node.ProbeIntercepted, node.InterceptedDetail(icpt.Issuer))
 	case err != nil && got != "":
 		return done(node.ProbeNotA2P2, "handshake failed: "+err.Error())
 	case err != nil && isTimeout(err):

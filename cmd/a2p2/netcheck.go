@@ -150,7 +150,7 @@ func addrAdvice(out addrCheckOut) string {
 	case node.ProbeNotA2P2:
 		return "Something answers at " + addr + ", but it is not an a2p2 machine: check the port."
 	case node.ProbeIntercepted:
-		return interceptedAdvice(addr, top.Issuer)
+		return node.InterceptedAdvice(addr, top.Issuer, false)
 	case node.ProbeRefused:
 		return "Nothing listens at " + addr + ": the other machine may have networking off or listen on another port."
 	case node.ProbeTimeout:
@@ -158,24 +158,9 @@ func addrAdvice(out addrCheckOut) string {
 			"if it cannot accept connections, it can still take part by connecting out."
 	}
 	if best == node.ProbeUnreachable && top.OnLink {
-		return "The address is on a network this machine is attached to, yet cannot be reached: a VPN or firewall " +
-			"on this machine is probably blocking local-network access. Reach the other machine another way, for " +
-			"example its public address with a forwarded port, or a member both machines can reach."
+		return node.OnLinkAdvice
 	}
 	return "The address cannot be reached from this network; check the address and this machine's connection."
-}
-
-// interceptedAdvice is the closing sentence when a TLS-inspecting proxy
-// answers at addr. issuer is bounded and escaped already (peer.Intercepted).
-func interceptedAdvice(addr, issuer string) string {
-	by := ""
-	if issuer != "" {
-		by = " (certificate issued by \"" + node.EscapeDisplay(issuer) + "\")"
-	}
-	return "A TLS-inspecting proxy answers between this machine and " + addr + by + ". a2p2 refuses intercepted " +
-		"connections, because it could not tell the other machine from the proxy. Options: use a2p2 between " +
-		"machines inside this network; ask the network's administrators whether this destination can be exempt " +
-		"from inspection; or connect from another network."
 }
 
 // mappingText is the router's port mapping in one line.

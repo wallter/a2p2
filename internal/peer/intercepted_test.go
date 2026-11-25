@@ -106,7 +106,7 @@ func TestProbeOfAnInspectedConnectionIsInterceptedWithItsIssuer(t *testing.T) {
 			in := startInspector(t, "Example Corp Inspection CA", c.chain)
 			got := p.Probe(bg, in.node, in.addr)
 			if got.Result != node.ProbeIntercepted || got.Issuer != "Example Corp Inspection CA" ||
-				!strings.Contains(got.Detail, `certificate issued by "Example Corp Inspection CA"`) {
+				got.Detail != `the certificate there claims the issuer "Example Corp Inspection CA"; it is not the other machine's own` {
 				t.Fatalf("%+v", got)
 			}
 			if got := p.ProbeWith(bg, in.addr, nil); got.Result != node.ProbeIntercepted {
@@ -116,23 +116,25 @@ func TestProbeOfAnInspectedConnectionIsInterceptedWithItsIssuer(t *testing.T) {
 	}
 }
 
-// The issuer's name is the other side's text: it is cut, and a control
-// character or a bidirectional mark is written out, never sent to the
-// terminal.
+// The issuer's name is the other side's text: it is cut, and a quote, a
+// line or paragraph separator, a bidirectional mark, a line break and an
+// escape each become "?", so nothing in it can change what is read around it
+// or the terminal.
 //
 // Requirements: N2
-func TestAnInterceptedIssuerNameIsBoundedAndEscaped(t *testing.T) {
-	in := startInspector(t, "Evil\x1b[2J‮CA "+strings.Repeat("x", 300), true)
+func TestAnInterceptedIssuerNameIsBoundedAndOnlyPlainCharactersSurvive(t *testing.T) {
+	in := startInspector(t, "Evil\" \u2028\u2029\u202e\n\x1b[2J CA (R&D) "+strings.Repeat("x", 300), true)
 	got := NewProber(newID(t)).Probe(bg, in.node, in.addr)
 	if got.Result != node.ProbeIntercepted {
 		t.Fatalf("%+v", got)
 	}
-	for _, s := range []string{got.Issuer, got.Detail} {
-		if strings.ContainsAny(s, "\x1b‮") || len(s) > 400 {
+	for _, s := range []string{got.Issuer, got.Detail, (&Intercepted{Issuer: got.Issuer}).Error()} {
+		if strings.ContainsAny(s[strings.Index(s, "Evil"):], "\x1b\u202e\u2028\u2029\n") || len(s) > 500 {
 			t.Fatalf("not safe to show: %q", s)
 		}
 	}
-	if !strings.Contains(got.Issuer, `\u{1b}`) || !strings.HasSuffix(got.Issuer, "...") {
+	if strings.ContainsRune(got.Issuer, '"') || !strings.HasPrefix(got.Issuer, "Evil? ????") ||
+		!strings.Contains(got.Issuer, "CA (R&D) ") || !strings.HasSuffix(got.Issuer, "...") {
 		t.Fatalf("%q", got.Issuer)
 	}
 }
@@ -146,7 +148,7 @@ func TestAJoinThroughAnInspectingProxySaysSo(t *testing.T) {
 	_, err := NewJoinClient(newID(t)).Join(bg, []string{in.addr}, func(string) error { return nil }, []byte("{}"))
 	var ic *Intercepted
 	if !errors.As(err, &ic) || ic.Issuer != "Example Corp Inspection CA" ||
-		!strings.Contains(err.Error(), "TLS-inspecting proxy") || strings.Contains(err.Error(), "exactly one") {
+		!strings.Contains(err.Error(), "claims the issuer") || !strings.Contains(err.Error(), "most likely a TLS-inspecting proxy") || strings.Contains(err.Error(), "exactly one") {
 		t.Fatalf("%v", err)
 	}
 }
@@ -207,30 +209,63 @@ func certNodeOfWebServer(t *testing.T) error {
 //
 // Requirements: N2
 func TestNoRouteToAnAttachedSubnetIsAVPNOrFirewallBlock(t *testing.T) {
-	nets := []netip.Prefix{netip.MustParsePrefix("192.168.86.0/24"), netip.MustParsePrefix("fe80::/64")}
+	nets := []netip.Prefix{netip.MustParsePrefix("192.168.86.0/24"), netip.MustParsePrefix("fe80::/64"),
+		netip.MustParsePrefix("0.0.0.0/0")}
 	dial := func(ip string, err error) error {
 		return &net.OpError{Op: "dial", Net: "tcp", Addr: &net.TCPAddr{IP: net.ParseIP(ip), Port: 7423}, Err: err}
 	}
+	fast, slow := time.Millisecond, 3*time.Second
 	for _, c := range []struct {
 		name string
 		err  error
 		host string
+		took time.Duration
 		want bool
 	}{
-		{"no route on the attached subnet", dial("192.168.86.241", syscall.EHOSTUNREACH), "192.168.86.241", true},
-		{"no route on the attached IPv6 link", dial("fe80::1", syscall.EHOSTUNREACH), "fe80::1", true},
-		{"no route elsewhere", dial("203.0.113.9", syscall.EHOSTUNREACH), "203.0.113.9", false},
-		{"network unreachable on the subnet", dial("192.168.86.241", syscall.ENETUNREACH), "192.168.86.241", false},
-		{"refused on the subnet", dial("192.168.86.241", syscall.ECONNREFUSED), "192.168.86.241", false},
-		{"no route, host name resolved to the subnet", dial("192.168.86.7", syscall.EHOSTUNREACH), "printer.local", true},
-		{"no route, no address known", errors.New("connect: no route to host"), "printer.local", false},
+		{"no route on the attached subnet, at once", dial("192.168.86.241", syscall.EHOSTUNREACH), "192.168.86.241", fast, true},
+		{"no route on the attached subnet, after seconds (a neighbour that does not answer)", dial("192.168.86.241", syscall.EHOSTUNREACH), "192.168.86.241", slow, false},
+		{"no route at a link-local address (zone unknown)", dial("fe80::1", syscall.EHOSTUNREACH), "fe80::1", fast, false},
+		{"no route at an IPv4 link-local address", dial("169.254.1.2", syscall.EHOSTUNREACH), "169.254.1.2", fast, false},
+		{"no route elsewhere, with a /0 in the list", dial("203.0.113.9", syscall.EHOSTUNREACH), "203.0.113.9", fast, false},
+		{"network unreachable on the subnet", dial("192.168.86.241", syscall.ENETUNREACH), "192.168.86.241", fast, false},
+		{"refused on the subnet", dial("192.168.86.241", syscall.ECONNREFUSED), "192.168.86.241", fast, false},
+		{"no route, host name resolved to the subnet", dial("192.168.86.7", syscall.EHOSTUNREACH), "printer.local", fast, true},
+		{"no route, no address known", errors.New("connect: no route to host"), "printer.local", fast, false},
 	} {
-		if got := noRouteOnLink(c.err, c.host, nets); got != c.want {
+		if got := noRouteOnLink(c.err, c.host, nets, c.took); got != c.want {
 			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
 	}
-	if noRouteOnLink(dial("192.168.86.241", syscall.EHOSTUNREACH), "192.168.86.241", nil) {
+	if noRouteOnLink(dial("192.168.86.241", syscall.EHOSTUNREACH), "192.168.86.241", nil, fast) {
 		t.Error("no attached subnet is known")
+	}
+}
+
+// An interface address with no mask, a mask that is not a plain prefix, a
+// prefix length of 0 or a link-local subnet never becomes an attached
+// subnet; an ordinary one does, masked.
+//
+// Requirements: N2
+func TestAnInterfaceAddressWithoutAPlainMaskIsNotAnAttachedSubnet(t *testing.T) {
+	ip4 := net.ParseIP("192.168.86.10")
+	for _, c := range []struct {
+		name string
+		a    net.Addr
+		want string // "" none
+	}{
+		{"a /24", &net.IPNet{IP: ip4, Mask: net.CIDRMask(24, 32)}, "192.168.86.0/24"},
+		{"a /24 in a 16-byte mask", &net.IPNet{IP: ip4.To16(), Mask: net.CIDRMask(120, 128)}, "192.168.86.0/24"},
+		{"no mask", &net.IPNet{IP: ip4}, ""},
+		{"a mask that is not a prefix", &net.IPNet{IP: ip4, Mask: net.IPMask{255, 0, 255, 0}}, ""},
+		{"a /0", &net.IPNet{IP: ip4, Mask: net.CIDRMask(0, 32)}, ""},
+		{"an IPv6 link-local /64", &net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)}, ""},
+		{"an IPv4 link-local /16", &net.IPNet{IP: net.ParseIP("169.254.3.4"), Mask: net.CIDRMask(16, 32)}, ""},
+		{"not a network address", &net.IPAddr{IP: ip4}, ""},
+	} {
+		got, ok := attachedPrefix(c.a)
+		if (c.want == "") == ok || ok && got.String() != c.want {
+			t.Errorf("%s: %v %v, want %q", c.name, got, ok, c.want)
+		}
 	}
 }
 
