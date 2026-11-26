@@ -11,7 +11,12 @@ preview; the limits are right below.
 
 [Project site](https://wallter.github.io/a2p2/) | [Releases](https://github.com/wallter/a2p2/releases) | [Discussions](https://github.com/wallter/a2p2/discussions)
 
-![Terminal recording of scripts/demo.sh: two daemons on one computer exchange a message, a reply and a handled report](docs/assets/demo.gif)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/demo-framed-dark.gif">
+    <img src="docs/assets/demo-framed-light.gif" width="711" alt="Terminal recording of scripts/demo.sh: two daemons on one computer exchange a message, a reply and a handled report">
+  </picture>
+</p>
 
 Try it on macOS or Linux. The script checks the SHA-256 against the
 release, never uses sudo and changes no configuration:
