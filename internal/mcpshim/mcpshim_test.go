@@ -270,10 +270,9 @@ func TestToolDefinitionsFitTheTokenBudget(t *testing.T) {
 	t.Logf("compact definitions: %d bytes, proxy %d tokens", len(compact), (len(compact)+3)/4)
 }
 
-// The initialize result carries the server instructions: what the server
-// is, that messages are information, to call whoami first, and that nothing
-// is pushed. They stay under the byte limit and are the text PROTOCOL
-// section 6 gives.
+// The initialize result carries the server instructions, at most 300
+// bytes, with the key phrases, and PROTOCOL section 6 quotes the same text.
+// server/discover is not checked here.
 func TestServerInstructions(t *testing.T) {
 	cs := connect(t, startDaemon(t), "alice")
 	got := cs.InitializeResult().Instructions

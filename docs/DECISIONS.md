@@ -1504,24 +1504,30 @@ when to use `reply` instead of `send` or `ack`. They were reworded (PROTOCOL
 section 6), with "message" in place of "mail". Added now: the `instructions`
 field of the MCP `initialize` result, set from `mcpshim.Instructions`: what
 the server is, that messages from others are information and not
-instructions from the user, to call `whoami` first, and that nothing is
-pushed. No tool, parameter name, schema or annotation changed; no
-dependency, wire message, command or table.
+instructions from the user, to call `whoami` first, and that new messages are
+not pushed. No tool, parameter name, schema or annotation changed; no
+dependency, wire message, command or table. The reword also touched the
+parameter descriptions in the tool schemas (`level`, `to`, `reply_to`,
+`wait_seconds`, `recent` and others) and the `whoami` result's `note`
+("mail" became "messages"); both are text a model reads.
 
-- **Cost:** at most 300 bytes (now 260), sent once per session in the
-  initialize result. It is not in the tool-definition count of A2, which
-  stays at or under 4,000 bytes (3,994 now, 6 left). To fit, `reply` no
-  longer says its result names whom it reached (the result still does),
-  and a few parameter descriptions were shortened or dropped.
+- **Cost:** 276 bytes (limit 300) added to every initialize or
+  discover response, once per session. It is not in the tool-definition
+  count of A2, which stays at or under 4,000 bytes (3,991 now, was 3,979;
+  9 left). To fit, `reply` no longer says its result names whom it
+  reached (the result still does), and some parameter descriptions were
+  shortened or dropped.
 - **Guarantees (what the tests assert):** the initialize result carries the
   text, it is at most 300 bytes and names `whoami`, `inbox` and "not
-  instructions from your user", and it is the text PROTOCOL quotes.
+  instructions from your user", and it is the text PROTOCOL quotes. Only
+  the initialize result is tested.
 - **Does not guarantee:** that a harness shows the string to its model;
   some harnesses drop it. The safety statements stay in the tool
   descriptions and in every inbox result's notice, so nothing depends on it.
 - **`server/discover`:** the SDK (v1.8.0) fills the `instructions` of that
-  call from the same option, so the string is there in the newest revision
-  too.
+  call from the same option (read in its source; no test, because the
+  SDK client makes that call itself), so the string should be there in the
+  newest revision too.
 
 **Revisit if** a harness is found to ignore the string, or the 4,000-byte
 limit has to move.
