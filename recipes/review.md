@@ -1,8 +1,9 @@
 # Review by a second agent
 
 Use this when work is finished and someone other than its author should
-check it. A reviewer with a clean context finds what the author's context
-hides; a reviewer from another model family does better still.
+check it. A reviewer with a clean context may see what the author's context
+hides. A reviewer from another model family may find partly different
+problems, so use one when you have it.
 
 ## The request
 
