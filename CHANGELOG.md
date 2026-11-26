@@ -91,7 +91,19 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   `local`; and in `peers` a machine name two machines use, or one that
   reads as another machine's id, carries the id. Since 0.1.0 an agent could also register
   as `Human`, and `a2p2 mcp --harness human` as the person; both are now
-  refused.
+  refused. The same marks now reach the page's notices and trace, the
+  CLI's `trace`, question alerts and the hook, whose notice used to say
+  no sender was the user even when this machine's person was one. A
+  replaced notice says `edited` and names the message's own label, as
+  the thread does; when another agent of the author's machine replaced
+  it, both name that agent in `changed_by`. `trace` gives the author and writes a handler with a shared short
+  id in full. `unread` first lines and MCP `peek` lines carry
+  `changed_by` and `edited` too, MCP gives `changed_by_person`, the CLI,
+  the page and question alerts mark a `human` editor, and the hook and
+  `unread`'s senders name the agent that wrote the text shown: a local
+  agent that replaced the person's message used to be summed up as the
+  person. Any agent on a machine can replace or withdraw the messages of
+  every other label there, the person's included; the marks show who did.
 - **One admin can no longer block its own removal by flooding requests.**
   Since 0.1.0, an admin of a room (for example the admin of another owner
   in a shared room) could sign many entries that wait for a second admin.

@@ -508,6 +508,24 @@ is the reply to the question with `from_this_machine` and `person`
 yours. Any program run as the same OS user can still send as `human`
 through the local API, so `person` says where a message was written,
 not who typed it.
+The same marks reach every other place that shows an author: a
+replaced, withdrawn or expired notice names the message's own label
+(any agent of the author's machine may replace it), a replaced notice
+says `edited`, and `changed_by` names another agent of that machine
+that wrote the change, on the notice and on the message; `trace` gives the author and each handler as
+entries write them, with `from_this_machine` and `id_shared`; `unread`
+names as senders the writers of the text shown (the editor when
+`changed_by` is set: every label on a machine shares its key, so any
+local agent can replace or withdraw the person's messages), gives
+`changed_by` and `edited` on first lines and MCP `peek`, and
+lists which senders are this machine, and the hook marks this
+machine's person and another machine's `human` in its notice, keeping
+this machine's person among the 5 senders it names; a
+question alert writes the mark after the asker. The CLI, the page and
+the hook draw each mark apart from message text (CLI bodies are
+indented, a question alert's later body lines deeper than its asker
+line; page marks are their own elements, hook labels lose every
+character but letters, digits and `._@-`).
 The surface compares the short ids of this machine, every member of
 every room held and the authors and addressees shown; a key whose short
 id another has is written in full and marked `id_shared` in entries,

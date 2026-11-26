@@ -22,7 +22,7 @@ func TestAlertsListQuestionsWaitingForThePerson(t *testing.T) {
 	q := e.send(SendInput{Agent: alice, Text: "Ship it?", To: []string{e.s.HumanID()}})
 	as, err := e.s.Alerts(ctx, 0)
 	if err != nil || len(as) != 1 || as[0].Kind != AlertQuestion || as[0].ID != q.ID || as[0].Room != e.s.LocalRoom() ||
-		as[0].Text != alice+" asks: Ship it?" {
+		as[0].Text != alice+" [this machine] asks: Ship it?" {
 		t.Fatalf("alerts: %+v %v", as, err)
 	}
 }

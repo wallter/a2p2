@@ -49,10 +49,10 @@ type Entry struct {
 	// Version is the record whose text is shown (the message or a
 	// replace); empty for notices without text.
 	Version string
-	// Edited, in a message entry: the text shown is its author's
-	// replacement, not the text first sent (Version is not ID). In an
-	// expired entry: the message was replaced, and the newest text held
-	// expired here, so no earlier text is shown as current.
+	// Edited, in a message entry or a replaced notice: the text shown is
+	// its author's replacement, not the text first sent (Version is not
+	// ID). In an expired entry: the message was replaced, and the newest
+	// text held expired here, so no earlier text is shown as current.
 	Edited bool
 	Kind   string
 	// ID is the message concerned; Record is the record at this position
@@ -64,6 +64,10 @@ type Entry struct {
 	RoomLabel string
 	From      string // agent id, label@short node (the full key when shared)
 	FromNode  string
+	// ChangedBy: the agent of the author's machine that wrote the
+	// replacement shown, or the replace or withdraw of a notice, when it
+	// is not From's agent; written like From.
+	ChangedBy string
 	// Here: the author is this machine, by the full key (filled in by
 	// Surface). IDShared: the author's or an addressee's short id is
 	// another known machine's too, so it is written in full (From, ToIDs).
@@ -999,6 +1003,14 @@ func (v *roomView) entry(h *rec, kind, key string) (*Entry, error) {
 		msg = t
 	}
 	if msg != nil {
+		// A notice names the message's author as the message does, and
+		// the agent that wrote the replace or withdraw in ChangedBy when
+		// it is another: any agent of the author's machine may (T2), so
+		// the same message never shows two labels (D65).
+		if msg.author == h.author {
+			e.From = core.AgentID(msg.f.Agent, msg.author)
+			e.ChangedBy = changedBy(msg, h)
+		}
 		e.To, e.AskHandled = msg.f.To, msg.f.AskHandled
 		// A reply whose parent fails its check is shown without a parent
 		// (PROTOCOL section 2).
@@ -1009,6 +1021,16 @@ func (v *roomView) entry(h *rec, kind, key string) (*Entry, error) {
 	var err error
 	e.ParentState, err = v.parentState(e.Parent)
 	return e, err
+}
+
+// changedBy is the agent id of the writer of r, a replace or withdraw of
+// message msg, when another agent of the author's machine wrote it; ""
+// when msg's own agent did, or r is msg.
+func changedBy(msg, r *rec) string {
+	if r == nil || r == msg || r.author != msg.author || r.f.Agent == msg.f.Agent {
+		return ""
+	}
+	return core.AgentID(r.f.Agent, r.author)
 }
 
 func relevant(r *rec, self, agent string) bool {
@@ -1083,6 +1105,7 @@ func (v *roomView) decide(g *agentState, agent string, h *rec, heads map[string]
 				return nil, nil, err
 			}
 			e.Text, e.Choices, e.Version, e.Edited = text.f.Text, text.f.Choices, ver.id, ver.id != h.id
+			e.ChangedBy = changedBy(h, ver)
 			v.fileState(e, ver)
 		}
 	case core.KindWithdraw:
@@ -1130,7 +1153,7 @@ func (v *roomView) decide(g *agentState, agent string, h *rec, heads map[string]
 		if e, err = v.entry(h, EntryReplaced, h.id); err != nil {
 			return nil, nil, err
 		}
-		e.Text, e.Choices, e.Version = h.f.Text, h.f.Choices, h.id
+		e.Text, e.Choices, e.Version, e.Edited = h.f.Text, h.f.Choices, h.id, true
 		v.fileState(e, h)
 	default:
 		return nil, nil, nil // handled reports are for trace, not the inbox
@@ -1292,7 +1315,8 @@ func (v *roomView) voided(g *agentState) ([]Entry, error) {
 }
 
 // expiredEntry is the expired notice of message h, whose text, or whose
-// newest replacement's text, expired here: Edited when it was replaced.
+// newest replacement's text, expired here: Edited when it was replaced,
+// and ChangedBy names the replacement's writer as for a message entry.
 func (v *roomView) expiredEntry(h *rec) (*Entry, error) {
 	e, err := v.entry(h, EntryExpired, "x:"+h.id)
 	if err != nil {
@@ -1303,6 +1327,7 @@ func (v *roomView) expiredEntry(h *rec) (*Entry, error) {
 		return nil, err
 	}
 	e.Edited = ver.id != h.id
+	e.ChangedBy = changedBy(h, ver)
 	return e, nil
 }
 
@@ -1326,6 +1351,7 @@ func (v *roomView) threadEntry(h *rec) (*Entry, error) {
 			return nil, err
 		}
 		e.Text, e.Choices, e.Version, e.Edited = text.f.Text, text.f.Choices, ver.id, ver.id != h.id
+		e.ChangedBy = changedBy(h, ver)
 		v.fileState(e, ver)
 		return e, nil
 	}

@@ -163,6 +163,10 @@ type (
 		RoomLabel string `json:"room_label"`
 		From      string `json:"from"`
 		FromNode  string `json:"from_node"`
+		// ChangedBy: the agent of the author's machine that wrote the
+		// replacement shown, or this notice's replace or withdraw, when
+		// it is not from's agent (D65).
+		ChangedBy string `json:"changed_by,omitempty"`
 		// FromThisMachine: the author is this machine, by its full key.
 		// IDShared: the author's or an addressee's short id is another
 		// known machine's too, so from and to name it in full.
@@ -292,22 +296,33 @@ type (
 		At       string `json:"at"`
 		Member   bool   `json:"member"`
 		Evidence string `json:"evidence"`
+		IDShared bool   `json:"id_shared,omitempty"`
 	}
 	// Handled: at is when the report was written, as its author signed it.
+	// agent is written as entries write from; node is the writer's key.
 	Handled struct {
-		Agent string `json:"agent"`
-		At    string `json:"at"`
+		Agent           string `json:"agent"`
+		Node            string `json:"node"`
+		FromThisMachine bool   `json:"from_this_machine"`
+		IDShared        bool   `json:"id_shared,omitempty"`
+		At              string `json:"at"`
 	}
 	// TraceResp: saved is true when this machine holds the message's
 	// signed header; reason is the state of its text here. An id not held
 	// here is an error.
 	TraceResp struct {
-		ID      string    `json:"id"`
-		Room    string    `json:"room"`
-		Saved   bool      `json:"saved"`
-		Reason  string    `json:"reason"`
-		Copies  []Copy    `json:"copies"`
-		Handled []Handled `json:"handled"`
+		ID     string `json:"id"`
+		Room   string `json:"room"`
+		Saved  bool   `json:"saved"`
+		Reason string `json:"reason"`
+		// From, from_node, from_this_machine and id_shared: the message's
+		// author, as an entry gives them (D65).
+		From            string    `json:"from"`
+		FromNode        string    `json:"from_node"`
+		FromThisMachine bool      `json:"from_this_machine"`
+		IDShared        bool      `json:"id_shared,omitempty"`
+		Copies          []Copy    `json:"copies"`
+		Handled         []Handled `json:"handled"`
 		// Files are the files of the winning version, with what this
 		// machine holds of each and each member's last answer.
 		Files []TraceFile `json:"files,omitempty"`
@@ -583,9 +598,13 @@ type (
 		Count int    `json:"count"`
 	}
 	FirstLine struct {
-		ID              string `json:"id"`
-		Room            string `json:"room"`
-		From            string `json:"from"`
+		ID   string `json:"id"`
+		Room string `json:"room"`
+		From string `json:"from"`
+		// ChangedBy, Edited: as on an entry; the line is changed_by's text
+		// when it is set (D65).
+		ChangedBy       string `json:"changed_by,omitempty"`
+		Edited          bool   `json:"edited,omitempty"`
 		FromThisMachine bool   `json:"from_this_machine"`
 		IDShared        bool   `json:"id_shared,omitempty"`
 		Line            string `json:"line"`
@@ -593,11 +612,17 @@ type (
 	// Unread is counts and sender labels, and first lines only when asked.
 	// It never marks anything seen.
 	Unread struct {
-		Agent string      `json:"agent,omitempty"` // empty: no agent matches this hook
-		Count int         `json:"count"`
-		From  []string    `json:"from,omitempty"`
-		Rooms []RoomCount `json:"rooms,omitempty"`
-		First []FirstLine `json:"first,omitempty"`
+		Agent string `json:"agent,omitempty"` // empty: no agent matches this hook
+		Count int    `json:"count"`
+		// From: the writers of what the entries show, the editor of a
+		// message another agent of its machine changed (node.Entry.Writer).
+		From []string `json:"from,omitempty"`
+		// FromHere: the ids in from whose author is this machine, by the
+		// full key (D65); always a list, so a hook can tell a daemon
+		// before this field (none) from one with no such id.
+		FromHere []string    `json:"from_this_machine"`
+		Rooms    []RoomCount `json:"rooms,omitempty"`
+		First    []FirstLine `json:"first,omitempty"`
 	}
 	Peer struct {
 		Node      string   `json:"node"`
@@ -732,7 +757,7 @@ func waitOf(ms int64) (time.Duration, error) {
 // EntryOf renders a node entry (PROTOCOL section 7, Entry).
 func EntryOf(e node.Entry) Entry {
 	out := Entry{Key: e.Key, Version: e.Version, Edited: e.Edited, Kind: e.Kind, ID: e.ID, Room: e.Room, RoomLabel: e.RoomLabel,
-		From: e.From, FromNode: e.FromNode, FromThisMachine: e.Here, IDShared: e.IDShared, AuthorRemoved: e.AuthorRemoved, Parent: e.Parent, Thread: e.Thread,
+		From: e.From, FromNode: e.FromNode, ChangedBy: e.ChangedBy, FromThisMachine: e.Here, IDShared: e.IDShared, AuthorRemoved: e.AuthorRemoved, Parent: e.Parent, Thread: e.Thread,
 		ParentState: e.ParentState, Late: e.Late, Created: Time(e.Created), Text: e.Text, Choices: e.Choices,
 		AskHandled: e.AskHandled, Skipped: e.Skipped, FilesPending: e.FilesPending, FilesNote: e.FilesNote,
 		Request: e.Request, State: e.RequestState, Reason: e.RequestReason}
@@ -838,12 +863,13 @@ func AlertOf(a node.Alert) Alert {
 
 // TraceOf renders a trace.
 func TraceOf(t node.TraceView) TraceResp {
-	out := TraceResp{ID: t.ID, Room: t.Room, Saved: t.Saved, Reason: t.Reason, Copies: []Copy{}, Handled: []Handled{}}
+	out := TraceResp{ID: t.ID, Room: t.Room, Saved: t.Saved, Reason: t.Reason, Copies: []Copy{}, Handled: []Handled{},
+		From: t.From, FromNode: t.FromNode, FromThisMachine: t.Here, IDShared: t.IDShared}
 	for _, c := range t.Copies {
-		out.Copies = append(out.Copies, Copy{Node: c.Node, At: Time(c.At), Member: c.Member, Evidence: "position"})
+		out.Copies = append(out.Copies, Copy{Node: c.Node, At: Time(c.At), Member: c.Member, Evidence: "position", IDShared: c.IDShared})
 	}
 	for _, h := range t.Handled {
-		out.Handled = append(out.Handled, Handled{Agent: h.Agent, At: Time(h.At)})
+		out.Handled = append(out.Handled, Handled{Agent: h.Agent, Node: h.Node, FromThisMachine: h.Here, IDShared: h.IDShared, At: Time(h.At)})
 	}
 	for _, f := range t.Files {
 		tf := TraceFile{SHA256: f.SHA256, Name: f.Name, Size: f.Size, State: f.State, Holders: []Holder{}}
@@ -1119,12 +1145,12 @@ func Handler(s *node.Surface, info Info) http.Handler {
 			id = a.ID
 		}
 		u, err := s.Unread(ctx, id, r.Room, r.Lines)
-		out := Unread{Agent: u.Agent, Count: u.Count, From: u.From}
+		out := Unread{Agent: u.Agent, Count: u.Count, From: u.From, FromHere: append([]string{}, u.FromHere...)}
 		for _, c := range u.Rooms {
 			out.Rooms = append(out.Rooms, RoomCount{Room: c.Room, Label: c.Label, Count: c.Count})
 		}
 		for _, f := range u.First {
-			out.First = append(out.First, FirstLine{ID: f.ID, Room: f.Room, From: f.From, FromThisMachine: f.Here, IDShared: f.IDShared, Line: f.Line})
+			out.First = append(out.First, FirstLine{ID: f.ID, Room: f.Room, From: f.From, ChangedBy: f.ChangedBy, Edited: f.Edited, FromThisMachine: f.Here, IDShared: f.IDShared, Line: f.Line})
 		}
 		return out, err
 	})

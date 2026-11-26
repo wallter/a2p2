@@ -214,7 +214,7 @@ func TestAQuestionAlertEscapesTheAskersText(t *testing.T) {
 	alice := e.agent("alice")
 	e.send(SendInput{Agent: alice, Text: "Ship it?\x1b[2K\u202e ❤\ufe0f\nnow", To: []string{e.s.HumanID()}})
 	as, err := e.s.Alerts(ctx, 0)
-	if err != nil || len(as) != 1 || as[0].Text != alice+` asks: Ship it?\u{1b}[2K\u{202e} ❤`+"\ufe0f\nnow" {
+	if err != nil || len(as) != 1 || as[0].Text != alice+` [this machine] asks: Ship it?\u{1b}[2K\u{202e} ❤`+"\ufe0f\nnow" {
 		t.Fatalf("alerts: %+v %v", as, err)
 	}
 }

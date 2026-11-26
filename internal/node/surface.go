@@ -1307,10 +1307,17 @@ type TraceView struct {
 	Room string
 	// Saved: this machine holds the message's signed header. Whether it
 	// holds the text is Reason.
-	Saved   bool
-	Reason  string // its text here: live, expired, withdrawn, not_admitted or missing
-	Copies  []CopyView
-	Handled []HandledView
+	Saved  bool
+	Reason string // its text here: live, expired, withdrawn, not_admitted or missing
+	// From is the message's author as entries write it (the full key when
+	// its short id is shared), FromNode its key; Here and IDShared as in
+	// Entry, from the full key.
+	From     string
+	FromNode string
+	Here     bool
+	IDShared bool
+	Copies   []CopyView
+	Handled  []HandledView
 	// Files are the files of the winning version, with holders' answers.
 	Files []TraceFile
 }
@@ -1319,15 +1326,21 @@ type TraceView struct {
 // up to the message's position. That is position evidence only: it does
 // not tell apart another record the author signed at the same position.
 type CopyView struct {
-	Node   string
-	At     time.Time // when this machine observed it, not when the copy was made
-	Member bool      // a member of the room now, in this machine's view (not then)
+	Node     string
+	At       time.Time // when this machine observed it, not when the copy was made
+	Member   bool      // a member of the room now, in this machine's view (not then)
+	IDShared bool      // Node's short id is another known machine's too
 }
 
-// HandledView is a handling report held here.
+// HandledView is a handling report held here: Agent is its writer as
+// entries write it (the full key when the short id is shared), Node the
+// writer's machine key, Here and IDShared as in Entry.
 type HandledView struct {
-	Agent string
-	At    time.Time // when the report was written, as its author signed it
+	Agent    string
+	Node     string
+	Here     bool
+	IDShared bool
+	At       time.Time // when the report was written, as its author signed it
 }
 
 // Trace shows where message id got to: saved here, the reason its text is
@@ -1346,8 +1359,9 @@ func (s *Surface) Trace(ctx context.Context, id string) (TraceView, error) {
 		return TraceView{}, err
 	}
 	t := TraceView{ID: id, Room: room, Saved: true}
-	var author, epoch string
+	var author, epoch, label string
 	var seq int64
+	var handlers []string
 	err = s.m.view(ctx, room, func(v *roomView) error {
 		x, err := v.get(id)
 		if err != nil || x == nil {
@@ -1359,14 +1373,15 @@ func (s *Surface) Trace(ctx context.Context, id string) (TraceView, error) {
 		if x.f.Kind != core.KindMessage {
 			return userErr("%s is not a message", id)
 		}
-		t.Reason, author, epoch, seq = x.reason, x.author, x.f.Epoch, x.f.Seq
+		t.Reason, author, epoch, seq, label = x.reason, x.author, x.f.Epoch, x.f.Seq, x.f.Agent
 		hs, err := v.refs(id)
 		if err != nil {
 			return err
 		}
 		for _, h := range hs {
 			if h.f.Kind == core.KindHandled && h.h.Effect == store.EffectOK {
-				t.Handled = append(t.Handled, HandledView{Agent: s.agentID(h.f.Agent, h.author), At: h.f.Created})
+				t.Handled = append(t.Handled, HandledView{Agent: h.f.Agent, Node: h.author, At: h.f.Created})
+				handlers = append(handlers, h.author)
 			}
 		}
 		return nil
@@ -1378,8 +1393,23 @@ func (s *Surface) Trace(ctx context.Context, id string) (TraceView, error) {
 	if err != nil {
 		return TraceView{}, err
 	}
+	// The author, each handler and each copy's machine are written as
+	// entries write them, and marked from the full key (D65).
+	keys := append(handlers, author)
 	for _, c := range cs {
-		t.Copies = append(t.Copies, CopyView{Node: c.Peer, At: c.At, Member: slices.Contains(st.Members, c.Peer)})
+		keys = append(keys, c.Peer)
+	}
+	x, err := s.ids(ctx, keys)
+	if err != nil {
+		return TraceView{}, err
+	}
+	t.From, t.FromNode, t.Here, t.IDShared = x.agent(label, author), author, author == s.m.ID, x.shared[author]
+	for i := range t.Handled {
+		h := &t.Handled[i]
+		h.Agent, h.Here, h.IDShared = x.agent(h.Agent, h.Node), h.Node == s.m.ID, x.shared[h.Node]
+	}
+	for _, c := range cs {
+		t.Copies = append(t.Copies, CopyView{Node: c.Peer, At: c.At, Member: slices.Contains(st.Members, c.Peer), IDShared: x.shared[c.Peer]})
 	}
 	t.Files, err = s.traceFiles(ctx, room, id)
 	return t, err
@@ -1390,9 +1420,15 @@ func (s *Surface) Trace(ctx context.Context, id string) (TraceView, error) {
 type UnreadView struct {
 	Agent string
 	Count int
-	From  []string // agent ids of the authors, first seen first
-	Rooms []RoomCount
-	First []FirstLine
+	// From: agent ids of the writers of what the entries show (Writer:
+	// the editor when another agent of the author's machine changed the
+	// message), first seen first.
+	From []string
+	// FromHere are the ids in From whose author is this machine, by the
+	// full key (Entry.Here).
+	FromHere []string
+	Rooms    []RoomCount
+	First    []FirstLine
 }
 
 // RoomCount is the unread count of one room.
@@ -1402,14 +1438,18 @@ type RoomCount struct {
 	Count int
 }
 
-// FirstLine is an unread message's first line, clipped.
+// FirstLine is an unread message's first line, clipped. From is the
+// message's author, ChangedBy and Edited as in Entry: the line is
+// ChangedBy's text when it is set.
 type FirstLine struct {
-	ID       string
-	Room     string
-	From     string
-	Here     bool // the author is this machine (Entry.Here)
-	IDShared bool // the author's short id is another known machine's too
-	Line     string
+	ID        string
+	Room      string
+	From      string
+	ChangedBy string
+	Edited    bool
+	Here      bool // the author is this machine (Entry.Here)
+	IDShared  bool // the author's short id is another known machine's too
+	Line      string
 }
 
 // Unread summarises agent's unread entries in room, or in every room when
@@ -1453,12 +1493,19 @@ func (s *Surface) Unread(ctx context.Context, agent, room string, lines bool) (U
 		u.Count += len(es)
 		u.Rooms = append(u.Rooms, RoomCount{Room: r.ID, Label: shown[r.ID], Count: len(es)})
 		for _, e := range es {
-			if !seen[e.From] {
-				seen[e.From] = true
-				u.From = append(u.From, e.From)
+			// The sender named is the writer of what the entry shows: the
+			// editor of a message another agent of its machine changed,
+			// which is on the author's machine, so Here is the author's.
+			if w := e.Writer(); !seen[w] {
+				seen[w] = true
+				u.From = append(u.From, w)
+				if e.Here {
+					u.FromHere = append(u.FromHere, w)
+				}
 			}
 			if lines && len(u.First) < maxFirstLines {
-				u.First = append(u.First, FirstLine{ID: e.ID, Room: r.ID, From: e.From, Here: e.Here, IDShared: e.IDShared, Line: firstLine(e)})
+				u.First = append(u.First, FirstLine{ID: e.ID, Room: r.ID, From: e.From, ChangedBy: e.ChangedBy, Edited: e.Edited,
+					Here: e.Here, IDShared: e.IDShared, Line: firstLine(e)})
 			}
 		}
 	}
@@ -1715,7 +1762,17 @@ func (s *Surface) Alerts(ctx context.Context, wait time.Duration) ([]Alert, erro
 			return nil, err
 		}
 		for _, q := range qs {
-			as = append(as, Alert{Kind: AlertQuestion, ID: q.ID, Room: q.Room, Since: q.Created, Text: EscapeDisplay(q.From) + " asks: " + EscapeDisplayText(q.Text)})
+			who := EscapeDisplay(q.From)
+			if m := AuthorMark(q.From, q.Here); m != "" {
+				who += " [" + m + "]"
+			}
+			if q.Edited {
+				who += " [edited]"
+			}
+			if c := ChangedWords(q.ChangedBy, q.Here); c != "" {
+				who += " [" + c + "]"
+			}
+			as = append(as, Alert{Kind: AlertQuestion, ID: q.ID, Room: q.Room, Since: q.Created, Text: who + " asks: " + EscapeDisplayText(q.Text)})
 		}
 		if len(as) > 0 || wait == 0 {
 			return as, err

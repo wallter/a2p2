@@ -245,6 +245,9 @@ async function escapeScenario(out) {
     await sleep(50); await idle("opening the room"); await sleep(100);
     out.roomhead = $("roomhead").textContent;
     out.stream = $("msgs").textContent;
+    // Each message and notice drawn: its author, marks and body, each read from its own element.
+    out.drawn = $("msgs").children.map((d) => ({ cls: d.className, from: (d.querySelector("span.from") || { textContent: "" }).textContent,
+      marks: d.querySelectorAll("span.mark").map((x) => x.textContent), body: d.querySelectorAll("div.body").map((b) => b.textContent) }));
     const sel = $("to");
     out.toOptions = sel.options.map((o) => o.value);
     const author = out.toOptions.find((v) => v !== "");
@@ -269,6 +272,16 @@ async function escapeScenario(out) {
       await sleep(300);
       out.scenario.refusedPosts = posts.slice();
       out.scenario.refusedErr = $("err").textContent;
+    }
+    // TRACE_IDS: messages whose trace dialog is opened; the authors and the
+    // marks of each paragraph and cell are written.
+    out.traces = [];
+    for (const id of (process.env.TRACE_IDS || "").split(",").filter(Boolean)) {
+      inPage("openTrace(" + JSON.stringify(id) + ")");
+      await sleep(200);
+      const b = $("tracebody");
+      out.traces.push({ id, from: b.querySelectorAll("span.from").map((x) => x.textContent),
+        marks: b.querySelectorAll("p").concat(b.querySelectorAll("td")).map((x) => x.querySelectorAll("span.mark").map((k) => k.textContent)) });
     }
     if (probePath) await escapeScenario(out);
   } catch (e) {

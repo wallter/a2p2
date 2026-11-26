@@ -98,7 +98,16 @@ an invite.
   that another machine also uses, or that reads as another machine's
   id, is shown with `#` and the machine's id. A member can still grind a key
   with a matching short id (about 2^32 tries) and be admitted; it is then
-  shown in full, not refused. Any program running as you can still post
+  shown in full, not refused. The same marks, from the full key, are on
+  the CLI's messages, notices and `trace`, the page's messages, notices,
+  questions and trace, question alerts and the hook's unread notice;
+  a replaced message is shown under its own label everywhere, and
+  another agent of its machine that replaced it is named as the one that
+  changed it. Message text that copies a mark's
+  words is drawn apart from the marks (indented in the CLI, a question
+  alert's later body lines deeper than its asker line, in its own
+  element on the page, its own field in MCP; the hook shows no text).
+  Any program running as you can still post
   as your person through the socket or the CLI: `person` says where a
   message was written, not who typed it.
 - Room labels, machine names, file names and message text can come from
