@@ -970,7 +970,15 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    it may keep but lacks, it answers "not yet", starts one carry job (a
    want to the author), and holds the file within its budget while the
    text lives. A lapsed job is answered "gave up" for a day, and the
-   reader is told `unavailable`. A per-room setting has three values:
+   reader is told `unavailable`. The author is never carried for: it
+   wrote the file, and asking for it would only hold a member's budget.
+   Carry jobs and `keep` wants of one author's files that are still
+   live reserve at most a quarter of the room budget, each counted by the
+   bytes not yet received, so an author that uploads one byte of each
+   file or none cannot hold the rest; a part left by an upload goes when
+   its want lapses or an edit ends the want, since nothing can finish it
+   then. A want this
+   machine's own agent asked for is not capped. A per-room setting has three values:
    `off`, `carry` (default, since every member already carries the room's
    text for others) and `keep` (want every file); the CLI asks for a
    change at a terminal, as for any decision of the person.
@@ -987,13 +995,28 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    Names are not Unicode-normalised: a combining mark becomes `_`. It does not decompress, preview, render or run it.
    Tool results say a file is data from another machine.
 8. **A person confirms the exact bytes [F6, F11].** `send` with `files`
-   opens each path once, refuses anything but a regular file after
-   opening, and copies and hashes from that one handle into staging. The
-   request shows each path as resolved from the opened file, in full,
+   is refused while the room's requests are full before any path is
+   touched. Then each path is checked by name before anything touches
+   it: on Windows only a drive letter, a colon, a separator and plain
+   names pass (no UNC path, namespace, stream or device name); on Unix
+   nothing under `/dev`, `/proc`, `/sys`, `/net` or, on macOS, another
+   automount point. Every link on the way is read and its target checked
+   the same way before it is looked at. Each component is looked up in
+   the directory opened before it. The file is then opened once, only if
+   it is a regular file and still the entry checked, and refused if it is
+   one of a2p2's own: nothing under the home but agents' copies in
+   `files/`, and no file that is the same file as one in the home outside
+   `files/` (the machine key, the local key, the database, a blob), a hard
+   link included. Approval checks a pending request again, by its path
+   and by the bytes of the keys, so one an older binary staged from them
+   is not sent. Sizes, the path shown and the bytes staged come from that
+   handle. The same bytes listed twice are listed once. At most four sends
+   stage files at a time. The request shows each path as resolved from the opened file, in full,
    with control, bidirectional and invisible characters escaped
    (`EscapeDisplay`, PROTOCOL 10.8), its size and
    SHA-256, the room, the recipients, and for a replacement which message
-   it replaces. The CLI and the page show the whole text, every line
+   it replaces. A file with several names on disk is said to have them:
+   the path shown is only the name opened. The CLI and the page show the whole text, every line
    escaped, and send back the terms digest they showed; an approval
    without it or with other terms is refused (`terms_changed`) and
    decides nothing. There is one way to approve a send with files
@@ -1107,7 +1130,10 @@ running as the same user can call `confirm` itself, or read a file and
 paste it as text. A send with files tells the agent only the request and
 that it waits, and refuses every path that cannot be staged with one
 message, but an agent can still learn that a path can be staged at all,
-which its other tools could tell it anyway. Withdrawing after others
+which its other tools could tell it anyway. Below the request limit, a
+send that fits raises a request the person sees and one that does not
+fit is refused, so an agent can learn roughly how large a file is, and
+each guess that fits shows the person a request naming the file. Withdrawing after others
 fetched removes the copies a2p2 keeps; a copy an agent moved or changed is
 out of reach (a copy is known by its file number and modification time).
 A removed machine keeps what it fetched (T5). F2 binds honest machines: a
@@ -1123,9 +1149,17 @@ its rule immediately before each request; a removal that commits between
 that check and the request's write is ordered as if it arrived a moment
 later. Every version of one
 message that carries the same commitment shares its list, since the hash
-makes the content identical. On Unix the last symbolic link of a path to
-attach is followed; the person is shown the path of the file actually
-opened. A process that can write inside the home can race a2p2's own
+makes the content identical. A path to attach is walked one component
+at a time, each looked up in the directory opened before it (`os.Root`)
+and opened only if it is still the entry checked, so a directory or a
+link swapped in on the way after its check is refused and never
+followed. Links are read and checked before they are followed; the person
+is shown the path of the file actually opened. A network file system the
+person mounted, or a drive letter mapped to a share, is used as any
+local path: on Windows the handle of such a file reports
+`\\server\share\...`, which is taken only for a path that began with a
+drive letter the system reports as a network drive.
+A cloud placeholder file can download its bytes when read. A process that can write inside the home can race a2p2's own
 file operations: the home is the person's. On Windows a power loss can
 undo a rename that was not flushed; a start reconciles, and a blob that
 is gone is fetched again. An upload goes only to a machine that asked

@@ -1403,7 +1403,16 @@ answers 202 "not yet" and starts one carry job: a want to the author
 request for the same file joins the same job. A job lapses as a want
 does; for the next 24 hours requests for that file are answered `202`
 with body `{"state":"gave_up"}`, and the reader shows `unavailable` with
-reason `not_carried`. With setting `off` it answers 404. A carried file is
+reason `not_carried`. With setting `off` it answers 404. A request from
+the message's author is answered 404 and starts nothing. A new carry job,
+or a `keep` want, is not started while the live wants of the same
+author's files in the room, each counted by the bytes not yet received,
+would reserve more than a quarter of the room budget with it; the
+request is then answered 404, as over the budget. When a want lapses,
+or goes because an edit made another version the one to keep, the part
+an upload left for it is dropped. Wants stored before this rule keep
+their reservation and lapse as before; a part left under a want already
+lapsed is dropped if it was reserved no later than the lapse. A carried file is
 held and served like a fetched one; F1 deletes it with the text. Setting
 `keep` wants every file of every message it may keep, within the budget.
 
@@ -1426,7 +1435,7 @@ readable text.
 
 | Call | Request | Response |
 |---|---|---|
-| `send` (changed) | adds `"files":["<path>",…]` (1–8): an absolute path, or `"sha256:<hex>"` naming verified bytes this machine holds for the version being replaced, kept by listing it again. With `replaces`, absent means the replacement has no files. Approval of a replacement checks again that the replaced version is still the winning one, readable here, and lists each kept file; otherwise the request fails and its staging is removed | `{"request","state":"waiting"}` only: nothing is written, and the agent learns no size or hash of what was staged. Refused before anything is read: `too_large` (over 8 files), `invalid_request` (a path not absolute, empty text, choices). A path that cannot be staged, for any reason (missing, unreadable, not a regular file once opened, over 256 MiB or a budget, the same bytes twice), is refused with `invalid_request` and the one message "cannot attach that path: not a readable regular file within the limits"; the reason goes to the daemon's debug log without the path |
+| `send` (changed) | adds `"files":["<path>",…]` (1–8): an absolute path, or `"sha256:<hex>"` naming verified bytes this machine holds for the version being replaced, kept by listing it again. With `replaces`, absent means the replacement has no files. Approval of a replacement checks again that the replaced version is still the winning one, readable here, and lists each kept file; otherwise the request fails and its staging is removed | `{"request","state":"waiting"}` only: nothing is written, and the agent learns no size or hash of what was staged. Refused before anything is read: `too_large` (over 8 files), `invalid_request` (a path not absolute, empty text, choices). With 32 of this machine's requests waiting in the room: `rate_limited`, before any path is touched. A path that cannot be staged, for any reason (missing, unreadable, not a regular file once opened, a remote or device path, one of a2p2's own files, over 256 MiB or a budget, the requests filled while staging), is refused with `invalid_request` and the one message "cannot attach that path: not a readable regular file within the limits"; the reason goes to the daemon's debug log without the path. The same bytes listed twice are listed once |
 | `fetch` (new) | `{"agent","room"?,"sha256","message"?,"wait_ms"?}` (≤ 120,000; the tool sends at most 30,000). `message` picks the message when several list the same bytes. The agent must have been shown the version that lists the file: by its inbox, or by a thread, history or skipped view, which mark a message with files as shown for this purpose (only an inbox read lets it report the message handled); a read the agent confirmed counts too. On the author's machine the agent that wrote the winning version may fetch without being shown it; every other id, the person's included, needs one of those marks, and is answered `not_shown` without one | `{"state","room","message","name","path"?,"size","have"?,"from"?,"reason"?,"holders"?:[{"node","at","answer"}]}`; `state` is `here` (with `path`), `partial`, `coming`, `fetching`, `unavailable`, `gone` (`reason`: `withdrawn`, `replaced`, `expired`, `before_you_joined`) or `too_large` |
 | `requests` (changed) | | kind `send_files`: `agent`, `room`, the effective recipients `to` (agent ids, or `["everyone"]` with `members`, the member count; for a replacement, those of the message it replaces), `reply_to` and, for a reply to its author, `reply_author`, `replaces` (`{"id","version","line"}`: the message, the version replaced and its first line), `text_line` (the first line) and `body` (the whole text, each line escaped), `files:[{"path","name","size","sha256","type"?,"kept"?}]` with `path` escaped (10.8) and `"sha256:<hex>"` for a kept file, `terms` |
 | `confirm` (changed) | adds `"terms"`: an approval of a `send_files` request must carry the `terms` the person was shown, and is refused `terms_changed` with nothing decided and nothing sent if they are missing or not the request's current terms; there is no other way to approve one. A decline needs none. The approval covers `terms`: SHA-256 over `a2p2 send files 3`, room, agent, the effective recipients (each, or `everyone`, the member count and the SHA-256 over `a2p2 members 1` and the members' sorted keys, one per line; for a replacement, those of the message it replaces), the thread parent, `replaces` and the version of it replaced, the whole text's hash and each file's path, size and SHA-256. Approval copies each staged file into a new private file while hashing and publishes only if its size and digest are the approved ones | `approved` with `effect` the message id; expires as `declined` after 24 hours |
@@ -1555,10 +1564,25 @@ to the MCP default; the shim strips them from `tools/list` (D51).
 | `blobs/.staging/<request id>/<n>` | a send waiting for a person |
 | `files/<room id>/<name>` | the copy written for an agent, for one message, 0600 |
 
-Staging refuses, before any I/O, a Windows UNC path, a `\\?\` or `\\.\`
-namespace and a reserved device name; it opens the path once (following
-links, non-blocking on Unix), checks with `fstat` on the
-handle that it is a regular file, and copies and hashes from that handle.
+Staging is refused while the room has 32 requests of this machine
+waiting, before any path is touched. Staging refuses, before any I/O, a
+Windows path that is not a drive letter, a colon and a separator followed
+by names: so a UNC path, a `\\?\`, `\\.\` or `\??\` namespace, a colon
+after the drive (a stream, `NUL:`), a wildcard and a reserved device name
+in any component (CON, PRN, AUX, NUL, COM0 to COM9, LPT0 to LPT9, the
+superscript COM and LPT names, CONIN$, CONOUT$, CLOCK$). On Unix it
+refuses by name a path under `/dev`, `/proc`, `/sys`, `/net` and, on
+macOS, `/Network`, `/home` and their `/System/Volumes/Data` forms. It
+walks the path one component at a time, each looked up in the directory
+opened before it; it reads each link on the way and checks its target
+the same way before looking at it; it opens the last component once,
+only if it is a regular file and still the entry checked (non-blocking on
+Unix); it refuses a walk through the home other than into `files/` and a
+file that is the same file as one in the home outside `files/`; and it
+copies and hashes from that handle. On Windows a handle path
+`\\server\share\...` is taken only for a path that began with a drive
+letter mapped to a network share. The same bytes listed twice are listed
+once.
 The path shown is the one the system reports for the open handle, with C0,
 C1, U+200E, U+200F, U+061C, U+202A to U+202E and U+2066 to U+2069 written
 as `\u{…}`. A copy's name is the manifest's `name` sanitised as before
@@ -1638,6 +1662,9 @@ directory not yet synced; retried at a start, as on Windows).
 | Telling refusals apart | one 404, one body, decided from rows (10.3) |
 | Path tricks in `name` | never a path (10.8) |
 | Swapping the file during confirmation | staged from one open handle; approval checks the staged digest, never the source |
+| An agent told to attach a2p2's own key or database | refused at staging, by a walk through the home and by file identity, a hard link to a nested file included; a request staged by an older binary is refused at approval |
+| A path that makes the machine connect out before approval | refused by name before any I/O, links on the way included (10.8) |
+| An author that never uploads, or uploads one byte of each file, holds a carrier's budget | its own requests start no carry job; one author's live wants, counted by the bytes not yet received, reserve at most a quarter of the room budget; a part goes when its want lapses or an edit ends it (10.5) |
 | A path that hides its end | shown in full, controls and bidi characters escaped |
 | A member lists a hash it may not read in its own message | served only for the message the bytes are held for (F2) |
 | A withdraw after others fetched | every member that learns deletes bytes, parts and copies; active transfers stop (F1, F2) |
@@ -1708,6 +1735,9 @@ with the test that holds it.
 | Every refusal on the file route is the same status and body whatever its reason | `TestEveryNotHeldAnswerIsTheSameBytes` |
 | A response or upload in progress stops when the sender commits a withdraw, replacement, removal, narrower grant or void that ends it | `TestARevocationStopsATransferInProgress` |
 | Staging opens the path once, refuses a non-regular file after opening (a FIFO, a device, a directory), and copies from that handle | `TestStagingCopiesFromTheHandleItOpenedAndRefusesAFifo` |
+| Staging reads and checks each link before following it, and opens only the entry it checked | `TestStagingNeverFollowsALinkAtTheLastComponentWhenItOpens`, `TestADirectorySwappedOnTheWayAfterItsCheckIsRefused`, `TestAPathUnderAnAutomountOrDevicePointIsRefusedBeforeAnyIO`, `TestAFileOnADriveLetterMappedToAShareIsStagedAsALocalFile` (the rule; Windows unverified) |
+| The Windows name rule refuses every form but a drive and plain names | `TestAWindowsPathOfAnyFormButADriveAndPlainNamesIsRefusedByNameBeforeAnyIO` (the rule, run on every system; the open is unverified on Windows) |
+| a2p2's own files are never staged, nor sent from a request staged before this rule | `TestASendCannotAttachTheMachineKeyOrDatabaseEvenThroughAHardLink`, `TestAnAgentCannotAttachTheMachineKeyOrTheDatabase`, `TestARequestStagedFromTheMachineKeyBeforeTheFixIsNotPublished` |
 | The approval display shows the resolved path in full with controls and bidirectional characters escaped, and the replaced message | `TestTheRequestEscapesBidiCharactersInThePathAndNamesTheReplacedMessage`, added with the surfaces (10.6) |
 | One transfer per peer per direction, 8 in all | `TestFileTransfersAreLimitedPerPeerAndInAll` |
 | 120 seconds per response and 64 KiB/s over 30 seconds | `TestASlowTransferIsCut` |

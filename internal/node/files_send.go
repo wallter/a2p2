@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -160,9 +159,40 @@ func (f *Files) RequestSend(ctx context.Context, s FileSend) (FileSendResult, er
 	if err := f.m.checkWrite(ctx, s.Room, d.Agent, f.publishDecide(s.Room, d, placeholderSHA(0))); err != nil {
 		return res, unwritable(err)
 	}
+	// A full request queue is said before any path is touched: past it an
+	// agent learns nothing about a path from the answer (F35).
+	paths := false
+	for _, p := range s.Files {
+		paths = paths || !strings.HasPrefix(p, KeptPrefix)
+	}
+	switch full, err := f.m.st.PendingFull(ctx, s.Room, MaxPendingRequests); {
+	case err != nil:
+		return res, err
+	case full:
+		return res, &UserError{Code: ErrorRateLimited, Msg: store.ErrTooManyPending.Error()}
+	}
+	// At most StagingAtOnce sends open and copy files at a time, so many
+	// sends at once hold a bounded number of open files and staged bytes
+	// not yet reserved by a request (F35).
+	select {
+	case f.staging <- struct{}{}:
+		defer func() { <-f.staging }()
+	case <-ctx.Done():
+		return res, ctx.Err()
+	}
 	id := f.r.newID()
 	seen := map[string]bool{}
 	staged := []store.StagedFile{}
+	// Each path is opened once, by store.OpenSource's rules (a remote or
+	// device path is refused before anything touches it [fix-files-b 7],
+	// a2p2's own files are refused [F33]); sizes, the path shown and the
+	// bytes staged all come from that handle.
+	srcs := map[int]*store.Source{}
+	defer func() {
+		for _, src := range srcs {
+			src.Close()
+		}
+	}()
 	fail := func(err error) (FileSendResult, error) {
 		f.m.st.DropStaging(id)
 		f.m.st.ReleaseStaging(id)
@@ -176,24 +206,25 @@ func (f *Files) RequestSend(ctx context.Context, s FileSend) (FileSendResult, er
 		if strings.HasPrefix(p, KeptPrefix) || !filepath.IsAbs(p) {
 			continue
 		}
-		if store.RemoteOrDevice(p) { // before anything touches the path [fix-files-b 7]
-			return res, badFileFrom("a remote or device path is not sent", store.ErrRemoteOrDevice)
-		}
-		st, err := os.Stat(p)
+		src, err := f.m.st.OpenSource(p)
 		if err != nil {
-			return res, badFileFrom("not a regular file once opened, or unreadable", store.FileErrorOf("stat", err))
+			return res, badFileFrom("not a regular file once opened, or unreadable", store.FileErrorOf("open", err))
 		}
-		if st.Size() > core.MaxFileSize {
+		srcs[i] = src
+		if src.Size > core.MaxFileSize {
 			return res, &UserError{Code: ErrorTooLarge, Msg: "a file is at most 256 MiB"}
 		}
-		sizes[i] = st.Size()
-		total += st.Size()
+		sizes[i] = src.Size
+		total += src.Size
 	}
 	// The manifest's rules too, with the names the paths give and stand-in
 	// digests, before anything is copied; checked again once staged [L3].
 	pre := store.SendDraft{}
 	for i, p := range s.Files {
 		name := filepath.Base(p)
+		if src := srcs[i]; src != nil {
+			name = filepath.Base(src.Path)
+		}
 		if !core.ValidFileName(name) {
 			name = store.SafeName(name)
 		}
@@ -236,26 +267,37 @@ func (f *Files) RequestSend(ctx context.Context, s FileSend) (FileSendResult, er
 			if !filepath.IsAbs(p) {
 				return fail(badFile("a file is an absolute path"))
 			}
-			sf, err := f.m.st.StageFile(id, i, p, sizes[i])
+			sf, err := f.m.st.StageSource(id, i, srcs[i], sizes[i])
 			switch {
 			case errors.Is(err, store.ErrTooLarge):
 				return fail(&UserError{Code: ErrorTooLarge, Msg: "a file grew while it was staged; ask again"})
 			case err != nil:
-				return fail(badFileFrom("not a regular file once opened, or unreadable", store.FileErrorOf("open", err)))
+				return fail(badFileFrom("not a regular file once opened, or unreadable", store.FileErrorOf("read", err)))
 			}
 			name := filepath.Base(sf.Path)
 			if !core.ValidFileName(name) {
 				name = store.SafeName(name)
 			}
-			df = store.DraftFile{StagedFile: store.StagedFile{N: i, SHA256: sf.SHA256, Size: sf.Size}, Path: sf.Path, Name: name}
+			df = store.DraftFile{StagedFile: store.StagedFile{N: i, SHA256: sf.SHA256, Size: sf.Size}, Path: sf.Path, Name: name,
+				Links: sf.Links}
 		}
 		if seen[df.SHA256] {
-			return fail(badFile("the same bytes are listed twice"))
+			// The same bytes again are listed once: a manifest lists each
+			// hash once, and a refusal here would tell an agent that two
+			// files it may not read are equal (F35).
+			if !df.Kept {
+				if err := f.m.st.DropStaged(id, i); err != nil {
+					// the staging directory goes with the refusal
+					return fail(badFileFrom("a staged file could not be removed", err))
+				}
+			}
+			continue
 		}
 		seen[df.SHA256] = true
 		d.Files = append(d.Files, df)
 		staged = append(staged, df.StagedFile)
 	}
+	_ = hookAt("files:staged") // tests: the room's requests fill while the files are staged
 	if _, err := core.EncodeManifest(draftManifest(d, strings.Repeat("00", 16))); err != nil {
 		return fail(badFile("the files break a manifest rule: " + err.Error()))
 	}
@@ -268,6 +310,10 @@ func (f *Files) RequestSend(ctx context.Context, s FileSend) (FileSendResult, er
 	switch err := f.m.st.CreateSendRequest(ctx, q, staged, MaxPendingRequests); {
 	case errors.Is(err, store.ErrNoSpace):
 		return fail(&UserError{Code: ErrorTooLarge, Msg: "the files do not fit the room's or the machine's file budget"})
+	case errors.Is(err, store.ErrTooManyPending) && paths:
+		// Filled after the check above, once bytes were read: said as any
+		// other refusal after reading, so that it tells nothing (F35).
+		return fail(badFileFrom("the room's requests filled while the files were staged", errFilledMeanwhile))
 	case errors.Is(err, store.ErrTooManyPending):
 		return fail(&UserError{Code: ErrorRateLimited, Msg: err.Error()})
 	case err != nil:
@@ -409,6 +455,11 @@ func (f *Files) confirmSend(ctx context.Context, q store.Request, approve bool) 
 	for _, x := range d.Files {
 		if !x.Kept && f.m.st.CheckStaged(q.ID, x.N, x.SHA256, x.Size) != nil {
 			return decide(store.RequestFailed, store.ReasonSendChanged)
+		}
+		// a request staged before staging refused a2p2's own files (an
+		// older binary, up to a day before) is checked again here (F33)
+		if !x.Kept && f.m.st.StagedHomeFile(x.Path, x.SHA256) {
+			return decide(store.RequestFailed, store.ReasonSendHomeFile)
 		}
 	}
 	if d.Replaces != "" {
@@ -557,6 +608,10 @@ type recordRefusal struct{ *UserError }
 func (r recordRefusal) Unwrap() error { return r.UserError }
 
 var errReplacedMeanwhile = errors.New("files: the replaced version changed before approval")
+
+// errFilledMeanwhile: the room's request queue filled while the files of
+// a send were staged.
+var errFilledMeanwhile = &store.FileError{Op: "request", Code: "queue_full"}
 
 // errTermsChangedMeanwhile: the room's membership is not the one the
 // approved terms counted for "everyone".

@@ -113,9 +113,11 @@ func (s *Surface) SendFiles(ctx context.Context, in SendInput, files []string) (
 }
 
 // CannotAttach is the one refusal of a send whose paths cannot be staged,
-// whatever the reason (missing, unreadable, not a regular file, too large,
-// over a budget, the same bytes twice): an agent that asked learns
-// nothing more about a path than that (DESIGN 12, limits).
+// whatever the reason (missing, unreadable, not a regular file, a remote
+// or device path, one of a2p2's own files, too large, over a budget, the
+// request queue filled while staging): an agent that asked learns nothing
+// more about a path than that (DESIGN 12, limits). A full queue is said
+// before any path is touched; the same bytes twice are listed once (F35).
 const CannotAttach = "cannot attach that path: not a readable regular file within the limits"
 
 // cannotAttachErr turns a refusal of staging into CannotAttach when the
@@ -353,6 +355,7 @@ type SendFileView struct {
 	SHA256 string
 	Type   string
 	Kept   bool
+	Links  int // names the file had on disk when staged, when more than one
 }
 
 // describeSend fills v for a send with files.
@@ -398,7 +401,8 @@ func (s *Surface) describeSend(ctx context.Context, q store.Request, v *RequestV
 	})
 	var total int64
 	for _, x := range d.Files {
-		f := SendFileView{Path: EscapeDisplay(x.Path), Name: EscapeDisplay(x.Name), Size: x.Size, SHA256: x.SHA256, Type: x.Type, Kept: x.Kept}
+		f := SendFileView{Path: EscapeDisplay(x.Path), Name: EscapeDisplay(x.Name), Size: x.Size, SHA256: x.SHA256, Type: x.Type, Kept: x.Kept,
+			Links: x.Links}
 		if x.Kept {
 			f.Path = KeptPrefix + x.SHA256
 		}
@@ -439,10 +443,23 @@ func sendText(sv *SendView, label, room string, total int64) string {
 			msg += " (version " + sv.Base + ")"
 		}
 		return fmt.Sprintf("replace message %s, which goes to %s, by agent %s, with new text and %s (%d bytes); "+
-			"the replacement has only the files listed", msg, to, agent(sv.Agent), files, total)
+			"the replacement has only the files listed", msg, to, agent(sv.Agent), files, total) + linksNote(sv.Files)
 	}
 	return fmt.Sprintf("send a message by agent %s to %s with %s (%d bytes): the files are the bytes copied when the agent asked",
-		agent(sv.Agent), to, files, total)
+		agent(sv.Agent), to, files, total) + linksNote(sv.Files)
+}
+
+// linksNote says which files had several names on disk: the path shown is
+// the one opened, and a hard link has no other name to show, so the
+// person is told the file may be another one they know (F36).
+func linksNote(fs []SendFileView) string {
+	var b strings.Builder
+	for i, f := range fs {
+		if f.Links > 1 && !f.Kept {
+			fmt.Fprintf(&b, "; file %d has %d names on disk, so it may be a file you know by another path", i+1, f.Links)
+		}
+	}
+	return b.String()
 }
 
 func firstLineOf(text string) string {

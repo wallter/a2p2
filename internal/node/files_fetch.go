@@ -550,7 +550,7 @@ func (f *Files) keep(ctx context.Context, room string, recs []store.FileRecord) 
 				continue
 			}
 			_, _ = f.issueWant(ctx, store.FileWant{Room: room, Msg: fr.Msg, Version: fr.Record, SHA256: it.SHA256,
-				Author: c.mf.Author, Size: it.Size, At: f.m.now()})
+				Author: c.mf.Author, Size: it.Size, At: f.m.now(), Capped: true})
 		}
 	}
 }
