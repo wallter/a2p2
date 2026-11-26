@@ -84,6 +84,13 @@ bench:
 bench-local:      ## local send, send-to-visible, MCP shim, two daemons, scale, micro parts and a profile [BENCH_ARGS=--quick]
 	GO=$(GO) scripts/bench.sh $(BENCH_ARGS)
 
+# The network benchmark (scripts/bench-net): daemons in Docker containers on
+# a private network, links shaped with tc netem; about 35 minutes, or five
+# with BENCH_ARGS=--quick. Results in .bench-net/ (git-ignored). Not part of check.
+.PHONY: bench-net
+bench-net:        ## throughput and latency between machines in Docker: delay, loss, rate, size, members, files [BENCH_ARGS=--quick]
+	scripts/bench-net.sh $(BENCH_ARGS)
+
 # The deep random differential tests at other seeds, one after another
 # (about two minutes a seed). A failure logs its operations; reduce them
 # with A2P2_MODEL_REDUCE=file A2P2_MODEL_MATCH=text go test -run
