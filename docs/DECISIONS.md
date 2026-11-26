@@ -2488,3 +2488,71 @@ to pass another owner's text off as the local person's.
 **Revisit if** a later release adds a receipt rule for room labels or
 names, the short id is lengthened, or a harness shows that models still
 take another machine's `human` for their person.
+
+## D-NEW-F-cli-person. The CLI takes the person's identity only where a person is likely (2026-11-25)
+
+A security review found that the CLI acted as `human@<own id>` whenever
+`--as` was left out, and that `--as ""` counted as left out (F11). That
+id is the one other members and agents, other owners' included, are told
+is this machine's person. So any agent with a shell, or a Pi skill whose
+`$ME` was empty in a fresh shell, read as the person, which took the
+person's questions off their list, and could answer one as the person
+when a room message told it to. Rooms now span owners, so this is fixed
+now with the rest of the review. `room leave` (F38), the UI token in
+`status --json` (F41) and the advertised addresses (F51) are in the same
+pass.
+
+- **What changed.** An explicitly empty `--as` is a usage error, as is
+  `--as` with `--person`. Without either, in a shell whose environment
+  shows a harness's agent (`CLAUDECODE` and `AI_AGENT` seen in a Claude
+  Code 2.1.332 shell; `CODEX_THREAD_ID`, `CODEX_SANDBOX` and
+  `GEMINI_CLI` read from those binaries, and only simulated in the
+  tests), the CLI registers as that harness with the working directory,
+  so it gets `<harness>-<directory>`, the id the MCP shim gives the
+  agent when it runs in the same directory under the default label (not
+  when `A2P2_NAME` or `--name` sets another), and says so on stderr. Otherwise `send`, `ack`, `inbox` when it
+  marks entries seen and `inbox --level` act as the person only with
+  stdin a terminal. `a2p2 ui`, whose address carries the page's token
+  and so the person's identity on the page, is refused in an agent's
+  shell and away from a terminal. `--person` overrides each refusal.
+  Used away from a terminal or in an agent's shell, the CLI then sends
+  `unattended` with `register` (one optional field of the local API,
+  the command's name), which the daemon logs as a warning; at a
+  terminal outside an agent's shell nothing is logged.
+  Reads that mark nothing (`--peek`, `--thread`, `history`, `fetch`)
+  are unchanged. `room leave` asks at a terminal for a typed `yes`,
+  shows the room's id, isolates a right-to-left label as approvals do,
+  says when this machine is the room's only member or only admin, and
+  sends the daemon the id shown, never the label typed. A room set aside
+  is found by its id or label in `status`; a room it cannot look up is
+  not left. `status --json` prints the daemon's compact answer without
+  its `ui` member, the other members in order with their bytes. `net
+  on` says that every member and invite holder gets the advertised
+  addresses, and lists `config.json`'s `advertise` when it is set. The
+  demo's file step now sends and fetches as its agents.
+- **Costs.** A script that sent, acked or read as the person without a
+  terminal stops working until it adds `--person` or `--as`. A person
+  who runs `a2p2` inside an agent's shell (`!` in Claude Code) acts as
+  that agent unless they add `--person`. The stderr note adds a line to
+  every agent call. An older daemon still running after an upgrade
+  ignores `unattended`, so it logs nothing.
+- **Still open.** None of this is a boundary: a program running as the
+  user can pass `--person`, unset the variables, drive a terminal or
+  call the socket. The variable list covers the harnesses named; OpenCode,
+  Antigravity CLI, Hermes and Pi set nothing a2p2 knows, so their agents
+  are caught only by the terminal check (Pi's skill passes `--as`). The
+  Codex and Gemini variables were read from the binaries, not seen in a
+  run. The log line is a record for a person who looks, not an alert.
+  `net on` does not yet list the detected IPv4 addresses it will
+  advertise: that needs `daemon.FamiliesText` to name them
+  (daemon/netaddrs.go, another group's file). The UI token is still
+  returned by the socket's `status` to any caller; the one-time code of
+  F14 replaces it. `room leave` sends the id it showed, but if the room
+  is left and joined again under the same id while the prompt waits, the
+  new copy is the one deleted: refusing that needs the generation shown
+  to be checked under the leave lock in `internal/node`, outside this
+  change.
+
+**Revisit if** a harness documents a variable for its agents' shells, an
+OS-separated approver arrives, or F14 changes how `a2p2 ui` gets its
+address.

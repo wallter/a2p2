@@ -553,6 +553,22 @@ and `a2p2 join`, each with a typed `yes` that the daemon records; the page
 offers neither. No decision goes through agent tools. A same-user agent
 set on bypassing it can; an OS-separated approver may come later.
 
+**The CLI and the person's identity.** Without `--as` the CLI acts as
+`human@<own id>`, the id other members and agents take for the person.
+An explicitly empty `--as` is refused. In a shell whose environment shows
+a harness's agent (`CLAUDECODE`, `CODEX_THREAD_ID`, `CODEX_SANDBOX`,
+`GEMINI_CLI`, `AI_AGENT`) it acts as that agent, `<harness>-<directory>`
+as its MCP tools would in the same directory under the default label,
+and says so on stderr. Elsewhere `send`, `ack` and an `inbox` that marks
+entries seen act as the person only with stdin a terminal; `inbox
+--peek`, `--thread`, `history` and `fetch` need no terminal. `a2p2 ui`,
+whose address carries the page's token, is refused in an agent's shell
+and away from a terminal. `--person` overrides each refusal; used away
+from a terminal or in an agent's shell, the daemon logs it as a warning. These
+are guard rails against mistakes and injected instructions: a program
+running as the user can pass `--person`, drive a terminal or call the
+socket.
+
 A request's text is built from local facts and escapes every string that
 can come from another machine (`EscapeDisplay`, PROTOCOL 10.8): the room
 label a remote creator chose and the names in entries, each also isolated
@@ -638,7 +654,9 @@ room's data is deleted and its generation changes, so no late response
 applies. Its files are deleted after the rooms lock is released, so
 leaving a room with many files does not stall the other rooms' pulls and
 approvals (other file work still waits for the deletions). Rejoining
-needs a new invite; an admin removes it from the list.
+needs a new invite; an admin removes it from the list. Since nothing
+undoes it, the CLI asks at a terminal for a typed `yes`, and says first
+when this machine is the room's only member or its only admin.
 
 ## 8. Failure handling
 

@@ -380,6 +380,34 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   a part an upload left goes when its want lapses or the author edits
   the message, and a part a 0.2.3 binary left under a lapsed want goes
   at the next sweep.
+- **An agent with a shell no longer acts as the person by accident.**
+  Since 0.1.0 the CLI acted as `human@<machine id>` whenever `--as` was
+  left out or empty, with no check for a person. Any agent that ran
+  `a2p2` in its shell, or one told to by a room message, could answer
+  the person's questions as the person and mark them seen, so they left
+  the person's list. Now an empty `--as` is an error. In a shell that
+  Claude Code, Codex or Gemini CLI marks as its agent's, or with
+  `AI_AGENT` set, the CLI acts as that agent. Elsewhere `send`, `ack`
+  and an `inbox` that marks messages seen act as the person only at a
+  terminal or with the new `--person` flag. `a2p2 ui`, whose address
+  lets the page act as the person, is refused in an agent's shell and
+  away from a terminal unless `--person` is given. The daemon log
+  records `--person` used away from a terminal or in an agent's shell.
+  Scripts that read or sent as the person, or ran `ui`, without a
+  terminal must add `--person` or name themselves with `--as`. This is a
+  guard rail: any program running as you can still act as you.
+- **`room leave` asks first.** Since 0.1.0 it deleted the room's data at
+  once with no terminal check. It now asks at a terminal for a typed
+  `yes`, shows the room's id and leaves that id, and says when this
+  machine is the room's only admin or member. A room it cannot look up
+  is not left.
+- **`status --json` leaves out the page's address.** Since 0.1.0 it
+  printed the address with the page's access token, and agents run it.
+  `ui --print` gives the address to a person who asks.
+- `net on` now says that every member and invite holder gets the
+  addresses it advertises, which can include VPN and office addresses,
+  and lists the `advertise` addresses of `config.json` when they are
+  set.
 
 
 ## [0.2.3] - 2026-11-25

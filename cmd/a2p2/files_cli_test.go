@@ -35,6 +35,12 @@ func newDaemonForCLI(t *testing.T) *daemonForCLI {
 // handler.
 func newDaemonForCLIWith(t *testing.T, wrap func(http.Handler) http.Handler) *daemonForCLI {
 	t.Helper()
+	return newDaemonForCLIInfo(t, wrap, localapi.Info{Version: "t"})
+}
+
+// newDaemonForCLIInfo is newDaemonForCLIWith whose local API reports info.
+func newDaemonForCLIInfo(t *testing.T, wrap func(http.Handler) http.Handler, info localapi.Info) *daemonForCLI {
+	t.Helper()
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "a2p2.db"))
 	if err != nil {
@@ -66,7 +72,7 @@ func newDaemonForCLIWith(t *testing.T, wrap func(http.Handler) http.Handler) *da
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := localapi.Handler(s, localapi.Info{Version: "t"})
+	h := localapi.Handler(s, info)
 	if wrap != nil {
 		h = wrap(h)
 	}
@@ -106,9 +112,19 @@ func (d *daemonForCLI) run(t *testing.T, atTerminal bool, answers string, name s
 	case "confirm":
 		err = confirm(c, args)
 	case "status":
-		err = status(c)
+		if err = c.fs.Parse(args); err == nil {
+			err = status(c)
+		}
 	case "inbox":
 		err = inbox(c, args)
+	case "ack":
+		err = ack(c, args)
+	case "history":
+		err = history(c, args)
+	case "net":
+		err = netCmd(c, args)
+	case "ui":
+		err = uiCmd(c, args)
 	default:
 		t.Fatalf("no command %s here", name)
 	}
@@ -170,7 +186,7 @@ func TestSendWithAFilePrintsTheRequestAloneAndSendsAnAbsolutePath(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
-	out, _, err := d.run(t, false, "", "send", "--room", "team", "--file", "build.log", "the log")
+	out, _, err := d.run(t, true, "", "send", "--room", "team", "--file", "build.log", "the log")
 	if err != nil || !strings.Contains(out, " waiting: a person must confirm") || strings.Contains(out, "build.log") || strings.Contains(out, "bytes") {
 		t.Fatalf("send: %q %v", out, err)
 	}
@@ -178,7 +194,7 @@ func TestSendWithAFilePrintsTheRequestAloneAndSendsAnAbsolutePath(t *testing.T) 
 	if err != nil || len(qs) != 1 || qs[0].Send == nil || len(qs[0].Send.Files) != 1 || qs[0].Send.Files[0].Path != filepath.Join(dir, "build.log") {
 		t.Fatalf("request: %+v %v", qs, err)
 	}
-	if _, _, err := d.run(t, false, "", "send", "--room", "team", "--file", "missing.log", "x"); err == nil || !strings.Contains(err.Error(), node.CannotAttach) {
+	if _, _, err := d.run(t, true, "", "send", "--room", "team", "--file", "missing.log", "x"); err == nil || !strings.Contains(err.Error(), node.CannotAttach) {
 		t.Fatalf("missing file: %v", err)
 	}
 }

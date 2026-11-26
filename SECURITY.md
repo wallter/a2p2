@@ -103,6 +103,31 @@ reports.
 - The daemon's Unix socket is in a private directory. Any program running
   as your OS user can use the socket and read your machine's state.
   Messages are stored unencrypted in `a2p2.db` in the state directory.
+- Without `--as`, the CLI acts as your person, `human@<machine id>`, the
+  id other members and agents take for you. So it refuses an empty
+  `--as`. In a shell that a harness marks as its agent's (Claude Code,
+  Codex, Gemini CLI, or any shell with `AI_AGENT` set; only the Claude
+  Code variables were seen in a real shell, the others were read from
+  the harnesses' binaries), it acts as that agent: as `<harness>-<directory>`, the id the agent's MCP tools have
+  when they run in the same directory under the default label. Elsewhere
+  `send`, `ack` and an `inbox` that marks messages seen act as you only
+  at a terminal. `a2p2 ui`, whose address carries the token that lets
+  the page act as you, is refused in such a shell and away from a
+  terminal. `--person` overrides each refusal; when it is used away from
+  a terminal or in such a shell, the daemon log records the command. This
+  stops an agent with a shell, or a script, from answering your
+  questions, taking them off your list or taking the page's address by
+  mistake or because a message told it to. It is not a boundary: any
+  program running as you can pass `--person`, drive a terminal, unset
+  those variables or call the socket, whose `status` call still returns
+  the address. The agent of a harness a2p2 does not recognise reads as
+  you, and acts as you if its shell has a terminal.
+- `room leave` deletes the room's data here and asks at a terminal
+  first, naming the room by its id. `status --json` leaves out the
+  page's address and its token; `ui --print` prints it.
+- Advertised addresses, including VPN and office network addresses, go
+  to every member of your rooms and every holder of an invite. `a2p2 net
+  on` says so, and `a2p2 status` lists them.
 - On Windows, file modes do not protect the socket. The state directory
   is created with an access control list for your user only, and a2p2
   refuses one that lets other users in. Each local API request must also
