@@ -1144,8 +1144,16 @@ The CLI follows the socket calls above. See `a2p2 help` for the full syntax.
   `[asks for handled reports]`; `inbox --peek` marks nothing.
 - `net on [<addr>] [--outbound-only]` and `net off` change network state.
 
-`confirm`, `net` and the approval step of `join` require a terminal on
-stdin. Without one, `join` prints the preview and stops.
+`confirm`, `net`, `room leave`, a change of `room files` and the
+approval step of `join` require a terminal on stdin. Without one, `join`
+prints the preview and stops. Without `--as`, `send`, `ack` and an
+`inbox` that marks entries seen act as the person only at a terminal or
+with `--person`; away from a terminal or in an agent's shell `register`
+then carries `unattended` (the command), which the daemon logs. In an
+agent's shell the CLI registers as that
+harness instead (DESIGN 7). An empty `--as` is refused. `status --json`
+leaves out `ui`; `ui --print` gives it, at a terminal outside an agent's
+shell or with `--person` (then logged as `unattended` `ui`).
 
 ## 8. Schema (migrations 2 to 12)
 

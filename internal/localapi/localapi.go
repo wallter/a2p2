@@ -40,6 +40,11 @@ type (
 		Harness string `json:"harness"`
 		Label   string `json:"label,omitempty"`
 		Cwd     string `json:"cwd,omitempty"`
+		// Unattended names the CLI command that acts as the person, or
+		// gives the page's address (ui), with --person away from a
+		// terminal or in an agent's shell; the daemon logs it. Older
+		// daemons ignore it.
+		Unattended string `json:"unattended,omitempty"`
 	}
 	SendReq struct {
 		Agent      string   `json:"agent"`
@@ -888,7 +893,13 @@ func statusNetwork(st node.StatusView) Network {
 func Handler(s *node.Surface, info Info) http.Handler {
 	mux := http.NewServeMux()
 	handle(mux, "register", func(ctx context.Context, r RegisterReq) (store.Agent, error) {
-		return s.Register(ctx, r.Harness, r.Label, r.Cwd)
+		a, err := s.Register(ctx, r.Harness, r.Label, r.Cwd)
+		if err == nil && r.Unattended != "" && a.Label == node.HumanLabel {
+			// The record of a2p2 --person: the person's identity taken
+			// where no person was seen typing.
+			slog.Warn("acting as the person with --person, away from a terminal or in an agent's shell", "command", core.CleanLabel(r.Unattended), "agent", a.ID)
+		}
+		return a, err
 	})
 	handle(mux, "send", func(ctx context.Context, r SendReq) (any, error) {
 		in := node.SendInput{Agent: r.Agent, Room: r.Room, Text: r.Text, To: r.To, ReplyTo: r.ReplyTo,

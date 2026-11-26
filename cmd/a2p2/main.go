@@ -41,9 +41,12 @@ Getting started
                                   --approve-tools (Codex) lets every a2p2 tool, send included, run without a prompt.
   a2p2 ui [--print]               open the local web page; --print only prints its address
                                   The address carries the page's access token: do not log or share it.
+                                  At a terminal only, never in an agent's shell, unless --person is given.
   a2p2 doctor                     check the daemon and harness connections
 
-Talking (as the human, or --as <label> for a script)
+Talking (as the person at a terminal, or --as <label> for a script)
+  In an agent's shell these act as that agent. Away from a terminal, send, ack and
+  inbox act as the person only with --person, which the daemon log records.
   a2p2 send [--room R] [--to AGENT]... [--reply-to ID] [--ask-handled] [--replaces ID] TEXT...
                                   Use --to label@machine, for example human@1a2b3c4d.
                                   Find machine IDs with a2p2 room list ROOM.
@@ -77,7 +80,7 @@ Rooms across machines
   a2p2 room list [ROOM]           members, admins, changes waiting, limits
   a2p2 room admin ROOM MACHINE    ask to make a member an admin (confirm to sign)
   a2p2 room remove ROOM MACHINE   ask to remove a member (confirm to sign)
-  a2p2 room leave ROOM            stop carrying a room on this machine
+  a2p2 room leave ROOM            stop carrying a room and delete its data here (asks at a terminal)
   a2p2 room files ROOM [off|carry|keep]
                                   show or set what this machine does with the room's files:
                                   off: hold only what this machine's agents fetch; carry (default):
@@ -142,18 +145,20 @@ func usagef(format string, a ...any) error {
 
 // cmd bundles what most subcommands need.
 type cmd struct {
-	ctx  context.Context
-	fs   *flag.FlagSet
-	json *bool
-	as   *string
-	home string
-	cl   *localapi.Client
+	ctx    context.Context
+	fs     *flag.FlagSet
+	json   *bool
+	as     *string
+	person *bool
+	home   string
+	cl     *localapi.Client
 }
 
 func newCmd(ctx context.Context, name string) *cmd {
 	c := &cmd{ctx: ctx, fs: flag.NewFlagSet(name, flag.ContinueOnError), home: daemon.Home()}
 	c.json = c.fs.Bool("json", false, "print JSON")
-	c.as = c.fs.String("as", "", "act as this agent label instead of the human")
+	c.as = c.fs.String("as", "", "act as this agent label instead of the person")
+	c.person = c.fs.Bool("person", false, "act as the person without a terminal or in an agent's shell; the daemon log records it")
 	return c
 }
 
@@ -168,21 +173,6 @@ func (c *cmd) client() (*localapi.Client, error) {
 	cl, err := connectDaemon(c.ctx, c.home)
 	c.cl = cl
 	return cl, err
-}
-
-// who resolves the acting agent: the human, or a registered script label.
-func (c *cmd) who() (string, error) {
-	cl, err := c.client()
-	if err != nil {
-		return "", err
-	}
-	var a store.Agent
-	req := localapi.RegisterReq{Harness: "human", Label: "human"}
-	if *c.as != "" {
-		req = localapi.RegisterReq{Harness: "cli", Label: *c.as}
-	}
-	err = cl.Call(c.ctx, "register", req, &a)
-	return a.ID, err
 }
 
 // call makes one local API call; with --json it prints the response as
@@ -319,13 +309,13 @@ func run(ctx context.Context, name string, args []string) (err error) {
 		return confirm(c, args)
 	case "alerts":
 		return alerts(c, args)
+	case "ack":
+		return ack(c, args)
+	case "ui":
+		return uiCmd(c, args)
 	}
 
 	// Everything below talks to the daemon.
-	printOnly := new(bool)
-	if name == "ui" {
-		printOnly = c.fs.Bool("print", false, "print the address and open nothing")
-	}
 	if err := c.fs.Parse(permute(c.fs, args)); err != nil {
 		return errUsage
 	}
@@ -333,33 +323,29 @@ func run(ctx context.Context, name string, args []string) (err error) {
 	switch name {
 	case "status":
 		return status(c)
-	case "ui":
-		if *printOnly && *c.json {
-			return usagef("a2p2 ui --print prints the address and nothing else; it does not take --json")
-		}
-		var st localapi.Status
-		if err := c.call("status", nil, &st, nil); err != nil {
-			return err
-		}
-		showUI(os.Stdout, st.UI, *printOnly, openURL) // openURL: tty_unix.go, tty_windows.go
-		return nil
 	case "trace":
 		if len(rest) != 1 {
 			return usagef("a2p2 trace ID")
 		}
 		return trace(c, rest[0])
-	case "ack":
-		if len(rest) != 1 {
-			return usagef("a2p2 ack ID")
-		}
-		me, err := c.who()
-		if err != nil {
-			return err
-		}
-		var r localapi.AckResp
-		return c.call("ack", localapi.AckReq{Agent: me, ID: rest[0]}, &r, func() { fmt.Println(ackText(r)) })
 	}
 	return usagef("unknown command %q; run a2p2 help", name)
+}
+
+// ack reports a message handled, as the acting agent.
+func ack(c *cmd, args []string) error {
+	if err := c.fs.Parse(permute(c.fs, args)); err != nil {
+		return errUsage
+	}
+	if c.fs.NArg() != 1 {
+		return usagef("a2p2 ack ID")
+	}
+	me, err := c.who("ack", true)
+	if err != nil {
+		return err
+	}
+	var r localapi.AckResp
+	return c.call("ack", localapi.AckReq{Agent: me, ID: c.fs.Arg(0)}, &r, func() { fmt.Println(ackText(r)) })
 }
 
 // installArgs reads install and uninstall arguments: the harness name and
@@ -609,6 +595,24 @@ func status(c *cmd) error {
 			_ = c.cl.Call(c.ctx, "status", localapi.StatusReq{NoticeShown: true}, nil)
 		}
 	}()
+	if *c.json {
+		// Without the page's address: it carries the page's token, and
+		// agents run status --json into their transcripts. a2p2 ui
+		// --print gives it to a person who asks.
+		cl, err := c.client()
+		if err != nil {
+			return err
+		}
+		raw, err := cl.CallRaw(c.ctx, "status", localapi.StatusReq{ShowNotice: true}, &st)
+		if err != nil {
+			return err
+		}
+		if raw, err = withoutKey(raw, "ui"); err != nil {
+			return err
+		}
+		_, err = os.Stdout.Write(raw)
+		return err
+	}
 	return c.call("status", localapi.StatusReq{ShowNotice: true}, &st, func() {
 		if st.Notice != "" {
 			fmt.Println("NOTICE   " + st.Notice)
@@ -934,9 +938,7 @@ func room(c *cmd, args []string) error {
 			fmt.Printf("files %s: %s of %s held for this room\n", r.Mode, sizeText(r.Held), sizeText(r.Budget))
 		})
 	case rest[0] == "leave" && len(rest) == 2:
-		return c.call("room/leave", localapi.RoomReq{Room: rest[1]}, &localapi.Empty{}, func() {
-			fmt.Println("left; its data is deleted here. Other members list this machine until an admin removes it.")
-		})
+		return leave(c, rest[1])
 	}
 	return usagef("a2p2 room create LABEL | invite ROOM [--history] [--member|--admin] | admin ROOM MACHINE | remove ROOM MACHINE | " +
 		"files ROOM [off|carry|keep] | leave ROOM | list [ROOM]")
@@ -1176,6 +1178,11 @@ func printAlert(w io.Writer, a localapi.Alert) {
 	}
 }
 
+// advertisedWarning is said before a2p2 net on: who learns the addresses
+// it advertises. a2p2 status lists them once it listens.
+const advertisedWarning = "Every member of your rooms and every holder of an invite gets the addresses it advertises, " +
+	"which can include VPN and office network addresses. a2p2 status lists them once it listens."
+
 // netCmd is a person's networking decision: shown exactly, asked at a
 // terminal, recorded by the daemon (a decided request of kind network),
 // and applied by the daemon at once.
@@ -1200,6 +1207,7 @@ func netCmd(c *cmd, args []string) error {
 		return err
 	}
 	req := localapi.NetReq{State: "off"}
+	var advertise []string // config.json's advertise, which replaces the detected addresses
 	switch {
 	case rest[0] == "on" && *outbound:
 		req.State = "outbound"
@@ -1209,6 +1217,7 @@ func netCmd(c *cmd, args []string) error {
 		if err != nil {
 			return err
 		}
+		advertise = cfg.Advertise
 		req.Listen = daemon.DefaultListen
 		if cfg.Listen != "" {
 			req.Listen = cfg.Listen
@@ -1224,7 +1233,15 @@ func netCmd(c *cmd, args []string) error {
 	}[req.State]
 	fmt.Fprintln(os.Stderr, what)
 	if req.State == "on" {
-		fmt.Fprintln(os.Stderr, daemon.FamiliesText(req.Listen))
+		if len(advertise) > 0 {
+			// The daemon gives these instead of the addresses it detects
+			// (less any the listener cannot serve, which status names), so
+			// the detected ones FamiliesText lists would be wrong here.
+			fmt.Fprintln(os.Stderr, "It advertises the addresses set in config.json instead of the ones it detects: "+escapeAll(advertise, ", ")+".")
+		} else {
+			fmt.Fprintln(os.Stderr, daemon.FamiliesText(req.Listen))
+		}
+		fmt.Fprintln(os.Stderr, advertisedWarning)
 	}
 	if *mapPort {
 		req.MapPort = true
@@ -1389,7 +1406,7 @@ func send(c *cmd, args []string) error {
 	if text == "" && *replaces == "" {
 		return usagef("a2p2 send [flags] TEXT (or text on stdin)")
 	}
-	me, err := c.who()
+	me, err := c.who("send", true)
 	if err != nil {
 		return err
 	}
@@ -1439,7 +1456,7 @@ func fetch(c *cmd, args []string) error {
 	if err := c.fs.Parse(permute(c.fs, args)); err != nil || c.fs.NArg() != 1 {
 		return usagef("a2p2 fetch SHA256 [--room R] [--message ID] [--wait SECONDS]")
 	}
-	me, err := c.who()
+	me, err := c.who("fetch", false)
 	if err != nil {
 		return err
 	}
@@ -1485,7 +1502,10 @@ func inbox(c *cmd, args []string) error {
 	if err := c.fs.Parse(args); err != nil {
 		return errUsage
 	}
-	me, err := c.who()
+	// Reading marks the entries seen, which takes a question from the
+	// person's list; --peek, --thread and --levels mark nothing.
+	marks := *level != "" || !*peek && *thread == "" && !*levels
+	me, err := c.who("inbox", marks)
 	if err != nil {
 		return err
 	}
@@ -1553,7 +1573,7 @@ func history(c *cmd, args []string) error {
 	}
 	// As the acting agent: entries its level kept out are marked, and it
 	// may then report one it was shown handled.
-	me, err := c.who()
+	me, err := c.who("history", false)
 	if err != nil {
 		return err
 	}
