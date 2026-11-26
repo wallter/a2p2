@@ -57,6 +57,29 @@ reports.
   hash and never opens, unpacks or runs it; treat it as data from another
   machine, and take care with whatever program opens it. A member that
   fetched a file keeps it after removal.
+- What an agent can attach. Text in a room can steer an agent into
+  naming a path for a send. a2p2 refuses a2p2's own files (the machine
+  key, the local key, the database, anything under the home but agents'
+  copies, and a hard link to any of them), and refuses by name, before
+  it touches the path or follows a link to it, device paths and paths
+  that can make the machine connect to another host: on Windows anything
+  but a drive letter and plain names (so no `\\host\share` or `\??\UNC\`
+  path), on Unix `/dev`, `/proc`, `/sys`, `/net` and the macOS automount
+  points. Each part of a path is looked up in the directory opened
+  before it, so a directory swapped on the way is refused. The Windows
+  code has not been run on Windows. Any other file your user can read
+  can still be staged, and the person sees its full path, size and
+  SHA-256 before it leaves; a file with several names is said to have
+  them. Read the path before you approve. An agent learns only that a
+  send waits or was refused; it can still learn roughly how large a file
+  is, at the cost of requests you see. A network share you mounted, or a
+  drive letter you mapped, is used as any local path.
+- A member that writes a message with files can make your machine hold
+  at most a quarter of its room file budget for its files, counted by
+  the bytes it has not sent, for a day at a time: a request from the
+  author itself starts no carry job, and a part it left goes when the
+  want lapses or when the author edits the message. Several machines of
+  one owner can each take a quarter.
 - The daemon's Unix socket is in a private directory. Any program running
   as your OS user can use the socket and read your machine's state.
   Messages are stored unencrypted in `a2p2.db` in the state directory.
@@ -197,6 +220,11 @@ daemon and the CLI make these connections and no others:
   --invite` make a TCP connection and a TLS handshake from the CLI under
   a throwaway key, whatever the networking state, and send no request.
 - A host name in an address is looked up by your system's resolver.
+- A file an agent names for a send is read through your file systems. A
+  path that names another host or an automount point, or a link on the
+  way that leads to one, is refused before it is looked up. A share you
+  mounted or a drive letter you mapped is read as a local file, so
+  reading it reaches the host you chose.
 - `install.sh` and `install.ps1`, which you run yourself and which are not
   part of the daemon, download one release and its `SHA256SUMS` from
   `github.com/wallter/a2p2/releases`. With `A2P2_VERIFY_ATTESTATION=1`

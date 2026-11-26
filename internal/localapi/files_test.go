@@ -267,7 +267,8 @@ func TestASendWithFilesRefusesBadPathsAndTooManyFiles(t *testing.T) {
 
 // DESIGN 12, limits: a path that cannot be staged gets one refusal,
 // whatever the reason, so an agent cannot tell a missing file from a
-// directory, an oversized file or two files with the same bytes.
+// directory or an oversized file. Two files with the same bytes are not
+// refused: they are listed once (F35, the test after this one).
 func TestEveryPathThatCannotBeStagedGetsTheSameRefusal(t *testing.T) {
 	m := newFilesMachine(t)
 	big := filepath.Join(t.TempDir(), "big")
@@ -277,13 +278,10 @@ func TestEveryPathThatCannotBeStagedGetsTheSameRefusal(t *testing.T) {
 	if err := os.Truncate(big, 257<<20); err != nil { // sparse: nothing is written
 		t.Fatal(err)
 	}
-	unreadable := writeFile(t, "a.txt", "abc")
-	twice := writeFile(t, "b.txt", "abc")
 	for name, files := range map[string][]string{
-		"missing":    {filepath.Join(t.TempDir(), "missing")},
-		"directory":  {t.TempDir()},
-		"too large":  {big},
-		"same bytes": {unreadable, twice},
+		"missing":   {filepath.Join(t.TempDir(), "missing")},
+		"directory": {t.TempDir()},
+		"too large": {big},
 	} {
 		err := m.c.Call(context.Background(), "send", SendReq{Agent: m.alice, Room: "team", Text: "x", Files: files}, nil)
 		var e *Error
@@ -293,6 +291,20 @@ func TestEveryPathThatCannotBeStagedGetsTheSameRefusal(t *testing.T) {
 	}
 	if qs := call[RequestsResp](t, m.c, "requests", Empty{}); len(qs.Requests) != 0 {
 		t.Fatalf("a refused send raised a request: %+v", qs)
+	}
+}
+
+// F35: a send that lists the same bytes twice raises one request with the
+// file once, so the answer does not tell an agent that two paths are equal.
+func TestASendListingTheSameBytesTwiceRaisesOneRequestWithOneFile(t *testing.T) {
+	m := newFilesMachine(t)
+	a := writeFile(t, "a.txt", "abc")
+	b := writeFile(t, "b.txt", "abc")
+	w := call[SendFilesResp](t, m.c, "send", SendReq{Agent: m.alice, Room: "team", Text: "x", Files: []string{a, b}})
+	qs := call[RequestsResp](t, m.c, "requests", Empty{}).Requests
+	if len(qs) != 1 || qs[0].ID != w.Request || len(qs[0].Files) != 1 || qs[0].Files[0].SHA256 != sha("abc") ||
+		qs[0].Files[0].Size != 3 {
+		t.Fatalf("requests = %+v", qs)
 	}
 }
 

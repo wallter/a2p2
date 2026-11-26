@@ -9,21 +9,18 @@ import (
 )
 
 // handlePath, where the system cannot report the path of an open file:
-// the name resolved, accepted only if it is still the opened file.
+// the name walkSource opened it by. That name has no link in it (the walk
+// read every one and went on from its target) and each of its components
+// was opened from the one before and checked to be the entry looked at,
+// so the name is not looked up again: a second lookup could follow a link
+// swapped in since, and reach a path the walk refused.
 func handlePath(f *os.File) (string, error) {
-	p, err := filepath.EvalSymlinks(f.Name())
-	if err == nil {
-		p, err = filepath.Abs(p)
-	}
-	if err != nil {
-		return "", err
-	}
-	a, err := f.Stat()
-	if err != nil {
-		return "", err
-	}
-	if b, err := os.Stat(p); err != nil || !os.SameFile(a, b) {
-		return "", errors.New("files: the file changed while it was opened")
+	p := filepath.Clean(f.Name())
+	if !filepath.IsAbs(p) {
+		return "", errors.New("files: the opened file has no absolute name")
 	}
 	return p, nil
 }
+
+// automountRoots are automount points refused besides /net: none known.
+var automountRoots []string

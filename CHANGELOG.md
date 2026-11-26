@@ -303,6 +303,42 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   whose readability is undecided, and an inbox read writes no receipts
   for a room left, or left and joined again, while it ran (both since
   0.1.0).
+- **An agent can no longer attach a2p2's own key or database to a send.**
+  Since 0.2.0, an agent steered by room text could stage the machine key,
+  the local key or `a2p2.db`, and one careless approval sent it to every
+  member that may read the room. Staging now refuses every file under the
+  home except agents' copies in `files/`, and any file that is the same
+  file as one in the home, a hard link included. A request staged before
+  the upgrade from the machine key is refused at approval.
+- **A path to attach can no longer make the machine connect out before
+  anyone approves.** Since 0.2.0, on Windows a path such as
+  `\??\UNC\host\share\x` passed the name check and was opened, which can
+  send the user's Windows credentials to that host; on Unix a path under
+  an automount point such as `/net` could make the machine connect to the
+  host it names. Staging now accepts on Windows only a drive letter and
+  plain names, and on Unix refuses `/dev`, `/proc`, `/sys`, `/net` and the
+  macOS automount points, checking every link on the way before it is
+  followed. Each part of the path is looked up in the directory opened
+  before it, so a directory swapped in after its check is refused. A
+  drive letter mapped to a share still works as in 0.2.3. The Windows
+  part has not been run on Windows.
+- **Staging tells an agent less about files it cannot read.** Since 0.2.0,
+  once 32 requests waited an agent could learn whether two files had the
+  same bytes, one bit per call, with no request for the person to see. A
+  full queue is now refused before any path is touched, and the same
+  bytes listed twice are listed once. A request now says when a file has
+  several names on disk.
+- **A message's author can no longer hold another member's file budget.**
+  Since 0.2.0, the author of a message with files could ask a member in
+  the default `carry` setting for its own files: the member reserved
+  their size for a day while the author never uploaded, and for as long
+  as the message lived if the author uploaded one byte of each. Its own
+  sends with files were refused as too large. A request from the author
+  now starts no carry job, one author's carry jobs reserve at most a
+  quarter of the room budget, counted by the bytes not yet received, and
+  a part an upload left goes when its want lapses or the author edits
+  the message, and a part a 0.2.3 binary left under a lapsed want goes
+  at the next sweep.
 
 
 ## [0.2.3] - 2026-11-25

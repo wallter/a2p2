@@ -37,10 +37,12 @@ func TestStagingCopiesFromTheHandleItOpenedAndRefusesAFifo(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("staging a FIFO blocked")
 	}
-	for _, p := range []string{dir, "/dev/null"} {
-		if _, err := s.StageFile(req, 0, p, core.MaxFileSize); !errors.Is(err, ErrNotRegular) {
-			t.Fatalf("%s: %v", p, err)
-		}
+	if _, err := s.StageFile(req, 0, dir, core.MaxFileSize); !errors.Is(err, ErrNotRegular) {
+		t.Fatalf("%s: %v", dir, err)
+	}
+	// a device under /dev is refused by its name, before it is opened
+	if _, err := s.StageFile(req, 0, "/dev/null", core.MaxFileSize); !errors.Is(err, ErrRemoteOrDevice) {
+		t.Fatalf("/dev/null: %v", err)
 	}
 	real := filepath.Join(dir, "real.txt")
 	if err := os.WriteFile(real, []byte("the bytes"), 0o600); err != nil {

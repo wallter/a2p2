@@ -2207,3 +2207,93 @@ ran (F70). Rooms that span owners make the first three real now.
 
 **Revisit if** a record format change is due (carry the version a
 reply answers), or a schema change lets records keep their arrival time.
+
+## D-NEW-H-files. What may be staged, and what one author can reserve (2026-11-25)
+
+A security review found four gaps in attachments (F10, F23, F33/F40,
+F35). Rooms now span owners, so text from another owner's member can
+steer an agent into naming a path, and that member's machine can ask
+for files. Each gap needs only that.
+
+- **What changed.** Staging opens each path once through
+  `store.OpenSource`. A send is refused while 32 of this machine's
+  requests wait in the room, before any path is touched. A path is then
+  checked by name before anything touches it: on Windows only a drive
+  letter, a colon, a separator and plain names (no UNC, `\\?\`, `\\.\` or
+  `\??\` form, no colon after the drive, no wildcard, no device name in
+  any component, with COM0, LPT0, the superscript names, CONIN$, CONOUT$
+  and CLOCK$ added); on Unix nothing under `/dev`, `/proc`, `/sys`,
+  `/net` or, on macOS, `/Network`, `/home` and their
+  `/System/Volumes/Data` forms. The path is walked one component at a
+  time with `os.Root`, each looked up in the directory opened before it
+  and opened only if it is still the entry looked at (`os.SameFile`), so
+  a directory or link swapped in after its check is refused, and a
+  lookup never leaves the directory it was checked in. Every link on the
+  way is read and its target checked by name before it is looked at.
+  Only a regular file is opened. The handle's reported path passes the
+  name check again; on Windows a `\\server\share` handle path is taken
+  only for a path that began with a drive letter `GetDriveTypeW` reports
+  as a network drive, as 0.2.3 staged such files. The walk refuses a
+  path through the home other than into `files/`, and a file with
+  several names is compared by identity with every file in the home
+  outside `files/`. Approval checks a pending request again by its path
+  and by the bytes of the home's small files (the keys), so one staged by
+  an older binary is not sent (reason "a staged file is one of a2p2's own
+  files"). Sizes, the path shown and the staged bytes come from that
+  handle. The same bytes listed twice are listed once instead of refused.
+  A queue that fills while staging is refused with the one staging
+  refusal. At most four sends stage files at a time. A staged file with
+  several names says so in the request text (draft field `links`). A
+  request for a file from its own author starts no carry job, and live
+  carry or `keep` wants of one author's files reserve at most a quarter
+  of the room budget, each counted by the bytes not yet received
+  (`core.AuthorWantShare`); a want this machine's agent asked for is not
+  capped. When a want lapses, or goes because an edit made another
+  version the one to keep, its part is dropped in the same transaction:
+  only the author could finish it, against a live want. A part reserved
+  no later than the lapse of a want that 0.2.3 left lapsed is dropped
+  too; one reserved after it is an agent's fetch and stays. The delivery model has these rules. No
+  wire, record, schema or tool change.
+- **Why links are followed, not refused.** The links are read and
+  checked one by one, the person sees the resolved path, and the open
+  follows none. Refusing every link would break honest paths through
+  `/tmp` on macOS or a linked checkout and adds little, since the path
+  shown is the file opened. The owner can choose to refuse them.
+- **Compatibility.** New rules apply to new requests only. Stored wants
+  over the quarter keep their reservation, take uploads and lapse as
+  before (`TestWantsAnOlderBinaryReservedOverTheAuthorsShareStillLoadAndLapse`,
+  `TestLiveWantsAnOlderBinaryIssuedOverTheAuthorsShareStillWorkAndLapse`).
+  A pending request staged by an older binary is approved as before,
+  unless its file is one of a2p2's own. An older binary reading a draft
+  ignores `links`; one that finds a part dropped at a lapse sees what a
+  failed upload leaves. Checked once by hand: v0.2.3's store opened a
+  database this code wrote (a pending send with `links`, a carry want
+  with a part), read the draft, reconciled and swept it. No file was
+  moved between an old and a new binary over the network. Machines from 0.2.0 to
+  0.2.3 see only a 404 where they saw 202 for an author's own request,
+  which they already handle as "not held".
+- **Costs.** An agent that names a file under the home, or a symbolic
+  link into it, gets the one staging refusal. A path through a macOS
+  `/home` or `/Network` mount is refused. On Windows a path through a
+  junction or a `\??\` link target to anything but a local drive is
+  refused. A carrier asked for many large files of one author that
+  never connects in carries a quarter of its room budget at a time. Per
+  path component, one directory opened, one `lstat` and one `fstat`; a
+  walk of the home only for a file with several names; at approval, a
+  hash of each small file directly in the home.
+- **Still open.** The Windows walk (`os.Root` there), link reading,
+  handle path and drive type were written from documentation and built,
+  not run. A network file system the person mounted, or a drive letter
+  mapped to a share, is read as local, so a path on it contacts the
+  host the person chose; refusing them is an owner's choice. A request
+  an older binary staged from a hard link to the database is not caught
+  at approval (its bytes are no longer the database's); it expires
+  within a day. The room usage in local status, which agents' tools do
+  not show, still counts equal files once. A cloud placeholder file can
+  download its bytes when read. Below the request limit an agent can
+  still learn roughly how large a file is, at the cost of requests the
+  person sees. Several machines of one owner can each take a quarter of a
+  carrier's room budget; a per-owner share needs owner sides.
+
+**Revisit if** the Windows paths are run, a harness sandbox gives agents
+the socket without file access, or owner sides exist.

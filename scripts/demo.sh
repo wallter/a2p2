@@ -68,6 +68,7 @@ HB=$(mktemp -d /tmp/a2p2demo.XXXXXX) || { rmdir "$HA"; exit 2; }
 chmod 700 "$HA" "$HB"
 status=0
 JPID=""
+HF="" # the file sent is kept outside alpha's home: a2p2 does not attach files from its home
 
 cleanup() {
   trap '' INT TERM
@@ -99,6 +100,7 @@ cleanup() {
     [ "$n" -gt 0 ] || { echo "demo: a daemon under $h did not stop" >&2; rc=1; }
   done
   rm -rf "$HA" "$HB"
+  [ -n "$HF" ] && rm -rf "$HF"
   if [ -e "$HA" ] || [ -e "$HB" ]; then
     echo "demo: could not remove $HA or $HB" >&2; rc=1
   elif [ "$rc" = 0 ]; then
@@ -261,10 +263,10 @@ emit "$OUT"
 
 if [ "$withfile" = 1 ]; then
   step "10. A file from alpha to beta (a person confirms the bytes on alpha)"
-  mkdir "$HA/outgoing" || die "mkdir"
-  printf 'demo file\nline two\n' > "$HA/outgoing/note.txt"
-  SENT=$(cat "$HA/outgoing/note.txt")
-  do_ alpha 3 send --room design-review --file "$HA/outgoing/note.txt" "A small file"
+  HF=$(mktemp -d /tmp/a2p2demo.XXXXXX) || die "mktemp"
+  printf 'demo file\nline two\n' > "$HF/note.txt"
+  SENT=$(cat "$HF/note.txt")
+  do_ alpha 3 send --room design-review --file "$HF/note.txt" "A small file"
   FQID=$(printf '%s\n' "$OUT" | sed -n 's/^request \(q_[0-9a-f]*\) waiting.*/\1/p' | head -n 1)
   [ -n "$FQID" ] || die "no request for the file"
   do_pty alpha 12 confirm "$FQID"
@@ -280,7 +282,7 @@ if [ "$withfile" = 1 ]; then
   do_ beta 3 fetch "$SHA" --room design-review --message "$FMID" --wait 20
   GOT=$(printf '%s\n' "$OUT" | sed -n 's/^\(\/.*\)$/\1/p' | head -n 1)
   [ -f "$GOT" ] || die "fetch printed no file path"
-  if [ "$(cat "$GOT")" = "$SENT" ] && cmp -s "$GOT" "$HA/outgoing/note.txt"; then
+  if [ "$(cat "$GOT")" = "$SENT" ] && cmp -s "$GOT" "$HF/note.txt"; then
     echo "  The bytes fetched on beta are equal to the file sent from alpha."
   else
     die "the fetched file differs from the one sent"

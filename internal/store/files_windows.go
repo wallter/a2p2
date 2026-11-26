@@ -5,7 +5,6 @@ package store
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -40,19 +39,46 @@ func fileIdent(f *os.File) (string, error) {
 		uint64(d.LastWriteTime.HighDateTime)<<32|uint64(d.LastWriteTime.LowDateTime)), nil
 }
 
-// openSource opens a path a person named for reading, once. Modes mean
-// nothing on Windows (D47): files a2p2 writes inherit the home's access
-// list. The caller refuses anything but a regular file from the handle.
-func openSource(path string) (*os.File, error) { return os.Open(path) }
+// oNonBlock: an open does not wait on Windows.
+const oNonBlock = 0
 
-// remoteOrDevice: a UNC path, a \\?\ or \\.\ namespace, or a reserved
-// device name in any directory; refused before any I/O [fix-files-b 7].
-func remoteOrDevice(path string) bool {
-	if strings.HasPrefix(path, `\\`) || strings.HasPrefix(path, `//`) || strings.HasPrefix(path, `\/`) || strings.HasPrefix(path, `/\`) {
-		return true
+var getDriveType = syscall.NewLazyDLL("kernel32.dll").NewProc("GetDriveTypeW")
+
+// driveRemote reports whether root (such as Z:\) is a drive letter mapped
+// to a network share (DRIVE_REMOTE). It reads the system's table of drive
+// letters. Unverified on Windows: written from the documentation of
+// GetDriveTypeW.
+func driveRemote(root string) bool {
+	p, err := syscall.UTF16PtrFromString(root)
+	if err != nil {
+		return false
 	}
-	stem := strings.ToUpper(strings.SplitN(filepath.Base(path), ".", 2)[0])
-	return windowsReserved[strings.TrimRight(stem, " ")]
+	const driveRemoteType = 4 // DRIVE_REMOTE
+	t, _, _ := getDriveType.Call(uintptr(unsafe.Pointer(p)))
+	return t == driveRemoteType
+}
+
+// remoteOrDevice is windowsRemoteOrDevice (files_source.go, where tests on
+// every system run it).
+func remoteOrDevice(path string) bool { return windowsRemoteOrDevice(path) }
+
+// linkCount is the number of names the open file f has.
+func linkCount(f *os.File) int {
+	var d syscall.ByHandleFileInformation
+	if err := syscall.GetFileInformationByHandle(syscall.Handle(f.Fd()), &d); err != nil {
+		return 0
+	}
+	return int(d.NumberOfLinks)
+}
+
+// linkTarget is a link's target as read, with the NT prefix of a local
+// drive removed (\??\C:\x is C:\x); any other form stays as it is, and
+// remoteOrDevice refuses it.
+func linkTarget(t string) string {
+	if rest, ok := strings.CutPrefix(t, `\??\`); ok && len(rest) >= 3 && rest[1] == ':' && rest[2] == '\\' {
+		return rest
+	}
+	return t
 }
 
 var getFinalPathNameByHandle = syscall.NewLazyDLL("kernel32.dll").NewProc("GetFinalPathNameByHandleW")

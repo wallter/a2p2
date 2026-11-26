@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 )
 
@@ -46,13 +47,42 @@ func fileIdent(f *os.File) (string, error) {
 	return fmt.Sprintf("%x:%x:%x", uint64(sys.Dev), uint64(sys.Ino), st.ModTime().UnixNano()), nil
 }
 
-// openSource opens a path a person named for reading, once. Non-blocking,
-// so a FIFO or a device does not hang the open; the caller refuses
-// anything but a regular file from the handle's own information.
-func openSource(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+// oNonBlock opens a source without waiting: a FIFO or a device swapped in
+// after the walk's look does not hang the open, and the walk then refuses
+// it as not the entry it looked at.
+const oNonBlock = syscall.O_NONBLOCK
+
+// driveRemote: Unix has no drive letters.
+func driveRemote(string) bool { return false }
+
+// sourceRoots are the directories whose paths are refused by name, before
+// any I/O: devices and kernel files (/dev/fd names another open file of
+// the daemon), and automount points, where a lookup makes the machine
+// connect out (automountRoots, per system).
+var sourceRoots = append([]string{"/dev", "/proc", "/sys", "/net"}, automountRoots...)
+
+// remoteOrDevice: a clean path at or under one of sourceRoots, compared
+// without case (macOS volumes usually ignore it).
+func remoteOrDevice(p string) bool {
+	for _, r := range sourceRoots {
+		if len(p) >= len(r) && strings.EqualFold(p[:len(r)], r) && (len(p) == len(r) || p[len(r)] == '/') {
+			return true
+		}
+	}
+	return false
 }
 
-// remoteOrDevice: on Unix every path is opened non-blocking and its type
-// checked on the handle; nothing is refused by its name alone.
-func remoteOrDevice(string) bool { return false }
+// linkCount is the number of names the open file f has.
+func linkCount(f *os.File) int {
+	st, err := f.Stat()
+	if err != nil {
+		return 0
+	}
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+		return int(sys.Nlink)
+	}
+	return 0
+}
+
+// linkTarget is a link's target as read: on Unix, as it is.
+func linkTarget(t string) string { return t }
