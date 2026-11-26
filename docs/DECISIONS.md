@@ -1976,9 +1976,21 @@ would run the workflow, and the fixes need no protocol change.
   "skipped" on failure would not stop a swapped file. Without it the
   installer now says the checksum does not show who built the file.
   `install.sh` refuses an install directory, or one above it, that every
-  user may write without the sticky bit, that a group may write (unless
-  it is the user's own group of the same name), that another user than
-  root owns, or that is a symbolic link another user owns. It walks the
+  user may write without the sticky bit, that another user than root
+  owns, that is a symbolic link another user owns, or that a group may
+  write (mode bits, no sticky bit) when the group has a member other
+  than the user and root. Members are the group's listed members and the
+  users whose primary group it is, from `getent` (on macOS without it,
+  `dscacheutil` and `dscl`). On macOS the groups `everyone`,
+  `localaccounts` and `netaccounts`, and any group `dsmemberutil` says
+  the account `nobody` is in, hold accounts those lists do not name, so
+  they are refused. A group it cannot list gets a note and the install
+  goes on, so a group-writable `~/.local/bin` whose group holds only the
+  user, or a Homebrew prefix that the group `admin` of only the user
+  and root may write, installs. Accounts of a network directory that the
+  system does not list, nested groups and access control lists are not
+  read. It takes trailing slashes off each path before it looks at it, so
+  `link/` is judged as the link. It walks the
   path as written, and each link it meets adds the path the link names
   (`readlink`, or the resolved path from `cd -P` without it), walked the
   same way. It makes missing levels with mode 0755 and
@@ -2003,7 +2015,8 @@ would run the workflow, and the fixes need no protocol change.
   yet. A trial rule that refused the label `bee` made it fail, as an
   F71-type change would.
 - **Costs:** two more actions in the only unattended workflow; a release
-  takes one more job and an artifact kept for a day. Moving an action now
+  takes one more job and an artifact kept for seven days, so the publish
+  job can be re-run alone within that time. Moving an action now
   means changing a SHA by hand. A step in `make check` of a few seconds.
   Each release adds a directory of test data. An install into a
   directory another user can change, which worked before, is refused.

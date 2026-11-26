@@ -72,6 +72,14 @@ publish that commit untested. Do not tag by hand.
    tree is clean, HEAD is on `origin/main`, CHANGELOG.md has the section
    (`scripts/changelog.sh`) and the tag exists neither here nor on
    `origin`. Then it makes the annotated tag and pushes it.
+   If the publish job fails, re-run that job alone within seven days:
+   the build job's files are kept that long as a workflow artifact.
+   After that, re-run all jobs; GitHub allows re-runs for about 30
+   days after a run. An attestation made by a failed run
+   stays, and it is true: that workflow built those files from the tag.
+   If a release was created in part, delete it with `gh release delete
+   vX.Y.Z` (without `--cleanup-tag`, so the tag stays) before the re-run.
+   None of these paths has been run yet.
 5. `make verify-release VERSION=vX.Y.Z` (needs `gh`, signed in). It waits
    for the release workflow, checks that the release has exactly the six
    binaries and `SHA256SUMS`, downloads each of them by name into a
