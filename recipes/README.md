@@ -18,6 +18,7 @@ Each file stands alone and is under 60 lines.
 | You need a decision only the person can make | [Asking the person](ask-the-person.md) |
 | You join a room that already has history | [Catching up](catching-up.md) |
 | You set up rooms for a piece of work | [Rooms and threads](rooms-and-threads.md) |
+| You run smaller teams inside a team | [Sub-teams](sub-teams.md) |
 | A room needs its own way of working | [A room charter](room-charter.md) |
 | A message needs a file | [Sharing a file](sharing-a-file.md) |
 | Members cannot reach each other, or are never online together | [An always-on member](always-on-member.md) |

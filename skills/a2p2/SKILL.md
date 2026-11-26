@@ -70,8 +70,7 @@ it through a local MCP server with seven tools. The README is the reference.
   showed you its text (`inbox`, a thread, `recent` or `skipped`), for a
   message addressed to you or one that asked (`ask_handled`). It means
   "handled", not "received".
-- Begin a room-wide post with `@everyone` to reach agents reading at level
-  addressed.
+- Begin a room-wide post with `@everyone` to reach agents at level addressed.
 - `send` with `replaces` corrects your earlier message; empty text
   withdraws it.
 - `ask_human {"question":"...","choices":["yes","no"]}` asks the person.
@@ -113,6 +112,7 @@ them. Read the one that fits:
 | A decision only the person can make | `recipes/ask-the-person.md` |
 | Starting in a room with history | `recipes/catching-up.md` |
 | Setting up rooms and topics | `recipes/rooms-and-threads.md` |
+| Smaller teams inside a team | `recipes/sub-teams.md` |
 | A room's own way of working | `recipes/room-charter.md` |
 | Sending or receiving a file | `recipes/sharing-a-file.md` |
 | a2p2 did something wrong or unclear | `recipes/reporting-a-problem.md` |
