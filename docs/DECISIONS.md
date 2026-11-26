@@ -2137,3 +2137,85 @@ would run the workflow, and the fixes need no protocol change.
 **Revisit if** an action is moved to a new major release, GitHub offers
 immutable releases or a required environment here, the attestation check
 can be done without `gh`, or a mixed-version chaos run is added.
+
+## D-NEW-D-join-labels. A join into a held room counts only from a member, and a joined room keeps the label approved (2026-11-25)
+
+A security review showed two flaws in the joiner (F7, F12). A machine
+that is not a member of a room this machine holds, such as a removed
+admin that has not heard of its removal, could send an invite for it.
+After one approval its answer's entries were applied, a removal it
+signed late among them, and the answer opened the `not_caught_up` gate
+even with no heads. And the label of a joined room came from the signed
+create entry without a comparison with the preview the person approved,
+and could be `local`, so another owner's messages read as this
+machine's local room. Rooms now span owners, so both are fixed now,
+after D57, which lets a receipt rule land without stopping a start.
+
+- **What changed.** For a room held here, a preview must name the create
+  entry and the label held here; a different label is refused and named
+  as a change. Each batch of the answer counts only as a pull's does
+  (T4): if the admin machine is a member here before the batch or after
+  it (`Rooms.receiveJoin`), or the whole batch is refused. The same test
+  applies to a join that pinned the room in an earlier run, as soon as
+  this machine is a member of it here by any path; the test and the
+  write are one step under the rooms lock. Pages are kept in memory until
+  they make the admin machine a member, up to 1,024 entries or 4 MiB,
+  not counting entries held here already. Otherwise nothing is stored
+  and the join ends refused with `ReasonJoinServerNotMember`. A page over
+  256 entries or 3 MiB, or one marked `more` that holds nothing or does
+  not move past the last `next`, ends the join (`ReasonJoinBadPage`), so
+  a hostile admin machine cannot keep a resume polling at once forever. A join lifts the gate only
+  when its last page lists heads, all accepted here, and the admin
+  machine is a member here, as `caughtUp` does. For a new room, the
+  create entry's label must equal the preview's, may not read as `local`
+  (`LabelKey`, so any case and surrounding blanks) and may hold no
+  character the display would escape (`DisplayHidden`: controls,
+  direction marks and invisible characters outside the places honest
+  writing needs them: a joiner inside an emoji, or a joiner or
+  non-joiner between letters of Arabic, Indic and other scripts that
+  need one). The rule runs at the
+  preview and again on the answer, so a join approved under an older
+  version is also refused. A join an older version recorded for a room
+  held here, or pinned without comparing the labels, under a label other
+  than the one held, is refused before any entry of it is applied, and
+  the room stays. The preview reads the room and its generation in one
+  step, so a pin cannot slip between them. A stored room labelled
+  `local` that is not this machine's local room is shown with its id
+  (`Rooms.ShownLabel`) in room info, quarantine, inbox labels, unread
+  counts, levels, request texts (both where they are shown and where an
+  approval compares them) and `ResolveRoom`, so `local` resolves only to
+  the local room. An invite for such a room is refused at the preview:
+  preview terms stay raw, and the room keeps working by pulls.
+- **Where the rule lives.** In the joiner, not in `core`: `core` cannot
+  use the display tables of `node`, and a create entry is parsed again
+  on every pull of a room already held, where a new rule would mark it
+  invalid. Only a join starts a room from another machine's create entry.
+  `PinRoom` does not run the rule; tests use it to place a room as an
+  older version stored it.
+- **No wire, entry or schema change.** Stored labels and entries are not
+  checked or changed. A database written by 0.2.0 to 0.2.3 opens, rooms
+  labelled `local` included, and 0.2.3 opens one this version wrote.
+  Older admin machines send the label they hold, which is the create
+  entry's, so honest joins are unchanged.
+- **Costs.** A machine that holds a room and does not know the admin
+  that invites it, whose own admission comes after 1,024 entries (or
+  4 MiB) of its log that this machine lacks, cannot join through it: it
+  pulls from a member first, or leaves and joins again. While pages
+  wait, they are held in memory and checked again together under the
+  rooms lock; the limits bound that work. A room an honest older machine labelled `local`, or
+  gave a label with such a character, cannot be joined by this version;
+  rooms cannot be renamed, so it must be made again under another label.
+- **Still open.** Lookalike letters (`lоcal` with a Cyrillic `о`) are not
+  detected. A room created here under the label `local` is only shown
+  with its id; refusing it at `room create` and a `local: true` flag in
+  results belong to the surface's wording (group G). The server's own
+  preview still sends the label it holds raw; the joiner checks it. A
+  pull's answer still writes a non-member's log entries before it checks
+  membership (`Exchange.apply`); the fix belongs with the pull code. A
+  hostile admin machine can still send pages that move on without end;
+  only the room's own bounds limit them. Joins between this version and
+  0.2.0 to 0.2.3 machines, and 0.2.3 reopening a database this version
+  wrote, are argued from the unchanged formats, not run in a test.
+
+**Revisit if** rooms gain a rename, a second built-in label is reserved,
+or a joiner reports a refused join of a room it holds.

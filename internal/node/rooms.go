@@ -244,7 +244,7 @@ func (r *Rooms) quarantine(room, label, reason string) {
 	if r.quarantined == nil {
 		r.quarantined = map[string]Quarantine{}
 	}
-	r.quarantined[room] = Quarantine{Room: room, Label: label, Reason: reason}
+	r.quarantined[room] = Quarantine{Room: room, Label: r.ShownLabel(room, label), Reason: reason}
 }
 
 // Quarantined lists the rooms set aside, in room id order.
@@ -574,7 +574,10 @@ func (r *Rooms) CreateRoom(ctx context.Context, label string) (string, error) {
 // its create entry as received (the join preview, step 4b), which is
 // pinned: any other create entry for the room is refused (C1). The room's
 // generation moves on, so nothing prepared under an earlier membership of
-// it applies. Entries then arrive through Receive.
+// it applies. Entries then arrive through Receive. The join itself pins
+// through pinJoin, after the label checks of the joiner
+// (remoteLabelProblem); PinRoom does not run them, so tests can place a
+// room as an older version stored it.
 func (r *Rooms) PinRoom(ctx context.Context, createWire []byte) (string, error) {
 	e, err := core.ParseEntry(createWire)
 	if err != nil {
@@ -591,6 +594,78 @@ func (r *Rooms) PinRoom(ctx context.Context, createWire []byte) (string, error) 
 		return "", err
 	}
 	return v.Fields().Room, nil
+}
+
+// remoteLabelProblem says why label may not name a room this machine
+// starts to hold from another machine's create entry, or "". A room
+// from elsewhere may not read as this machine's local room (LabelKey
+// equal to LocalLabel), and its label may hold no control, direction
+// or invisible character that the display would escape (DisplayHidden):
+// such text could make the room pass for another one wherever it is
+// shown. What the display keeps (a joiner inside an emoji, say) passes. The rule applies on receipt
+// only: a room stored under an older version still loads, and is shown
+// through ShownLabel.
+func remoteLabelProblem(label string) string {
+	if LabelKey(label) == LocalLabel {
+		return "its label reads as " + LocalLabel + ", the name of this machine's own room"
+	}
+	if DisplayHidden(label) {
+		return "its label holds a control, direction or invisible character"
+	}
+	return ""
+}
+
+// ShownLabel is how room id's label is shown on this machine. A room
+// other than this machine's local room whose label reads as local
+// (stored by an older version, or created here) is shown with its id,
+// so that its messages never read as the local room's.
+func (r *Rooms) ShownLabel(id, label string) string { return shownLabel(r.m.ID, id, label) }
+
+// shownLabel is ShownLabel on machine self.
+func shownLabel(self, id, label string) string {
+	if id != localRoomID(self) && LabelKey(label) == LocalLabel {
+		return label + " (room " + id + ", not this machine's local room)"
+	}
+	return label
+}
+
+// errServerNotMember: a join answer for a room held here came from a
+// machine that is not a member of it here, and its entries do not make
+// it one (receiveJoin).
+var errServerNotMember = errors.New("the answering machine is not a member of the room here")
+
+// receiveJoin is Receive for the entries of a join's answer from server.
+// When the room was held here before the join (held), or this machine is
+// a member of it here already (by this join's earlier pages, an earlier
+// run of it, or another join or pull since), the entries count only as
+// for a pull (T4): if server is a member of the room here before the
+// batch or after it. Otherwise nothing is stored (errServerNotMember).
+// The test and the write are one step under r.mu, so a membership
+// gained meanwhile is seen.
+func (r *Rooms) receiveJoin(ctx context.Context, room string, gen int64, server string, held bool, wires ...[]byte) ([]EntryResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rl, err := r.room(room)
+	if err != nil {
+		return nil, err
+	}
+	if gen != 0 && gen != rl.gen {
+		return nil, ErrStaleGeneration
+	}
+	if !held && !slices.Contains(rl.st.Members, r.m.ID) {
+		return r.ingest(ctx, rl, gen, wires, nil) // a room this join pinned, not yet joined: as Receive
+	}
+	was := slices.Contains(rl.st.Members, server)
+	commit := func(ctx context.Context, b *store.LogBatch, st members.State, _ func(string) *core.VerifiedEntry) (int64, error) {
+		if !was && !slices.Contains(st.Members, server) {
+			return 0, errServerNotMember
+		}
+		if b == nil {
+			return 0, nil
+		}
+		return r.m.st.ApplyLog(ctx, *b)
+	}
+	return r.ingestWith(ctx, rl, gen, wires, nil, commit)
 }
 
 func (r *Rooms) pin(ctx context.Context, v *core.VerifiedEntry) error {

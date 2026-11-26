@@ -354,7 +354,7 @@ func (r *Rooms) ConfirmWith(ctx context.Context, id string, approve bool, o Conf
 			if err != nil {
 				return Confirmation{}, err
 			}
-			label = lr.Label
+			label = r.ShownLabel(q.Room, lr.Label) // as Describe and Alerts show it
 		}
 		if requestText(q, label, r.memberNamesLocked(q.Room)) != o.Shown {
 			return Confirmation{}, &UserError{Msg: RequestChangedText}

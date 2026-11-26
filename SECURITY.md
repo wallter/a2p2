@@ -49,6 +49,26 @@ reports.
 - Anyone with a valid unused invite can present it. A person on the admin
   machine still approves the joining machine and the terms. Keep invites
   private and verify the joining machine's fingerprint before approval.
+- An invite to a room this machine already holds is used only on the
+  terms held here: the admin machine must name the room's create entry
+  and the label held here, and its log counts only if it is a member of
+  the room here before or after each batch of it, or the whole batch is
+  refused. A removed admin's invite
+  therefore cannot bring in entries it signed after its removal, and a
+  join answer opens the `not_caught_up` gate only when it comes from a
+  member here and lists its heads. A machine that holds the room and
+  has not heard of a newer admin can join through it only if that
+  admin's log shows its admission within 1,024 entries (4 MiB) that this
+  machine lacks.
+- A room joined from another machine is held under the label the person
+  approved in the preview: a create entry with another label is refused.
+  A new room's label may not read as `local` (in any case, with spaces
+  around it) and may not hold control, direction or invisible
+  characters, except those the display keeps (a joiner inside an emoji,
+  or between letters of a script that needs one). A room from an older
+  version that is labelled `local` still loads; it is shown with its id
+  and never resolves as the local room. Lookalike letters of other
+  scripts are not detected.
 - Files follow the permission of the text they belong to: a machine serves
   a file only to a current member that may read that message, and deletes
   it when the message goes. A person confirms the exact bytes of a file an
