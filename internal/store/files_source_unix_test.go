@@ -4,10 +4,12 @@ package store
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/wallter/a2p2/internal/core"
@@ -182,6 +184,95 @@ func TestStagingNeverFollowsALinkAtTheLastComponentWhenItOpens(t *testing.T) {
 	}
 }
 
+// TestALinkSwappedInAfterTheLookIsNeverOpened (D63, after the second
+// review): a link put in place of the last component, or of a directory
+// on the way, after its look is refused by the open itself and its target
+// is never opened, whether the link is relative (it stays inside the
+// directory looked in, and inside "/" for any path) or absolute. Each
+// target is unreadable to its owner (mode 0), so an open of it would fail
+// with a permission error instead of the swap refusal; os.Root, used
+// before, followed the relative link and opened the target before its
+// identity check.
+// Requirements: L1, P3
+func TestALinkSwappedInAfterTheLookIsNeverOpened(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a file of mode 0, so an open of the target is not visible")
+	}
+	s, _ := openTest(t)
+	dir := t.TempDir()
+	locked := filepath.Join(dir, "locked.txt")
+	if err := os.WriteFile(locked, []byte("never opened"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lockedDir := filepath.Join(dir, "lockeddir")
+	if err := os.Mkdir(lockedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lockedDir, "f.txt"), []byte("never opened"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{locked, lockedDir} {
+		if err := os.Chmod(p, 0); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chmod(p, 0o700)
+	}
+	if _, err := os.Open(locked); err == nil {
+		t.Skip("this file system opens a file of mode 0")
+	}
+	n := 0
+	for _, c := range []struct {
+		dirSwap bool
+		target  string
+	}{{false, "locked.txt"}, {false, locked}, {true, "lockeddir"}, {true, lockedDir}} {
+		n++
+		asked := filepath.Join(dir, "asked"+strings.Repeat("x", n)+".txt")
+		swapped := asked
+		path := asked
+		if c.dirSwap {
+			swapped = filepath.Join(dir, "sub"+strings.Repeat("x", n))
+			if err := os.Mkdir(swapped, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path = filepath.Join(swapped, "f.txt")
+			asked = path
+		}
+		if err := os.WriteFile(asked, []byte("checked bytes"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		walked, _ := filepath.EvalSymlinks(swapped)
+		sourceChecked = func(p string) {
+			if p != walked {
+				return
+			}
+			if err := os.RemoveAll(swapped); err != nil {
+				t.Error(err)
+			}
+			if err := os.Symlink(c.target, swapped); err != nil {
+				t.Error(err)
+			}
+		}
+		_, err := s.StageFile("q_"+strings.Repeat("4", 32), n, path, core.MaxFileSize)
+		sourceChecked = nil
+		if !errors.Is(err, errSwapped) {
+			t.Errorf("%s swapped in for %s: %v, want the swap refused before its target is opened", c.target, swapped, err)
+		}
+	}
+	// the honest case: a link that was there when it was looked at is read,
+	// checked and followed by its target, as before
+	plain := filepath.Join(dir, "plain.txt")
+	if err := os.WriteFile(plain, []byte("plain"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("plain.txt", filepath.Join(dir, "via.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := s.StageFile("q_"+strings.Repeat("4", 32), 7, filepath.Join(dir, "via.txt"), core.MaxFileSize); err != nil ||
+		st.SHA256 != core.SHA256Hex([]byte("plain")) {
+		t.Fatalf("a link there before the look: %+v %v", st, err)
+	}
+}
+
 // TestADirectorySwappedOnTheWayAfterItsCheckIsRefused (F23, F37): each
 // component is looked up in the directory opened before it, so a
 // directory replaced by a link after its check, to another directory or
@@ -229,6 +320,33 @@ func TestADirectorySwappedOnTheWayAfterItsCheckIsRefused(t *testing.T) {
 		if err == nil || i == 0 && !errors.Is(err, errSwapped) {
 			t.Errorf("%s swapped in: %v, want refused", target, err)
 		}
+	}
+}
+
+// TestAFileWithSeveralNamesIsRefusedWhenAFileOfTheHomeCannotBeCompared
+// (F33; D63, after the second review): a file with several names is
+// compared with every file of the home; one whose identity cannot be read
+// refuses the send instead of being skipped. One removed since the home
+// was listed is no longer a name of anything and is skipped.
+// Requirements: L1, P3
+func TestAFileWithSeveralNamesIsRefusedWhenAFileOfTheHomeCannotBeCompared(t *testing.T) {
+	s, _ := openTest(t)
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(a, []byte("two names"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(a, filepath.Join(dir, "b.txt")); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { homeEntryInfo = func(d fs.DirEntry) (fs.FileInfo, error) { return d.Info() } }()
+	homeEntryInfo = func(fs.DirEntry) (fs.FileInfo, error) { return nil, syscall.EIO }
+	if _, err := s.StageFile("q_"+strings.Repeat("3", 32), 0, a, core.MaxFileSize); !errors.Is(err, ErrHomeFile) {
+		t.Fatalf("a home file that cannot be compared: %v, want the home refusal", err)
+	}
+	homeEntryInfo = func(fs.DirEntry) (fs.FileInfo, error) { return nil, fs.ErrNotExist }
+	if st, err := s.StageFile("q_"+strings.Repeat("3", 32), 1, a, core.MaxFileSize); err != nil || st.Links != 2 {
+		t.Fatalf("a home file removed meanwhile: %+v %v", st, err)
 	}
 }
 

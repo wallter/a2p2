@@ -160,9 +160,9 @@ type FileWant struct {
 	Sent                               time.Time
 	// Capped, when issuing, marks a want no agent of this machine asked
 	// for (a carry job, the setting keep): with the room's other live
-	// wants of the same author, each counted by the bytes not yet
-	// received, it reserves at most 1/core.AuthorWantShare of the room
-	// budget (F10). Not stored.
+	// wants of the same author, each counted by its whole size (what it
+	// reserves, or its part occupies), it reserves at most
+	// 1/core.AuthorWantShare of the room budget (F10). Not stored.
 	Capped bool
 }
 
@@ -597,10 +597,11 @@ func (s *Store) IssueWant(ctx context.Context, w FileWant) (bool, error) {
 		}
 		if w.Size > 0 && w.Capped {
 			var held int64
-			// by the bytes not yet received: a part of one byte leaves the
-			// rest of the want counted
-			if err := tx.QueryRow(`SELECT coalesce(sum(max(w.size - coalesce((SELECT p.have FROM file_parts p
-				WHERE p.room = w.room AND p.msg = w.msg AND p.sha256 = w.sha256), 0), 0)), 0)
+			// each live want by its whole size, as the room's usage counts
+			// it (a part at its declared size): bytes received are checked
+			// only once the file is whole, so they free nothing before it
+			// is held and its want goes
+			if err := tx.QueryRow(`SELECT coalesce(sum(w.size), 0)
 				FROM file_wants w WHERE w.room = ? AND w.author = ? AND w.lapsed_at = 0`,
 				w.Room, w.Author).Scan(&held); err != nil {
 				return err

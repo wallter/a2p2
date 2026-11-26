@@ -142,6 +142,23 @@ func (f *Files) RequestSend(ctx context.Context, s FileSend) (FileSendResult, er
 			return res, err
 		}
 	}
+	// Every entry is checked by its form before any path is touched: an
+	// invalid entry beside a path must not let the path be opened, sized
+	// or read without a request the person sees (D63, after the second
+	// review).
+	for _, p := range s.Files {
+		if strings.HasPrefix(p, KeptPrefix) {
+			sha := strings.TrimPrefix(p, KeptPrefix)
+			if mf == nil || !core.ValidSHA256(sha) {
+				return res, badFile("sha256:<hex> keeps a file of the version replaced")
+			}
+			if _, isList, ok := mf.Listed(sha); !ok || isList {
+				return res, badFile("the version replaced does not list " + sha)
+			}
+		} else if !filepath.IsAbs(p) {
+			return res, badFile("a file is an absolute path")
+		}
+	}
 	// The audience as written: no addressee is everyone, whatever made it so.
 	d.Everyone = len(d.To) == 0
 	if d.Everyone {
@@ -200,19 +217,32 @@ func (f *Files) RequestSend(ctx context.Context, s FileSend) (FileSendResult, er
 	}
 	// The budget is reserved for the sizes the files have now, before a
 	// byte is copied; a file that grows meanwhile is refused (finding 9).
+	// A refusal before copying is said only after every path was opened
+	// and the budget was read, whatever the refusal: one that cannot open
+	// a path takes the same steps as one over a limit, so that its timing
+	// tells as little as its words (cannotAttachErr) (D63, after the
+	// second review).
 	sizes := map[int]int64{}
 	var total int64
+	var refusal error
 	for i, p := range s.Files {
-		if strings.HasPrefix(p, KeptPrefix) || !filepath.IsAbs(p) {
+		if strings.HasPrefix(p, KeptPrefix) {
 			continue
 		}
+		_ = hookAt("files:open") // tests: count the paths opened
 		src, err := f.m.st.OpenSource(p)
 		if err != nil {
-			return res, badFileFrom("not a regular file once opened, or unreadable", store.FileErrorOf("open", err))
+			if refusal == nil {
+				refusal = badFileFrom("not a regular file once opened, or unreadable", store.FileErrorOf("open", err))
+			}
+			continue
 		}
 		srcs[i] = src
 		if src.Size > core.MaxFileSize {
-			return res, &UserError{Code: ErrorTooLarge, Msg: "a file is at most 256 MiB"}
+			if refusal == nil {
+				refusal = &UserError{Code: ErrorTooLarge, Msg: "a file is at most 256 MiB"}
+			}
+			continue
 		}
 		sizes[i] = src.Size
 		total += src.Size
@@ -242,10 +272,16 @@ func (f *Files) RequestSend(ctx context.Context, s FileSend) (FileSendResult, er
 		}
 		pre.Files = append(pre.Files, x)
 	}
-	if _, err := core.EncodeManifest(draftManifest(pre, strings.Repeat("00", 16))); err != nil {
-		return res, badFile("the files break a manifest rule: " + err.Error())
+	if _, err := core.EncodeManifest(draftManifest(pre, strings.Repeat("00", 16))); err != nil && refusal == nil {
+		refusal = badFile("the files break a manifest rule: " + err.Error())
 	}
+	_ = hookAt("files:reserve") // tests: every refusal before copying gets here
 	switch err := f.m.st.ReserveStaging(ctx, s.Room, id, total); {
+	case refusal != nil:
+		if err == nil {
+			f.m.st.ReleaseStaging(id)
+		}
+		return res, refusal
 	case errors.Is(err, store.ErrNoSpace):
 		return res, &UserError{Code: ErrorTooLarge, Msg: "the files do not fit the room's or the machine's file budget"}
 	case err != nil:

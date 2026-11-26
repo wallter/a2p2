@@ -3,15 +3,16 @@ package store
 // What a send with files may stage (DESIGN 12, PROTOCOL 10.11). An agent
 // names a path; a person approves what was staged from it. So the path is
 // checked by its name before anything touches it, it is walked one
-// component at a time from each directory opened (os.Root), every link on
-// the way is read and its target checked the same way before that is
-// touched, the file is opened once and only if it is the entry checked,
-// and what is shown and sent is read from that handle. The machine's own
+// component at a time from each directory opened, every link on the way
+// is read and its target checked the same way before that is touched, the
+// file is opened once, without following a link, and kept only if it is
+// the entry checked, and what is shown and sent is read from that handle. The machine's own
 // files are never staged: nothing under the home but agents' copies, and
 // no file that is the same file as one directly in the home (a hard link
 // to the machine key, for one).
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -102,16 +103,32 @@ func (s *Store) OpenSource(path string) (*Source, error) {
 	return src, nil
 }
 
+// walkDir is one directory open for walkSource: lstat looks at an entry
+// without following a link, readlink reads one, and openFile and openDir
+// open an entry and return it only if it is the entry looked at
+// (errSwapped otherwise). On Unix the open itself follows no link
+// (openat with O_NOFOLLOW), and the handle is checked before anything is
+// read (files_walk_unix.go); elsewhere it is os.Root (files_walk_other.go).
+type walkDir interface {
+	lstat(name string) (walkEntry, error)
+	readlink(name string) (string, error)
+	openFile(name, full string, e walkEntry) (*os.File, error)
+	openDir(name, full string, e walkEntry) (walkDir, error)
+	info() (fs.FileInfo, error)
+	close()
+}
+
 // walkSource opens path one component at a time, each looked up in the
-// directory opened before it (os.Root), never by the whole name again:
-// so a directory on the way that is swapped after its check cannot send a
+// directory opened before it, never by the whole name again: so a
+// directory on the way that is swapped after its check cannot send a
 // later lookup somewhere else, and a lookup never leaves the directory it
 // was checked in. Each path reached is checked by RemoteOrDevice before it
 // is looked at; a link is read, its target checked the same way, and the
 // walk starts again from that target, so a link into /net or to a UNC path
 // is refused before the system follows it. Each entry is opened only if it
-// is still the one looked at (os.SameFile), so a link or another file put
-// in its place between the look and the open is refused. A walk that
+// is still the one looked at, so a link or another file put in its place
+// between the look and the open is refused; on Unix a link put there is
+// never followed and nothing swapped in is read. A walk that
 // passes through the home (compared by identity, so neither case nor a
 // link hides it) is refused unless its next directory is files/, the
 // agents' copies (ErrHomeFile). It returns the open file and the path it
@@ -135,13 +152,13 @@ restart:
 		return nil, "", ErrNotRegular
 	}
 	cur := vol + sep
-	dir, err := os.OpenRoot(cur)
+	dir, err := openWalkRoot(cur)
 	if err != nil {
 		return nil, "", fileErr("open", err)
 	}
 	inHome := false // dir is the home
-	if st, err := dir.Stat("."); err != nil {
-		dir.Close()
+	if st, err := dir.info(); err != nil {
+		dir.close()
 		return nil, "", fileErr("open", err)
 	} else {
 		inHome = os.SameFile(st, home.root)
@@ -149,28 +166,28 @@ restart:
 	for i, part := range parts {
 		next := filepath.Join(cur, part)
 		if RemoteOrDevice(next) {
-			dir.Close()
+			dir.close()
 			return nil, "", ErrRemoteOrDevice
 		}
 		if sourceLooked != nil {
 			sourceLooked(next)
 		}
-		fi, err := dir.Lstat(part)
+		fi, err := dir.lstat(part)
 		if err != nil {
-			dir.Close()
+			dir.close()
 			return nil, "", fileErr("open", err)
 		}
 		if sourceChecked != nil {
 			sourceChecked(next)
 		}
-		if fi.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
-			t, err := dir.Readlink(part)
+		if fi.mode&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			t, err := dir.readlink(part)
 			switch {
-			case err != nil && fi.Mode()&os.ModeSymlink != 0:
-				dir.Close()
+			case err != nil && fi.mode&os.ModeSymlink != 0:
+				dir.close()
 				return nil, "", fileErr("open", err)
 			case err == nil:
-				dir.Close()
+				dir.close()
 				links++
 				if links > maxSourceLinks {
 					return nil, "", errLinkLoop
@@ -191,42 +208,47 @@ restart:
 			// the last component: only a regular file is opened at all, so
 			// a FIFO or a device is never opened
 			if inHome {
-				dir.Close()
+				dir.close()
 				return nil, "", ErrHomeFile
 			}
-			if !fi.Mode().IsRegular() {
-				dir.Close()
+			if !fi.mode.IsRegular() {
+				dir.close()
 				return nil, "", ErrNotRegular
 			}
-			f, err := dir.OpenFile(part, os.O_RDONLY|oNonBlock, 0)
-			dir.Close()
+			// opened without following a link, and kept only if the
+			// handle is the regular file looked at (openFile)
+			f, err := dir.openFile(part, next, fi)
+			dir.close()
+			if errors.Is(err, errSwapped) {
+				return nil, "", errSwapped
+			}
 			if err != nil {
 				return nil, "", fileErr("open", err)
 			}
-			if st, err := f.Stat(); err != nil || !os.SameFile(st, fi) {
-				f.Close()
-				return nil, "", errSwapped
-			}
 			return f, next, nil
 		}
-		if !fi.IsDir() {
-			dir.Close()
+		if !fi.mode.IsDir() {
+			dir.close()
 			return nil, "", &FileError{Op: "open", Code: "not_found", err: os.ErrNotExist}
 		}
-		sub, err := dir.OpenRoot(part)
-		dir.Close()
+		sub, err := dir.openDir(part, next, fi)
+		dir.close()
+		if errors.Is(err, errSwapped) {
+			return nil, "", errSwapped
+		}
 		if err != nil {
 			return nil, "", fileErr("open", err)
 		}
-		if st, err := sub.Stat("."); err != nil || !os.SameFile(st, fi) {
-			sub.Close()
-			return nil, "", errSwapped
+		st, err := sub.info()
+		if err != nil {
+			sub.close()
+			return nil, "", fileErr("open", err)
 		}
-		if inHome && (home.copies == nil || !os.SameFile(fi, home.copies)) {
-			sub.Close()
+		if inHome && (home.copies == nil || !os.SameFile(st, home.copies)) {
+			sub.close()
 			return nil, "", ErrHomeFile
 		}
-		inHome = os.SameFile(fi, home.root)
+		inHome = os.SameFile(st, home.root)
 		dir, cur = sub, next
 	}
 	panic("unreachable")
@@ -318,7 +340,13 @@ func (s *Store) linkedHomeFile(st os.FileInfo, links int) bool {
 		if !d.Type().IsRegular() {
 			return nil
 		}
-		if fi, err := d.Info(); err == nil && os.SameFile(st, fi) {
+		fi, err := homeEntryInfo(d)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return nil // removed since it was listed: no longer a name of the file
+		case err != nil:
+			return err // cannot be compared: refuse
+		case os.SameFile(st, fi):
 			found = true
 			return filepath.SkipAll
 		}
@@ -326,6 +354,9 @@ func (s *Store) linkedHomeFile(st os.FileInfo, links int) bool {
 	})
 	return found || err != nil
 }
+
+// homeEntryInfo is d.Info; a test makes it fail.
+var homeEntryInfo = func(d fs.DirEntry) (fs.FileInfo, error) { return d.Info() }
 
 // StagedHomeFile reports whether a file staged for request req, as a
 // draft records it (path shown, SHA-256), looks like one of a2p2's own

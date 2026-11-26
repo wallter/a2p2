@@ -115,12 +115,16 @@ func TestWantsAnOlderBinaryReservedOverTheAuthorsShareStillLoadAndLapse(t *testi
 	}
 }
 
-// TestOneAuthorsWantsAreCountedByTheBytesNotYetReceivedAndAdmittedOneAtATime
-// (F10): a part of one byte leaves the rest of its want in the author's
-// share; wants issued at once never pass the share together; and a part
-// goes with its want when the want lapses.
+// TestAnAuthorsUnfinishedUploadsStillCountTheirWholeSizeInItsShare (F10;
+// D63, after the second review): bytes uploaded are checked only once a
+// file is whole, so an author that uploads all but one byte of garbage
+// for each want frees nothing of its share, which was the way past the
+// quarter to nearly the whole room budget. Wants issued at once never
+// pass the share together; a part goes with its want when the want
+// lapses; and once a want is gone its share is free again (the honest
+// case: a file received in full drops its want).
 // Requirements: L1
-func TestOneAuthorsWantsAreCountedByTheBytesNotYetReceivedAndAdmittedOneAtATime(t *testing.T) {
+func TestAnAuthorsUnfinishedUploadsStillCountTheirWholeSizeInItsShare(t *testing.T) {
 	s, _ := openTest(t)
 	ctx := context.Background()
 	s.SetFileBudgets(4000, 40000)
@@ -143,14 +147,15 @@ func TestOneAuthorsWantsAreCountedByTheBytesNotYetReceivedAndAdmittedOneAtATime(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.PartHave(ctx, p, 1); err != nil {
+	if err := s.PartHave(ctx, p, 899); err != nil {
 		t.Fatal(err)
 	}
-	// 899 still counted of the 1000 share
-	if err := want(2, 102); !errors.Is(err, ErrNoSpace) {
-		t.Fatalf("one byte freed the want's share: %v", err)
+	// all 900 still counted of the 1000 share, as the room's usage counts
+	// the part: 899 bytes received free nothing
+	if err := want(2, 101); !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("bytes received freed the want's share: %v", err)
 	}
-	if err := want(2, 101); err != nil {
+	if err := want(2, 100); err != nil {
 		t.Fatalf("what is left of the share: %v", err)
 	}
 	// another author's wants, issued at once: each fits alone, three fit together
@@ -176,6 +181,9 @@ func TestOneAuthorsWantsAreCountedByTheBytesNotYetReceivedAndAdmittedOneAtATime(
 	var has bool
 	if err := s.View(ctx, func(rd *Reader) (err error) { _, has, err = rd.FilePart(testRoom, msg, sha); return err }); err != nil || has {
 		t.Fatalf("the part outlived its want: %v %v", has, err)
+	}
+	if err := want(9, 900); err != nil {
+		t.Fatalf("the share of a want that went: %v", err)
 	}
 }
 

@@ -47,11 +47,6 @@ func fileIdent(f *os.File) (string, error) {
 	return fmt.Sprintf("%x:%x:%x", uint64(sys.Dev), uint64(sys.Ino), st.ModTime().UnixNano()), nil
 }
 
-// oNonBlock opens a source without waiting: a FIFO or a device swapped in
-// after the walk's look does not hang the open, and the walk then refuses
-// it as not the entry it looked at.
-const oNonBlock = syscall.O_NONBLOCK
-
 // driveRemote: Unix has no drive letters.
 func driveRemote(string) bool { return false }
 
@@ -62,7 +57,10 @@ func driveRemote(string) bool { return false }
 var sourceRoots = append([]string{"/dev", "/proc", "/sys", "/net"}, automountRoots...)
 
 // remoteOrDevice: a clean path at or under one of sourceRoots, compared
-// without case (macOS volumes usually ignore it).
+// without case (macOS volumes usually ignore it, and so can a Linux file
+// system: vfat, or ext4 with casefold). On a Linux root that keeps case
+// this also refuses a path such as /Net/x; that errs on the side of
+// refusing.
 func remoteOrDevice(p string) bool {
 	for _, r := range sourceRoots {
 		if len(p) >= len(r) && strings.EqualFold(p[:len(r)], r) && (len(p) == len(r) || p[len(r)] == '/') {

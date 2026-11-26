@@ -167,11 +167,13 @@ an invite.
   machine, and take care with whatever program opens it. A member that
   fetched a file keeps it after removal.
 - A member that writes a message with files can make your machine hold
-  at most a quarter of its room file budget for its files, counted by
-  the bytes it has not sent, for a day at a time: a request from the
-  author itself starts no carry job, and a part it left goes when the
-  want lapses or when the author edits the message. Several machines of
-  one owner can each take a quarter.
+  at most a quarter of its room file budget in files it has not finished
+  sending, each counted at its full size, for a day at a time: a
+  request from the author itself starts no carry job, and a part it left
+  goes when the want lapses or when the author edits the message. The
+  quarter bounds only these automatic reservations: files your agents
+  asked for, and files received in full, are not counted in it. Several
+  machines of one owner can each take a quarter.
 
 ### An agent or a program running as you
 
@@ -212,14 +214,22 @@ rails against mistakes and steered agents.
   that can make the machine connect to another host: on Windows anything
   but a drive letter and plain names (so no `\\host\share` or `\??\UNC\`
   path), on Unix `/dev`, `/proc`, `/sys`, `/net` and the macOS automount
-  points. Each part of a path is looked up in the directory opened
-  before it, so a directory swapped on the way is refused. The Windows
-  code has not been run on Windows. Any other file your user can read
-  can still be staged, and the person sees its full path, size and
-  SHA-256 before it leaves; a file with several names is said to have
-  them. Read the path before you approve. An agent learns only that a
-  send waits or was refused; it can still learn roughly how large a file
-  is, at the cost of requests you see. A network share you mounted, or a
+  points, so an honest file under one of them must be copied elsewhere
+  first. Each part of a path is looked up in the directory opened
+  before it. On macOS and Linux each part is opened without following a
+  link and kept only if it is what was looked at, so a link or a
+  directory swapped in on the way is refused before its target is
+  opened. On Windows a swapped link is opened before it is refused, and
+  the Windows code has not been run on Windows. Any other file your user
+  can read can still be staged, and the person sees its full path, size
+  and SHA-256 before it leaves; a file with several names is said to
+  have them. Read the path before you approve. A send is checked whole
+  before any path is opened, and a refusal after the paths are opened
+  and before a byte is copied (unreadable, too large, over the budget)
+  has the same words and takes the same steps, so an agent learns only
+  that a send waits or was refused. It can still learn roughly how
+  large a file is, at the cost of requests you see, and small timing
+  differences remain. A network share you mounted, or a
   drive letter you mapped, is used as any local path.
 
 ### Another user of this computer
