@@ -375,7 +375,7 @@ marks nothing seen. Results are compact JSON with `<`, `>` and `&` as
 written. Copy and handled reports stay in `a2p2 trace` and the page.
 
 A2 is checked by a proxy, compact definition bytes divided by four and
-rounded up: 3,979 bytes, 995 of the 1,000 allowed. `TestToolsGolden` checks
+rounded up: 3,994 bytes, 999 of the 1,000 allowed. The server also sends a short `instructions` text (at most 300 bytes) in its `initialize` result, outside that count (D54). `TestToolsGolden` checks
 the definitions match the protocol, and `TestToolDefinitionsFitTheTokenBudget`
 enforces the 4,000-byte limit. The count by each model family's own
 tokenizer has not been measured.

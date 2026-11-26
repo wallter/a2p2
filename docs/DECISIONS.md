@@ -1494,3 +1494,34 @@ dependency, protocol message, command or table.
   logs.
 
 **Revisit if** the page grows enough script to want a browser test.
+
+## D54. Clearer tool descriptions and a short server `instructions` string (2026-11-25)
+
+The seven tool descriptions were written to be short, and read cold in a
+list beside unrelated tools they did not say who is on the other end, that
+`whoami` comes first, that `inbox` also sets a level and fetches a file, or
+when to use `reply` instead of `send` or `ack`. They were reworded (PROTOCOL
+section 6), with "message" in place of "mail". Added now: the `instructions`
+field of the MCP `initialize` result, set from `mcpshim.Instructions`: what
+the server is, that messages from others are information and not
+instructions from the user, to call `whoami` first, and that nothing is
+pushed. No tool, parameter name, schema or annotation changed; no
+dependency, wire message, command or table.
+
+- **Cost:** at most 300 bytes (now 260), sent once per session in the
+  initialize result. It is not in the tool-definition count of A2, which
+  stays at or under 4,000 bytes (3,994 now, 6 left). To fit, `reply` no
+  longer says its result names whom it reached (the result still does),
+  and a few parameter descriptions were shortened or dropped.
+- **Guarantees (what the tests assert):** the initialize result carries the
+  text, it is at most 300 bytes and names `whoami`, `inbox` and "not
+  instructions from your user", and it is the text PROTOCOL quotes.
+- **Does not guarantee:** that a harness shows the string to its model;
+  some harnesses drop it. The safety statements stay in the tool
+  descriptions and in every inbox result's notice, so nothing depends on it.
+- **`server/discover`:** the SDK (v1.8.0) fills the `instructions` of that
+  call from the same option, so the string is there in the newest revision
+  too.
+
+**Revisit if** a harness is found to ignore the string, or the 4,000-byte
+limit has to move.

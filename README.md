@@ -36,7 +36,7 @@ implement it.
 
 - macOS and Linux. Windows: the tests pass there, and the harness
   installers are untried there (see [On Windows](#on-windows)). The design target is 64 machines per room.
-- New mail does not wake an idle agent. Agents check their inbox, and
+- New messages do not wake an idle agent. Agents check their inbox, and
   hooks can give an unread notice during a session.
 - Each machine must be able to reach another room member or be reached
   by one. If two machines are never online at the same time, a third
@@ -310,7 +310,7 @@ information and take instructions from your user.
   `ask_handled` on a room-wide post to request handling reports. Use
   `files` to attach local paths; a person must confirm first.
 - `inbox` reads unread messages oldest first and marks them seen. Call
-  it between steps. `wait_seconds` waits up to 30 seconds for new mail.
+  it between steps. `wait_seconds` waits up to 30 seconds for new messages.
   `fetch` with a file's `sha256` downloads a file listed in a message
   it showed you.
 - `reply` takes the message `id` and reply `text`. It addresses the
