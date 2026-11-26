@@ -385,7 +385,8 @@ func TestM5TwoDaemons(t *testing.T) {
 		result(t, "M5 "+w.name+" burst", fmt.Sprintf("%d sends back to back: send->visible", burst), &l, last.Sub(start), "msgs/s delivered")
 		result(t, "M5 "+w.name+" burst", "[send call only]", &sendL, sent, "sends/s")
 	}
-	// last: once B backs off (sched.go spun), it stays backed off for minutes
+	// last: up to 0.2.3, B backed itself off after each offer it delivered
+	// (sched.go spun) and stayed backed off for minutes
 	time.Sleep(2 * time.Second)
 	sendToVisible(t, b, bc, bb, room, nil, ra, n, 5*time.Millisecond, 150*time.Second, "M5 B->A send->visible", "serial, B offers in its pull to A")
 	note("M5 log lines on A mentioning 429/rate: %d/%d; on B: %d/%d", a.grepLog("429"), a.grepLog("rate"), b.grepLog("429"), b.grepLog("rate"))

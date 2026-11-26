@@ -18,10 +18,23 @@ package node
 //     until this machine's log of the room changes or a request from the
 //     peer, a current member, shows changed log heads (the Exchange keeps
 //     that state; refusalOf); 413 halves the offer; 429 and 503 wait their
-//     Retry-After. A waiting pull answered same well before its wait, with
-//     nothing stored here, counts as a failure for back-off: against a
-//     peer that answers at once, after 1 s doubling to 5 min, one request
-//     per room per 4 to 6 min.
+//     Retry-After.
+//   - Spins: an exchange that stored nothing here and did not wait (a same
+//     well before its wait, or a difference whose round was not clean) is
+//     backed off as a failure; against a peer that answers at once, after
+//     1 s doubling to 5 min, one exchange per room per 4 to 6 min. A wait
+//     held at least holdProof (twice the round trip, at most 1 s) and then
+//     answered same or stopped by a change ends the count (held).
+//   - Offers: an exchange that offered room changes, ended clean, and from
+//     whose answers the peer's progress is inferred (PullStats.Given) is
+//     excused (excused). Its closing request waits holdProof; a peer that
+//     holds it has held a wait. Otherwise, after an earlier held wait the
+//     exchange is not a spin and the next may follow at once, a further
+//     one before another held wait waits SchedPace, and with no held wait
+//     since the last spin it is a spin. That is how a machine that only
+//     connects out delivers its writes, at once to a peer that holds
+//     waits, and to one that does not, no faster than the back-off or one
+//     exchange per SchedPace.
 //
 // Clock, timers, jitter and transport are injected, so tests are
 // deterministic. Peers' addresses are the Exchange's AddrBook; Run keeps
@@ -43,6 +56,7 @@ const (
 	SchedProbe      = 10 * time.Second // the probe of a newly chosen rotating anchor
 	SchedBackoffMin = time.Second
 	SchedBackoffMax = 5 * time.Minute
+	SchedPace       = time.Second // between excused exchanges with no hold between them (excused)
 )
 
 // SchedOpts injects the clock, timers and jitter; zero values are the
@@ -79,6 +93,23 @@ type peerState struct {
 	until time.Time // not before
 	offer int       // offer limit after a 413; 0: the exchange's
 	spins int       // waiting pulls running that neither waited nor stored anything
+	// held: since its last spin the peer held a waiting pull of this
+	// machine's longer than an answer takes (holdProof); paced: an
+	// exchange was excused since that hold (excused).
+	held  bool
+	paced bool
+	rtt   time.Duration // per request, of its last exchange answered early
+	timed bool          // rtt was measured
+}
+
+// holdProof is how long a waiting pull must have lasted to show the peer
+// held it rather than answered it: more than twice the round trip last
+// measured, at most 1 s, and 1 s before one is measured.
+func (ps *peerState) holdProof() time.Duration {
+	if !ps.timed {
+		return SchedBackoffMin
+	}
+	return min(2*ps.rtt, SchedBackoffMin)
 }
 
 // roomSched is one room's anchors: the peer each is pulling from, and the
@@ -229,9 +260,15 @@ func (s *Scheduler) start(ctx context.Context, room string, gen int64) {
 			return
 		}
 		tried[peer] = true
-		if _, err := s.x.Pull(ctx, room, peer, PullOpts{Offer: true, OfferLimit: s.offerOf(room, peer)}); err != nil {
+		began := s.o.Now()
+		wake, _ := s.x.r.m.wakes.sub(room) // a change ends it early (Pull, Superseded); no wait to stop
+		st, err := s.x.Pull(ctx, room, peer, PullOpts{Offer: true, OfferLimit: s.offerOf(room, peer), Stop: wake})
+		if err != nil {
 			s.failed(room, peer, err)
 			continue
+		}
+		if st.Requests > 0 {
+			s.timed(room, peer, s.o.Now().Sub(began)/time.Duration(st.Requests))
 		}
 		s.succeeded(room, peer)
 		done++
@@ -271,8 +308,20 @@ func (s *Scheduler) anchor(ctx context.Context, room string, gen int64, slot int
 		}
 		offer := first || seq != offered
 		began := s.o.Now()
-		st, err := s.x.Pull(ctx, room, peer, PullOpts{Offer: offer, OfferLimit: s.offerOf(room, peer),
-			WaitMS: wait.Milliseconds(), Stop: wake})
+		// A change stops the wait only once it has lasted holdProof, when
+		// an answer would be back: a request with an offer abandoned in
+		// flight, again at every change, would never deliver it, and a
+		// wait stopped then shows the peer held it (heldFor).
+		pctx, done := context.WithCancel(ctx)
+		proof := s.proofOf(room, peer)
+		stop := s.stopAfter(pctx, wake, began, proof)
+		var confirm int64 // the closing request of an offer exchange waits as long as a hold must last
+		if offer {
+			confirm = max(proof.Milliseconds(), 1)
+		}
+		st, err := s.x.Pull(pctx, room, peer, PullOpts{Offer: offer, OfferLimit: s.offerOf(room, peer),
+			WaitMS: wait.Milliseconds(), ConfirmWaitMS: confirm, Stop: stop})
+		done()
 		switch {
 		case ctx.Err() != nil:
 			return
@@ -281,13 +330,35 @@ func (s *Scheduler) anchor(ctx context.Context, room string, gen int64, slot int
 				first, offered = false, seq
 			}
 			s.succeeded(room, peer)
-			// Progress is what was stored here; what was sent proves
-			// nothing. An exchange that stored nothing and did not wait
-			// (a same well before its wait, or a lasting difference whose
-			// round was not clean) is backed off as a failure.
+			// Progress is what was stored here. An exchange that stored
+			// nothing and did not wait (a same well before its wait, or a
+			// lasting difference whose round was not clean) is backed off
+			// as a failure: a spin. An exchange that offered new room
+			// changes, ended clean (same or superseded, not capped, nothing
+			// stalled or too large), and from whose responses the peer's
+			// progress is inferred (st.Given) goes to excused instead,
+			// which bounds it. That is how a machine that only connects
+			// out delivers its writes.
+			elapsed := s.o.Now().Sub(began)
 			stored := st.Stored+st.Repaired+st.Entries > 0
-			early := s.o.Now().Sub(began) < wait/2
-			s.spun(room, peer, !stored && (st.Same == 0 || early))
+			early := elapsed < wait/2
+			clean := (st.Same > 0 || st.Superseded) && !st.Capped && st.Stalled == 0 && st.TooLarge == 0
+			// The round trip per request, leaving out a closing request
+			// that carried a wait (it may have been held).
+			if n := st.Requests; st.ConfirmHeld > 0 && n > 1 && early {
+				s.timed(room, peer, (elapsed-st.ConfirmHeld)/time.Duration(n-1))
+			} else if early && n > 0 && st.ConfirmHeld == 0 {
+				s.timed(room, peer, elapsed/time.Duration(n))
+			}
+			switch {
+			case !stored && offer && st.Given > 0 && clean:
+				s.excused(room, peer, st.ConfirmHeld > 0 && st.ConfirmHeld >= proof)
+			default:
+				s.spun(room, peer, !stored && (st.Same == 0 || early))
+				if !early && st.Same > 0 {
+					s.heldFor(room, peer, elapsed)
+				}
+			}
 			if slot == slotRotating {
 				if probed {
 					s.rotate(room) // the end of a wait
@@ -295,6 +366,7 @@ func (s *Scheduler) anchor(ctx context.Context, room string, gen int64, slot int
 				probed = true
 			}
 		case errors.Is(err, ErrWaitStopped):
+			s.heldFor(room, peer, s.o.Now().Sub(began))
 			if slot == slotRotating {
 				s.rotate(room) // a cancellation
 			}
@@ -468,7 +540,86 @@ func (s *Scheduler) spun(room, peer string, spun bool) {
 		return
 	}
 	ps.spins++
+	ps.held = false
 	ps.until = now.Add(s.backoff(ps.spins))
+}
+
+// excused notes an exchange that offered new room changes and from which
+// the peer's progress was inferred (anchor). Its closing request waited
+// as long as a hold must last (PullOpts.ConfirmWaitMS); if the peer held
+// it (confirmed), that is a held wait: not a spin, and the count ends.
+// Otherwise, with a peer that has held a wait since its last spin (held),
+// the first such exchange is not a spin and may be followed at once, and
+// each further one before the peer holds a wait again puts the next
+// SchedPace later. Without such a hold it counts as a spin and backs off.
+// So a peer that answers every wait at once gets no more exchanges than
+// the back-off allows however often the room changes, one that held a
+// wait before, one exchange per SchedPace while the room keeps changing,
+// and one that holds waits is never held back.
+func (s *Scheduler) excused(room, peer string, confirmed bool) {
+	now := s.o.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ps := s.state(room, peer)
+	switch {
+	case confirmed:
+		ps.held, ps.paced, ps.spins = true, false, 0
+	case ps.held && !ps.paced:
+		ps.paced = true
+	case ps.held:
+		ps.until = now.Add(time.Duration(float64(SchedPace) * (0.8 + 0.4*s.o.Jitter())))
+	default:
+		ps.spins++
+		ps.until = now.Add(s.backoff(ps.spins))
+	}
+}
+
+// heldFor notes a waiting pull to peer that lasted d, answered same or
+// stopped: as long as holdProof shows the peer held it, which ends the
+// count of spins.
+func (s *Scheduler) heldFor(room, peer string, d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ps := s.state(room, peer); d >= ps.holdProof() {
+		ps.held, ps.paced, ps.spins = true, false, 0
+	}
+}
+
+// proofOf is peer's holdProof.
+func (s *Scheduler) proofOf(room, peer string) time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state(room, peer).holdProof()
+}
+
+// stopAfter is a channel closed when wake is and at least d has passed
+// since began, or never if ctx ends first.
+func (s *Scheduler) stopAfter(ctx context.Context, wake <-chan struct{}, began time.Time, d time.Duration) <-chan struct{} {
+	c := make(chan struct{})
+	go func() {
+		select {
+		case <-wake:
+		case <-ctx.Done():
+			return
+		}
+		if rest := began.Add(d).Sub(s.o.Now()); rest > 0 {
+			select {
+			case <-s.o.After(rest):
+			case <-ctx.Done():
+				return
+			}
+		}
+		close(c)
+	}()
+	return c
+}
+
+// timed notes the round trip per request of an exchange answered early.
+func (s *Scheduler) timed(room, peer string, d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ps := s.state(room, peer)
+	ps.rtt, ps.timed = d, true
 }
 
 func (s *Scheduler) succeeded(room, peer string) {

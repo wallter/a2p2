@@ -368,7 +368,11 @@ of every author in the sender's `Admitted` it holds anything of), 64 hex.
    admitted without history and holds headers where the other holds text)
    are therefore idle against each other after one round.
 4. A cut page, offer or log batch justifies another request; only something
-   stored, locally or as the other side acknowledges, counts as progress. A
+   stored, locally or as the other side acknowledges, counts as progress.
+   The server's acknowledgement is inferred from its summaries and counts
+   once for each request that gave something new; a request sent only for
+   the server's `more` or `log.more` advances only if it stored something
+   on the requester's side. A
    stream blocked by a refused record does not hold back other streams,
    including the same author's. Held and refused entries the peer cannot
    list in `extra` are sent at most once in an exchange. A continuation
@@ -410,7 +414,13 @@ Sizes are measured by `TestPullSizesInASixtyFourMachineRoomAfterThirtyDaysOfDail
 
 Requester on 200: discard if the room's local generation changed since the
 request; otherwise in one transaction apply `log.entries`, then `page`
-(section 2), then store what the response shows the server holds. Send the
+(section 2), then store what the response shows the server holds. If the
+server is a member here neither before `log.entries` nor after them (it
+was removed while the response was on the way), nothing of the response
+is stored and the exchange ends; a machine that is not a member here is
+not pulled from (T4, as for a request at step 4). The room counts as caught up (DESIGN 3) after an
+exchange whose last response names log heads all accepted here that are
+exactly this log's heads. Send the
 next request at once while differing authors are not covered, or `more`,
 `log.more` or its own offer was cut.
 
@@ -446,7 +456,7 @@ Error body: `{"error":"<code>","detail":"<≤ 200 bytes>"}`.
 | Probe of a rotating anchor | 10 s |
 | Back-off | 1 s doubling to 5 min, ±20 % jitter |
 | Per peer | one waiting pull per room (a new one releases the old); 4 other concurrent (a request counts until it enters a hold); 20 per s, burst 40 |
-| Requester pacing | a waiting pull answered `same` well before its wait, with nothing stored either way, counts as a failure for back-off |
+| Requester pacing | an exchange that stored nothing on the requester's side and did not wait (`same` well before its wait, or a round that was not clean) counts as a failure for back-off (a *spin*); a wait held at least twice the round trip (at most 1 s) and then answered `same` or abandoned for a local change ends the count. An exchange that offered the requester's room changes, ended clean (`same`, or abandoned after a round for a newer change; not capped, stalled or `too_large`), and whose answers show the server's progress (4.3 step 4: its log heads moved after accepted entries given for the first time, or, for the whole log resent after a refusal, name one of them; or its digest or detail of an offered author changed, at most once per request that gave something new) carries, on its later openings, a `wait_ms` as long as such a hold; a server that holds one of them until its wait ends shows it holds waits, and the exchange is not a spin and ends the count. If it answers at once: after an earlier hold, the first such exchange is not a spin, and each further one before another hold waits 1 s (±20 %); with no hold since the last spin it is a spin. A change stops a waiting pull only once it has lasted that hold, so an offer is not abandoned in flight. These are the requester's choices: no field or message is new, and a server since 0.2.0 holds any opening that carries `wait_ms` (step 9) |
 | Inbound connections | 256 of members of a room held here, at most 16 of one key; 32 of other keys ("strangers"); 64 still in the TLS handshake, and 16 more for source groups (IPv4 address or IPv6 /64) that completed a member's handshake in the last 24 h, at most 4 of them for one group |
 | Per source, outside the members' pool | 8 per IPv4 address or IPv6 /64, 16 per /56, 32 per /48, in the shared handshake slots or of strangers; a connection with no slot is closed at once. The 16 kept slots are not counted here; one there that does not prove a member's key is closed and its group is no longer known |
 | Server TLS handshake | 5 s for the handshake and the membership lookup after it; the pool is chosen once the handshake has finished, and a full pool closes the connection |

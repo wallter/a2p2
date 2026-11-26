@@ -1088,8 +1088,14 @@ type PullOpts struct {
 	// WaitMS, above 0, makes the exchange's first request a waiting pull
 	// (PROTOCOL 4.4 step 9): the server holds a same answer up to it.
 	WaitMS int64
+	// ConfirmWaitMS, above 0, makes each later opening request, once the
+	// peer's progress was seen (PullStats.Given), wait up to it: a peer
+	// that holds it shows that it holds waits (PullStats.ConfirmHeld).
+	ConfirmWaitMS int64
 	// Stop, closed while that first request waits, abandons it: Pull
 	// returns ErrWaitStopped (a local change re-issues it with an offer).
+	// Closed later, it ends the exchange after a round that stored
+	// nothing here (PullStats.Superseded).
 	Stop <-chan struct{}
 }
 
@@ -1111,6 +1117,24 @@ type PullStats struct {
 	Stalled   int  // continuations ended because they did not advance
 	TooLarge  int  // authors whose detail alone did not fit in a request
 	Capped    bool
+
+	// Given counts responses from which the peer's progress is inferred:
+	// after accepted log entries given for the first time in this
+	// exchange, its log heads moved from those last known, or, for the
+	// whole log resent after a refusal, name one of them (in heads or
+	// extra); or its digest or
+	// detail of an author offered in the round changed; and only if a
+	// request of the round gave something new since the last response
+	// that counted. It is inferred from the peer's summaries (PROTOCOL 4.3 step 4),
+	// not proof: another member may have relayed the same records first,
+	// and a peer can claim it at will.
+	Given int
+	// ConfirmHeld is the longest an opening sent with ConfirmWaitMS took
+	// to be answered same.
+	ConfirmHeld time.Duration
+	// Superseded: the exchange ended after a round with progress that
+	// stored nothing here, because Stop had closed (the room changed).
+	Superseded bool
 
 	// heads are the log heads the peer advertised in its last response.
 	heads []string
@@ -1178,11 +1202,29 @@ func (x *Exchange) Pull(ctx context.Context, room, peer string, o PullOpts) (Pul
 			x.pulled(room, peer, gen, st.heads)
 			return st, nil
 		}
+		// Rounds that stored nothing here, with the room changed since the
+		// exchange began: the next exchange offers the change, so this one
+		// ends instead of opening round after round to the cap.
+		if st.Stored+st.Repaired+st.Entries == 0 && closed(o.Stop) {
+			st.Superseded = true
+			x.pulled(room, peer, gen, st.heads)
+			return st, nil
+		}
 	}
 	// Only a peer changing all the time gets here: counted, not an error.
 	st.Capped = true
 	x.pulled(room, peer, gen, st.heads)
 	return st, nil
+}
+
+// closed says whether c is closed; a nil c never is.
+func closed(c <-chan struct{}) bool {
+	select {
+	case <-c:
+		return true
+	default:
+		return false
+	}
 }
 
 // pulled marks the room caught up (maySign) after an exchange with peer,
@@ -1194,7 +1236,12 @@ func (x *Exchange) pulled(room, peer string, gen int64, heads []string) {
 }
 
 // caughtUp marks room caught up with peer's log if peer is a current
-// member and every one of heads (what it advertised) is accepted here.
+// member, every one of heads (what it advertised last) is accepted here,
+// and they are this log's heads, as this machine would advertise them: a
+// list of older entries this log has gone past, which could hide newer
+// ones, opens nothing (as for a join, Joiner.verify; D64). A log here
+// ahead of the peer's gave the peer its entries in the exchange, so the
+// peer's last answer names the same heads unless it did not accept them.
 func (r *Rooms) caughtUp(room, peer string, gen int64, heads []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1206,6 +1253,9 @@ func (r *Rooms) caughtUp(room, peer string, gen int64, heads []string) {
 		if rl.state[h].State != store.LogAccepted {
 			return
 		}
+	}
+	if own, _ := rl.logHeads(); !sameSet(heads, own) {
+		return
 	}
 	rl.pulled = true
 }
@@ -1222,6 +1272,8 @@ type prepared struct {
 	offered  map[string]bool // authors of the records offered
 	offerCut bool
 	logCut   bool
+	gave     []string // ids of its accepted log entries not given earlier in the exchange
+	resent   bool     // its entries are the whole log, sent again after a refusal
 }
 
 // prepare builds an opening request (with seen if useSeen and still
@@ -1302,6 +1354,7 @@ func (x *Exchange) prepare(ctx context.Context, room, peer string, gen int64, ch
 		switch {
 		case rf != nil && rf.full:
 			q.Log.Entries, p.logCut, _ = rl.entriesFor(nil, nil, false, budget, acceptedOnly)
+			p.resent = true
 		case rf != nil:
 			// Refused even the whole log: none until something changes.
 		case pl == nil:
@@ -1312,6 +1365,17 @@ func (x *Exchange) prepare(ctx context.Context, room, peer string, gen int64, ch
 		}
 		for _, id := range unlisted {
 			sent["x:"+id] = true
+		}
+		// Entries given again (the peer did not take them) are no sign of
+		// progress, nor is evidence (held or refused here): only accepted
+		// entries given first in this exchange can be.
+		for _, w := range q.Log.Entries {
+			if e, err := core.ParseEntry(w); err == nil && !sent["g:"+e.ID()] {
+				sent["g:"+e.ID()] = true
+				if rl.state[e.ID()].State == store.LogAccepted {
+					p.gave = append(p.gave, e.ID())
+				}
+			}
 		}
 		budget -= wiresSize(q.Log.Entries)
 		if offering {
@@ -1627,11 +1691,11 @@ func chunks(own summary, base int, differ []string) (out [][]string, tooLarge []
 
 // round runs one round of an exchange and reports whether it made
 // progress: a record, text or entry stored here, or stored by the peer as
-// its response shows (its log heads moved after entries were given, or
-// its digest or detail of an author whose records were offered changed);
-// or, when it stored nothing, whether the peer's detail first learned in
-// it lets the next round offer something (4.3 step 3). Cuts only justify
-// the next request of the round; one that does not advance ends quietly.
+// its response shows (PullStats.Given); or, when it stored nothing,
+// whether the peer's detail first learned in it lets the next round offer
+// something (4.3 step 3). Cuts only justify the next request of the
+// round; one that does not advance ends quietly, and one sent only for
+// the peer's more advances only by what it stores here.
 // A round that stored nothing and was clean (nothing refused, skipped,
 // stalled or too large) leaves the peer's sum as seen.
 func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o PullOpts, st *PullStats,
@@ -1646,15 +1710,32 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 	// that differs from base.
 	digest, detail, baseDetail := map[string]string{}, map[string]string{}, map[string]string{}
 	learned := map[string][]store.StreamDetail{}
+	offered := map[string]bool{} // authors offered in this round
+	// owed: a request of this round gave something new (an offer, or log
+	// entries first given in the exchange) and no response has been taken
+	// as the peer's progress since. Only then is one taken so: each request
+	// that gives something earns at most one, so a peer whose summaries
+	// keep changing cannot keep a round going with nothing new given.
+	owed := false
 	send := func(chunk []string, snap string, useSeen bool) (prepared, *PullResponse, error) {
 		p, err := x.prepare(ctx, room, peer, gen, chunk, snap, useSeen, o.Offer, o.OfferLimit, base, sent, peerLog)
 		if err != nil {
 			return p, nil, err
 		}
+		if len(p.gave) > 0 || len(p.req.Offer) > 0 {
+			owed = true
+		}
 		waiting := o.WaitMS > 0 && st.Requests == 0 && snap == ""
 		if waiting {
 			p.req.WaitMS = min(o.WaitMS, MaxWaitMS)
 		}
+		// A later opening, once the peer's progress was seen, waits
+		// briefly: a peer that holds it shows that it holds waits.
+		confirm := !waiting && snap == "" && o.ConfirmWaitMS > 0 && st.Given > 0
+		if confirm {
+			p.req.WaitMS = min(o.ConfirmWaitMS, MaxWaitMS)
+		}
+		began := x.r.m.now()
 		if base == nil {
 			base = p.old
 			if base == nil {
@@ -1684,6 +1765,9 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 		}
 		if err := checkResponse(resp, p.req); err != nil {
 			return p, nil, errors.Join(err, x.refuse(ctx, room, peer, gen, CodeBadResponse, 1))
+		}
+		if confirm && resp.Same {
+			st.ConfirmHeld = max(st.ConfirmHeld, x.r.m.now().Sub(began))
 		}
 		return p, resp, nil
 	}
@@ -1718,22 +1802,41 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 		if a.gone {
 			return a, false, ErrPeerNotMember
 		}
-		moved := a.entries || a.stored+a.repaired > 0
-		if len(p.req.Log.Entries) > 0 && !resp.Same && p.heads != nil && !sameSet(p.heads, resp.Log.Heads) {
-			moved = true
+		// given: the response suggests the peer stored what it was given,
+		// inferred from its log heads and summaries (its word, not proof):
+		// its heads moved (or, after a refusal, name an entry) after
+		// accepted entries first given in this exchange; or its digest or detail of an author offered in
+		// this round changed.
+		given := false
+		if len(p.gave) > 0 && !resp.Same {
+			if p.heads != nil && !sameSet(p.heads, resp.Log.Heads) {
+				given = true
+			}
+			// After a refusal the peer's log is forgotten: heads that now
+			// name an entry of the log resent show it took them. (A first
+			// contact also knows no heads, but a peer that held the log
+			// already names them too, so it is not taken as a sign.)
+			for _, id := range p.gave {
+				if p.resent && (slices.Contains(resp.Log.Heads, id) || slices.Contains(resp.Log.Extra, id)) {
+					given = true
+				}
+			}
+		}
+		for au := range p.offered {
+			offered[au] = true
 		}
 		if p.req.Sum != "" && !resp.Same {
-			for au := range p.offered {
+			for au := range offered {
 				if resp.Digests[au] != digest[au] {
-					moved = true
+					given = true
 				}
 			}
 			digest = maps.Clone(resp.Digests)
 		}
 		for au, d := range resp.Detail {
 			j := string(mustJSON(d))
-			if p.offered[au] && j != detail[au] {
-				moved = true
+			if offered[au] && j != detail[au] {
+				given = true
 			}
 			if j != baseDetail[au] {
 				learned[au] = d
@@ -1742,6 +1845,11 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 			}
 			detail[au] = j
 		}
+		if given = given && owed; given {
+			st.Given++
+			owed = false
+		}
+		moved := given || a.entries || a.stored+a.repaired > 0
 		if moved {
 			progress = true
 		}
@@ -1773,9 +1881,13 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 	}
 	open := resp
 	fresh := a.entries // the room log changed: Admitted may have
-	// The opening again while its log or offer was cut.
+	// The opening again while its log or offer was cut. A request sent
+	// only because the peer said log more advances only if something was
+	// stored here: what it gives besides (records written meanwhile) does
+	// not keep the peer's word going.
 	for resp.Log.More || p.logCut || p.offerCut {
 		var moved bool
+		ours := p.logCut || p.offerCut
 		if p, resp, err = send(nil, "", false); err != nil {
 			return false, err
 		}
@@ -1787,7 +1899,7 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 			return progress, nil
 		}
 		open, fresh = resp, fresh || a.entries
-		if !moved {
+		if !moved || !ours && !a.here() {
 			st.Stalled++
 			clean = false
 			break
@@ -1854,7 +1966,9 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 					blocked[k], grew = true, true
 				}
 			}
-			if !moved && !grew {
+			// As for the opening: one sent on for the peer's more alone
+			// must store something here.
+			if !grew && !a.here() && (!moved || !p.offerCut && !p.logCut) {
 				st.Stalled++
 				clean = false
 				break
@@ -1984,6 +2098,13 @@ type appliedResp struct {
 	observed         bool // what the peer said it holds was stored
 }
 
+// errPeerGone: the answering peer is not a member here and its answer's
+// entries do not make it one (Exchange.apply); nothing of it is stored.
+var errPeerGone = errors.New("pull: the answering peer is not a member here")
+
+// here says whether the response stored something here.
+func (a appliedResp) here() bool { return a.entries || a.stored+a.repaired > 0 }
+
 // apply applies one response to the request p in one transaction: its log
 // entries, then, if the peer is still a member here, its page and what the
 // peer said it holds, dated when p was built (PROTOCOL 4.4): equal to
@@ -2000,7 +2121,15 @@ func (x *Exchange) apply(ctx context.Context, room, peer string, gen int64, p pr
 	now := r.m.now()
 	var a appliedResp
 	refused := map[string]int{}
+	// T4, as Exchange.serve and Rooms.receiveJoin: a peer's log entries
+	// count only if it is a member here before them or they make it one.
+	// One removed while its answer was on the way gets nothing stored: the
+	// batch is refused and the room's state rolls back.
+	wasMember := slices.Contains(rl.st.Members, peer)
 	commit := func(ctx context.Context, b *store.LogBatch, st members.State, look func(string) *core.VerifiedEntry) (int64, error) {
+		if !wasMember && !slices.Contains(st.Members, peer) {
+			return 0, errPeerGone
+		}
 		a = appliedResp{entries: b != nil}
 		var n int64
 		_, err := r.m.st.Exchange(ctx, room, gen, func(tx *store.Tx) error {
@@ -2052,6 +2181,9 @@ func (x *Exchange) apply(ctx context.Context, room, peer string, gen int64, p pr
 		return n, err
 	}
 	res, err := r.ingestWith(ctx, rl, gen, rawBytes(resp.Log.Entries), nil, commit)
+	if errors.Is(err, errPeerGone) {
+		return appliedResp{gone: true}, nil
+	}
 	if err != nil {
 		return appliedResp{}, err
 	}

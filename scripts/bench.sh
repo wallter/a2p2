@@ -81,6 +81,10 @@ while [ "$i" -le "$runs" ]; do
   A2P2_BENCH_BIN=$BIN A2P2_BENCH_OUT=$out/load-$i.tsv A2P2_BENCH_QUICK=$quick \
     $GO test -tags bench -count=1 -timeout 90m -run "^TestM?(${only:-M})" -v ./internal/bench > "$out/load-$i.log" 2>&1 || status=1
   grep -E '^(RESULT|NOTE|--- FAIL|FAIL)' "$out/load-$i.log" | sed 's/^RESULT  //; s/^NOTE    /  note: /'
+  if grep -q 'no tests to run' "$out/load-$i.log"; then
+    echo "bench: --only '$only' matches no load test" >&2
+    status=1
+  fi
   if [ -z "$only" ]; then
     echo
     echo "== run $i: micro (in process)"

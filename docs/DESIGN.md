@@ -165,7 +165,8 @@ index allows both branches of a fork.
 - Entries are passed on in causal order, evidence after them.
 - **Not modelled: pull before signing.** Since starting, a daemon signs no
   entry for a room until an exchange with a current member has left it
-  holding every log head that member advertised (rooms it created, and
+  holding every log head that member advertised last, and those are
+  exactly the heads of the log here, as for a join (rooms it created, and
   rooms where it is the only member, are exempt; a room it just joined is
   exempt only if the join's last page listed heads, all accepted here,
   from a machine that is a member here). It narrows
@@ -212,6 +213,10 @@ over pinned mutual TLS. See [Protocol section 4](PROTOCOL.md#4-pull).
 - **Requester.** It applies the response only if the room's local
   generation is the one the request was made under (it changes on leave and
   on join), then log entries, then the page [RM1, R4], in one transaction.
+  Like the server, it takes the log entries of a peer that is not a member
+  here only if they make it one (T4): an answer from a peer removed while
+  it was on the way stores nothing
+  (`TestAPullsAnswerFromAPeerRemovedWhileItWasOnTheWayStoresNothing`).
   Each side keeps the other's summary as a dated observation, the only
   source of copy reports [R5].
 
@@ -259,6 +264,56 @@ of a network.
 A server holds a waiting pull at most 60 s; client and server deadlines
 exceed it by 30 s. A rotating anchor is first probed with a 10 s pull; failure moves on.
 Waiting pulls to one peer share one HTTP/2 connection.
+
+**Pacing (PROTOCOL 4.6).** An exchange that stored nothing here and did
+not wait counts as a failure for back-off, a *spin*, so a peer that
+answers every wait at once gets one exchange per room per 4 to 6 minutes.
+A wait the peer held for at least twice the round trip (at most 1 s) ends
+the count. A local change stops a waiting pull only once it has lasted
+that long, so a request carrying an offer is never abandoned in flight
+again and again, and a stopped wait shows the peer held it.
+
+A machine that only connects out (N1) delivers its writes as offers in
+its own pulls, and the peer, having stored them, answers at once. Such an
+exchange is *excused* when it ended clean and its answers show the peer's
+progress: its log heads moved after accepted entries given for the first
+time (after a refusal, name one of them), or its digest or detail of an
+author offered changed. That is the peer's word, not proof, and counts
+once for each request that gave something new. Once it has shown
+progress, the exchange's closing request (the opening answered `same`)
+carries a short wait, as long as a hold must last; a peer that holds it
+has shown it holds waits, and the exchange is not a spin and ends the
+count. A server holds only a `same` answer, so this is the one moment
+when a peer can show that while the room keeps changing. If the peer
+answers it at once: after an earlier held wait, the first such exchange
+is not a spin and the next may follow at once, and each further one
+before the peer holds a wait again starts 1 s (±20 %) after it; with no
+held wait since the last spin, it is a spin. The trigger is any change
+of the room (a write here, records or entries from any member, files,
+pruning), and the bounds hold for all of them. Up to 0.2.3 every offer
+exchange was a spin, so a machine sending more often than about once a
+minute backed itself off from its peer, up to 5 minutes.
+
+Inside one exchange, the peer's word keeps a continuation going only
+while this machine gives it something new; a request sent only because
+the peer said `more` or `log.more` must store something here, and log
+entries the peer did not take are no sign of progress. So a peer that
+answers with ever-changing heads or digests ends the exchange after a few
+requests instead of holding it in a loop.
+
+Measured in tests with a fake clock and 100 ms requests
+(`internal/node/sched_outbound_test.go`): against a peer that stores
+every offer but answers every wait at once, while the room changes every
+1 s, 200 ms or 50 ms, from this machine or from another member, 2 to 14
+requests to it a minute (0.2.3's scheduler: up to 1,168, at 50 ms, as
+each change stopped a wait in flight); against
+one that held waits for a minute first and then answers them at once,
+11 to 104 (one exchange a second while the changes come every 50 ms).
+Messages of an outbound-only machine reach an honest listener within
+the bounds of
+`TestAnOutboundOnlyMachinesMessagesReachTheListenerAtOnceAtAnyPace`: 50 ms
+at any pace with no round trip; with 100 ms requests, 300 ms at human
+pace and 800 ms in a burst faster than an exchange.
 
 **Inbound connections.** A listener cannot know who connects until the TLS
 handshake proves the client's key, and any key completes one. So it does

@@ -48,6 +48,29 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   that still grows with the unread backlog. Results and their order are
   unchanged, and the database schema is not touched, so 0.2.0 to 0.2.3
   can still open the database.
+- **A machine no longer backs itself off from its peer by sending.**
+  Since 0.1.0, the exchange that carried a machine's new messages to a
+  peer as an offer stored nothing locally and returned at once, and the
+  scheduler counted it as a peer answering at once with nothing: it
+  backed that peer off for 1 s, then 2 s, doubling to 5 minutes, and
+  later messages waited for the back-off to end. Any machine sending more
+  often than about once a minute to a peer was affected; it hurt most a
+  machine that cannot be reached (`net outbound`, or a network that drops
+  inbound), whose offers are its only way out, at human pace too. Now
+  such an exchange, when the peer's answers show it stored the offer and
+  the peer holds the exchange's short closing wait, is not counted. A
+  peer that answers every wait at once is still backed off, whatever
+  changes the room (in tests with 100 ms requests and changes every 1 s to
+  50 ms: 14 requests to it a minute or fewer; 0.2.3 sent up to 1,168), and one
+  that held waits before gets at most one exchange a second. A peer whose
+  answers keep claiming progress no longer holds one exchange in a loop.
+  Measured over two daemons on loopback (`scripts/bench.sh --only M5`, one
+  run), B connecting out only, sending to A one message at a time: before,
+  7 of 1,000 arrived within the 150 s budget, and the median of those few
+  was 6.8 s; now all 1,000 arrive, median 21 ms, p95 1.0 s. The 1 s tail
+  is A's pull rate limit (429), which this does not change. A burst of
+  2,000 from B back to back all arrives, median 14.9 s, p95 18.7 s.
+  No wire change: 0.2.0 to 0.2.3 machines hold the closing wait too.
 
 ### Security
 
@@ -70,6 +93,17 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   run goes on from the last page read.
   Entries kept while the admin machine is not yet a member are checked
   again once a quarter page more of them is kept, not on every page.
+- **A pull's answer follows the same two rules.** Since 0.1.0, the log
+  entries of a pull's answer were written before the peer's membership was
+  checked, so a peer removed while its answer was on the way still had
+  its entries stored; and an exchange opened the `not_caught_up` gate when
+  every head the peer named was accepted here, even older entries this
+  log had gone past. Now the answer's entries count only if the peer is a
+  member here before or after them, or nothing of the answer is stored;
+  and the gate opens only when the peer's last answer names exactly the
+  heads of the log here. A machine whose log is ahead of its peer's gives
+  the peer its entries in the same exchange, so it still opens the gate
+  after one pull.
 - **A joined room is held under the label its person approved, and never
   as `local`.** Since 0.1.0, the label shown in a join preview was not
   compared with the room's signed create entry, and a room created on

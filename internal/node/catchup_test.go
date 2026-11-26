@@ -8,6 +8,7 @@ package node
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -149,5 +150,74 @@ func TestARejoinApprovalIsNotGatedOnCatchingUp(t *testing.T) {
 	}
 	if cf, err := a.r.Confirm(context.Background(), qs[0].ID, true); err != nil || cf.State != store.RequestApproved {
 		t.Fatalf("rejoin approval: %+v %v", cf, err)
+	}
+}
+
+// [D64, after integration] The exact-heads rule costs an honest machine
+// nothing when its log is ahead of the peer it pulls from: the exchange
+// gives the peer the entries it lacks, the peer's last answer names this
+// log's heads, and a restarted machine is caught up after one pull from a
+// member that was behind it.
+//
+// Requirements: T9
+func TestARestartedMachineAheadOfItsPeerIsCaughtUpAfterOnePull(t *testing.T) {
+	clock := lclock()
+	net := newMemNet()
+	a := newPNode(t, net, "a", newLNode(t, "a", clock))
+	b := newPNode(t, net, "b", newLNode(t, "b", clock))
+	d := newPNode(t, net, "d", newLNode(t, "d", clock))
+	room := a.create("team")
+	a.change(room, Change{Kind: core.EntryAdd, Target: b.id, Name: "bee", History: true})
+	a.change(room, Change{Kind: core.EntryAdd, Target: d.id, Name: "dee", History: true})
+	b.pin(room, a.lnode)
+	b.pull(room, a.lnode)
+	d.pin(room, a.lnode)
+	d.pull(room, a.lnode)
+	a.change(room, Change{Kind: core.EntryAdd, Target: junkNode(7), Name: "later", History: true})
+	b.mustPull(room, a, PullOpts{}) // b holds the later add; d does not
+	b.restartP()
+	if b.pulled(room) {
+		t.Fatal("caught up straight after a restart: the test shows nothing")
+	}
+	b.mustPull(room, d, PullOpts{})
+	if st := d.state(room); !slices.Contains(st.Members, junkNode(7)) {
+		t.Fatal("the exchange did not give d the entry it lacked")
+	}
+	if !b.pulled(room) {
+		t.Fatal("a machine ahead of its peer was not caught up after pulling from it")
+	}
+}
+
+// [D64, after integration] A current member whose last answer names log
+// heads that are older entries this log has gone past (here the create
+// entry, a list of ancestors that could hide newer entries) does not lift
+// the not_caught_up gate, even though every head it names is accepted
+// here; as for a join (TestJoinWhoseHeadsAreOlderEntriesDoesNotCountAsCaughtUp).
+// Its honest heads do.
+//
+// Requirements: T9
+func TestAPullWhoseHeadsAreOlderEntriesDoesNotCountAsCaughtUp(t *testing.T) {
+	a, b, net, room, q := restoredAdmin(t)
+	ws, err := b.r.Offer(room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.r.Receive(context.Background(), room, 0, ws...); err != nil {
+		t.Fatal(err) // a now holds every entry b does, and the gate is still shut
+	}
+	a.r.mu.Lock()
+	createID := a.r.rooms[room].createID
+	a.r.mu.Unlock()
+	net.tamper = func(_, _ string, resp *PullResponse) { resp.Log.Heads = []string{createID} }
+	if _, err := a.pullFrom(room, b, PullOpts{}); err != nil {
+		t.Fatalf("the exchange with older heads: %v", err)
+	}
+	if a.pulled(room) {
+		t.Fatal("an exchange whose heads are older entries opened the not_caught_up gate")
+	}
+	net.tamper = nil
+	a.mustPull(room, b, PullOpts{})
+	if cf := a.confirm(q.ID); cf.State != store.RequestApproved {
+		t.Fatalf("after an exchange with the log's heads: %+v", cf)
 	}
 }

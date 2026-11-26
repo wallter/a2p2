@@ -49,6 +49,12 @@ type recNet struct {
 	// limit, above 0, stalls every request after that many (until its
 	// context ends), so a scheduler that spins cannot spin for ever.
 	limit int
+	// delay, above 0, is each request's round trip: fake time passes
+	// before it reaches the server (or its context ends).
+	delay time.Duration
+	// refuse, if set and it returns an error, refuses a request with it
+	// before it reaches the server.
+	refuse func(from, to string, q *PullRequest) error
 }
 
 func (n *recNet) link(from string) PullTransport { return &recLink{n, n.memNet.link(from), from} }
@@ -63,10 +69,23 @@ func (l *recLink) Pull(ctx context.Context, peer string, q *PullRequest) (*PullR
 	l.n.mu.Lock()
 	l.n.log = append(l.n.log, sent{from: l.from, to: peer, room: q.Room, wait: q.WaitMS, offer: len(q.Offer), at: l.n.clock.Now()})
 	over := l.n.limit > 0 && len(l.n.log) > l.n.limit
+	delay, refuse := l.n.delay, l.n.refuse
 	l.n.mu.Unlock()
 	if over {
 		<-ctx.Done()
 		return nil, ctx.Err()
+	}
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if refuse != nil {
+		if err := refuse(l.from, peer, q); err != nil {
+			return nil, err
+		}
 	}
 	defer func() {
 		l.n.mu.Lock()
