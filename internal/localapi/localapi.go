@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/wallter/a2p2/internal/core"
@@ -665,6 +666,18 @@ type (
 		// does not load in this version: not served or pulled, nothing
 		// deleted. Absent when there are none.
 		Quarantined []Quarantined `json:"quarantined,omitempty"`
+		// Unattended counts the CLI's uses of --person away from a
+		// terminal or in an agent's shell since the daemon started.
+		// Absent when there were none, and from daemons before 0.2.4.
+		Unattended *Unattended `json:"unattended,omitempty"`
+	}
+	// Unattended is how often the person's identity was taken with
+	// --person where no person was seen typing, the last time and the
+	// command then. Kept in the daemon's memory only.
+	Unattended struct {
+		Count   int    `json:"count"`
+		Last    string `json:"last"`
+		Command string `json:"command"`
 	}
 	// Quarantined is one room set aside (node.Quarantine).
 	Quarantined struct {
@@ -681,6 +694,32 @@ type Info struct {
 	UIURL   func() string
 	PID     int
 	Stop    func() // asks the daemon to shut down
+	// Uses keeps the count of unattended --person uses; the daemon makes
+	// one for its process, so it outlives a run. Nil: Handler makes one.
+	Uses *PersonUses
+}
+
+// PersonUses counts the uses of --person away from a terminal or in an
+// agent's shell, in memory.
+type PersonUses struct {
+	mu   sync.Mutex
+	last Unattended
+}
+
+func (p *PersonUses) add(command string, at time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.last = Unattended{Count: p.last.Count + 1, Last: Time(at), Command: command}
+}
+
+func (p *PersonUses) get() *Unattended {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.last.Count == 0 {
+		return nil
+	}
+	u := p.last
+	return &u
 }
 
 // apiError is every refusal: the sentence, a code from node.ErrorCodes and
@@ -944,12 +983,17 @@ func statusNetwork(st node.StatusView) Network {
 // Handler serves the local API over s.
 func Handler(s *node.Surface, info Info) http.Handler {
 	mux := http.NewServeMux()
+	if info.Uses == nil {
+		info.Uses = &PersonUses{}
+	}
 	handle(mux, "register", func(ctx context.Context, r RegisterReq) (store.Agent, error) {
 		a, err := s.Register(ctx, r.Harness, r.Label, r.Cwd)
 		if err == nil && r.Unattended != "" && a.Label == node.HumanLabel {
 			// The record of a2p2 --person: the person's identity taken
-			// where no person was seen typing.
-			slog.Warn("acting as the person with --person, away from a terminal or in an agent's shell", "command", core.CleanLabel(r.Unattended), "agent", a.ID)
+			// where no person was seen typing. Status counts it.
+			command := core.CleanLabel(r.Unattended)
+			info.Uses.add(command, time.Now())
+			slog.Warn("acting as the person with --person, away from a terminal or in an agent's shell", "command", command, "agent", a.ID)
 		}
 		return a, err
 	})
@@ -1161,7 +1205,9 @@ func Handler(s *node.Surface, info Info) http.Handler {
 			}
 		}
 		st, err := s.Status(ctx, r.ShowNotice)
-		return StatusOf(st, s.Addrs(), info), err
+		out := StatusOf(st, s.Addrs(), info)
+		out.Unattended = info.Uses.get()
+		return out, err
 	})
 	// net records a person's networking decision, with the authority of
 	// confirm: the CLI asks for it at a terminal and no agent tool or hook

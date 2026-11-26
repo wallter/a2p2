@@ -253,8 +253,8 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   bound. Refusals of keys that share no room, and refused connections,
   are now logged at Debug, with one Info line a minute about refused
   connections; a member's refusals reach Info 5 at once, then one per
-  10 s per key. At Debug each refusal is still a line, and the log file
-  is still not rotated.
+  10 s per key. At Debug each refusal is still a line; the log file is
+  now rotated (below).
 - **`a2p2 install codex` no longer approves every a2p2 tool without
   asking.** Since 0.1.0 it added `default_tools_approval_mode = "approve"`
   to `[mcp_servers.a2p2]` in `~/.codex/config.toml`, so a Codex agent
@@ -424,12 +424,18 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   the person's questions as the person and mark them seen, so they left
   the person's list. Now an empty `--as` is an error. In a shell that
   Claude Code, Codex or Gemini CLI marks as its agent's, or with
-  `AI_AGENT` set, the CLI acts as that agent. Elsewhere `send`, `ack`
-  and an `inbox` that marks messages seen act as the person only at a
-  terminal or with the new `--person` flag. `a2p2 ui`, whose address
+  `AI_AGENT` set, the CLI acts as that agent (under `A2P2_NAME` when the
+  shell has it) and says on stderr which id it used. Elsewhere `send`,
+  `ack` and an `inbox` that marks messages seen act as the person only
+  when stdin or stderr is a terminal (so text piped in at a terminal
+  works) or with the new `--person` flag. `a2p2 ui`, whose address
   lets the page act as the person, is refused in an agent's shell and
-  away from a terminal unless `--person` is given. The daemon log
-  records `--person` used away from a terminal or in an agent's shell.
+  away from a terminal unless `--person` is given, and takes no
+  `--json`. Over SSH it opens nothing on the remote computer and prints
+  the address with the port to forward; a browser that cannot be started
+  is said, with the address. The daemon log records `--person` used away
+  from a terminal or in an agent's shell, and `status` and `doctor` show
+  how many times since the daemon started, with the last time.
   Scripts that read or sent as the person, or ran `ui`, without a
   terminal must add `--person` or name themselves with `--as`. This is a
   guard rail: any program running as you can still act as you.
@@ -453,13 +459,18 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   approve requests on the page. Now the address holds a code that works
   once and for 30 seconds; the page trades it for a session kept in the
   tab. A code used twice ends the session it gave, however late the
-  second use. `a2p2 ui --print` still prints the address alone on
+  second use. On Linux a code is refused to a connection that the kernel's socket
+  table, matched on both addresses and both ports, shows is another
+  user's; where that table cannot say (macOS, Windows, a cut-down
+  `/proc`), the code alone decides.
+  `a2p2 ui --print` still prints the address alone on
   standard output, and says on standard error that it works once. With
-  a daemon before this release still running, `a2p2 ui` opens nothing
-  and says to run `a2p2 stop`. A tab left open after its daemon stopped
-  no longer shows what another listener on its port answers, and sends
-  a message or a decision only right after a state from its own daemon
-  for its own session.
+  a daemon before this release still running, `a2p2 ui` opens and prints
+  nothing and says to run `a2p2 stop`. A tab left open after its daemon
+  stopped no longer shows what another listener on its port answers
+  (every answer names its run), forgets its session when it signs out,
+  and sends a message or a decision only right after a state from its
+  own daemon for its own session.
   A daemon whose page port was taken says so in its log.
 - **`daemon.log` no longer grows without end.** Since 0.1.0 another
   machine could make it grow (a refused request is a line). Once over
@@ -470,9 +481,12 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   macOS and Linux, a user who could change a directory above the a2p2
   home could put another home with their own socket at its path, which a
   running MCP session would then dial. a2p2 now refuses such a home and
-  names the directory, including one reached through links, and one
-  writable by a group other than your own private group (on macOS,
-  `staff`).
+  names the directory, including one reached through links: one another
+  user owns, one others can write without the sticky bit, or one a group
+  you are not in can write. A directory a group you are in can write (on
+  macOS, `staff`) is not refused; the log, `status` and `doctor` warn.
+  A directory no other user can reach (under a 0700 directory of yours,
+  as `~/Documents` is on macOS) is neither refused nor warned about.
 - **A device on the local network has less hold on port mapping.**
   Exposed since 0.2.0: a person who ran `a2p2 net on --map-port`, on a
   network with another device that answers as the router. That device

@@ -38,11 +38,16 @@ also writes a new random key to `local.key` in the home and refuses every
 local API request without it in the `A2P2-Local-Key` header, so only a
 process that can read the home can call the daemon. On macOS and Linux no
 key is written or asked for, and a home under a directory that another
-user owns or can change (no sticky bit; group write only for the user's
-own private group), or reached through a link another user owns, is
-refused, by the daemon and by every client before it dials. The path is
-walked one name at a time, following each link from the directory that
-holds it.
+user owns or can change (others' write without the sticky bit, or group
+write by a group the user is not in), or reached through a link another
+user owns, is refused, by the daemon and by every client before it
+dials. Group write by a group the user is in, other than the user's own
+private group, is accepted with a warning in the daemon's log, `status`
+and `doctor` (`daemon.HomeWarnings`). Only users who can reach a
+directory count: the walk keeps the search bits of the directories above
+each one, so a 0777 directory under a 0700 one of the user's is neither
+refused nor warned about. The path is walked one name at a
+time, following each link from the directory that holds it.
 
 The loopback page has no long-lived secret in any address. Each `status`
 call (and so `a2p2 ui`) gives the page's address with a new one-time
@@ -55,8 +60,16 @@ value kept with that session alone, and the page stops at a state with another,
 since a tab left open after its daemon stopped may reach another user's
 listener on the same port. After a failed state it makes no other call
 until a state names its run, and it reads a fresh state before each POST
-and download. `a2p2 ui` does not open the long-lived token address of a
-daemon before 0.2.4. A daemon started by a client writes `daemon.log` in
+and download. Every answer to a session also carries its run in the
+`A2P2-Run` header; the page draws no answer without it and signs out,
+forgetting the session in the tab's storage, at one with another run. On
+Linux a code is refused to a connection whose client socket, found by
+its whole four-tuple in `/proc/net/tcp` and `tcp6`, belongs to a user
+other than the daemon's own or root; where no single socket is found,
+and on other systems, the code alone decides. `a2p2 ui` neither
+opens nor prints the long-lived token address of a daemon before 0.2.4,
+takes no `--json`, and over SSH (`SSH_CONNECTION` set) opens nothing and
+names the port to forward. A daemon started by a client writes `daemon.log` in
 the home; the running daemon moves its last 10 MiB to `daemon.log.1`
 once it is over 10 MiB, checked at start and every 10 seconds, and
 empties it even if that copy fails.
@@ -627,13 +640,16 @@ set on bypassing it can; an OS-separated approver may come later.
 An explicitly empty `--as` is refused. In a shell whose environment shows
 a harness's agent (`CLAUDECODE`, `CODEX_THREAD_ID`, `CODEX_SANDBOX`,
 `GEMINI_CLI`, `AI_AGENT`) it acts as that agent, `<harness>-<directory>`
-as its MCP tools would in the same directory under the default label,
-and says so on stderr. Elsewhere `send`, `ack` and an `inbox` that marks
-entries seen act as the person only with stdin a terminal; `inbox
+as its MCP tools would in the same directory under the default label
+(or under `A2P2_NAME` when the shell has it), and says on stderr which
+id it used. Elsewhere `send`, `ack` and an `inbox` that marks
+entries seen act as the person only with stdin or stderr a terminal; `inbox
 --peek`, `--thread`, `history` and `fetch` need no terminal. `a2p2 ui`,
 whose address carries a one-time code that opens the page as the person, is refused in an agent's shell
-and away from a terminal. `--person` overrides each refusal; used away
-from a terminal or in an agent's shell, the daemon logs it as a warning. These
+and away from a terminal, with `--print` too. `--person` overrides each refusal; used away
+from a terminal or in an agent's shell, the daemon logs it as a warning
+and counts it in memory, and `status` and `doctor` show the count, the
+last time and the command. These
 are guard rails against mistakes and injected instructions: a program
 running as the user can pass `--person`, drive a terminal or call the
 socket.

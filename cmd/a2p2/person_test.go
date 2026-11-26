@@ -25,6 +25,9 @@ import (
 // of its variables decide who the CLI acts as, unless a test sets them.
 func TestMain(m *testing.M) {
 	getenv = func(string) string { return "" }
+	stderrTerminal = func() bool { return false }       // a test that wants one sets it
+	homeWarnings = func(string) []string { return nil } // never a look at the real home's directories
+	openURL = func(string) error { return errors.New("no browser is opened in tests") }
 	os.Exit(m.Run())
 }
 
@@ -258,27 +261,34 @@ func TestPersonFlagInAnAgentShellIsLoggedEvenAtATerminal(t *testing.T) {
 	}
 }
 
-// F11, F41: the page's address carries the token that lets the page act
+// F11, F41: the page's address carries the code that lets the page act
 // as the person, so a2p2 ui gives it as the person's identity is given:
 // not in an agent's shell, and away from a terminal only with --person,
-// which the daemon log records.
+// which the daemon log records. --json is refused in every case, since it
+// printed the daemon's whole status and the address after it.
 func TestUIGivesThePagesAddressOnlyWhereThePersonIs(t *testing.T) {
 	var log lockedBuffer
 	old := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&log, nil)))
 	t.Cleanup(func() { slog.SetDefault(old) })
-	const url = "http://127.0.0.1:7422/#token=0123456789abcdef"
+	const url = "http://127.0.0.1:7422/#c=0123456789abcdef"
 	d := newDaemonForCLIInfo(t, nil, localapi.Info{Version: "t", UIURL: func() string { return url }})
 	for _, tc := range []struct {
 		env        map[string]string
 		atTerminal bool
 	}{{map[string]string{"CLAUDECODE": "1"}, false}, {map[string]string{"CODEX_THREAD_ID": "x"}, true}, {nil, false}} {
 		inShell(t, tc.env)
-		for _, args := range [][]string{{"--print"}, {"--json"}} {
+		for _, args := range [][]string{{"--print"}, {}} {
 			out, _, err := d.run(t, tc.atTerminal, "", "ui", args...)
-			if err == nil || !strings.Contains(err.Error(), "--person") || strings.Contains(out, "token") {
+			if err == nil || !strings.Contains(err.Error(), "--person") || strings.Contains(out, "0123456789abcdef") {
 				t.Errorf("%v terminal=%v %q: %q %v", tc.env, tc.atTerminal, args, out, err)
 			}
+		}
+	}
+	inShell(t, nil)
+	for _, args := range [][]string{{"--json"}, {"--json", "--person"}} {
+		if out, _, err := d.run(t, true, "", "ui", args...); !errors.Is(err, errUsage) || out != "" {
+			t.Errorf("ui %q at a terminal: %q %v", args, out, err)
 		}
 	}
 	if _, _, err := d.run(t, true, "", "ui", "--print", "--as", "bot"); !errors.Is(err, errUsage) {
@@ -364,7 +374,7 @@ func TestStatusJSONLeavesOutThePageAddress(t *testing.T) {
 	if err != nil || string(got) != want {
 		t.Fatalf("got %q %v", got, err)
 	}
-	const url = "http://127.0.0.1:7422/#token=0123456789abcdef"
+	const url = "http://127.0.0.1:7422/#c=0123456789abcdef"
 	d := newDaemonForCLIInfo(t, nil, localapi.Info{Version: "t", UIURL: func() string { return url }})
 	raw, err = d.cl.CallRaw(context.Background(), "status", localapi.StatusReq{}, nil)
 	if err != nil || !strings.Contains(string(raw), "0123456789abcdef") {

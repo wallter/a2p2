@@ -2740,6 +2740,42 @@ pass.
   to be checked under the leave lock in `internal/node`, outside this
   change.
 
+**After the second review** (two reviewers of another model family):
+
+- `--person` away from a terminal was recorded only in the rotating
+  daemon log. The daemon now also counts it in memory, and `status`
+  carries `unattended` (`count`, `last`, `command`; one optional field
+  of the local API, absent when there were none and from older
+  daemons), which `status` and `doctor` print. It is needed now because
+  the log line alone is seldom read; it is not stored, so the count
+  starts again at each daemon start, and no schema changes.
+- A person who piped text in at a terminal (`echo hi | a2p2 send`) was
+  refused, since only stdin was checked. A person is now taken to be
+  there when stdin or stderr is a terminal; a harness's tool captures
+  both.
+- In a recognised agent's shell the CLI used the default label, another
+  mailbox than the agent's tools when their label was set. It now uses
+  `A2P2_NAME` when the shell has it, and its stderr line, printed at each
+  such call, says which id it used and that `--as` picks another. A label
+  set only in the harness's settings is not visible to the shell, so that
+  case still needs `--as`.
+- `a2p2 ui --json` printed the daemon's whole status, the address after
+  it, and opened the browser; `ui` now refuses `--json`. `--print` still
+  needs a terminal or `--person`, since whoever reads a printed address
+  can trade its code as a browser would: printing it is acting as the
+  person. Over SSH, `ssh -t` gives the command a terminal; with
+  `SSH_CONNECTION` set, `ui` opens nothing on the remote computer (whose
+  browser would use the code up) and names the port to forward. A
+  browser that cannot be started is now said, after the address.
+- Declined: `room leave`, `confirm`, `net`, `join` and `room files` do
+  not also refuse in a recognised agent's shell. They ask for a typed
+  answer at a terminal, which an agent's tool does not have, and a
+  person who runs them with `!` in Claude Code would be refused.
+- Still open: an agent whose harness sets none of the variables is
+  taken for the person, and acts as the person if its shell has a
+  terminal (SECURITY.md says so). Reads that mark nothing still read the
+  person's mail without a terminal.
+
 **Revisit if** a harness documents a variable for its agents' shells, an
 OS-separated approver arrives, or F14 changes how `a2p2 ui` gets its
 address.
@@ -2823,6 +2859,77 @@ every dial. The MCP shim does not warn when the daemon runs another
 version than it does (F72); `status` carries the daemon's version, and
 only `a2p2 ui` checks it so far. On Windows the directories above the
 home are not checked.
+
+**After the second review** (two reviewers of another model family):
+
+- **Home.** A stock macOS account whose home sat under a directory its
+  `staff` group could write, or a Linux account whose group could not be
+  named (a static binary and a directory-service account), was refused,
+  so a database left by 0.2.3 there could not be reached. Now a
+  directory above the home is refused only where another user can
+  replace the home: another owner (root aside), others' write without
+  the sticky bit, or write by a group this user is not in. Write by a
+  group this user is in is accepted with a warning (the daemon's log at
+  start, `status`, and a `warn` line in `doctor`, which does not fail),
+  since a2p2 cannot tell whether anyone else is in the group; this
+  user's own private group gives none. A test starts a daemon on an
+  existing home with messages under such a directory, then refuses it
+  under a 0777 one and finds the same messages after the `chmod`.
+  After the third review, a directory counts only if another user can
+  reach it: under a directory of this user's or root's with no search
+  bit for others (`~/Documents` on macOS is 0700), a 0777 directory is
+  neither refused nor warned about, since 0.2.3 did not check the
+  directories above the home and a database there would otherwise be
+  cut off. Each class is followed on its own (a group's members by the
+  group bit of that group's directories, everyone else by the other
+  bit); ACLs are not read.
+- **Page.** A code is single-use already: a second trade is refused and
+  ends the first's session, and re-running `a2p2 ui` gives a new code
+  and leaves earlier sessions alone. On Linux the daemon now finds the
+  user of the client socket in `/proc/net/tcp` and refuses a trade from
+  another user before looking at the code, so that user can neither use
+  nor spend it. After the third review the socket is found by its whole
+  four-tuple (both addresses and both ports, IPv4, IPv6 and IPv4-mapped
+  IPv6 forms, in `tcp` and `tcp6`): matched by ports alone, another user
+  could hold a socket on 127.0.0.2 with the same two ports as the
+  person's browser (loopback is all of 127.0.0.0/8) and be taken for the
+  person, or make the person be taken for them. The user counts as known
+  only when exactly one connected socket (TIME_WAIT and LISTEN lines
+  aside) matches; a table that cannot be read (a missing `tcp6` aside),
+  a line that does not parse, or two matches make it unknown, and no
+  match is read again twice, since a table read in chunks while sockets
+  change can miss a line. Root is not refused, as it can read the home
+  anyway. **Unknown allows the trade**, as before the check existed: the
+  check must never lock the person out of their own page, and where it
+  cannot be made (macOS and Windows have no such table, and a sound
+  lookup there would need a new dependency or a privileged call; a
+  container or a cut-down `/proc` on Linux) there is nothing to tell an
+  honest browser from another user's. So the check is defence in depth
+  on Linux only. The race between accept and the read is harmless: the
+  client's socket lives while its connection carries the request, a
+  closed one cannot receive the session, and a four-tuple in use cannot
+  be taken by a second socket. `/proc/net` is the daemon's own
+  (`/proc/self/net`), which hidepid does not hide. The uid comes from the
+  kernel's table, never from the request. A session is not tied to one connection, since a
+  browser opens several. Every answer to a session carries its run in an
+  `A2P2-Run` header, so a listener that took the port between two states
+  can no longer have a history, thread or file drawn; the page signs out
+  and also forgets its session in the tab's storage. 1,024 untraded
+  codes are kept instead of 64, since every `status` call (the CLI's
+  connect, the MCP shim) makes one. With a daemon before 0.2.4 running,
+  `ui --print` no longer prints its long-lived token address either.
+- **Still open.** Where the user at the other end is not known (macOS,
+  Windows, and on Linux a `/proc` that cannot be read or a lookup with
+  no single match), a local user who can read another process's
+  arguments during the code's 30 seconds, and trades it before the
+  browser does, holds a session until the browser's trade ends it, or
+  keeps it if the browser never trades. On macOS and Windows another
+  user cannot normally read the arguments of the person's processes; on
+  Linux they can unless `/proc` is mounted with hidepid, and there the
+  check refuses them whenever the lookup succeeds, which is the normal
+  case. A duplicated tab
+  shares the session, as browsers copy the tab's storage. `status` still
+  makes a code for any caller of the socket.
 
 **Revisit if** a browser can be handed an address without a command
 line on Linux, or the local API gains a call that makes codes only for

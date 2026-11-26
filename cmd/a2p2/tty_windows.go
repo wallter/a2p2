@@ -12,14 +12,17 @@ import (
 // shell, or a terminal such as mintty that is not a Windows console) is
 // not, so decisions are not taken there; use Windows Terminal, the console
 // or PowerShell.
-func isTerminal() bool {
+func isTerminal() bool { return isTerminalFile(os.Stdin) }
+
+// isTerminalFile asks the console whether f is one.
+func isTerminalFile(f *os.File) bool {
 	var mode uint32
-	return syscall.GetConsoleMode(syscall.Handle(os.Stdin.Fd()), &mode) == nil
+	return syscall.GetConsoleMode(syscall.Handle(f.Fd()), &mode) == nil
 }
 
-// openURL opens url in the default browser. rundll32 hands it to the
+// openBrowser opens url in the default browser. rundll32 hands it to the
 // registered handler as is; "cmd /c start" would cut it at characters cmd
 // treats as special.
-func openURL(url string) {
-	_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+func openBrowser(url string) error {
+	return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
 }

@@ -215,22 +215,38 @@ rails against mistakes and steered agents.
   Codex, Gemini CLI, or any shell with `AI_AGENT` set; only the Claude
   Code variables were seen in a real shell, the others were read from
   the harnesses' binaries), it acts as that agent: as `<harness>-<directory>`, the id the agent's MCP tools have
-  when they run in the same directory under the default label. Elsewhere
-  `send`, `ack` and an `inbox` that marks messages seen act as you only
-  at a terminal. `a2p2 ui`, whose address carries the one-time code that
-  lets the page act as you, is refused in such a shell and away from a
-  terminal. `--person` overrides each refusal; when it is used away from
-  a terminal or in such a shell, the daemon log records the command. This
-  stops an agent with a shell, or a script, from answering your
-  questions, taking them off your list or taking the page's address by
-  mistake or because a message told it to. It is not a boundary: any
-  program running as you can pass `--person`, drive a terminal, unset
-  those variables or call the socket, whose `status` call still returns
-  the address. The agent of a harness a2p2 does not recognise reads as
-  you, and acts as you if its shell has a terminal.
+  when they run in the same directory under the default label, or under
+  `A2P2_NAME` when the shell has it. It says on stderr which id it used;
+  if the agent's tools were given another label in the harness's
+  settings, that id is another mailbox, and `--as` picks the right one.
+  Elsewhere `send`, `ack` and an `inbox` that marks messages seen act as
+  you only when stdin or stderr is a terminal (so `echo hi | a2p2 send`
+  at a terminal works). `a2p2 ui`, whose address carries the one-time
+  code that lets the page act as you, is refused in such a shell and
+  away from a terminal, `--print` too, since whoever reads the address
+  can use the code; over SSH, `ssh -t` gives it a terminal, and it then
+  opens nothing on the remote computer and prints the address to open
+  through a forwarded port. `--person` overrides each refusal; when it
+  is used away from a terminal or in such a shell, the daemon log records
+  the command and `status` and `doctor` show how many times since the
+  daemon started, the last time and the command. This stops an agent
+  with a shell, or a script, from answering your questions, taking them
+  off your list or taking the page's address by mistake or because a
+  message told it to. It is not a boundary: any program running as you
+  can pass `--person`, drive a terminal, unset those variables or call
+  the socket, whose `status` call still returns the address. The count
+  starts again when the daemon restarts.
+- A limit to know: an agent whose harness a2p2 does not recognise (none
+  of the variables above is set) is taken for you. It reads your inbox,
+  and if its shell has a terminal, as some harnesses give their agents,
+  it sends, acks and opens the page as you without `--person`. Give such
+  an agent its own name with `--as`, or keep it out of your shell.
 - `room leave` deletes the room's data here and asks at a terminal
   first, naming the room by its id. `status --json` leaves out the
-  page's address and its code; `ui --print` prints it.
+  page's address and its code; `ui --print` prints it. `ui` takes no
+  `--json`. With a daemon from before 0.2.4 still running, `ui` neither
+  opens nor prints its address, which carries that daemon's long-lived
+  token, and says to run `a2p2 stop`.
 - What an agent can attach. Text in a room can steer an agent into
   naming a path for a send. a2p2 refuses a2p2's own files (the machine
   key, the local key, the database, anything under the home but agents'
@@ -272,27 +288,42 @@ rails against mistakes and steered agents.
   that works once and for 30 seconds; the page trades it for a session
   kept in that browser tab, which ends when the daemon stops. On Linux the
   address is in the command line of `xdg-open` and of a browser it
-  starts, which other users can read. Such a user who reads it and trades
-  it before your browser does gets a session; your page then says the
-  link was used already, that session is ended and the daemon's log says
-  so. On a shared machine, run `a2p2 ui --print` and paste the address
+  starts, which other users can read. On Linux the daemon looks up which
+  user opened the connection, by the connection's two addresses and two
+  ports in `/proc/net/tcp` and `tcp6`, and refuses to trade a code for
+  any user but its own or root, leaving the code good for your browser.
+  This is defence in depth on Linux only. Where it cannot tell (macOS,
+  Windows, a `/proc` it cannot read, or no single matching socket), the
+  code alone decides, so you are never locked out of your page: then a
+  user who reads the code from a process list within its 30 seconds and
+  trades it before your browser does gets a session; your page then says the link was used already, that
+  session is ended and the daemon's log says so. A tab copied with the
+  browser's duplicate command shares the session, as the browser copies
+  the tab's storage. On a shared machine, run `a2p2 ui --print` and paste the address
   into a browser that is already open. A program running as your user
   can still get a code from `a2p2 status` and decide on the page (a guard
   rail, as for the socket). If another user takes the page's port first,
   the daemon serves on another one and its log says so. A tab left open
-  from an earlier run refuses what a listener answers unless it names
-  the run given with that tab's own session,
+  from an earlier run draws nothing a listener answers unless the answer
+  names the run given with that tab's own session (each answer carries
+  it in a header), signs itself out and forgets the session otherwise,
   and sends a message, a decision or a download request only right after
   a state from its own daemon process; a listener that takes the port in
   the moment between that check and the request still receives it.
-- The a2p2 home and every directory above it must be writable only by
+- The a2p2 home and every directory above it should be writable only by
   you. On Unix a2p2 refuses a home under a directory that another user
-  owns (root aside) or can write without the sticky bit, or that its
-  group can write unless the group is your own private group (named as
-  you; on macOS `staff` is not). Links on the way are followed one at a
-  time and each must be yours or root's. On Windows the directories above
-  the home are not checked. A client checks the home when it connects,
-  and does not check which user serves the socket it dials.
+  owns (root aside), that others can write without the sticky bit, or
+  that a group you are not in can write. Under a directory that a group
+  you are in can write (on macOS `staff`, which holds every account), it
+  starts, and the daemon's log, `status` and `doctor` warn: anyone else
+  in that group could replace the home. Your own private group (named as
+  you) gives no warning. A directory other users cannot reach, because a
+  directory of yours or root's above it gives them no search bit (on
+  macOS `~/Documents` is 0700), is neither refused nor warned about; ACLs
+  are not read, so an ACL that lets another user pass is not seen. Links
+  on the way are followed one at a time and each must be yours or root's. On Windows the directories above the
+  home are not checked. A client checks the home when it connects, and
+  does not check which user serves the socket it dials.
 
 ## What `a2p2 install` approves and writes
 
