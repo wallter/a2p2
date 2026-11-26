@@ -2,7 +2,7 @@ package mcpshim
 
 // Group G of the security review (2026-11-25): what an agent reads says
 // which messages this machine wrote, which "human" is this machine's
-// person and which room is the local one (D-NEW-G-mcp-identity).
+// person and which room is the local one (D65).
 
 import (
 	"context"

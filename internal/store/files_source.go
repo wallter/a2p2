@@ -239,7 +239,7 @@ var errSwapped = &FileError{Op: "open", Code: "changed"}
 // handle path of a file reached through a drive letter that names a
 // network share the person mapped (Windows: \\server\share\x for Z:\x).
 // That share is already connected, and it is used as any local path, as a
-// network file system mounted on Unix is (D-NEW-H-files). driveRemote
+// network file system mounted on Unix is (D63). driveRemote
 // says whether a drive root is such a share.
 func mappedShare(resolved, shown string, driveRemote func(root string) bool) bool {
 	if len(resolved) < 3 || resolved[1] != ':' || windowsRemoteOrDevice(resolved) {

@@ -3,7 +3,7 @@ package node
 // Group G of the security review (2026-11-25): what an agent is shown says
 // plainly which messages this machine wrote, which "human" is this
 // machine's person, which machines share a short id and which room is
-// the local one (decision D-NEW-G-mcp-identity).
+// the local one (decision D65).
 
 import (
 	"context"

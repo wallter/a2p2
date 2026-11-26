@@ -2,7 +2,7 @@ package node
 
 // How the surfaces write who wrote a message and which room it is in, so
 // that a model or a person cannot take another machine's mail for this
-// machine's (decision D-NEW-G-mcp-identity):
+// machine's (decision D65):
 //
 //   - Here on every entry says whether its author is this machine,
 //     compared by the full machine key, never by the short id.

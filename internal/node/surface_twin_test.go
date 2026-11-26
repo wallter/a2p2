@@ -1,6 +1,6 @@
 package node
 
-// Group G (D-NEW-G-mcp-identity): two machines whose keys differ but whose
+// Group G (D65): two machines whose keys differ but whose
 // short ids (the first 8 hex characters) are the same. The key names
 // below were found by a birthday search over newLNodeAs seeds; both keys
 // sign real records here, so these tests exercise every read path with a

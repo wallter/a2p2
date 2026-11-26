@@ -2138,7 +2138,7 @@ would run the workflow, and the fixes need no protocol change.
 immutable releases or a required environment here, the attestation check
 can be done without `gh`, or a mixed-version chaos run is added.
 
-## D-NEW-N-records. Replaced text is marked, answers are tied to the text shown, and peer hints are bounded (2026-11-25)
+## D62. Replaced text is marked, answers are tied to the text shown, and peer hints are bounded (2026-11-25)
 
 A security review showed that the author of a message could replace it
 after a reader answered, and every view but the inbox then showed the
@@ -2208,7 +2208,7 @@ ran (F70). Rooms that span owners make the first three real now.
 **Revisit if** a record format change is due (carry the version a
 reply answers), or a schema change lets records keep their arrival time.
 
-## D-NEW-H-files. What may be staged, and what one author can reserve (2026-11-25)
+## D63. What may be staged, and what one author can reserve (2026-11-25)
 
 A security review found four gaps in attachments (F10, F23, F33/F40,
 F35). Rooms now span owners, so text from another owner's member can
@@ -2298,7 +2298,7 @@ for files. Each gap needs only that.
 **Revisit if** the Windows paths are run, a harness sandbox gives agents
 the socket without file access, or owner sides exist.
 
-## D-NEW-D-join-labels. A join into a held room counts only from a member, and a joined room keeps the label approved (2026-11-25)
+## D64. A join into a held room counts only from a member, and a joined room keeps the label approved (2026-11-25)
 
 A security review showed two flaws in the joiner (F7, F12). A machine
 that is not a member of a room this machine holds, such as a removed
@@ -2380,7 +2380,7 @@ after D57, which lets a receipt rule land without stopping a start.
 **Revisit if** rooms gain a rename, a second built-in label is reserved,
 or a joiner reports a refused join of a room it holds.
 
-## D-NEW-G-mcp-identity. What an agent reads says who wrote it and which room it is (2026-11-25)
+## D65. What an agent reads says who wrote it and which room it is (2026-11-25)
 
 A security review and a council of models found that an agent could not
 tell this machine's mail from another machine's. MCP entries left out the
@@ -2489,7 +2489,7 @@ to pass another owner's text off as the local person's.
 names, the short id is lengthened, or a harness shows that models still
 take another machine's `human` for their person.
 
-## D-NEW-F-cli-person. The CLI takes the person's identity only where a person is likely (2026-11-25)
+## D66. The CLI takes the person's identity only where a person is likely (2026-11-25)
 
 A security review found that the CLI acted as `human@<own id>` whenever
 `--as` was left out, and that `--as ""` counted as left out (F11). That
@@ -2557,7 +2557,7 @@ pass.
 OS-separated approver arrives, or F14 changes how `a2p2 ui` gets its
 address.
 
-## D-NEW-I-daemon-token. A one-time code opens the page, the daemon log is rotated, and a home under a shared directory is refused (2026-11-25)
+## D67. A one-time code opens the page, the daemon log is rotated, and a home under a shared directory is refused (2026-11-25)
 
 The security review of 2026-11-25 found that the page's address carried
 its token for the daemon's whole run (F14). `a2p2 ui` hands that address
@@ -2641,7 +2641,7 @@ home are not checked.
 line on Linux, or the local API gains a call that makes codes only for
 `a2p2 ui`.
 
-## D-NEW-L-portmap. Port mapping checks what a host answering as the router says (2026-11-25)
+## D68. Port mapping checks what a host answering as the router says (2026-11-25)
 
 A security review (F61 to F66) showed that a device on the same network
 as a machine that ran `net on --map-port` could answer as the router. One
@@ -2721,7 +2721,7 @@ address in an invite reaches other owners' joiners.
 **Revisit if** the owner decides on invites or permanent leases, a
 dial-back can tell a relayed connection, or port mapping is removed.
 
-## D-NEW-M-team-script. The team launcher keeps its state from other users and its options from manifest values (2026-11-25)
+## D69. The team launcher keeps its state from other users and its options from manifest values (2026-11-25)
 
 A security review found three gaps in `scripts/team` (F74 to F76). The
 state directory was checked only by its owner, so another user who made

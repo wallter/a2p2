@@ -506,7 +506,7 @@ that only the local room reads as `local` and no two rooms read alike
 repeated until all differ), and a room name that could mean two rooms
 is refused; the page and the CLI keep drawing rooms
 that read alike their own way (D58). `room create` refuses `local` in
-any case. Nothing here changes what is stored or accepted (D-NEW-G-mcp-identity).
+any case. Nothing here changes what is stored or accepted (D65).
 
 A2 is checked by a proxy, compact definition bytes divided by four and
 rounded up: 3,991 bytes, 998 of the 1,000 allowed. The server also sends a short `instructions` text (at most 300 bytes) in its `initialize` and `server/discover` results, outside that count (D54). `TestToolsGolden` checks
