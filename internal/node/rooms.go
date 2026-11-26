@@ -244,16 +244,20 @@ func (r *Rooms) quarantine(room, label, reason string) {
 	if r.quarantined == nil {
 		r.quarantined = map[string]Quarantine{}
 	}
-	r.quarantined[room] = Quarantine{Room: room, Label: r.ShownLabel(room, label), Reason: reason}
+	r.quarantined[room] = Quarantine{Room: room, Label: label, Reason: reason}
 }
 
-// Quarantined lists the rooms set aside, in room id order.
+// Quarantined lists the rooms set aside, in room id order, each label as
+// ShownLabel shows it (read after smu is released: smu is a leaf).
 func (r *Rooms) Quarantined() []Quarantine {
 	r.smu.Lock()
-	defer r.smu.Unlock()
 	out := make([]Quarantine, 0, len(r.quarantined))
 	for _, id := range sortedIDs(r.quarantined) {
 		out = append(out, r.quarantined[id])
+	}
+	r.smu.Unlock()
+	for i := range out {
+		out[i].Label = r.ShownLabel(out[i].Room, out[i].Label)
 	}
 	return out
 }
@@ -606,7 +610,7 @@ func (r *Rooms) PinRoom(ctx context.Context, createWire []byte) (string, error) 
 // only: a room stored under an older version still loads, and is shown
 // through ShownLabel.
 func remoteLabelProblem(label string) string {
-	if LabelKey(label) == LocalLabel {
+	if reservedLocal(label) {
 		return "its label reads as " + LocalLabel + ", the name of this machine's own room"
 	}
 	if DisplayHidden(label) {
@@ -615,18 +619,33 @@ func remoteLabelProblem(label string) string {
 	return ""
 }
 
-// ShownLabel is how room id's label is shown on this machine. A room
-// other than this machine's local room whose label reads as local
-// (stored by an older version, or created here) is shown with its id,
-// so that its messages never read as the local room's.
-func (r *Rooms) ShownLabel(id, label string) string { return shownLabel(r.m.ID, id, label) }
+// ShownLabel is how room id, stored with label, is shown to a person on
+// this machine (room info, request texts, quarantine). A room other than
+// this machine's local room whose label reads as local (stored by an
+// older version) is shown as ShownLabels shows it to agents, among every
+// room held here: "local#" and the start of its id, never local, so that
+// its messages never read as the local room's and the label shown names
+// it again. Other labels are shown as stored; the page and the CLI draw
+// rooms whose labels read alike their own way (D58).
+func (r *Rooms) ShownLabel(id, label string) string {
+	return shownLabel(context.Background(), r.m.st, r.m.ID, id, label)
+}
 
-// shownLabel is ShownLabel on machine self.
-func shownLabel(self, id, label string) string {
-	if id != localRoomID(self) && LabelKey(label) == LocalLabel {
-		return label + " (room " + id + ", not this machine's local room)"
+// shownLabel is ShownLabel on machine self, whose rooms st holds. If the
+// rooms cannot be read, id is shown as ShownLabels shows it beside the
+// local room alone, so the local rule still holds.
+func shownLabel(ctx context.Context, st *store.Store, self, id, label string) string {
+	if id == localRoomID(self) || !reservedLocal(label) {
+		return label
 	}
-	return label
+	stored := map[string]string{}
+	if rs, err := st.LogRooms(ctx); err == nil {
+		for _, x := range rs {
+			stored[x.ID] = x.Label
+		}
+	}
+	stored[id] = label
+	return ShownLabels(localRoomID(self), stored)[id]
 }
 
 // errServerNotMember: a join answer for a room held here came from a

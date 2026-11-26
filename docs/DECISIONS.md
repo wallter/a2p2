@@ -2341,7 +2341,9 @@ after D57, which lets a receipt rule land without stopping a start.
   the room stays. The preview reads the room and its generation in one
   step, so a pin cannot slip between them. A stored room labelled
   `local` that is not this machine's local room is shown with its id
-  (`Rooms.ShownLabel`) in room info, quarantine, inbox labels, unread
+  (`Rooms.ShownLabel`, which since D65 asks `ShownLabels`, so it reads
+  `local#` and the first 8 hex of the id, as agents see it) in room
+  info, quarantine, inbox labels, unread
   counts, levels, request texts (both where they are shown and where an
   approval compares them) and `ResolveRoom`, so `local` resolves only to
   the local room. An invite for such a room is refused at the preview:

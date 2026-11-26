@@ -1429,6 +1429,10 @@ func (s *Surface) Unread(ctx context.Context, agent, room string, lines bool) (U
 	if err != nil {
 		return UnreadView{}, err
 	}
+	shown, err := s.roomLabels(ctx)
+	if err != nil {
+		return UnreadView{}, err
+	}
 	seen := map[string]bool{}
 	for i, r := range rs {
 		es := s.markWith(x, byRoom[i])
@@ -1436,7 +1440,7 @@ func (s *Surface) Unread(ctx context.Context, agent, room string, lines bool) (U
 			continue
 		}
 		u.Count += len(es)
-		u.Rooms = append(u.Rooms, RoomCount{Room: r.ID, Label: shownLabel(s.m.ID, r.ID, r.Label), Count: len(es)})
+		u.Rooms = append(u.Rooms, RoomCount{Room: r.ID, Label: shown[r.ID], Count: len(es)})
 		for _, e := range es {
 			if !seen[e.From] {
 				seen[e.From] = true

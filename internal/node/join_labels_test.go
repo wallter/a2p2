@@ -317,7 +317,7 @@ func TestStoredRoomLabelledLocalStillOpensAndIsNotShownAsTheLocalRoom(t *testing
 		t.Fatalf("local resolves to %q %v, want this machine's local room %q", id, err, e.s.local)
 	}
 	shown, err := e.s.roomLabel(ctx, room)
-	if err != nil || shown == LocalLabel || !strings.Contains(shown, room) {
+	if err != nil || shown != LocalLabel+"#"+roomTag(room) {
 		t.Fatalf("shown label %q %v", shown, err)
 	}
 	if id, err := e.s.ResolveRoom(ctx, room); err != nil || id != room {
@@ -790,7 +790,7 @@ func TestLegacyRoomLabelledLocalIsShownWithItsIdEverywhere(t *testing.T) {
 	y.send(room, "yan", "from the other machine")
 	b.mustPull(room, y, PullOpts{})
 	shown := s.r.ShownLabel(room, LocalLabel)
-	if shown == LocalLabel || !strings.Contains(shown, room) {
+	if shown != LocalLabel+"#"+roomTag(room) {
 		t.Fatalf("shown %q", shown)
 	}
 
@@ -850,5 +850,75 @@ func TestLegacyRoomLabelledLocalIsShownWithItsIdEverywhere(t *testing.T) {
 	_, err = b.joiner(jn).JoinPreview(ctx, y.invite(room, RoleMember, false))
 	if err == nil || !strings.Contains(err.Error(), "reads as local") {
 		t.Fatalf("preview of the held room: %v", err)
+	}
+}
+
+// Follow-up of groups D and G: a room from another machine labelled
+// local, held as an older version stored it, is shown one way wherever a
+// label is shown (one helper, ShownLabels, decides): the room list the
+// CLI and the page draw, the entries agents read and the request text a
+// person approves. That label names the room again, and none of them is
+// plain local.
+func TestARoomLabelledLocalFromElsewhereIsShownOneWayEverywhere(t *testing.T) {
+	ctx := context.Background()
+	clock := lclock()
+	net := newMemNet()
+	y := newPNode(t, net, "y", newLNode(t, "y", clock))
+	b := newPNode(t, net, "b", newLNode(t, "b", clock))
+	room := y.create(LocalLabel)
+	y.change(room, Change{Kind: core.EntryAdd, Target: b.id, Name: "bee", History: true})
+	b.pin(room, y.lnode) // as 0.2.3 held it
+	s, err := OpenSurface(ctx, b.m, b.r, SurfaceOpts{Name: "b", Book: NewAddrBook()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag, err := s.Register(ctx, "test", "bob", "/work/bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	y.register("yan")
+	y.send(room, "yan", "from the other machine")
+	b.mustPull(room, y, PullOpts{})
+
+	want := LocalLabel + "#" + roomTag(room)
+	rs, err := s.RoomList(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rs {
+		switch {
+		case r.ID == room && r.Label != want:
+			t.Fatalf("room list labels the room %q, want %q", r.Label, want)
+		case r.ID != s.local && LabelKey(r.Label) == LocalLabel:
+			t.Fatalf("room list shows %s as local", r.ID)
+		}
+	}
+	v, err := s.Inbox(ctx, ag.ID, want, 10, 0)
+	if err != nil {
+		t.Fatalf("the label shown does not name the room: %v", err)
+	}
+	if len(v.Entries) == 0 {
+		t.Fatal("no entries")
+	}
+	for _, e := range v.Entries {
+		if e.Room != room || e.RoomLabel != want {
+			t.Fatalf("entry in %s labelled %q", e.Room, e.RoomLabel)
+		}
+	}
+	if id, err := s.ResolveRoom(ctx, LocalLabel); err != nil || id != s.local {
+		t.Fatalf("local resolves to %s, %v", id, err)
+	}
+	if got := s.r.ShownLabel(room, LocalLabel); got != want {
+		t.Fatalf("ShownLabel %q", got)
+	}
+	y.change(room, Change{Kind: core.EntryAdmin, Target: b.id})
+	b.mustPull(room, y, PullOpts{})
+	q := b.propose(room, Change{Kind: core.EntryAdd, Target: fmt.Sprintf("%064x", 78), Name: "zed"})
+	d, err := s.Describe(ctx, q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.RoomLabel != want || !strings.Contains(d.Text, want) {
+		t.Fatalf("describe: %q %q", d.RoomLabel, d.Text)
 	}
 }

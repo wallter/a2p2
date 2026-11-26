@@ -504,8 +504,12 @@ members is refused as an addressee. Agent-facing labels are shown so
 that only the local room reads as `local` and no two rooms read alike
 (`<label>#<8 hex of the id>`, then the whole id, then the bare id,
 repeated until all differ), and a room name that could mean two rooms
-is refused; the page and the CLI keep drawing rooms
-that read alike their own way (D58). `room create` refuses `local` in
+is refused. Unread counts and levels take the same labels. Room info,
+request texts and quarantine, which the CLI and the page show, show a
+room other than the local one whose label reads as `local` by the same
+rule (`Rooms.ShownLabel`), so it reads there as agents see it and can be
+typed back; other labels they show as stored, and they draw rooms that
+read alike their own way (D58). `room create` refuses `local` in
 any case. Nothing here changes what is stored or accepted (D65).
 
 A2 is checked by a proxy, compact definition bytes divided by four and
@@ -549,8 +553,10 @@ The joiner pins the label the person approved: a create entry whose
 label is not the preview's is refused, and so is a new room whose label
 reads as `local` (`node.LabelKey`) or holds a character the display
 would escape (`DisplayHidden`). Rooms already stored are not checked; one
-labelled `local` that is not this machine's local room is shown with its
-id (`Rooms.ShownLabel`) and never resolves as `local`. For a room it
+labelled `local` that is not this machine's local room is shown as
+`local#` and the first 8 hex of its id (`Rooms.ShownLabel`, which asks
+`ShownLabels`, the rule agents see, among every room held) and never
+resolves as `local`. For a room it
 holds already, the joiner refuses a preview naming another create entry
 or label, and takes each batch of the answer only as a pull takes it
 (T4): if the admin machine is a member here before or after it. The

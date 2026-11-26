@@ -48,7 +48,7 @@ func (s *Surface) Describe(ctx context.Context, q store.Request) (RequestView, e
 		if err != nil {
 			return RequestView{}, err
 		}
-		label = shownLabel(s.m.ID, q.Room, lr.Label) // as Alerts shows it, and ConfirmWith compares it
+		label = shownLabel(ctx, s.m.st, s.m.ID, q.Room, lr.Label) // as Alerts shows it, and ConfirmWith compares it
 		if s.r != nil && q.Kind != store.RequestSendFiles {
 			members = s.r.memberNames(q.Room)
 		}

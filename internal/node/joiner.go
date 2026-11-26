@@ -350,7 +350,7 @@ func (r *Rooms) checkPreview(ctx context.Context, p Preview) (int64, error) {
 	case rl.label != p.Label:
 		return 0, userErr("the admin machine names room %s %s, but it is held here as %s; the label of a room cannot change, so the invite is refused",
 			p.Room, Isolate(EscapeDisplay(p.Label)), Isolate(EscapeDisplay(r.ShownLabel(p.Room, rl.label))))
-	case r.ShownLabel(p.Room, rl.label) != rl.label:
+	case p.Room != localRoomID(r.m.ID) && reservedLocal(rl.label):
 		return 0, userErr("room %s is held here with a label that reads as %s, the name of this machine's own room; "+
 			"it still works here, but an invite cannot be used for it", p.Room, LocalLabel)
 	}

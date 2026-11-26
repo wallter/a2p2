@@ -64,6 +64,10 @@ func (s *Surface) Levels(ctx context.Context, agent, room, level string) ([]Room
 	if err != nil {
 		return nil, err
 	}
+	shown, err := s.roomLabels(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := []RoomLevel{}
 	for _, r := range rs {
 		if level != "" {
@@ -75,7 +79,7 @@ func (s *Surface) Levels(ctx context.Context, agent, room, level string) ([]Room
 		if err != nil {
 			return nil, s.notRegistered(label, err)
 		}
-		out = append(out, RoomLevel{Room: r.ID, Label: shownLabel(s.m.ID, r.ID, r.Label), Level: l})
+		out = append(out, RoomLevel{Room: r.ID, Label: shown[r.ID], Level: l})
 	}
 	return out, nil
 }
