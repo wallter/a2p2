@@ -237,7 +237,7 @@ func (s *Surface) ResolveRoom(ctx context.Context, name string) (string, error) 
 		if r.ID == name {
 			return r.ID, nil
 		}
-		if r.Label == name {
+		if s.r.ShownLabel(r.ID, r.Label) == name {
 			ids = append(ids, r.ID)
 		}
 	}
@@ -712,7 +712,7 @@ func (s *Surface) roomLabels(ctx context.Context) (map[string]string, error) {
 	rs, err := s.m.st.LogRooms(ctx)
 	out := make(map[string]string, len(rs))
 	for _, r := range rs {
-		out[r.ID] = r.Label
+		out[r.ID] = s.r.ShownLabel(r.ID, r.Label)
 	}
 	return out, err
 }
@@ -1382,7 +1382,7 @@ func (s *Surface) Unread(ctx context.Context, agent, room string, lines bool) (U
 			continue
 		}
 		u.Count += len(v.Entries)
-		u.Rooms = append(u.Rooms, RoomCount{Room: r.ID, Label: r.Label, Count: len(v.Entries)})
+		u.Rooms = append(u.Rooms, RoomCount{Room: r.ID, Label: shownLabel(s.m.ID, r.ID, r.Label), Count: len(v.Entries)})
 		for _, e := range v.Entries {
 			if !seen[e.From] {
 				seen[e.From] = true

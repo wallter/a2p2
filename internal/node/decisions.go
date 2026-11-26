@@ -48,13 +48,14 @@ func (s *Surface) Describe(ctx context.Context, q store.Request) (RequestView, e
 		if err != nil {
 			return RequestView{}, err
 		}
-		label = lr.Label
+		label = shownLabel(s.m.ID, q.Room, lr.Label) // as Alerts shows it, and ConfirmWith compares it
 		if s.r != nil && q.Kind != store.RequestSendFiles {
 			members = s.r.memberNames(q.Room)
 		}
 	}
-	// RoomLabel and Name are kept as stored, for programs; Text, which a
-	// person approves, escapes them (requestText).
+	// Name is kept as stored, for programs, and RoomLabel as this machine
+	// shows it (ShownLabel); Text, which a person approves, escapes them
+	// (requestText).
 	v := RequestView{ID: q.ID, Kind: q.Kind, Action: q.Action, Room: q.Room, RoomLabel: label, Machine: q.Node,
 		Fingerprint: Fingerprint(q.Node), Name: q.Name, NameFrom: nameFrom(q), RecordedName: recordedName(members, q.Node),
 		Role: q.Role, History: q.History, Seconding: q.Seconds != "",

@@ -130,8 +130,10 @@ index allows both branches of a fork.
 - Entries are passed on in causal order, evidence after them.
 - **Not modelled: pull before signing.** Since starting, a daemon signs no
   entry for a room until an exchange with a current member has left it
-  holding every log head that member advertised (rooms it created or just
-  joined, and rooms where it is the only member, are exempt). It narrows
+  holding every log head that member advertised (rooms it created, and
+  rooms where it is the only member, are exempt; a room it just joined is
+  exempt only if the join's last page listed heads, all accepted here,
+  from a machine that is a member here). It narrows
   the restore problem and cannot detect a restore. If no other member can
   be reached, the request fails with `not_caught_up`; the person may
   approve it again with an explicit, recorded override after a warning
@@ -494,6 +496,27 @@ refused or expired (PROTOCOL 5.3). Once signed, `poll` returns the log,
 expired invite or not, until the joiner is removed, which `poll` then says.
 A machine that left locally but is still listed needs a fresh invite,
 preview and confirmation. No choice means no history.
+
+The joiner pins the label the person approved: a create entry whose
+label is not the preview's is refused, and so is a new room whose label
+reads as `local` (`node.LabelKey`) or holds a character the display
+would escape (`DisplayHidden`). Rooms already stored are not checked; one
+labelled `local` that is not this machine's local room is shown with its
+id (`Rooms.ShownLabel`) and never resolves as `local`. For a room it
+holds already, the joiner refuses a preview naming another create entry
+or label, and takes each batch of the answer only as a pull takes it
+(T4): if the admin machine is a member here before or after it. The
+same holds for a join that pinned the room in an earlier run once this
+machine is a member, and a join recorded by an older version under a
+label other than the one held is refused, the room kept. Pages are kept
+in memory until they make the admin machine a member, up to 1,024
+entries or 4 MiB that this machine does not hold; otherwise nothing is
+stored and the join is refused. A page with more than 256 entries or
+3 MiB, or one marked `more` that does not move past the last, ends the
+join. Results show a room's label through `Rooms.ShownLabel`: room
+info, unread counts, levels, request texts and quarantine. A join lifts the
+`not_caught_up` gate only if its last page lists heads, all accepted
+here, and the admin machine is a member here, as `caughtUp` does.
 
 **Not modelled: requests for a person (P3), narrowed.** Signing log
 entries and sending files wait for a recorded confirmation naming exactly

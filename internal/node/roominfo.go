@@ -158,7 +158,7 @@ func (r *Rooms) List(ctx context.Context) ([]RoomInfo, error) {
 
 func (r *Rooms) info(rl *roomLog) RoomInfo {
 	st := rl.st
-	info := RoomInfo{ID: rl.id, Label: rl.label, CreateID: rl.createID, Gen: rl.gen, Admins: slices.Clone(st.Admins)}
+	info := RoomInfo{ID: rl.id, Label: r.ShownLabel(rl.id, rl.label), CreateID: rl.createID, Gen: rl.gen, Admins: slices.Clone(st.Admins)}
 	for _, n := range st.Members {
 		info.Members = append(info.Members, MemberInfo{Node: n, Name: rl.cache[n].Name, Admin: slices.Contains(st.Admins, n)})
 	}

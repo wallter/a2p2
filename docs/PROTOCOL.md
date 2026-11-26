@@ -742,7 +742,17 @@ generation in the same write. The joiner reports success only when the
 last page is applied, no entry was refused, it has accepted every entry in
 `heads`, and its own state shows it a member; it then reports the role and
 history its own state shows, and says so if they differ from the preview
-(the log is the truth; a promotion may have landed meanwhile). After signed, the
+(the log is the truth; a promotion may have landed meanwhile). The joiner
+refuses, on receipt only: a preview of a room it does not hold whose label
+reads as `local` or holds a character the display escapes (10.8); a
+create entry whose label is not the preview's; and, for a room it holds,
+a preview naming another create entry or label, and entries from an
+admin machine that is not a member there before or after each batch (as
+T4 for a pull; pages are kept until they make it one, up to 1,024
+entries or 4 MiB not held there), and any page over 256 entries or
+3 MiB, or marked `more` without moving past the last `next`. A last
+page without `heads`, or from a machine that is not a member there, does
+not count as caught up. After signed, the
 answer stays signed, expired or not, while the key is a member; once it is
 removed the answer is 403 `removed`. A pending promotion of the joiner
 (third admin) is visible in the returned log as an entry waiting for a

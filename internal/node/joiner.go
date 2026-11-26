@@ -44,7 +44,33 @@ const (
 	ReasonJoinNoCreate  = "the admin machine's signed log does not start with the room's create entry"
 	ReasonJoinLeft      = "the room was left or joined again here during the join"
 	ReasonNotAccepted   = "the accept did not reach the admin machine: preview and accept the invite again"
+	// ReasonJoinServerNotMember: the room is held here, and the admin
+	// machine is not a member of it here, nor do its entries make it one
+	// (F7). Nothing it sent was stored.
+	ReasonJoinServerNotMember = "this machine holds the room, and the admin machine is not a member of it here; " +
+		"nothing it sent was stored. Ask a current member for an invite, or leave the room here and join again"
+	// ReasonJoinBadPage: a signed page with more entries or bytes than a
+	// page holds (PROTOCOL 5.2), or one that says more follows but does
+	// not move past the last page.
+	ReasonJoinBadPage = "the admin machine's signed answer breaks the page limits or does not move on"
 )
+
+// maxJoinPending and maxJoinPendingBytes bound the entries a join keeps
+// in memory, while the answering machine is not yet a member here, before
+// it gives up (ReasonJoinServerNotMember). Entries held here already are
+// not kept, so only what this machine lacks counts. Variables so tests
+// can lower them.
+var (
+	maxJoinPending      = 4 * MaxJoinEntries
+	maxJoinPendingBytes = 4 << 20
+)
+
+// labelChanged is the reason a join is refused when the room is held here
+// under a label other than the one the person approved (F12).
+func labelChanged(held, approved string) string {
+	return "the room is held here as " + Isolate(EscapeDisplay(held)) + ", not " + Isolate(EscapeDisplay(approved)) +
+		" as the preview showed; the label of a room cannot change"
+}
 
 // acceptTries is how many times JoinAccept sends an accept that the
 // admin machine answers 429 or 503, waiting its Retry-After (at most
@@ -256,7 +282,7 @@ func (j *Joiner) JoinPreview(ctx context.Context, token string) (Preview, error)
 	case p.State != JoinStatePreviewed:
 		return Preview{}, ErrNoRecord
 	}
-	gen, _, err := j.r.m.st.RoomGen(ctx, p.Room)
+	gen, err := j.r.checkPreview(ctx, p)
 	if err != nil {
 		return Preview{}, err
 	}
@@ -300,6 +326,58 @@ func answerPreview(rp JoinReply, a JoinAnswer, server string) (Preview, error) {
 		Role: a.Role, History: a.History, Member: a.Member, Admin: a.Admin, Expires: exp}
 	p.ID = previewID(p)
 	return p, nil
+}
+
+// checkPreview refuses a preview a person here must not be asked to
+// approve, and returns the room's generation here, read with the same
+// view of the rooms (a pin or a leave holds r.mu while it writes). For a
+// room held here, the admin machine must name the create entry and the
+// label this machine holds: a different label is shown as a change, not
+// as the room's name; a room held here whose label reads as local, which
+// an older version could store, is not offered again under that name.
+// For any other room, the label must pass remoteLabelProblem.
+func (r *Rooms) checkPreview(ctx context.Context, p Preview) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rl := r.rooms[p.Room]
+	switch {
+	case rl == nil:
+		if why := remoteLabelProblem(p.Label); why != "" {
+			return 0, userErr("this invite's room cannot be joined here: %s", why)
+		}
+	case rl.createID != p.Create:
+		return 0, userErr("this machine holds room %s with another create entry; the invite cannot be used here", p.Room)
+	case rl.label != p.Label:
+		return 0, userErr("the admin machine names room %s %s, but it is held here as %s; the label of a room cannot change, so the invite is refused",
+			p.Room, Isolate(EscapeDisplay(p.Label)), Isolate(EscapeDisplay(r.ShownLabel(p.Room, rl.label))))
+	case r.ShownLabel(p.Room, rl.label) != rl.label:
+		return 0, userErr("room %s is held here with a label that reads as %s, the name of this machine's own room; "+
+			"it still works here, but an invite cannot be used for it", p.Room, LocalLabel)
+	}
+	gen, _, err := r.m.st.RoomGen(ctx, p.Room)
+	return gen, err
+}
+
+// unheld is wires without the entries room holds here already and those
+// that do not parse: what a join must keep to give again.
+func (r *Rooms) unheld(room string, wires [][]byte) [][]byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rl := r.rooms[room]
+	var out [][]byte
+	for _, w := range wires {
+		e, err := core.ParseEntry(w)
+		if err != nil {
+			continue
+		}
+		if rl != nil {
+			if _, kept := rl.state[e.ID()]; kept {
+				continue
+			}
+		}
+		out = append(out, w)
+	}
+	return out
 }
 
 func validJoinRoom(r *JoinRoom) bool {
@@ -567,6 +645,29 @@ type paging struct {
 	after  int64 // the last page's next
 	gen    int64 // the generation the room is held at, once pinned or found
 	pinned bool  // this run's pin made it
+	// held: the room was held here before this join, so the admin
+	// machine's entries count only if it is a member here or they make it
+	// one (receiveJoin); pending are the entries kept until they do.
+	held    bool
+	pending [][]byte
+}
+
+// pageProblem says why a signed page breaks the paging rules (PROTOCOL
+// 5.2), or "": at most MaxJoinEntries entries and maxJoinPageBytes bytes,
+// as a server of any version pages them, and a page that says more
+// follows must hold entries and move past the last one.
+func pageProblem(pg *paging, a JoinAnswer) string {
+	size := 0
+	for _, e := range a.Entries {
+		size += len(e) + 1
+	}
+	switch {
+	case len(a.Entries) > MaxJoinEntries, size > maxJoinPageBytes:
+		return ReasonJoinBadPage
+	case a.More && (len(a.Entries) == 0 || a.Next <= pg.after):
+		return ReasonJoinBadPage
+	}
+	return ""
 }
 
 // apply takes one signed page. The first time, it finds the generation to
@@ -583,24 +684,38 @@ func (j *Joiner) apply(ctx context.Context, jn store.Join, pg *paging, a JoinAns
 	if !validJoinRoom(a.Room) || a.Room.ID != jn.Room || a.Room.Create != jn.CreateID {
 		return "the admin machine's signed answer names another room", nil
 	}
+	if why := pageProblem(pg, a); why != "" {
+		return why, nil
+	}
 	wires := make([][]byte, len(a.Entries))
 	for i, e := range a.Entries {
 		wires[i] = e
 	}
 	if pg.gen == 0 {
+		j.r.mu.Lock()
 		gen, held, err := j.r.m.st.RoomGen(ctx, jn.Room)
+		rl := j.r.rooms[jn.Room]
+		sameRoom := rl != nil && rl.createID == jn.CreateID
+		heldLabel := ""
+		if rl != nil {
+			heldLabel = rl.label
+		}
+		j.r.mu.Unlock()
 		if err != nil {
 			return "", err
 		}
-		j.r.mu.Lock()
-		rl := j.r.rooms[jn.Room]
-		sameRoom := rl != nil && rl.createID == jn.CreateID
-		j.r.mu.Unlock()
 		switch {
+		case jn.PinnedGen != 0 && sameRoom && heldLabel != jn.Label:
+			// Pinned by an earlier run under a version that did not
+			// compare the labels: the room stays, the join goes no further.
+			return labelChanged(heldLabel, jn.Label), nil
 		case jn.PinnedGen != 0:
-			pg.gen = jn.PinnedGen // Receive refuses it if the room was left since
+			pg.gen = jn.PinnedGen // receiveJoin refuses it if the room was left since
+		case held && sameRoom && gen == jn.Gen && heldLabel != jn.Label:
+			// A join recorded by an older version, or a preview raced by a pin.
+			return labelChanged(heldLabel, jn.Label), nil
 		case held && sameRoom && gen == jn.Gen:
-			pg.gen = gen
+			pg.gen, pg.held = gen, true
 		case held:
 			return ReasonJoinLeft, nil
 		default:
@@ -610,6 +725,14 @@ func (j *Joiner) apply(ctx context.Context, jn store.Join, pg *paging, a JoinAns
 			e, err := core.ParseEntry(wires[0])
 			if err != nil || e.ID() != jn.CreateID || e.Fields().Room != jn.Room || e.Fields().Kind != core.EntryCreate {
 				return ReasonJoinNoCreate, nil
+			}
+			// The label pinned is the one the person approved (F12).
+			if l := e.Fields().Label; l != jn.Label {
+				return "the room's signed create entry labels it " + Isolate(EscapeDisplay(l)) +
+					", not " + Isolate(EscapeDisplay(jn.Label)) + " as the preview showed", nil
+			}
+			if why := remoteLabelProblem(jn.Label); why != "" {
+				return "the room cannot be held here: " + why, nil
 			}
 			if err := hookAt("join:pin"); err != nil {
 				return "", err
@@ -624,7 +747,27 @@ func (j *Joiner) apply(ctx context.Context, jn store.Join, pg *paging, a JoinAns
 			pg.gen, pg.pinned = gen, true
 		}
 	}
-	_, err := j.r.Receive(ctx, jn.Room, pg.gen, wires...)
+	// A room held here, or one this machine is a member of already: the
+	// answer counts only from a member here, or once it makes the admin
+	// machine one (F7, receiveJoin). Entries that do not are kept and
+	// given again with the next page, within maxJoinPending and
+	// maxJoinPendingBytes.
+	if len(pg.pending) > 0 {
+		wires = append(pg.pending, wires...)
+		pg.pending = nil
+	}
+	_, err := j.r.receiveJoin(ctx, jn.Room, pg.gen, jn.Admin, pg.held, wires...)
+	if errors.Is(err, errServerNotMember) {
+		keep := j.r.unheld(jn.Room, wires)
+		size := 0
+		for _, w := range keep {
+			size += len(w)
+		}
+		if !a.More || len(keep) > maxJoinPending || size > maxJoinPendingBytes {
+			return ReasonJoinServerNotMember, nil
+		}
+		pg.pending, err = keep, nil
+	}
 	if errors.Is(err, ErrStaleGeneration) || errors.Is(err, ErrNoRoom) {
 		return ReasonJoinLeft, nil
 	}
@@ -660,9 +803,13 @@ func (j *Joiner) verify(jn store.Join, pg *paging, heads []string) (JoinOutcome,
 	if !slices.Contains(st.Members, self) {
 		return JoinOutcome{}, ReasonJoinNotMember
 	}
-	// Every head of the admin machine's last page is accepted here: the
-	// room's log is caught up (maySign).
-	rl.pulled = true
+	// Every head of the admin machine's last page is accepted here, and
+	// it is a member here: the room's log is caught up (maySign), on the
+	// same terms as a pull (caughtUp). An answer with no heads, or from a
+	// machine that is not a member, opens nothing (F7).
+	if len(heads) > 0 && slices.Contains(st.Members, jn.Admin) {
+		rl.pulled = true
+	}
 	o := JoinOutcome{State: JoinStateSigned, Room: jn.Room, Role: RoleMember, History: st.Permissions[self].All}
 	if slices.Contains(st.Admins, self) {
 		o.Role = RoleAdmin

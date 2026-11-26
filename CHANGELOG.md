@@ -51,6 +51,29 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Security
 
+- **A join can no longer write into a room this machine already holds
+  from a machine that is not a member.** Since 0.1.0, a removed admin, or
+  any machine holding a copy of the room, could send a member an invite.
+  Once its person approved, the answer's entries were applied (a removed
+  admin's late removals among them) and the `not_caught_up` gate opened,
+  even with no heads. Now, for a room held here, the preview must name
+  the create entry and label held here. Each batch of the answer counts
+  only if the admin machine is a member here before or after it, else
+  the whole batch is refused; this also holds for a join resumed after a
+  restart once this machine is a member. The gate opens only for an
+  answer with heads from a member. A page that breaks the page limits or
+  does not move on ends the join.
+- **A joined room is held under the label its person approved, and never
+  as `local`.** Since 0.1.0, the label shown in a join preview was not
+  compared with the room's signed create entry, and a room created on
+  another machine could be labelled `local`, so its messages read as this
+  machine's local room. Now a create entry with another label is refused,
+  a new room's label may not read as `local` or hold control, direction
+  or invisible characters (a joiner the display keeps, such as one in an
+  emoji or between Persian letters, passes), and a stored room labelled
+  `local` that is not the local room is shown with its id in every result
+  and never resolves as `local`. A join recorded by an older version
+  under another label is refused, and the room stays.
 - **One admin can no longer block its own removal by flooding requests.**
   Since 0.1.0, an admin of a room (for example the admin of another owner
   in a shared room) could sign many entries that wait for a second admin.
