@@ -556,10 +556,11 @@ The joiner pins the label the person approved: a create entry whose
 label is not the preview's is refused, and so is a new room whose label
 reads as `local` (`node.LabelKey`) or holds a character the display
 would escape (`DisplayHidden`). Rooms already stored are not checked; one
-labelled `local` that is not this machine's local room is shown as
-`local#` and the first 8 hex of its id (`Rooms.ShownLabel`, which asks
-`ShownLabels`, the rule agents see, among every room held) and never
-resolves as `local`. For a room it
+labelled `local` that is not this machine's local room is shown as its
+label, `#` and the first 8 hex of its id (`Rooms.ShownLabel`, which
+depends on that room alone, so request texts stay the same as rooms
+arrive; agents see the same through `ShownLabels` unless another room's
+label reads as it) and never resolves as `local`. For a room it
 holds already, the joiner refuses a preview naming another create entry
 or label, and takes each batch of the answer only as a pull takes it
 (T4): if the admin machine is a member here before or after it. The
@@ -568,12 +569,19 @@ machine is a member, and a join recorded by an older version under a
 label other than the one held is refused, the room kept. Pages are kept
 in memory until they make the admin machine a member, up to 1,024
 entries or 4 MiB that this machine does not hold; otherwise nothing is
-stored and the join is refused. A page with more than 256 entries or
-3 MiB, or one marked `more` that does not move past the last, ends the
-join. Results show a room's label through `Rooms.ShownLabel`: room
+stored and the join is refused. Kept entries are given again once 64
+more are kept, on the last page, or before a limit ends the join, so a
+page of one entry does not check them all again. A page with more than
+256 entries or 3 MiB, or one marked `more` that does not move past the
+last, ends the join, and so does a join that reads more than 256 pages
+or 64 MiB, or pages for 15 minutes, or for 2 minutes without an entry
+this machine lacks (`ReasonJoinTooLong`). These bounds, the cursor and
+the kept entries carry over the join's runs in memory until it ends or
+the daemon restarts; the next run goes on from the last page read. Results show a room's label through `Rooms.ShownLabel`: room
 info, unread counts, levels, request texts and quarantine. A join lifts the
 `not_caught_up` gate only if its last page lists heads, all accepted
-here, and the admin machine is a member here, as `caughtUp` does.
+here, that are exactly the heads of the log here, and the admin machine
+is a member here.
 
 **Not modelled: requests for a person (P3), narrowed.** Signing log
 entries and sending files wait for a recorded confirmation naming exactly

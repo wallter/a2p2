@@ -40,10 +40,15 @@ an invite.
   refused. A removed admin's invite
   therefore cannot bring in entries it signed after its removal, and a
   join answer opens the `not_caught_up` gate only when it comes from a
-  member here and lists its heads. A machine that holds the room and
-  has not heard of a newer admin can join through it only if that
-  admin's log shows its admission within 1,024 entries (4 MiB) that this
-  machine lacks.
+  member here and its heads are the heads of the log here. A machine
+  that holds the room and has not heard of a newer admin can join
+  through it only if that admin's log shows its admission within 1,024
+  entries (4 MiB) that this machine lacks. One join reads at most 256
+  pages or 64 MiB, for at most 15 minutes of reading, and 2 minutes
+  without an entry this machine lacks; past that the join is refused.
+  These count over all the join's runs until the daemon restarts.
+  Joins still resume one at a time, so a hostile admin machine can delay
+  the others by up to that much in all, again after each restart.
 - Advertised addresses, including VPN and office network addresses, go
   to every member of your rooms and every holder of an invite. `a2p2 net
   on` says so, and `a2p2 status` lists them.
@@ -79,7 +84,8 @@ an invite.
   characters, except those the display keeps (a joiner inside an emoji,
   or between letters of a script that needs one). A room from an older
   version that is labelled `local` still loads; it is shown with its id
-  and never resolves as the local room. Lookalike letters of other
+  (its label, `#` and 8 hex of the id, the same for the life of the
+  room) and never resolves as the local room. Lookalike letters of other
   scripts are not detected.
 - Any member machine can post under any label, `human` included, and an
   agent id names a machine by a short id of 32 bits. What an agent

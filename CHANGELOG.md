@@ -61,8 +61,15 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   only if the admin machine is a member here before or after it, else
   the whole batch is refused; this also holds for a join resumed after a
   restart once this machine is a member. The gate opens only for an
-  answer with heads from a member. A page that breaks the page limits or
-  does not move on ends the join.
+  answer from a member whose heads are exactly the heads of the log
+  here. A page that breaks the page limits or does not move on ends the
+  join, and so does an answer that passes 256 pages or 64 MiB, or pages
+  for 15 minutes, or for 2 minutes without an entry this machine lacks.
+  These count over every run of the join until the daemon restarts, so
+  an answer cut short each run does not start them again, and the next
+  run goes on from the last page read.
+  Entries kept while the admin machine is not yet a member are checked
+  again once a quarter page more of them is kept, not on every page.
 - **A joined room is held under the label its person approved, and never
   as `local`.** Since 0.1.0, the label shown in a join preview was not
   compared with the room's signed create entry, and a room created on
@@ -72,7 +79,9 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   or invisible characters (a joiner the display keeps, such as one in an
   emoji or between Persian letters, passes), and a stored room labelled
   `local` that is not the local room is shown with its id in every result
-  and never resolves as `local`. A join recorded by an older version
+  and never resolves as `local`. A person is shown it as its label, `#`
+  and the first 8 hex of its id, which no other room changes, so the
+  text of a request waiting for approval stays the same. A join recorded by an older version
   under another label is refused, and the room stays.
 - **An agent can tell this machine's person from a `human` on another
   machine.** Since 0.1.0, any member machine of a shared room could post

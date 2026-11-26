@@ -622,30 +622,26 @@ func remoteLabelProblem(label string) string {
 // ShownLabel is how room id, stored with label, is shown to a person on
 // this machine (room info, request texts, quarantine). A room other than
 // this machine's local room whose label reads as local (stored by an
-// older version) is shown as ShownLabels shows it to agents, among every
-// room held here: "local#" and the start of its id, never local, so that
-// its messages never read as the local room's and the label shown names
-// it again. Other labels are shown as stored; the page and the CLI draw
-// rooms whose labels read alike their own way (D58).
+// older version) is shown as its label, "#" and the first 8 hex of its
+// id, never as local, so that its messages never read as the local
+// room's. That form depends on the room alone, so it stays the same for
+// the life of the room here: a request's text a person is approving does
+// not change when another room arrives. It is what agents are shown
+// (ShownLabels) unless another room's label reads as it; then agents get
+// a longer form and request texts still name the room by its id. Other
+// labels are shown as stored; the page and the CLI draw rooms whose
+// labels read alike their own way (D58).
 func (r *Rooms) ShownLabel(id, label string) string {
 	return shownLabel(context.Background(), r.m.st, r.m.ID, id, label)
 }
 
-// shownLabel is ShownLabel on machine self, whose rooms st holds. If the
-// rooms cannot be read, id is shown as ShownLabels shows it beside the
-// local room alone, so the local rule still holds.
-func shownLabel(ctx context.Context, st *store.Store, self, id, label string) string {
+// shownLabel is ShownLabel on machine self. It reads no other room, and
+// takes the store only to keep the callers' form.
+func shownLabel(_ context.Context, _ *store.Store, self, id, label string) string {
 	if id == localRoomID(self) || !reservedLocal(label) {
 		return label
 	}
-	stored := map[string]string{}
-	if rs, err := st.LogRooms(ctx); err == nil {
-		for _, x := range rs {
-			stored[x.ID] = x.Label
-		}
-	}
-	stored[id] = label
-	return ShownLabels(localRoomID(self), stored)[id]
+	return label + "#" + roomTag(id)
 }
 
 // errServerNotMember: a join answer for a room held here came from a
@@ -664,6 +660,9 @@ var errServerNotMember = errors.New("the answering machine is not a member of th
 func (r *Rooms) receiveJoin(ctx context.Context, room string, gen int64, server string, held bool, wires ...[]byte) ([]EntryResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := hookAt("join:receive"); err != nil {
+		return nil, err
+	}
 	rl, err := r.room(room)
 	if err != nil {
 		return nil, err
