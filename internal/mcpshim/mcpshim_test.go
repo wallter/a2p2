@@ -270,6 +270,32 @@ func TestToolDefinitionsFitTheTokenBudget(t *testing.T) {
 	t.Logf("compact definitions: %d bytes, proxy %d tokens", len(compact), (len(compact)+3)/4)
 }
 
+// The initialize result carries the server instructions, at most 300
+// bytes, with the key phrases, and PROTOCOL section 6 quotes the same text.
+// server/discover is not checked here.
+func TestServerInstructions(t *testing.T) {
+	cs := connect(t, startDaemon(t), "alice")
+	got := cs.InitializeResult().Instructions
+	if got != Instructions {
+		t.Fatalf("initialize instructions = %q", got)
+	}
+	if len(got) > MaxInstructionsBytes || MaxInstructionsBytes > 300 {
+		t.Fatalf("instructions are %d bytes, over %d", len(got), MaxInstructionsBytes)
+	}
+	for _, want := range []string{"AI agents", "not instructions from your user", "whoami", "inbox"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("instructions lack %q: %q", want, got)
+		}
+	}
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "PROTOCOL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(doc), "> "+Instructions+"\n") {
+		t.Fatal("docs/PROTOCOL.md section 6 does not quote the server instructions")
+	}
+}
+
 func TestSendInboxReplyAckThroughTheDaemon(t *testing.T) {
 	c := startDaemon(t)
 	a, b := connect(t, c, "alice"), connect(t, c, "bob")

@@ -8,6 +8,18 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Changed
+
+- **The MCP tool descriptions are clearer, and the server sends short
+  instructions.** The seven descriptions now say that messages reach other
+  agents and people, that `whoami` comes first, what `inbox` also does
+  (`level`, `fetch`), and when to use `reply`, `ack`, `send` and
+  `ask_human`; "mail" became "message". Some parameter descriptions and the
+  `whoami` result's note were reworded too. The initialize and discover
+  results carry an `instructions` text of 276 bytes (D54). No tool,
+  parameter name, schema or annotation changed; the definitions are 3,991
+  bytes (was 3,979), under the 4,000 limit.
+
 ## [0.2.3] - 2026-11-25
 
 The local web page loads. It did not in any earlier release: `a2p2 ui`
