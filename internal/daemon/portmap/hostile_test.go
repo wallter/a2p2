@@ -100,7 +100,7 @@ func TestARouterThatSpeaksOnlyNATPMPIsMappedAndTheRecordEndsEmpty(t *testing.T) 
 	gw := newFakeUDP(t, natpmpRouter([4]byte{198, 51, 100, 9}, 50123, &maps))
 	rec := record(t)
 	k := NewKeeper(client(gw), 7423, rec, nil)
-	stop := runKeeper(k)
+	stop := runKeeper(t, k)
 	waitFor(t, "the mapping", func() bool { return k.State().Mapping != nil })
 	waitFor(t, "only the NAT-PMP mapping recorded", func() bool {
 		held, _ := rec.Load()
@@ -204,7 +204,7 @@ func TestAGrantLongerThanAskedIsClampedAndRenewedAtHalfOfWhatWasAsked(t *testing
 	// asked (1 s here), not at half of what it was told, nor at once.
 	k := NewKeeper(longGrant{client(gw)}, 7423, record(t), nil)
 	before := len(gw.requests())
-	stop := runKeeper(k)
+	stop := runKeeper(t, k)
 	defer stop()
 	waitFor(t, "the mapping", func() bool { return k.State().Mapping != nil })
 	granted := time.Now()
@@ -235,9 +235,9 @@ func TestAMappedAddressThatIsNotPublicIsNeverTakenOrLeftUnusable(t *testing.T) {
 		r := &pcpRouter{extIP: netip.MustParseAddr(ext), extPort: 40001, maps: map[string]uint16{}}
 		gw := newFakeUDP(t, r.answer)
 		rec := record(t)
-		k := NewKeeper(client(gw), 7423, rec, nil)
-		stop := runKeeper(k)
-		waitFor(t, ext, func() bool { return k.State().Err != "" })
+		k := NewKeeper(patient(client(gw)), 7423, rec, nil)
+		stop := runKeeper(t, k)
+		waitFor(t, ext, func() bool { return strings.Contains(k.State().Err, "not a public address") })
 		if st := k.State(); st.Mapping != nil || !strings.Contains(st.Err, "not a public address") {
 			t.Fatalf("%s: state %+v", ext, st)
 		}
@@ -334,7 +334,7 @@ func TestAKeeperThatEndsGivesOutNoMappingEvenIfItsRemovalFailed(t *testing.T) {
 	r := &pcpRouter{extIP: netip.MustParseAddr("203.0.113.7"), extPort: 40001, maps: map[string]uint16{}}
 	gw := newFakeUDP(t, r.answer)
 	k := NewKeeper(client(gw), 7423, record(t), nil)
-	stop := runKeeper(k)
+	stop := runKeeper(t, k)
 	waitFor(t, "the mapping", func() bool { return k.State().Mapping != nil })
 	r.set(func(r *pcpRouter) { r.silentDel = true })
 	stop()
@@ -349,14 +349,14 @@ func TestAKeeperThatEndsGivesOutNoMappingEvenIfItsRemovalFailed(t *testing.T) {
 func TestARenewalAnsweredWithAnUnusableAddressWithdrawsTheOneGivenOut(t *testing.T) {
 	defer func(l, w, ra time.Duration) { Lifetime, minWait, retryAfter = l, w, ra }(Lifetime, minWait, retryAfter)
 	// retryAfter is short so that a first attempt lost under load (two
-	// tries of 250 ms) is tried again within waitFor's 5 s, not in 5
+	// tries of 250 ms) is tried again within waitFor's deadline, not in 5
 	// minutes; renewals answered with the unusable address then repeat,
 	// which changes nothing the test checks.
 	Lifetime, minWait, retryAfter = 2*time.Second, time.Millisecond, 50*time.Millisecond
 	r := &pcpRouter{extIP: netip.MustParseAddr("203.0.113.7"), extPort: 40001, maps: map[string]uint16{}}
 	gw := newFakeUDP(t, r.answer)
 	k := NewKeeper(client(gw), 7423, record(t), nil)
-	stop := runKeeper(k)
+	stop := runKeeper(t, k)
 	defer stop()
 	waitFor(t, "the mapping", func() bool { return k.State().Mapping != nil })
 	r.set(func(r *pcpRouter) { r.extIP = netip.MustParseAddr("10.0.0.7") })
@@ -411,12 +411,14 @@ func TestARenewalAnsweredWithAnUnusableAddressIsNotRetriedEveryMinWait(t *testin
 	Lifetime, minWait, retryAfter = time.Second, time.Millisecond, time.Hour
 	r := &pcpRouter{extIP: netip.MustParseAddr("203.0.113.7"), extPort: 40001, maps: map[string]uint16{}}
 	gw := newFakeUDP(t, r.answer)
-	k := NewKeeper(client(gw), 7423, record(t), nil)
-	stop := runKeeper(k)
+	// retryAfter is an hour here, so a first mapping lost under load would
+	// never be tried again: the client waits long for each answer instead.
+	k := NewKeeper(patient(client(gw)), 7423, record(t), nil)
+	stop := runKeeper(t, k)
 	defer stop()
 	waitFor(t, "the mapping", func() bool { return k.State().Mapping != nil })
 	r.set(func(r *pcpRouter) { r.extIP = netip.MustParseAddr("10.0.0.7") })
-	waitFor(t, "the unusable renewal", func() bool { return k.State().Err != "" })
+	waitFor(t, "the unusable renewal", func() bool { return strings.Contains(k.State().Err, "not a public address") })
 	// The mapping held expires within this wait.
 	if n := requestsAfter(gw, 1500*time.Millisecond); n > 1 {
 		t.Fatalf("%d requests in 1.5 s, want at most 1", n)

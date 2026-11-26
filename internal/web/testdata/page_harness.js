@@ -132,6 +132,19 @@ const document = {
 };
 const $ = (id) => { const e = document.getElementById(id); if (!e) throw new Error("index.html has no id " + id); return e; };
 
+// Calls to the server in flight, to the end of their bodies. settle waits
+// for none to be, so a step ends when the page has finished what it started,
+// however slow the machine, and not after a time chosen for a fast one.
+let inflight = 0;
+function tracked(p) {
+  inflight++;
+  return p.then(async (r) => {
+    // Read the body here so that the call ends only when the page can have it.
+    const body = [101, 204, 205, 304].includes(r.status) ? null : await r.arrayBuffer();
+    return new Response(body, { status: r.status, statusText: r.statusText, headers: r.headers });
+  }).finally(() => { inflight--; });
+}
+
 const win = {
   document,
   location: { hash: "#" + encodeURIComponent(token), pathname: "/", search: "" },
@@ -147,13 +160,13 @@ const win = {
     if (o && o.method === "POST" && path.startsWith("/api/send")) posts.push(JSON.parse(o.body));
     // The daemon's own answer, emptied: its headers (the run) are kept.
     if (dropHistory && path.startsWith("/api/history")) {
-      return fetch(new URL(path, base), o).then((r) => {
+      return tracked(fetch(new URL(path, base), o).then((r) => {
         const h = new Headers(r.headers);
         h.delete("content-length");
         return new Response(JSON.stringify({ entries: [] }), { status: r.status, headers: h });
-      });
+      }));
     }
-    return fetch(new URL(path, base), o);
+    return tracked(fetch(new URL(path, base), o));
   },
   setInterval: () => 0, // the script's own polling is not started; the scenario calls refresh
   setTimeout, clearTimeout, console, Date, JSON, Promise, Set, Map, Math, URL,
@@ -167,15 +180,19 @@ process.on("unhandledRejection", (e) => errors.push("unhandled: " + (e && e.mess
 const ctx = vm.createContext(win);
 const inPage = (src) => vm.runInContext(src, ctx);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// Waits for the page's refresh to end, by drawing or by failing; hitting the
-// deadline is an error, never a normal end.
+// Waits for the page to finish what it started: no refresh running and no
+// call to the server in flight, seen twice in a row (the work between two
+// calls is microtasks, which end before a timer fires). The deadline is for
+// a hang only: it is an error, never a normal end.
 async function idle(what) {
-  const deadline = Date.now() + 15000;
-  for (;;) {
-    if (!inPage("busy")) return true;
-    if (Date.now() > deadline) { errors.push("deadline: " + what + " did not finish in 15 seconds"); return false; }
-    await sleep(20);
+  const deadline = Date.now() + 120000;
+  await sleep(0);
+  for (let quiet = 0; quiet < 2;) {
+    if (Date.now() > deadline) { errors.push("deadline: " + what + " did not finish in 120 seconds"); return false; }
+    await sleep(10);
+    quiet = !inPage("busy") && inflight === 0 ? quiet + 1 : 0;
   }
+  return true;
 }
 
 // escapeScenario runs with PROBE_JSON, a JSON object: strings, an array
@@ -220,12 +237,14 @@ async function escapeScenario(out) {
   for (const b of buttons) {
     posts.length = 0;
     b.dispatch("click");
-    await sleep(300); await idle("a choice"); await sleep(100);
+    await idle("a choice");
     // The stand-in has no isConnected, so the page writes the error to the
     // outcome line instead of the card.
     out.clicks.push({ label: b.textContent, posts: posts.slice(),
       error: card.querySelector("div.question-error").textContent || $("outcome").textContent });
-    inPage("S.outcome = ''");
+    // The outcome line is drawn again for the next click, even with the same text.
+    inPage("S.outcome = ''; S.sigs.n = ''");
+    $("outcome").textContent = "";
     if (posts.length) break;
   }
 }
@@ -236,7 +255,6 @@ async function escapeScenario(out) {
     out.appHiddenBefore = $("app").hidden;
     vm.runInContext(fs.readFileSync(appPath, "utf8"), ctx, { filename: "app.js" });
     await idle("the first refresh");
-    await sleep(100);
     out.connectionHidden = $("connection").hidden;
     out.connection = $("connection").hidden ? "" : $("connection").textContent;
     out.appHidden = $("app").hidden;
@@ -251,7 +269,7 @@ async function escapeScenario(out) {
     const button = $("rooms").children.map((li) => li.firstChild).find((b) => b.dataset.room === roomId);
     if (!button) throw new Error("no sidebar button for room " + roomId);
     button.dispatch("click");
-    await sleep(50); await idle("opening the room"); await sleep(100);
+    await idle("opening the room");
     out.roomhead = $("roomhead").textContent;
     out.stream = $("msgs").textContent;
     // Each message and notice drawn: its author, marks and body, each read from its own element.
@@ -265,11 +283,11 @@ async function escapeScenario(out) {
       sel.dispatch("change");
       dropHistory = true;
       inPage("refresh(true)");
-      await sleep(50); await idle("the reload without the author"); await sleep(100);
+      await idle("the reload without the author");
       out.scenario.toAfterReload = sel.value;
       $("text").value = "a private note";
       $("compose").dispatch("submit");
-      await sleep(300); await idle("the send");
+      await idle("the send");
       out.scenario.author = author;
       out.scenario.posts = posts.slice();
       out.scenario.sendErr = $("err").textContent;
@@ -278,7 +296,7 @@ async function escapeScenario(out) {
       sel.value = "";
       $("text").value = "second note";
       $("compose").dispatch("submit");
-      await sleep(300);
+      await idle("the refused send");
       out.scenario.refusedPosts = posts.slice();
       out.scenario.refusedErr = $("err").textContent;
     }
@@ -287,7 +305,7 @@ async function escapeScenario(out) {
     out.traces = [];
     for (const id of (process.env.TRACE_IDS || "").split(",").filter(Boolean)) {
       inPage("openTrace(" + JSON.stringify(id) + ")");
-      await sleep(200);
+      await idle("the trace");
       const b = $("tracebody");
       out.traces.push({ id, from: b.querySelectorAll("span.from").map((x) => x.textContent),
         marks: b.querySelectorAll("p").concat(b.querySelectorAll("td")).map((x) => x.querySelectorAll("span.mark").map((k) => k.textContent)) });

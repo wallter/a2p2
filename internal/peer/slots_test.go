@@ -151,8 +151,11 @@ func h2KeyClient(t *testing.T, id *Identity) *http.Client {
 
 // open says whether the server still holds c: a read that times out
 // means open; EOF, a reset or a TLS alert means it was closed or refused.
+// A closed connection answers at once, so only a held one waits out the
+// deadline; it is long enough that a server slow to close under load is
+// not taken for one that keeps the connection.
 func open(c net.Conn) bool {
-	_ = c.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	_ = c.SetReadDeadline(time.Now().Add(750 * time.Millisecond))
 	_, err := c.Read(make([]byte, 1))
 	var ne net.Error
 	return errors.As(err, &ne) && ne.Timeout()

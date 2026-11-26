@@ -132,6 +132,15 @@ func (r *pcpRouter) answer(q []byte) []byte {
 // the race detector still delivers a fake's answer within it.
 const testTry = 250 * time.Millisecond
 
+// patient is c with one long wait for an answer (1.5 s, against 250 ms and
+// then 500 ms), for a test whose fake router answers and which needs that
+// answer: a try that a loaded machine delays would end it with "no
+// answer". The wait costs time only where nothing answers.
+func patient(c *Client) *Client {
+	c.Try, c.Tries = 1500*time.Millisecond, 1
+	return c
+}
+
 func client(gw *fakeUDP) *Client {
 	return &Client{Gateway: loop, Local: loop, Port: gw.port(), SSDP: "127.0.0.1:9", Try: testTry, Tries: 2}
 }
@@ -216,7 +225,9 @@ func TestARouterThatSpeaksOnlyNATPMPIsAskedInNATPMP(t *testing.T) {
 func TestARouterThatRefusesIsReportedWithEachProtocolsReason(t *testing.T) {
 	r := &pcpRouter{result: 2, maps: map[string]uint16{}}
 	gw := newFakeUDP(t, r.answer)
-	_, err := client(gw).Map(context.Background(), 7423, time.Hour, nil, nil)
+	// A lost try would read "no answer" instead of the router's refusal.
+	c := patient(client(gw))
+	_, err := c.Map(context.Background(), 7423, time.Hour, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "PCP: refused: not authorized") || !strings.Contains(err.Error(), "UPnP:") {
 		t.Fatalf("refusal: %v", err)
 	}
@@ -455,16 +466,26 @@ func get(t *testing.T, f *File) []Mapping {
 	return ms
 }
 
-func runKeeper(k *Keeper) (stop func()) {
+// runKeeper starts k and returns its stop. The stop is also a cleanup of
+// the test, so a keeper is ended even when the test fails before it stops
+// it: one left running would read the package's timing variables while
+// the next test sets them, and fail that test with a data race.
+func runKeeper(t *testing.T, k *Keeper) (stop func()) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { k.Run(ctx); close(done) }()
-	return func() { cancel(); <-done }
+	stop = func() { cancel(); <-done }
+	t.Cleanup(stop)
+	return stop
 }
 
+// waitFor's deadline matters only when a test fails: each step the keeper
+// waits on can need several tries of a UDP exchange that a loaded machine
+// answers late, and a step lost is repeated retryAfter later.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	for deadline := time.Now().Add(5 * time.Second); !cond(); time.Sleep(5 * time.Millisecond) {
+	for deadline := time.Now().Add(30 * time.Second); !cond(); time.Sleep(5 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out waiting for " + what)
 		}
@@ -489,7 +510,7 @@ func TestAKeeperFollowsARouterThatLosesTheMappingAndRemovesItAtTheEnd(t *testing
 			seen = append(seen, st.Mapping.External.String())
 		}
 	})
-	stop := runKeeper(k)
+	stop := runKeeper(t, k)
 	waitFor(t, "renewals", func() bool { mu.Lock(); defer mu.Unlock(); return len(seen) >= 3 })
 	stop()
 	mu.Lock()
@@ -520,7 +541,7 @@ func TestTheMappingIsRecordedBeforeTheRouterIsAsked(t *testing.T) {
 		return r.answer(q)
 	})
 	k := NewKeeper(client(gw), 7423, rec, nil)
-	stop := runKeeper(k)
+	stop := runKeeper(t, k)
 	waitFor(t, "the mapping", func() bool { return k.State().Mapping != nil })
 	if held := get(t, rec); len(held) != 1 || held[0].External.String() != "203.0.113.7:40001" {
 		t.Fatalf("recorded %+v", held)
@@ -565,7 +586,7 @@ func TestACrashAfterTheRouterMadeTheMappingIsUndoneFromTheRecordFile(t *testing.
 		if _, err := c.Map(context.Background(), 7423, time.Hour, nil, noteTo(rec)); err != nil || r.held() != 1 {
 			t.Fatalf("%v, router holds %d", err, r.held())
 		}
-		runKeeper(NewKeeper(c, 0, rec, nil))()
+		runKeeper(t, NewKeeper(c, 0, rec, nil))()
 		if r.held() != 0 || len(get(t, rec)) != 0 {
 			t.Fatalf("router holds %d (removed by the nonce kept), record %v", r.held(), get(t, rec))
 		}
@@ -577,7 +598,7 @@ func TestACrashAfterTheRouterMadeTheMappingIsUndoneFromTheRecordFile(t *testing.
 		if _, err := c.Map(context.Background(), 7423, time.Hour, nil, noteTo(rec)); err != nil || maps.Load() != 1 {
 			t.Fatalf("%v, router holds %d", err, maps.Load())
 		}
-		runKeeper(NewKeeper(c, 0, rec, nil))()
+		runKeeper(t, NewKeeper(c, 0, rec, nil))()
 		waitFor(t, "the deletion", func() bool { return maps.Load() == 0 })
 		if len(get(t, rec)) != 0 {
 			t.Fatalf("record %v", get(t, rec))
@@ -603,7 +624,7 @@ func TestACrashAfterTheRouterMadeTheMappingIsUndoneFromTheRecordFile(t *testing.
 		if !strings.Contains(string(last), `"external_port":7424`) || strings.Contains(string(last), "external_ip") {
 			t.Fatalf("record before the add %s", last)
 		}
-		runKeeper(NewKeeper(c, 0, rec, nil))()
+		runKeeper(t, NewKeeper(c, 0, rec, nil))()
 		if g.has("7424") || len(get(t, rec)) != 0 || !slices.Contains(g.called(), "DeletePortMapping") {
 			t.Fatalf("calls %v, record %v", g.called(), get(t, rec))
 		}
@@ -636,8 +657,8 @@ func TestARecordThatCannotBeUsedWholeSendsNothingAndIsKept(t *testing.T) {
 			t.Fatalf("%s: loaded: %v", name, err)
 		}
 		k := NewKeeper(client(gw), 7423, rec, nil)
-		stop := runKeeper(k)
-		waitFor(t, name, func() bool { return k.State().Err != "" })
+		stop := runKeeper(t, k)
+		waitFor(t, name, func() bool { return strings.Contains(k.State().Err, "nothing was sent to the router") })
 		time.Sleep(50 * time.Millisecond)
 		stop()
 		after, _ := os.ReadFile(rec.Path)
@@ -679,7 +700,7 @@ func TestAUPnPForwardThatIsNotThisMachinesIsNotDeleted(t *testing.T) {
 	if err := rec.Save([]Mapping{m}); err != nil {
 		t.Fatal(err)
 	}
-	runKeeper(NewKeeper(c, 0, rec, nil))()
+	runKeeper(t, NewKeeper(c, 0, rec, nil))()
 	if !g.has("7423") || len(get(t, rec)) != 0 || slices.Contains(g.called(), "DeletePortMapping") {
 		t.Fatalf("calls %v, record %v", g.called(), get(t, rec))
 	}
@@ -739,7 +760,7 @@ func TestAFailedRenewalKeepsTheMappingAndAFailedRemovalIsReportedAndRetried(t *t
 	c := client(newFakeUDP(t, r.answer))
 	rec := record(t)
 	k := NewKeeper(c, 7423, rec, nil)
-	stop := runKeeper(k)
+	stop := runKeeper(t, k)
 	waitFor(t, "the mapping", func() bool { return k.State().Mapping != nil })
 	r.set(func(r *pcpRouter) { r.silentMap = true })
 	waitFor(t, "a failed renewal", func() bool { return k.State().Err != "" })
@@ -758,7 +779,7 @@ func TestAFailedRenewalKeepsTheMappingAndAFailedRemovalIsReportedAndRetried(t *t
 	}
 	r.set(func(r *pcpRouter) { r.silentDel = false })
 	clean := NewKeeper(c, 0, rec, nil) // the next run, with or without --map-port
-	runKeeper(clean)()
+	runKeeper(t, clean)()
 	if r.held() != 0 || len(get(t, rec)) != 0 || len(clean.State().Left) != 0 {
 		t.Fatalf("router holds %d, record %v, left %v", r.held(), get(t, rec), clean.State().Left)
 	}
@@ -784,9 +805,9 @@ func TestMalformedRouterAnswersAreNotTakenForAMapping(t *testing.T) {
 	} {
 		rec := record(t)
 		gw := newFakeUDP(t, tc.answer)
-		k := NewKeeper(client(gw), 7423, rec, nil)
-		stop := runKeeper(k)
-		waitFor(t, tc.name, func() bool { return k.State().Err != "" })
+		k := NewKeeper(patient(client(gw)), 7423, rec, nil)
+		stop := runKeeper(t, k)
+		waitFor(t, tc.name, func() bool { return strings.Contains(k.State().Err, "cannot be used") })
 		if st := k.State(); st.Mapping != nil || !strings.Contains(st.Err, "cannot be used") {
 			t.Fatalf("%s: %+v", tc.name, st)
 		}
@@ -825,7 +846,7 @@ func TestMalformedRouterAnswersAreNotTakenForAMapping(t *testing.T) {
 	g.mu.Lock()
 	g.cut = true
 	g.mu.Unlock()
-	c := client(noPCP(t))
+	c := patient(client(noPCP(t)))
 	c.SSDP = fmt.Sprintf("127.0.0.1:%d", g.ssdp.port())
 	if _, err := c.Map(context.Background(), 7423, time.Hour, nil, nil); err == nil || !strings.Contains(err.Error(), "not a complete") {
 		t.Fatalf("cut short: %v", err)
