@@ -53,11 +53,12 @@ func TestPrintEntryEscapesWhatAnotherMachineWrote(t *testing.T) {
 
 // E3: the question alert's text was built raw from the asker's label and
 // text (surface.go); the daemon now escapes it, and printAlert keeps each
-// of its lines indented.
+// of its lines indented; a body's later lines sit deeper than the
+// asker's line (D65).
 func TestPrintAlertIndentsEveryLineOfAQuestion(t *testing.T) {
 	var out bytes.Buffer
 	printAlert(&out, localapi.Alert{Kind: node.AlertQuestion, ID: "m1", Room: "r_1", Text: "bot@1a2b3c4d asks: Ship?\nReally"})
-	if got := out.String(); !strings.Contains(got, "  bot@1a2b3c4d asks: Ship?\n  Really\n") {
+	if got := out.String(); !strings.Contains(got, "  bot@1a2b3c4d asks: Ship?\n    Really\n") {
 		t.Fatalf("alert %q", got)
 	}
 }

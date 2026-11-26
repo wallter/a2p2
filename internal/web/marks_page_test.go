@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -38,6 +39,7 @@ func TestThePageMarksAnotherMachinesPersonThisMachineAndEdits(t *testing.T) {
 		From            string `json:"from,omitempty"`
 		FromThisMachine bool   `json:"from_this_machine"`
 		Edited          bool   `json:"edited,omitempty"`
+		IDShared        bool   `json:"id_shared,omitempty"`
 	}
 	cases := []struct {
 		e    entry
@@ -51,6 +53,7 @@ func TestThePageMarksAnotherMachinesPersonThisMachineAndEdits(t *testing.T) {
 		{entry{From: "bot@1a2b3c4d"}, []string{}},
 		{entry{From: "bot@1a2b3c4d", Edited: true}, []string{"edited"}},
 		{entry{From: "human@1a2b3c4d", Edited: true}, []string{"another machine's person, not you", "edited"}},
+		{entry{From: "bot@" + strings.Repeat("1a", 32), IDShared: true}, []string{"id written in full: short id shared"}},
 	}
 	in := []entry{}
 	for _, c := range cases {
@@ -73,8 +76,10 @@ func TestThePageMarksAnotherMachinesPersonThisMachineAndEdits(t *testing.T) {
 			t.Errorf("%+v: marks %s, want %s", c.e, g, w)
 		}
 	}
-	// Both cards draw the marks.
-	for _, use := range []string{`for (const k of authorMarks(m)) meta.append(el("span", "mark", k));`, `const marks = authorMarks(m).filter`} {
+	// The stream, the question cards (edited included) and the notices
+	// draw the marks.
+	for _, use := range []string{`for (const k of authorMarks(m)) meta.append(el("span", "mark", k));`, `const marks = authorMarks(m);`,
+		`for (const k of authorMarks(n)) line.append(" ", el("span", "mark", k));`} {
 		if !regexp.MustCompile(regexp.QuoteMeta(use)).Match(src) {
 			t.Errorf("app.js no longer draws the marks with %q", use)
 		}

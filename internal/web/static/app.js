@@ -403,7 +403,7 @@ function renderSide() {
   const levelRoom = (id) => escapeDisplay(((S.st.rooms || []).find((r) => r.id === id) || {}).label || id);
   for (const a of S.st.agents || []) {
     box.append(el("div", "", a.label || a.id, " ", el("span", "sub", a.harness + " · " + ago(a.last_seen))));
-    if (a.id === S.st.human) continue;
+    if (a.label === "human") continue; // the person: its id may be written in full in S.st.human
     const ls = (S.st.levels || []).filter((l) => l.agent === a.id);
     const words = ls.map((l) => levelRoom(l.room) + ": " + l.level);
     box.append(el("div", "sub", "level " + (words.length ? words.join(", ") + "; other rooms: all" : "all in every room")));
@@ -597,7 +597,7 @@ function renderNeeds() {
 // and is never among the questions (node.Surface.Questions).
 function askedBy(m) {
   const whom = (m.to || []).includes(S.st.human) ? ", asked of you" : ", asked of everyone in the room";
-  const marks = authorMarks(m).filter((k) => k !== "edited");
+  const marks = authorMarks(m);
   return [iso(escapeDisplay(m.from)), marks.length ? " (" + marks.join(", ") + ")" : "", " on ",
     iso(machineName(m.from_node, m.room)), " in ", ...roomNode(m.room), whom];
 }
@@ -685,8 +685,29 @@ function authorMarks(m) {
   else if (from && person && label === "human") out.push("this machine's person");
   else if (from && person) out.push("this machine, not its person");
   else if (from && m.from_this_machine) out.push("this machine");
+  if (m.id_shared) out.push("id written in full: short id shared");
   if (m.edited) out.push("edited");
+  // changed_by is an agent of the author's machine (node.ChangedWords)
+  if (m.changed_by) {
+    const c = String(m.changed_by).split("@")[0];
+    const who = c.toLowerCase() !== "human" ? "" : !m.from_this_machine ? ", another machine's person, not you"
+      : c === "human" ? ", this machine's person" : ", this machine, not its person";
+    out.push("changed by " + escapeDisplay(m.changed_by) + who);
+  }
   return out;
+}
+// noteLine draws a notice (a replacement, a withdrawal, an expiry) with
+// the same marks as the message, each in its own element, and a
+// replacement's text in its own body element, so text can never stand
+// where a mark is drawn.
+function noteLine(n) {
+  // from is the message's author; a mark names another agent of its machine that made the change
+  const what = { replaced: ": new text of message ", withdrawn: ": withdrawn, message ", expired: ": the text expired of message " }[n.kind] || " " + n.kind + " ";
+  const line = el("div", "noteline", el("span", "from", escapeDisplay(n.from || "")));
+  for (const k of authorMarks(n)) line.append(" ", el("span", "mark", k));
+  line.append(what + fp(n.id) + " (" + fmt(n.created) + ")");
+  if (n.kind === "replaced" && n.text) line.append(el("div", "body", escapeText(n.text)));
+  return line;
 }
 function entryMeta(m) {
   const meta = el("div", "meta", el("span", "from", escapeDisplay(m.from)), el("span", "", fmt(m.created)));
@@ -791,15 +812,12 @@ function renderStream(force) {
   // so that confirming it confirms text the person saw.
   S.notesShown = new Map();
   for (const n of notes) {
-    const what = { replaced: " changed message ", withdrawn: " withdrew message ", expired: ": the text expired of message " }[n.kind] || " " + n.kind + " ";
-    const line = el("div", "noteline", escapeDisplay(n.from || "") + what + fp(n.id) + " (" + fmt(n.created) + ")");
-    if (n.kind === "replaced" && n.text) line.append(el("div", "body", escapeText(n.text)));
-    box.append(line);
+    box.append(noteLine(n));
     S.notesShown.set(n.key, n.version);
   }
   $("older").hidden = !S.more || !S.msgs.length;
   $("empty").hidden = !S.room || list.length > 0 || notes.length > 0 || all().length > 0;
-  $("install-tip").hidden = (S.st.agents || []).some((a) => a.id !== S.st.human);
+  $("install-tip").hidden = (S.st.agents || []).some((a) => a.label !== "human");
   if (atBottom) sc.scrollTop = sc.scrollHeight;
 }
 function updateCompose() {
@@ -854,9 +872,11 @@ async function openTrace(id) {
     const t = await api("/api/trace?id=" + encodeURIComponent(id));
     const ct = el("table"), ht = el("table");
     ct.append(el("tr", "", ...["Machine", "Observed", "Member now"].map((h) => el("th", "", h))));
-    for (const c of t.copies || []) ct.append(el("tr", "", el("td", "", fp(c.node)), el("td", "", fmt(c.at)), el("td", "", c.member ? "yes" : "no")));
+    const machine = (c) => c.id_shared ? [escapeDisplay(c.node), " ", el("span", "mark", "id written in full: short id shared")] : [fp(c.node)];
+    for (const c of t.copies || []) ct.append(el("tr", "", el("td", "", ...machine(c)), el("td", "", fmt(c.at)), el("td", "", c.member ? "yes" : "no")));
     ht.append(el("tr", "", ...["Agent", "When"].map((h) => el("th", "", h))));
-    for (const h of t.handled || []) ht.append(el("tr", "", el("td", "", escapeDisplay(h.agent)), el("td", "", fmt(h.at))));
+    const who = (a) => [el("span", "from", escapeDisplay(a.agent || a.from)), ...authorMarks({ ...a, from: a.agent || a.from }).flatMap((k) => [" ", el("span", "mark", k)])];
+    for (const h of t.handled || []) ht.append(el("tr", "", el("td", "", ...who(h)), el("td", "", fmt(h.at))));
     // The same words as a2p2 trace (cmd/a2p2, textWords and copyReportWords).
     const textState = {
       live: "available on this machine", missing: "waiting for a copy",
@@ -864,6 +884,7 @@ async function openTrace(id) {
       withdrawn: "withdrawn by its author", expired: "expired (text is kept 30 days)",
     }[t.reason] || t.reason;
     showDialog(el("h2", "", "Message " + fp(id)),
+      ...(t.from ? [el("p", "", "From ", ...who(t))] : []),
       el("p", "", "Header: " + (t.saved ? "saved on this machine" : "not held on this machine") + ". Text: " + textState + "."),
       el("h2", "", "Copy reports"),
       el("p", "sub", "These are the machines that reported holding the author's messages up to this one, as this machine observed."),

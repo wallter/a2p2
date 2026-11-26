@@ -97,6 +97,33 @@ func fromLabel(e Entry) string {
 	return l
 }
 
+// Writer is the agent id, written like From, of whoever wrote what the
+// entry shows: ChangedBy when another agent of the author's machine wrote
+// the replacement shown or the notice's change, else From. Summaries
+// that name one sender per entry (unread, the hook) name the writer, so
+// they never give one agent's text under another's label (D65).
+func (e Entry) Writer() string {
+	if e.ChangedBy != "" {
+		return e.ChangedBy
+	}
+	return e.From
+}
+
+// ChangedWords are the words the CLI and alerts write for an entry's
+// ChangedBy: "changed by" and the agent, and, when it is labelled human,
+// its mark (AuthorMark). The editor is an agent of the author's machine,
+// so here is the author's (Entry.Here). "" when changedBy is.
+func ChangedWords(changedBy string, here bool) string {
+	if changedBy == "" {
+		return ""
+	}
+	w := "changed by " + EscapeDisplay(changedBy)
+	if l, _, _ := strings.Cut(changedBy, "@"); IsPerson(l) {
+		w += ", " + AuthorMark(changedBy, here)
+	}
+	return w
+}
+
 // marked fills in, on each entry, whether this machine wrote it (Here,
 // from the full key) and the ids of its author and addressees as shown:
 // a short id another known machine shares is written in full and the
@@ -132,6 +159,9 @@ func (s *Surface) markWith(x idForms, es []Entry) []Entry {
 		e.Here = e.FromNode == s.m.ID
 		if x.shared[e.FromNode] {
 			e.From, e.IDShared = x.agent(fromLabel(*e), e.FromNode), true
+			if l, _, ok := strings.Cut(e.ChangedBy, "@"); ok {
+				e.ChangedBy = x.agent(l, e.FromNode)
+			}
 		}
 		for _, a := range e.To {
 			if x.shared[a.Node] {
@@ -160,6 +190,40 @@ func (s *Surface) SharedIDs(ctx context.Context) (map[string]bool, error) {
 // person, in any case: the label a person's answer comes under. Only
 // human on this machine is this machine's person (Entry.Here).
 func IsPerson(label string) bool { return strings.EqualFold(label, HumanLabel) }
+
+// The words the CLI and alerts write after an author for where it is,
+// decided by AuthorMark; the page draws the same ones (app.js,
+// authorMarks) and MCP gives person and from_this_machine fields.
+const (
+	MarkOtherPerson = "another machine's person, not you"
+	MarkThisPerson  = "this machine's person"
+	MarkNotPerson   = "this machine, not its person"
+	MarkThisMachine = "this machine"
+)
+
+// AuthorMark is the mark of an author written as agent id from, with
+// here from the full machine key (Entry.Here): "" for an agent of
+// another machine. Any member machine can post as human, so human on
+// another machine is never this machine's person, and only exactly
+// human written here is. Agent labels are checked on receipt and hold
+// no space or bracket, so a label cannot write a mark itself.
+func AuthorMark(from string, here bool) string {
+	if from == "" {
+		return ""
+	}
+	l, _, _ := strings.Cut(from, "@")
+	switch person := IsPerson(l); {
+	case person && !here:
+		return MarkOtherPerson
+	case person && l == HumanLabel:
+		return MarkThisPerson
+	case person:
+		return MarkNotPerson
+	case here:
+		return MarkThisMachine
+	}
+	return ""
+}
 
 // ---- room labels as shown ----
 

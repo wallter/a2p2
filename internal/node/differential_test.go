@@ -1207,7 +1207,14 @@ func (h *harness) implEntry(e Entry) string {
 	if d%time.Hour == 0 {
 		created = fmt.Sprint(int64(d / time.Hour))
 	}
-	agent, _, _ := strings.Cut(e.From, "@")
+	// The model's notice is from the agent that wrote the withdraw or
+	// replace: the implementation names it in ChangedBy when it is not
+	// the message's own agent (D65).
+	from := e.From
+	if e.Kind != EntryMessage && e.ChangedBy != "" {
+		from = e.ChangedBy
+	}
+	agent, _, _ := strings.Cut(from, "@")
 	return fmt.Sprintf("%s key=%s rec=%s msg=%s from=%s/%s text=%q ver=%s parent=%s thread=%s ps=%s created=%s late=%v removed=%v at=%s.%s.%d",
 		e.Kind, h.key(e.Key), h.id(e.Record), h.id(e.ID), h.nodes[e.FromNode], agent,
 		e.Text, h.id(e.Version), h.id(e.Parent), h.id(e.Thread), e.ParentState,

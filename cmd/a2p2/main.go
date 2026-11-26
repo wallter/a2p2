@@ -483,22 +483,33 @@ func clock(t string) string {
 // which the daemon sets by the full machine key (D65): any member machine
 // can post as human, so a human on another machine is marked as that
 // machine's person and never as this machine's.
-func authorMark(e localapi.Entry) string {
-	if e.From == "" {
-		return ""
+func authorMark(e localapi.Entry) string { return marks(e.From, e.FromThisMachine, false) }
+
+// marks are the CLI's words after an author written as from: where it is
+// (node.AuthorMark, from the full key) and, with shared, that its short
+// id is another known machine's too, so the full key is written.
+func marks(from string, here, shared bool) string {
+	out := ""
+	if m := node.AuthorMark(from, here); m != "" {
+		out += " [" + m + "]"
 	}
-	l, _, _ := strings.Cut(e.From, "@")
-	switch person := node.IsPerson(l); {
-	case person && !e.FromThisMachine:
-		return " [another machine's person, not you]"
-	case person && l == node.HumanLabel:
-		return " [this machine's person]"
-	case person:
-		return " [this machine, not its person]"
-	case e.FromThisMachine:
-		return " [this machine]"
+	if shared {
+		out += " [" + idSharedWords + "]"
 	}
-	return ""
+	return out
+}
+
+// idSharedWords mark an id written with the full key because another
+// machine known here has the same short id (D65).
+const idSharedWords = "id written in full: short id shared"
+
+// machineShown is a machine key as the CLI writes it: the short id, or
+// the full key when another known machine shares the short id.
+func machineShown(n string, shared bool) string {
+	if shared {
+		return node.EscapeDisplay(n) + " [" + idSharedWords + "]"
+	}
+	return short(n)
 }
 
 // printEntry shows one entry. Its text, choices, author and addressees
@@ -511,11 +522,17 @@ func printEntry(w io.Writer, e localapi.Entry) {
 	if len(e.To) > 0 {
 		head += " → " + escapeAll(e.To, ", ")
 	}
+	if e.IDShared { // the author's or an addressee's id
+		head += " [" + idSharedWords + "]"
+	}
 	if e.Kind != "message" {
 		head += " [" + e.Kind + "]"
 	}
 	if e.Edited {
 		head += " [edited]"
+	}
+	if c := node.ChangedWords(e.ChangedBy, e.FromThisMachine); c != "" {
+		head += " [" + c + "]"
 	}
 	if e.Parent != "" {
 		head += " (reply to " + node.EscapeDisplay(e.Parent)
@@ -783,7 +800,11 @@ func printTrace(w io.Writer, t localapi.TraceResp) {
 	if !t.Saved {
 		header = "not held on this machine"
 	}
-	fmt.Fprintf(w, "message  %s\nroom     %s\nheader   %s\ntext     %s\n", t.ID, t.Room, header, reason)
+	fmt.Fprintf(w, "message  %s\nroom     %s\n", t.ID, t.Room)
+	if t.From != "" {
+		fmt.Fprintf(w, "from     %s%s\n", node.EscapeDisplay(t.From), marks(t.From, t.FromThisMachine, t.IDShared))
+	}
+	fmt.Fprintf(w, "header   %s\ntext     %s\n", header, reason)
 	if len(t.Copies) == 0 {
 		fmt.Fprintln(w, "copy reports: none yet")
 	} else {
@@ -794,7 +815,7 @@ func printTrace(w io.Writer, t localapi.TraceResp) {
 		if !cp.Member {
 			member = "not a member now"
 		}
-		fmt.Fprintf(w, "  %s (%s), observed %s\n", short(cp.Node), member, clock(cp.At))
+		fmt.Fprintf(w, "  %s (%s), observed %s\n", machineShown(cp.Node, cp.IDShared), member, clock(cp.At))
 	}
 	if len(t.Handled) == 0 {
 		fmt.Fprintln(w, "handled: no report yet")
@@ -802,7 +823,7 @@ func printTrace(w io.Writer, t localapi.TraceResp) {
 		fmt.Fprintln(w, "handled reports (time signed by the agent's machine):")
 	}
 	for _, h := range t.Handled {
-		fmt.Fprintf(w, "  by %s at %s\n", node.EscapeDisplay(h.Agent), clock(h.At))
+		fmt.Fprintf(w, "  by %s%s at %s\n", node.EscapeDisplay(h.Agent), marks(h.Agent, h.FromThisMachine, h.IDShared), clock(h.At))
 	}
 	if len(t.Files) > 0 {
 		fmt.Fprintln(w, "files (what this machine holds; each member's last answer, as this machine observed it):")
@@ -1210,14 +1231,16 @@ func alerts(c *cmd, args []string) error {
 // printAlert shows one alert with the command that deals with it. The
 // daemon has escaped what other machines wrote in its text; a request's
 // text is shown as confirm shows it (approvalText), and the lines of a
-// question are indented.
+// question's body after its first are indented deeper than the asker's
+// line, so a body cannot draw a line that reads as another asker with a
+// mark (D65).
 func printAlert(w io.Writer, a localapi.Alert) {
 	switch a.Kind {
 	case node.AlertRequest:
 		fmt.Fprintf(w, "Request %s\n  %s\n  Review with a2p2 confirm %s\n", a.ID, approvalText(a.Text, "    "), a.ID)
 	case node.AlertQuestion:
 		fmt.Fprintf(w, "Question %s in room %s\n  %s\n  Answer with a2p2 send --room %s --reply-to %s TEXT\n",
-			a.ID, a.Room, strings.ReplaceAll(a.Text, "\n", "\n  "), a.Room, a.ID)
+			a.ID, a.Room, strings.ReplaceAll(a.Text, "\n", "\n    "), a.Room, a.ID)
 	case node.AlertNetwork:
 		fmt.Fprintf(w, "Networking\n  %s\n  Choose another address with a2p2 net on ADDR, or run a2p2 net off\n", a.Text)
 	case node.AlertRemoved:

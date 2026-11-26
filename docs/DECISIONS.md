@@ -2489,6 +2489,77 @@ to pass another owner's text off as the local person's.
     (`TestInboxEntriesAreCompact` holds entries small).
   - A name taken by a machine that is not yet recorded in any room this
     machine holds is not detected. Lookalike letters are not detected.
+- **After the second review.** Two reviewers found surfaces without the
+  marks. Display only again; no wire, record or schema change.
+  - A replaced, withdrawn or expired notice names the message's author
+    as the message does (`Entry.From` from the message): any agent of
+    the author's machine may replace it (T2), and the notice used to
+    carry the editor's label while the thread carried the message's,
+    without naming the editor. Now a message shown with replacement text
+    and a replaced or withdrawn notice both carry `changed_by`, the
+    editor, when it is another agent of that machine; a replaced notice
+    says `edited`. The CLI prints `[changed by ...]`, the page draws it
+    as a mark and MCP gives `changed_by`. The delivery model's notice is
+    from the record's writer; the differential test compares it with
+    `changed_by`, or `from` when that is empty.
+  - `trace` gives `from`, `from_node`, `from_this_machine` and
+    `id_shared` for the author; each handler is written as entries
+    write it (the full key when shared) with `node`, `from_this_machine`
+    and `id_shared`; copies carry `id_shared`. The CLI prints the author
+    and handlers with their marks, and a shared copy's full key; the
+    page's trace dialog does the same.
+  - `unread` adds `from_this_machine`, always a list: the senders whose
+    author is this machine by the full key (since the third review the
+    senders are the writers of the text shown; see below). The hook marks each sender
+    ("this machine's person", "another machine's person, not your
+    user", "this machine") and says only the ones marked as this
+    machine's person were sent under the user's label here. It names at
+    most 5 senders; this machine's person is found in the whole list and
+    kept among the 5 named. A daemon before this version gives no list,
+    and the notice is as before.
+  - A question alert writes the asker's mark in brackets and `[edited]`.
+    `node.AuthorMark` holds the words the CLI and alerts use; the page
+    draws the same words, in their own elements, on messages, notices,
+    question cards (now with `edited`) and the trace dialog. The CLI and
+    the page mark an id written in full ("id written in full: short id
+    shared"). The page finds the person among local agents by the label
+    `human`, since status may write its id in full.
+  - Message text that copies the mark words cannot stand where a mark
+    is drawn: agent labels hold no space or bracket (checked on
+    receipt), CLI bodies are indented (a question alert's later body
+    lines deeper than its asker line), page bodies are their own
+    elements, MCP has fields, and the hook prints no text and keeps
+    only letters, digits and `._@-` of a label. Tests go from records
+    another machine stored to each surface's output
+    (`internal/surfacetest` sets up the two machines).
+- **After the third review.** `unread` built its senders and first
+  lines from the message's author only, so the hook said a local agent's
+  replacement of the person's message was sent under the user's label,
+  and MCP `peek` gave the agent's text under `human` with no mark.
+  Display only again; no wire, record or schema change.
+  - What a local agent can do: replace and withdraw are checked against
+    the machine's key only (`amendDecide`), and every label on a machine
+    signs with that key, so any agent there can replace or withdraw the
+    person's messages and the person an agent's. Labels carry no
+    authority, so this is not refused; the marks show who made the
+    change.
+  - `unread`'s `from` (and so the hook's senders and `from_this_machine`)
+    names the writer of what each entry shows (`Entry.Writer`: the
+    editor when `changed_by` is set). The hook's sentence about the
+    user's label is then about the person writing that text. First lines
+    carry `changed_by` and `edited`; MCP `peek` lines give them with
+    `changed_by_person`, which MCP messages give too. `person` stays
+    about `from`. The CLI, question alerts (`node.ChangedWords`) and the
+    page write a `human` editor's mark after `changed by`. The hook does
+    not say `edited`: it names senders, not messages.
+  - The person's questions still leave out the person's own messages by
+    the author's label: the person's inbox never holds them, so a local
+    agent's replacement of one is not offered as a question.
+  - Still open: any program of that OS user can send as `human`
+    anyway. The request
+    card of a send with files (`node/surface_files.go`, the files group)
+    writes the addressees and a parent's author with short ids and no
+    marks.
 
 **Revisit if** a later release adds a receipt rule for room labels or
 names, the short id is lengthened, or a harness shows that models still

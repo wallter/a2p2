@@ -870,10 +870,15 @@ type entry struct {
 	Edited bool   `json:"edited,omitempty"`
 	Room   string `json:"room_label"` // the result's rooms give its id
 	From   string `json:"from"`
+	// ChangedBy: another agent of the author's machine wrote the
+	// replacement shown or the notice's change, so the text is its, not
+	// from's; omitted otherwise. ChangedByPerson is person for it.
+	ChangedBy       string `json:"changed_by,omitempty"`
+	ChangedByPerson string `json:"changed_by_person,omitempty"`
 	// FromThisMachine: the author is this machine, by its full key; never
-	// omitted. Person, when the author is labelled human: whether that is
-	// this machine's person. IDShared: an id here is written in full,
-	// since another machine known here has the same short id.
+	// omitted. Person, when the author (from) is labelled human: whether
+	// that is this machine's person. IDShared: an id here is written in
+	// full, since another machine known here has the same short id.
 	FromThisMachine bool     `json:"from_this_machine"`
 	Person          string   `json:"person,omitempty"`
 	IDShared        bool     `json:"id_shared,omitempty"`
@@ -922,9 +927,14 @@ type peekRoom struct {
 }
 
 type peekLine struct {
-	ID              string `json:"id"`
-	Room            string `json:"room_label"`
-	From            string `json:"from"`
+	ID   string `json:"id"`
+	Room string `json:"room_label"`
+	From string `json:"from"`
+	// Edited, ChangedBy and ChangedByPerson as in entry: the line is
+	// changed_by's text when it is set.
+	Edited          bool   `json:"edited,omitempty"`
+	ChangedBy       string `json:"changed_by,omitempty"`
+	ChangedByPerson string `json:"changed_by_person,omitempty"`
 	FromThisMachine bool   `json:"from_this_machine"`
 	Person          string `json:"person,omitempty"`
 	IDShared        bool   `json:"id_shared,omitempty"`
@@ -952,7 +962,8 @@ func view(es []localapi.Entry, local string) inboxOut {
 	out := inboxOut{Notice: notice, Messages: []entry{}}
 	seen := map[string]bool{}
 	for _, e := range es {
-		x := entry{ID: e.ID, Kind: e.Kind, Edited: e.Edited, Room: line(e.RoomLabel, 0), From: line(e.From, 0),
+		x := entry{ID: e.ID, Kind: e.Kind, Edited: e.Edited, Room: line(e.RoomLabel, 0), From: line(e.From, 0), ChangedBy: line(e.ChangedBy, 0),
+			ChangedByPerson: person(e.ChangedBy, e.FromThisMachine),
 			FromThisMachine: e.FromThisMachine, Person: person(e.From, e.FromThisMachine), IDShared: e.IDShared, AuthorRemoved: e.AuthorRemoved,
 			To: lines(e.To), AskHandled: e.AskHandled, Skipped: e.Skipped, Parent: e.Parent, Thread: e.Thread, Late: e.Late, Created: e.Created,
 			Text: node.EscapeDisplayText(e.Text), Choices: lines(e.Choices),
@@ -1099,6 +1110,7 @@ func peekLines(first []localapi.FirstLine, labels map[string]string) []peekLine 
 	var out []peekLine
 	for _, f := range first {
 		out = append(out, peekLine{ID: f.ID, Room: labels[f.Room], From: line(f.From, 0),
+			Edited: f.Edited, ChangedBy: line(f.ChangedBy, 0), ChangedByPerson: person(f.ChangedBy, f.FromThisMachine),
 			FromThisMachine: f.FromThisMachine, Person: person(f.From, f.FromThisMachine), IDShared: f.IDShared, Line: line(f.Line, 0)})
 	}
 	return out
