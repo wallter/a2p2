@@ -113,6 +113,7 @@ Relative paths are relative to the manifest.
   "a2p2": "a2p2",
   "state_dir": "/tmp/a2p2-team-example/state",
   "max_members": 2,
+  "approve_a2p2_tools": true,
   "silence_seconds": 120,
   "kickoff": "Each member replies with a one-line plan, then a DONE: report.",
   "members": [
@@ -131,8 +132,22 @@ node is always named; use a throwaway one to try it), `a2p2` (the binary,
 default `a2p2` on the `PATH`), `state_dir` (default `.team/<manifest
 name>` next to the manifest), `max_members` (default 4, at most 16),
 `lead` (the kickoff's author label, default `lead`), `watcher_label`
-(default `team`), `kickoff`, `prelude`, `poll_seconds` (default 5) and
-`silence_seconds` (default 300).
+(default `team`), `kickoff`, `prelude`, `poll_seconds` (default 5),
+`silence_seconds` (default 300) and `approve_a2p2_tools`.
+
+`approve_a2p2_tools` must be `true` for a run with a `claude`, `codex` or
+`agy` member, or `up` is refused before anything starts. `status`,
+`stop`, `logs` and `report` do not ask, so a run started without the key
+can still be stopped. The consent is saved with each member's command
+line in the state directory, which is made 0700, and the supervisor
+starts no such member whose saved command line lacks it. A member runs
+with no person to answer its prompts, so the launcher approves every
+a2p2 tool for it: `send`, `reply`, `ack` and `ask_human` as well as
+`whoami`, `peers` and `inbox`. Text that anyone writes in a room of
+`a2p2_home` can then lead a member to post without a prompt, so use a
+home whose rooms only this team shares. Claude Code members get the seven
+tools by name; Codex and Antigravity members get the server's tools as a
+whole, which includes any tool a later a2p2 adds.
 
 Member keys: `label`, `harness` (`claude`, `codex`, `agy` or `command`),
 `model`, `brief` or `brief_file`, `limit_seconds` (default 900),
@@ -146,7 +161,7 @@ harness, are refused. Per harness:
 
 | Harness | How it is started | Profile keys |
 |---|---|---|
-| `claude` | `claude -p <prompt> --model M --no-session-persistence --mcp-config <file> --strict-mcp-config --allowedTools 'mcp__a2p2__*' --output-format stream-json --verbose` | `allowed_tools`, `permission_mode`, `max_budget_usd` |
+| `claude` | `claude -p <prompt> --model M --no-session-persistence --mcp-config <file> --strict-mcp-config --allowedTools 'mcp__a2p2__whoami,...,mcp__a2p2__ask_human' --output-format stream-json --verbose` | `allowed_tools`, `permission_mode`, `max_budget_usd` |
 | `codex` | `codex exec <prompt> -m M -s S --ephemeral --skip-git-repo-check -C <dir> -c mcp_servers.a2p2...` with `default_tools_approval_mode="approve"`, `--json -o <final>` | `sandbox` (default `read-only`) |
 | `agy` | `agy --settings '{"permissions":{"allow":["mcp(a2p2/*)"]}}' --model M --print-timeout <limit>s -p=<prompt>` from a directory with `.agents/mcp_config.json` | none |
 | `command` | `command`, a list of arguments with `{a2p2}`, `{home}`, `{label}`, `{room}`, `{workdir}`, `{final}`, `{prompt_file}` and `{team_dir}` filled in | `mcp_harness`: the `--harness` name its MCP server registers with |

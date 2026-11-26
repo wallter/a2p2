@@ -34,6 +34,7 @@ import queue
 import re
 import select
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -62,7 +63,11 @@ CODEX_SANDBOXES = ("read-only", "workspace-write")
 CLAUDE_TOOLS_REFUSED = re.compile(r"^(\*|Bash|Bash\(\*\)|Bash\(:\*\))$|dangerous", re.I)
 
 TOP_KEYS = {"room", "a2p2_home", "a2p2", "state_dir", "max_members", "lead", "watcher_label",
-            "kickoff", "prelude", "poll_seconds", "silence_seconds", "members"}
+            "kickoff", "prelude", "poll_seconds", "silence_seconds", "approve_a2p2_tools", "members"}
+# The a2p2 MCP tools. A Claude Code member is allowed these by name, so a
+# tool a later a2p2 adds is not allowed without a change here.
+A2P2_TOOLS = ("whoami", "peers", "send", "inbox", "reply", "ack", "ask_human")
+HEADLESS = ("claude", "codex", "agy")
 MEMBER_KEYS = {"label", "harness", "model", "brief", "brief_file", "limit_seconds",
                "silence_seconds", "workdir", "worktree"}
 HARNESS_KEYS = {"claude": {"permission_mode", "allowed_tools", "max_budget_usd"},
@@ -189,7 +194,26 @@ def load_manifest(path):
         })
     if not man["members"]:
         raise Fail("manifest: no members")
+    approve = m.get("approve_a2p2_tools", False)
+    if not isinstance(approve, bool):
+        raise Fail("manifest: approve_a2p2_tools must be true or false")
+    man["approve_a2p2_tools"] = approve
     return man
+
+
+def require_tool_approval(man):
+    """A member runs without a person to answer its prompts, so the
+    launcher approves every a2p2 tool for it, send included. Text that
+    anyone in a room of that home writes can then lead it to post without a
+    prompt. The person says so in the manifest; nothing else turns it on.
+    Only `up` asks: status, stop, logs and report work for any run, also
+    one started from a manifest without the key."""
+    headless = [x["label"] for x in man["members"] if x["harness"] in HEADLESS]
+    if headless and not man["approve_a2p2_tools"]:
+        raise Fail(f"manifest: {', '.join(headless)} run without a person to answer prompts, so the launcher must "
+                   "approve their a2p2 tools, send, reply, ack and ask_human included: text anyone writes in a room "
+                   "of a2p2_home can then lead them to post without a prompt. Set \"approve_a2p2_tools\": true to "
+                   "accept that, and use a home whose rooms only this team shares")
 
 
 # ------------------------------------------------------------------- a2p2
@@ -352,7 +376,7 @@ def launch_spec(man, m, prompt, work):
     if h == "claude":
         argv = ["claude", "-p", prompt, "--model", m["model"], "--no-session-persistence",
                 "--mcp-config", os.path.join(d, "mcp.json"), "--strict-mcp-config",
-                "--allowedTools", ",".join(["mcp__a2p2__*"] + m["allowed_tools"]),
+                "--allowedTools", ",".join(["mcp__a2p2__" + t for t in A2P2_TOOLS] + m["allowed_tools"]),
                 "--output-format", "stream-json", "--verbose"]
         if m["permission_mode"]:
             argv += ["--permission-mode", m["permission_mode"]]
@@ -377,7 +401,9 @@ def launch_spec(man, m, prompt, work):
         argv = [str(a).format(**vals) for a in m["command"]]
         env.update(A2P2_BIN=exe, TEAM_LABEL=label, TEAM_ROOM=man["room"], TEAM_FINAL=final,
                    TEAM_PROMPT_FILE=vals["prompt_file"], TEAM_MCP_HARNESS=m["mcp_harness"])
-    spec = {"argv": argv, "cwd": work, "env": env}
+    # The consent `up` checked goes with the command line, so the
+    # supervisor starts a member with approved tools only if it was given.
+    spec = {"argv": argv, "cwd": work, "env": env, "approve_a2p2_tools": man["approve_a2p2_tools"]}
     with open(os.path.join(d, "launch.json"), "w") as f:
         json.dump(spec, f)
     return final
@@ -390,8 +416,14 @@ def server_harness(m):
 # -------------------------------------------------------------------- up
 
 def reserve(man):
-    """Claims the state directory for one run; a second `up` is refused."""
-    os.makedirs(man["state"], exist_ok=True)
+    """Claims the state directory for one run; a second `up` is refused.
+    The directory is this user's alone: the supervisor runs the command
+    lines saved in it."""
+    os.makedirs(man["state"], mode=0o700, exist_ok=True)
+    st = os.lstat(man["state"])
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise Fail(f"{man['state']} is not a directory of this user; set another state_dir")
+    os.chmod(man["state"], 0o700)
     try:
         os.close(os.open(os.path.join(man["state"], "reserved"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
     except FileExistsError:
@@ -399,6 +431,7 @@ def reserve(man):
 
 
 def cmd_up(man, args):
+    require_tool_approval(man)
     reserve(man)
     os.makedirs(os.path.join(man["state"], "members"))
     os.makedirs(control_dir(man))
@@ -511,6 +544,13 @@ class Supervisor:
     def launch(self, x):
         with open(os.path.join(mdir(self.man, x["label"]), "launch.json")) as f:
             spec = json.load(f)
+        if x["harness"] in HEADLESS and spec.get("approve_a2p2_tools") is not True:
+            with self.lock:
+                x.update(state="failed", launched=time.time(), ended=time.time(), note="its saved command line approves a2p2's tools, "
+                         "and the run was started without \"approve_a2p2_tools\": true")
+            self.posts.put(f"failed: {x['label']} was not started: a2p2's tools were not approved for it.")
+            self.save()
+            return
         env = dict(os.environ, **spec["env"])
         launched = time.time()     # taken before the process exists
         t0 = time.monotonic()

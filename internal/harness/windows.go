@@ -45,9 +45,17 @@ func forOS(name string, o *Options) error {
 	// written, and any other is refused rather than quoted for a guess.
 	bin := windowsSlashes(o.Binary)
 	if !plainWord(bin) {
+		// A new folder directly under C:\ inherits a rule that lets every
+		// signed-in user change what is in it, so the advice names the
+		// command that removes inherited access and grants this user,
+		// SYSTEM and Administrators. It keeps grants made on the folder
+		// itself, so the advice says to look at the list afterwards.
 		return fmt.Errorf("on Windows a2p2 is named by its path in a command a shell runs, so the path may hold only "+
-			"letters, digits and / . _ - : (no spaces); %s does not. Copy a2p2.exe to a directory such as C:\\a2p2 "+
-			"and run that copy's install", o.Binary)
+			"letters, digits and / . _ - : (no spaces); %s does not. Copy a2p2.exe to a directory with such a path "+
+			"that only you can change, and run that copy's install. A folder you create directly under C:\\ can be "+
+			"changed by every user of this computer until you run, in cmd.exe: icacls DIR /inheritance:r /grant:r "+
+			"\"%%USERNAME%%:(OI)(CI)F\" \"SYSTEM:(OI)(CI)F\" \"Administrators:(OI)(CI)F\" (in PowerShell write "+
+			"$env:USERNAME for %%USERNAME%%). Then icacls DIR should list no other user; remove any it does", o.Binary)
 	}
 	o.Binary = bin
 	return nil

@@ -35,9 +35,10 @@ var version = "dev" // set by -ldflags at release
 const usage = `a2p2 - peer-to-peer messaging for AI agents and the people who run them
 
 Getting started
-  a2p2 install claude|codex|agy|opencode|hermes|pi [--on-stop] [--dry-run]
+  a2p2 install claude|codex|agy|opencode|hermes|pi [--on-stop] [--dry-run] [--approve-tools]
                                   connect a harness (undo with: a2p2 uninstall NAME)
                                   --on-stop also checks for messages when a turn ends.
+                                  --approve-tools (Codex) lets every a2p2 tool, send included, run without a prompt.
   a2p2 ui [--print]               open the local web page; --print only prints its address
                                   The address carries the page's access token: do not log or share it.
   a2p2 doctor                     check the daemon and harness connections
@@ -361,10 +362,11 @@ func run(ctx context.Context, name string, args []string) (err error) {
 func installArgs(fs *flag.FlagSet, name string, args []string) (string, harness.Options, error) {
 	onStop := fs.Bool("on-stop", false, "also check for mail when the agent finishes a turn (may start another turn)")
 	dry := fs.Bool("dry-run", false, "show what would change")
+	approve := fs.Bool("approve-tools", false, "Codex: let every a2p2 tool, send included, run without a prompt")
 	if err := fs.Parse(permute(fs, args)); err != nil || fs.NArg() != 1 {
-		return "", harness.Options{}, usagef("a2p2 %s <%s> [--on-stop] [--dry-run]", name, strings.Join(harness.Names, "|"))
+		return "", harness.Options{}, usagef("a2p2 %s <%s> [--on-stop] [--dry-run] [--approve-tools]", name, strings.Join(harness.Names, "|"))
 	}
-	return fs.Arg(0), harness.Options{OnStop: *onStop, DryRun: *dry}, nil
+	return fs.Arg(0), harness.Options{OnStop: *onStop, DryRun: *dry, ApproveTools: *approve}, nil
 }
 
 // ackText is what a2p2 ack prints: a repeated ack names the first report

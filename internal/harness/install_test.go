@@ -207,17 +207,39 @@ func TestUninstallLeavesTheWholeHomeAsItWasBeforeInstall(t *testing.T) {
 	}
 }
 
-// C6, I2: the Codex installer approves the tools of a2p2's own server only
-// (one marked line in its table), and uninstall removes exactly that line.
-func TestCodexInstallApprovesOnlyItsOwnServerAndUninstallRemovesIt(t *testing.T) {
+// F48: a2p2 install codex leaves every a2p2 tool to Codex's own approval
+// rules unless the person passes --approve-tools, so a message that asks
+// the agent to send something does not get a send without a prompt.
+func TestCodexInstallDoesNotApproveSendUnlessThePersonAsks(t *testing.T) {
 	o, _ := setup(t)
 	o.Run = fakeCLI(o.HomeDir)
+	path, _ := codexConfig(o)
+	rep, err := Install("codex", o)
+	if err != nil || !strings.Contains(rep, "a2p2 approves none") || !strings.Contains(rep, "--approve-tools") {
+		t.Fatalf("%v %s", err, rep)
+	}
+	b, _ := os.ReadFile(path)
+	if strings.Contains(string(b), "approval") {
+		t.Fatalf("config.toml after a plain install approves tools:\n%s", b)
+	}
+	if c := codexApprovalCheck(o); !c.OK || !strings.Contains(c.Info, "approved no tools") {
+		t.Fatalf("doctor: %+v", c)
+	}
+}
+
+// C6, I2: with --approve-tools the Codex installer approves the tools of
+// a2p2's own server only (one marked line in its table), says that send is
+// among them, and uninstall removes exactly that line.
+func TestCodexInstallWithApproveToolsApprovesOnlyItsOwnServerAndUninstallRemovesIt(t *testing.T) {
+	o, _ := setup(t)
+	o.Run = fakeCLI(o.HomeDir)
+	o.ApproveTools = true
 	path, _ := codexConfig(o)
 	os.MkdirAll(filepath.Dir(path), 0o755)
 	other := "[mcp_servers.other]\ncommand = \"x\"\n"
 	os.WriteFile(path, []byte(other), 0o600)
 	rep, err := Install("codex", o)
-	if err != nil || !strings.Contains(rep, "this server only") {
+	if err != nil || !strings.Contains(rep, "this server only") || !strings.Contains(rep, "send, reply, ack and ask_human") {
 		t.Fatalf("%v %s", err, rep)
 	}
 	Install("codex", o)
@@ -226,6 +248,9 @@ func TestCodexInstallApprovesOnlyItsOwnServerAndUninstallRemovesIt(t *testing.T)
 	if strings.Count(s, "default_tools_approval_mode") != 1 || !strings.Contains(s, codexTable+"\n"+codexApproval+"\n") ||
 		!strings.HasPrefix(s, other) {
 		t.Fatalf("config.toml after install:\n%s", s)
+	}
+	if c := codexApprovalCheck(o); !c.OK || !strings.Contains(c.Info, "you chose") || !strings.Contains(c.Info, "send included") {
+		t.Fatalf("doctor: %+v", c)
 	}
 	// Codex itself not on PATH: the approval still goes.
 	o.LookPath = func(f string) (string, error) { return "", errors.New("no") }
@@ -237,9 +262,132 @@ func TestCodexInstallApprovesOnlyItsOwnServerAndUninstallRemovesIt(t *testing.T)
 	}
 	// A table codex wrote some other way is not guessed at.
 	o2, _ := setup(t)
+	o2.ApproveTools = true
 	rep, err = Install("codex", o2)
-	if err != nil || !strings.Contains(rep, "approve a2p2's tools in Codex yourself") {
+	if err != nil || !strings.Contains(rep, "nothing was approved") {
 		t.Fatalf("%v %s", err, rep)
+	}
+}
+
+// F48: an earlier a2p2 approved every tool on each install without asking.
+// Doctor reports that line as a fault, and the next install removes it,
+// even when the Codex CLI keeps the table's other lines.
+func TestCodexReinstallRemovesTheApprovalEarlierVersionsAddedUnasked(t *testing.T) {
+	o, _ := setup(t)
+	o.Run = fakeCLI(o.HomeDir)
+	if _, err := Install("codex", o); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := codexConfig(o)
+	b, _ := os.ReadFile(path)
+	old := strings.Replace(string(b), codexTable+"\n", codexTable+"\n"+codexApprovalUnasked+"\n", 1)
+	os.WriteFile(path, []byte(old), 0o600)
+	c := codexApprovalCheck(o)
+	if c.OK || !strings.Contains(c.Info, "without asking") || !strings.Contains(c.Fix, "a2p2 install codex") {
+		t.Fatalf("doctor on the old line: %+v", c)
+	}
+	o.DryRun = true
+	rep, err := Install("codex", o)
+	if err != nil || !strings.Contains(rep, "would remove the tool approval an earlier a2p2 install added") {
+		t.Fatalf("dry run: %v %s", err, rep)
+	}
+	if b, _ := os.ReadFile(path); string(b) != old {
+		t.Fatalf("dry run changed config.toml:\n%s", b)
+	}
+	// A Codex CLI that leaves the old line in place on mcp add.
+	o.DryRun = false
+	o.Run = func(string, ...string) error { return nil }
+	if _, err := Install("codex", o); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); strings.Contains(string(b), "approval") {
+		t.Fatalf("the old approval survived a reinstall:\n%s", b)
+	}
+	if c := codexApprovalCheck(o); !c.OK {
+		t.Fatalf("doctor after reinstall: %+v", c)
+	}
+}
+
+// F48: the dry run says which tools would run without a prompt.
+func TestCodexDryRunShowsTheApprovalChoice(t *testing.T) {
+	o, _ := setup(t)
+	o.Run = fakeCLI(o.HomeDir)
+	o.DryRun = true
+	rep, err := Install("codex", o)
+	if err != nil || !strings.Contains(rep, "a2p2 approves none") {
+		t.Fatalf("%v %s", err, rep)
+	}
+	o.ApproveTools = true
+	rep, err = Install("codex", o)
+	if err != nil || !strings.Contains(rep, "tool approval: would let every a2p2 tool, send, reply, ack and ask_human included") {
+		t.Fatalf("%v %s", err, rep)
+	}
+	// Elsewhere the flag changes nothing, and says so.
+	rep, err = Install("claude", o)
+	if err != nil || !strings.Contains(rep, "--approve-tools has no effect for claude") {
+		t.Fatalf("%v %s", err, rep)
+	}
+}
+
+// Doctor names approvals a2p2 did not write: the person's own server-wide
+// line and tools approved one by one.
+func TestDoctorReportsCodexApprovalsThePersonWrote(t *testing.T) {
+	o, _ := setup(t)
+	path, _ := codexConfig(o)
+	writeFile(t, path, codexTable+"\ncommand = \"/opt/a2p2\"\ndefault_tools_approval_mode = \"approve\"\ntools.inbox.approval_mode = \"approve\"\n"+
+		"[mcp_servers.a2p2.tools.send]\napproval_mode = \"approve\" # mine\n[mcp_servers.other.tools.ack]\napproval_mode = \"approve\"\n")
+	c := codexApprovalCheck(o)
+	if !c.OK || !strings.Contains(c.Info, "not written by a2p2") || !strings.Contains(c.Info, "one by one in "+path+": inbox, send") {
+		t.Fatalf("%+v", c)
+	}
+}
+
+// A multi-line string or array in config.toml whose lines read like a2p2's
+// table header or approval line is the person's text: install writes
+// nothing into it, the record keeps only the real table, and uninstall
+// gives the text back unchanged.
+func TestCodexEditsLeaveTextThatLooksLikeTheTableAlone(t *testing.T) {
+	o, _ := setup(t)
+	o.ApproveTools = true
+	path, _ := codexConfig(o)
+	// A Codex CLI that edits its own table only: the real one is last.
+	o.Run = func(cli string, args ...string) error {
+		b, _ := os.ReadFile(path)
+		s := string(b)
+		switch args[1] {
+		case "add":
+			s += codexTable + "\ncommand = \"/opt/a2p2\"\n"
+		case "remove":
+			if i := strings.LastIndex(s, codexTable+"\n"); i > strings.LastIndex(s, "'''") {
+				s = s[:i]
+			}
+		}
+		return os.WriteFile(path, []byte(s), 0o600)
+	}
+	mine := "[profiles.notes]\ntext = \"\"\"\n" + codexTable + "\ncommand = \"/elsewhere/a2p2\"\n" + codexApprovalUnasked + "\n\"\"\"\n" +
+		"list = [\n  \"a\",\n  [\"b\"],\n]\nlit = '''\n" + codexTable + "\n'''\n"
+	writeFile(t, path, mine)
+	if found, cmd, _ := registered("codex", o); found || cmd != "" {
+		t.Fatalf("text read as a registration: %v %q", found, cmd)
+	}
+	if file, had, prior, _ := cliEntry("codex", o); had || prior != "" {
+		t.Fatalf("text recorded as the prior entry of %s: %q", file, prior)
+	}
+	if c := codexApprovalCheck(o); !c.OK || strings.Contains(c.Info, "runs without a prompt") {
+		t.Fatalf("text read as an approval: %+v", c)
+	}
+	if _, err := Install("codex", o); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	if !strings.HasPrefix(string(b), mine) || !strings.Contains(string(b)[len(mine):], codexTable+"\n"+codexApproval+"\n") {
+		t.Fatalf("install wrote into the text or missed the table:\n%s", b)
+	}
+	if _, err := Uninstall("codex", o); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != mine {
+		t.Fatalf("uninstall changed the text:\n%s\nwant:\n%s", b, mine)
 	}
 }
 
@@ -371,4 +519,136 @@ func TestHookOutputNeverContainsMessageTextWhateverItSays(t *testing.T) {
 	if n := notice(u); strings.Contains(n, "zqd") || strings.Contains(n, "zqe") {
 		t.Fatalf("notice = %q", n)
 	}
+}
+
+// The Codex CLI writes config.toml in $CODEX_HOME when that is set, so the
+// approval edits and doctor read that file, not ~/.codex/config.toml.
+func TestCodexApprovalFollowsCodexHome(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+	o := Options{} // no HomeDir: the environment decides, as for a real run
+	if p, err := codexConfig(o); err != nil || p != filepath.Join(dir, "config.toml") {
+		t.Fatalf("%q %v", p, err)
+	}
+	if p, err := configFile(o, specs["codex"].file); err != nil || p != filepath.Join(dir, "hooks.json") {
+		t.Fatalf("hooks: %q %v", p, err)
+	}
+	path := filepath.Join(dir, "config.toml")
+	writeFile(t, path, codexTable+"\ncommand = \"/opt/a2p2\"\n"+codexApprovalUnasked+"\n")
+	if c := codexApprovalCheck(o); c.OK || !strings.Contains(c.Info, path) {
+		t.Fatalf("doctor read another file: %+v", c)
+	}
+	if rep, err := setCodexApproval(o); err != nil || !strings.Contains(strings.Join(rep, "\n"), "removed the tool approval") {
+		t.Fatalf("%v %q", err, rep)
+	}
+	if b, _ := os.ReadFile(path); strings.Contains(string(b), "approval") {
+		t.Fatalf("not removed from $CODEX_HOME:\n%s", b)
+	}
+}
+
+// When codex mcp add fails and the CLI keeps the table, the approval an
+// earlier a2p2 wrote without asking still goes, and a retry installs.
+func TestCodexInstallRemovesTheOldApprovalWhenTheCLIFails(t *testing.T) {
+	o, r := setup(t)
+	path, _ := codexConfig(o)
+	old := codexTable + "\ncommand = \"/opt/a2p2\"\n" + codexApprovalUnasked + "\n"
+	writeFile(t, path, old)
+	r.fail["mcp add"] = true
+	if _, err := Install("codex", o); err == nil || !strings.Contains(err.Error(), "mcp add failed") {
+		t.Fatalf("%v", err)
+	}
+	if b, _ := os.ReadFile(path); strings.Contains(string(b), "approval") {
+		t.Fatalf("the old approval survived a failed add:\n%s", b)
+	}
+	r.fail["mcp add"] = false
+	o.ApproveTools = true
+	if _, err := Install("codex", o); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); strings.Count(string(b), codexApproval) != 1 || strings.Contains(string(b), codexApprovalUnasked+"\n") {
+		t.Fatalf("retry:\n%s", b)
+	}
+}
+
+// --approve-tools changes config.toml in one write, and keeps an edit
+// another program made to the file while a2p2 was changing it.
+func TestCodexApprovalEditKeepsAConcurrentEdit(t *testing.T) {
+	o, _ := setup(t)
+	o.ApproveTools = true
+	path, _ := codexConfig(o)
+	writeFile(t, path, codexTable+"\ncommand = \"/opt/a2p2\"\n"+codexApprovalUnasked+"\n")
+	var writes int
+	beforeCheck = func(p string) {
+		if writes++; writes == 1 {
+			b, _ := os.ReadFile(p)
+			os.WriteFile(p, append(b, "[profiles.mine]\nmodel = \"x\"\n"...), 0o600)
+		}
+	}
+	defer func() { beforeCheck = func(string) {} }()
+	if _, err := setCodexApproval(o); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	if writes != 2 || !strings.Contains(string(b), "[profiles.mine]") || strings.Count(string(b), codexApproval) != 1 ||
+		strings.Contains(string(b), codexApprovalUnasked+"\n") {
+		t.Fatalf("after %d tries:\n%s", writes, b)
+	}
+}
+
+// The person's own default_tools_approval_mode stays, and --approve-tools
+// adds no second one, which would make config.toml invalid.
+func TestCodexApproveToolsAddsNoDuplicateKey(t *testing.T) {
+	o, _ := setup(t)
+	o.ApproveTools = true
+	path, _ := codexConfig(o)
+	mine := codexTable + "\ncommand = \"/opt/a2p2\"\ndefault_tools_approval_mode = \"prompt\"\n"
+	writeFile(t, path, mine)
+	rep, err := setCodexApproval(o)
+	if err != nil || !strings.Contains(strings.Join(rep, "\n"), "a2p2 added nothing") {
+		t.Fatalf("%v %q", err, rep)
+	}
+	if b, _ := os.ReadFile(path); string(b) != mine {
+		t.Fatalf("config.toml changed:\n%s", b)
+	}
+}
+
+// TOML that the line scanner must read right: a multi-line string that
+// ends in four or five quotes inside an array, a commented or spaced
+// header, and a2p2's marker line in another server's table.
+func TestCodexEditsReadValidTOMLRight(t *testing.T) {
+	o, _ := setup(t)
+	path, _ := codexConfig(o)
+	other := "[mcp_servers.other]\n" + codexApprovalUnasked + "\n"
+	writeFile(t, path, "a = [\"\"\"x\"\"\"\", '''y''''']\n"+
+		"[ mcp_servers.\"a2p2\" ] # a2p2\ncommand = \"/opt/a2p2\"\n"+codexApprovalUnasked+"\n"+other)
+	if found, cmd, _ := registered("codex", o); !found || cmd != "/opt/a2p2" {
+		t.Fatalf("registered: %v %q", found, cmd)
+	}
+	if c := codexApprovalCheck(o); c.OK || !strings.Contains(c.Info, "without asking") {
+		t.Fatalf("doctor missed the old approval: %+v", c)
+	}
+	if _, table := codexTables(string(must(os.ReadFile(path)))); !strings.Contains(table, "command") || strings.Contains(table, "approval") {
+		t.Fatalf("recorded table: %q", table)
+	}
+	if removed, err := revokeCodexApproval(o); err != nil || !removed {
+		t.Fatalf("%v %v", removed, err)
+	}
+	b := string(must(os.ReadFile(path)))
+	if !strings.HasSuffix(b, other) || strings.Count(b, codexApprovalUnasked) != 1 {
+		t.Fatalf("revoke missed a2p2's line or took another table's:\n%s", b)
+	}
+	o.ApproveTools = true
+	if _, err := setCodexApproval(o); err != nil {
+		t.Fatal(err)
+	}
+	if b := string(must(os.ReadFile(path))); !strings.Contains(b, "# a2p2\n"+codexApproval+"\ncommand") {
+		t.Fatalf("approval not under the commented header:\n%s", b)
+	}
+}
+
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
 }

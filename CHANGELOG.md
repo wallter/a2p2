@@ -32,6 +32,48 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   parameter name, schema or annotation changed; the definitions are 3,991
   bytes (was 3,979), under the 4,000 limit.
 
+### Security
+
+- **`a2p2 install codex` no longer approves every a2p2 tool without
+  asking.** Since 0.1.0 it added `default_tools_approval_mode = "approve"`
+  to `[mcp_servers.a2p2]` in `~/.codex/config.toml`, so a Codex agent
+  could `send`, `reply` or `ask_human` without a prompt when a member of a
+  shared room, another owner's included, asked it to post something. Now
+  install approves nothing unless you pass `--approve-tools`, and the
+  dry run says which you chose. Reinstall to remove the old line;
+  `a2p2 doctor` fails a `codex tool approval` line until you do. A headless
+  `codex exec` needs `--approve-tools` (D-NEW-J-harness). The edits and
+  doctor follow `CODEX_HOME`, as the Codex CLI does.
+- **The team launcher asks before it approves a2p2's tools for members.**
+  Since 0.1.0 `scripts/team` approved every a2p2 tool for each Claude Code,
+  Codex and Antigravity member. A manifest with such members must now say
+  `"approve_a2p2_tools": true` for `up`; `status`, `stop`, `logs` and
+  `report` still work for runs started without it. Claude Code members
+  get the seven tools by name instead of `mcp__a2p2__*`, and the state
+  directory is now 0700.
+- **Pi's skill no longer puts message text in double quotes.** Since 0.1.0
+  the skill told the model to run `a2p2 send ... "text"` in bash, where
+  `$(...)` and backticks in text it copied from a peer would run as you.
+  It now sends text through a heredoc with a quoted end word and writes
+  the `--as` label out in every command, since an empty `--as` acts as
+  the person. The end word has random digits chosen at install. Run
+  `a2p2 install pi` again to get the new skill; `a2p2 doctor` fails the
+  old one.
+- **Install refuses a binary that another user could replace.** A binary
+  in a temporary directory, in Go's build cache (`go run`), in a directory
+  every user can change, owned by another user, or with a control
+  character in its path is refused, whether the path is a symlink or
+  leads through one; a group-writable directory gives a
+  warning, and `a2p2 doctor` reports the same. Directories install
+  creates for a harness's configuration are now 0700. On Windows the
+  advice no longer suggests `C:\a2p2`, which every signed-in user can
+  change by default; the binary's access list is not checked there yet.
+- Codex `config.toml` edits now skip multi-line strings and arrays and
+  touch only a2p2's tables, so text that reads like a2p2's table is not
+  written into or removed. `--approve-tools` adds no second
+  `default_tools_approval_mode` to a table that has one, and a change is
+  written only if the file still holds what a2p2 read.
+
 ### Fixed
 
 - **A send no longer slows down as a room's history grows, and an inbox
