@@ -40,7 +40,7 @@ Getting started
                                   --on-stop also checks for messages when a turn ends.
                                   --approve-tools (Codex) lets every a2p2 tool, send included, run without a prompt.
   a2p2 ui [--print]               open the local web page; --print only prints its address
-                                  The address carries the page's access token: do not log or share it.
+                                  The address works once, within 30 seconds: do not log or share it.
                                   At a terminal only, never in an agent's shell, unless --person is given.
   a2p2 doctor                     check the daemon and harness connections
 
@@ -130,13 +130,35 @@ var errUsage = errors.New("usage")
 // address, a name) and no error of a2p2 spans lines.
 func errorText(err error) string { return node.EscapeDisplay(err.Error()) }
 
-// showUI prints the page's address, which carries its access token, and
-// opens it with open unless printOnly. The address goes only to w, never to a log.
-func showUI(w io.Writer, url string, printOnly bool, open func(string)) {
+// showUI prints the page's address and opens it with open unless
+// printOnly. The address goes only to w, never to a log. It carries a
+// one-time code, which the page trades for a session (internal/web,
+// session.go); note, on stderr so that w holds the address alone, says
+// so. A daemon before 0.2.4 still running after an upgrade gives an
+// address with its long-lived token instead: that is never opened, since
+// opening puts it in the arguments of the browser, where other users can
+// read it; it is printed only for --print, with a note to restart the
+// daemon. daemonVersion is the running daemon's version.
+func showUI(w, note io.Writer, url, daemonVersion string, printOnly bool, open func(string)) error {
+	if !strings.Contains(url, "/#c=") {
+		restart := "the running a2p2 daemon (" + daemonVersion + ") is older than this a2p2 (" + version +
+			") and its address carries its long-lived token; run a2p2 stop, then a2p2 ui, for an address that works once"
+		if !printOnly {
+			return errors.New(restart + ". Nothing was opened: opening it would show the token to other users of this computer")
+		}
+		fmt.Fprintln(w, url)
+		fmt.Fprintln(note, "Note: "+restart+".")
+		return nil
+	}
 	fmt.Fprintln(w, url)
+	fmt.Fprintln(note, "This address opens the page once, within 30 seconds. Run a2p2 ui again for a new one.")
+	if daemonVersion != version {
+		fmt.Fprintln(note, "The running a2p2 daemon is "+daemonVersion+" and this a2p2 is "+version+"; run a2p2 stop to start this one.")
+	}
 	if !printOnly {
 		open(url)
 	}
+	return nil
 }
 
 func usagef(format string, a ...any) error {

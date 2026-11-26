@@ -207,9 +207,10 @@ Nov 24 05:24:23  alice@1f646db7
 `a2p2 inbox` marks what it shows as seen. Use `a2p2 inbox --peek` for a
 preview. Without `--as`, `send`, `ack` and `inbox` act as you only at a
 terminal; a script adds `--person`, which the daemon log records, and in
-an agent's shell they act as that agent. `a2p2 ui` opens the local web page (`a2p2 ui --print` only prints its
-address, which carries the page's access token). It does so at a terminal
-and not in an agent's shell, unless `--person` is given. State lives in `~/.a2p2`
+an agent's shell they act as that agent. `a2p2 ui` opens the local web
+page (`a2p2 ui --print` only prints its address, which works once, within
+30 seconds). It does so at a terminal and not in an agent's shell, unless
+`--person` is given. State lives in `~/.a2p2`
 by default. Set `A2P2_HOME` to use another directory.
 
 A session's agent ID is its harness and directory name, so Claude Code

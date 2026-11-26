@@ -408,6 +408,34 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   addresses it advertises, which can include VPN and office addresses,
   and lists the `advertise` addresses of `config.json` when they are
   set.
+- **The page's address no longer carries a long-lived secret.** Since
+  0.1.0, `a2p2 ui` opened an address holding the page's token for the
+  daemon's whole run, and on Linux `xdg-open` and the browser it starts
+  keep that address in their command lines, which other users of the
+  machine can read; with it they could read every room, send as you and
+  approve requests on the page. Now the address holds a code that works
+  once and for 30 seconds; the page trades it for a session kept in the
+  tab. A code used twice ends the session it gave, however late the
+  second use. `a2p2 ui --print` still prints the address alone on
+  standard output, and says on standard error that it works once. With
+  a daemon before this release still running, `a2p2 ui` opens nothing
+  and says to run `a2p2 stop`. A tab left open after its daemon stopped
+  no longer shows what another listener on its port answers, and sends
+  a message or a decision only right after a state from its own daemon
+  for its own session.
+  A daemon whose page port was taken says so in its log.
+- **`daemon.log` no longer grows without end.** Since 0.1.0 another
+  machine could make it grow (a refused request is a line). Once over
+  10 MiB its last 10 MiB are moved to `daemon.log.1`, checked every 10
+  seconds, so about 20 MiB is kept plus what is written between checks;
+  if that copy fails, the log is emptied anyway.
+- **A home under a directory other users can change is refused.** On
+  macOS and Linux, a user who could change a directory above the a2p2
+  home could put another home with their own socket at its path, which a
+  running MCP session would then dial. a2p2 now refuses such a home and
+  names the directory, including one reached through links, and one
+  writable by a group other than your own private group (on macOS,
+  `staff`).
 
 
 ## [0.2.3] - 2026-11-25

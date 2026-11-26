@@ -140,6 +140,8 @@ const win = {
   requestAnimationFrame: (f) => setTimeout(f, 0),
   fetch: (p, o) => {
     const path = String(p);
+    // A browser sends the page's Origin with every POST; Node does not.
+    if (o && o.method === "POST") o = { ...o, headers: { ...o.headers, Origin: new URL(base).origin } };
     if (o && o.method === "POST" && path.startsWith("/api/send")) posts.push(JSON.parse(o.body));
     if (dropHistory && path.startsWith("/api/history")) return Promise.resolve(Response.json({ entries: [] }));
     return fetch(new URL(path, base), o);
@@ -229,6 +231,9 @@ async function escapeScenario(out) {
     out.connectionHidden = $("connection").hidden;
     out.connection = $("connection").hidden ? "" : $("connection").textContent;
     out.appHidden = $("app").hidden;
+    out.authfailHidden = $("authfail").hidden;
+    out.authwhy = $("authwhy").textContent;
+    if (out.appHidden && !out.authfailHidden) throw new Error("signed out: " + out.authwhy);
     out.roomIds = $("rooms").children.map((li) => li.firstChild.dataset.room);
     out.rooms = $("rooms").children.map((li) => li.textContent);
     out.node = $("node").textContent;
@@ -255,6 +260,7 @@ async function escapeScenario(out) {
       await sleep(300); await idle("the send");
       out.scenario.author = author;
       out.scenario.posts = posts.slice();
+      out.scenario.sendErr = $("err").textContent;
       // A recipient lost some other way: the page must refuse, not send room-wide.
       posts.length = 0;
       sel.value = "";

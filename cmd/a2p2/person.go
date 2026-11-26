@@ -104,12 +104,12 @@ func (c *cmd) actor(command string, writes bool) (localapi.RegisterReq, string, 
 	return person, "", nil
 }
 
-// uiCmd prints or opens the page's address. Its token lets the page act
+// uiCmd prints or opens the page's address. Its one-time code lets the page act
 // as the person (send, seen and ack as human@<own id>), so it is given as
 // the person's identity is: never in an agent's shell, and away from a
 // terminal only with --person, which the daemon log records.
 func uiCmd(c *cmd, args []string) error {
-	printOnly := c.fs.Bool("print", false, "print the address and open nothing")
+	printOnly := c.fs.Bool("print", false, "print the page's address, which works once within 30 seconds, and open nothing")
 	if err := c.fs.Parse(permute(c.fs, args)); err != nil {
 		return errUsage
 	}
@@ -144,8 +144,7 @@ func uiCmd(c *cmd, args []string) error {
 	if err := c.call("status", nil, &st, nil); err != nil {
 		return err
 	}
-	showUI(os.Stdout, st.UI, *printOnly, openURL) // openURL: tty_unix.go, tty_windows.go
-	return nil
+	return showUI(os.Stdout, os.Stderr, st.UI, st.Version, *printOnly, openURL) // openURL: tty_unix.go, tty_windows.go
 }
 
 // who resolves the acting agent for command (see actor) and registers it.

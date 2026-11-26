@@ -9,7 +9,6 @@ package web
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -37,14 +36,15 @@ var assets embed.FS
 const maxBody = 64 << 10
 
 type server struct {
-	s     *node.Surface
-	token string
+	s  *node.Surface
+	ss *Sessions
 }
 
-// Handler serves the page. Every API request must present token; see
-// PROTOCOL.md section 7.
-func Handler(s *node.Surface, token string) http.Handler {
-	sv := &server{s, token}
+// Handler serves the page. Every API request but the trade of a link's
+// code must present a session of ss (session.go); see PROTOCOL.md
+// section 7.
+func Handler(s *node.Surface, ss *Sessions) http.Handler {
+	sv := &server{s, ss}
 	mux := http.NewServeMux()
 	for path, file := range map[string]string{"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"} {
 		mux.HandleFunc("GET "+path, sv.static(file))
@@ -52,6 +52,7 @@ func Handler(s *node.Surface, token string) http.Handler {
 	// No icon: answered empty, so the browser logs no missing file (an
 	// inline data: icon would be refused by the page's own CSP).
 	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	mux.HandleFunc("POST /api/session", sv.session)
 	mux.HandleFunc("GET /api/state", sv.api(sv.state))
 	mux.HandleFunc("GET /api/history", sv.api(sv.history))
 	mux.HandleFunc("GET /api/thread", sv.api(sv.thread))
@@ -105,12 +106,12 @@ func (sv *server) guard(next http.Handler) http.Handler {
 	})
 }
 
-// allowed applies the checks every API route shares: the Bearer token,
-// and for a POST a JSON content type and the body limit. It answers a
-// refusal itself and reports whether the request may go on.
+// allowed applies the checks every API route shares: a session as the
+// Bearer token, and for a POST a JSON content type and the body limit. It
+// answers a refusal itself and reports whether the request may go on.
 func (sv *server) allowed(w http.ResponseWriter, r *http.Request) bool {
-	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || subtle.ConstantTimeCompare([]byte(got), []byte(sv.token)) != 1 {
+	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok || !sv.ss.valid(got) {
 		writeJSON(w, 401, map[string]string{"error": "missing or invalid token; run `a2p2 ui` for a fresh link"})
 		return false
 	}
@@ -222,7 +223,9 @@ func (sv *server) state(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]any{"status": localapi.StatusOf(st, sv.s.Addrs(), localapi.Info{})}
+	// run is the presenting session's: the page refuses a state with another.
+	run, _ := sv.ss.runOf(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	out := map[string]any{"status": localapi.StatusOf(st, sv.s.Addrs(), localapi.Info{}), "run": run}
 	unread := make([]localapi.Entry, 0, len(in.Entries))
 	for _, e := range in.Entries {
 		unread = append(unread, localapi.EntryOf(e))
