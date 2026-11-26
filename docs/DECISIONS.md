@@ -2137,3 +2137,83 @@ would run the workflow, and the fixes need no protocol change.
 **Revisit if** an action is moved to a new major release, GitHub offers
 immutable releases or a required environment here, the attestation check
 can be done without `gh`, or a mixed-version chaos run is added.
+
+## D-NEW-L-portmap. Port mapping checks what a host answering as the router says (2026-11-25)
+
+A security review (F61 to F66) showed that a device on the same network
+as a machine that ran `net on --map-port` could answer as the router. One
+datagram that holds nothing of the request made a2p2 skip PCP and forget
+the PCP mapping it may have made. A lifetime of 136 years stopped renewal
+for the run. A multicast external address was saved, and then no later
+start mapped or removed anything. A private address went first in every
+invite. A UPnP listener on port 65534 or 65535 could ask for port 0 and
+leave the same unusable record. Rooms now span owners, so a wrong first
+address in an invite reaches other owners' joiners.
+
+- **What changed.** NAT-PMP's version answer to a PCP request counts only
+  if no PCP answer with the nonce comes in any of the tries, and the PCP
+  request stays recorded, to be deleted later; a PCP deletion that gets
+  only the version answer in all its tries counts as done. A new PCP
+  request with no answer at all is sent one deletion, not waited for,
+  before its handle is let go; a renewal with no answer is not, since its handle is
+  the mapping held. A lifetime longer than asked counts as asked, in the
+  client and again in the keeper. A grant whose external address is not
+  a public IPv4 address (private, 100.64.0.0/10, loopback, link-local,
+  multicast, 0.0.0.0/8, 240.0.0.0/4, or any IPv6 address, since every
+  request is IPv4 and IPv6 can encode a private IPv4 address) is not
+  taken: status says why, and what it may have made is removed after the
+  attempt. The address given to the reacher and to invites is checked
+  again, is withdrawn when the keeper's run ends (listener stopped, `net
+  off`, stop) whether or not the router confirmed the removal, and is
+  withdrawn when a renewal is answered with an address that cannot be
+  used; the next renewal is then five minutes later, so a router that
+  answers at once is not asked every second. After any failed attempt the keeper removes what it holds but the
+  live mapping, so failures do not pile up. A keeper adds at most 8
+  mappings to remove (a record still loads with up to 16) and never sends
+  a request whose handle the record could not load, so the record always
+  loads. UPnP never asks for a port past 65535. Only a default gateway
+  with a private IPv4 address is asked for a mapping; one an earlier
+  version asked (a public or shared address on the local network) still
+  gets the deletions of what the record holds for it. The `net on
+  --map-port` text says a router may keep a mapping past 2 hours after a
+  crash and that its answers are not authenticated. The daemon's port
+  mapping code moved to `internal/daemon/mapport.go`, so removing the
+  feature is deleting that file and `internal/daemon/portmap`, and fixing
+  a few calls in `daemon.go`, `RunOpts` and `defaultGateway`.
+- **What did not change.** Port mapping was already off unless a person
+  asks for it: the CLI (`net on --map-port`) asks at a terminal each
+  time, and the daemon takes it only from the local API's net call. Any
+  later `net on` without it removes the mapping; a recorded decision
+  with it still applies after a restart. No wire, record, schema or `portmap.json`
+  format change: a record written by 0.2.0 to 0.2.3 loads, and one written
+  now loads in them. Documentation addresses still pass the public check;
+  nobody holds them and the tests use them.
+- **Costs.** A router that speaks only NAT-PMP is now taken as one after
+  every PCP try (1.75 s) instead of at once, on each mapping, renewal and
+  PCP deletion. A router that does not answer PCP gets one more datagram,
+  a deletion, per attempt. A router that reports an IPv6 external
+  address gets no mapping. A router behind another NAT whose external address is private
+  or shared now gets no mapping where it got a useless one. A gateway with
+  a public or shared address is never asked. A failed attempt sends a
+  deletion for what it may have made.
+- **Still open.** A device that relays a public port it mapped for itself
+  to this machine's listener passes the dial-back, and the address is then
+  advertised to every member, and so does a wrong address that one
+  member falsely says it reached; detecting either needs the listener to tell
+  which inbound connection was a member's dial-back and from what source,
+  in `internal/peer` and `internal/node` (`dialback.go`, `reach.go`). The
+  unconfirmed mapped address still goes first in invites, because a room's
+  first invite comes before any member can confirm it; the owner chooses
+  between that, putting it last, and leaving it out until confirmed. A
+  forged NAT-PMP refusal still makes a2p2 forget a NAT-PMP mapping (it
+  lapses with the router's lease). A version answer forged on every try
+  of a PCP deletion, with every real answer lost, still lets a2p2 forget
+  a PCP mapping, and a PCP request with every reply and the deletion lost
+  is forgotten too; each lapses with the router's lease. Keeping them
+  instead would fill the keeper on a network without PCP. A permanent UPnP lease, asked for only
+  on error 725, is still unbounded after a crash. The SSDP answer's source
+  port is not checked (F65): the UPnP architecture does not fix it, and a
+  device that can spoof the gateway can do more by ARP.
+
+**Revisit if** the owner decides on invites or permanent leases, a
+dial-back can tell a relayed connection, or port mapping is removed.

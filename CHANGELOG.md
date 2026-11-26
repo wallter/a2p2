@@ -281,6 +281,26 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 - A test now opens databases written by each release from v0.2.0 to
   v0.2.3 with the current code, so a rule that would refuse old data
   fails it.
+- **A device on the local network has less hold on port mapping.**
+  Exposed since 0.2.0: a person who ran `a2p2 net on --map-port`, on a
+  network with another device that answers as the router. That device
+  could make a2p2 skip PCP with one datagram that holds nothing of the
+  request and forget the PCP mapping it may have made, grant a lifetime
+  of 136 years so a2p2 never renewed, report a multicast address so that
+  no later start mapped or removed anything, or report a private address
+  that a2p2 then put first in invites. Now a version answer counts only
+  if no PCP answer comes in any of the tries and the PCP request stays
+  recorded to be removed, a lifetime longer than the 2 hours asked counts
+  as 2 hours, an external address that is not a public IPv4 address is
+  not taken and a2p2 tries to remove what the router made, a UPnP port
+  past 65535 is never asked for, a run adds at most 8 mappings to remove,
+  and only a gateway with a private address is asked for a mapping (what
+  an earlier version recorded on another one is still removed). The
+  mapped address is no longer given out once networking stops using it,
+  even if the router did not confirm the removal. Port mapping stays off
+  unless a person asks for it; the CLI asks at a terminal each time. The
+  `net on --map-port` text now says a router may keep a mapping past 2
+  hours after a crash.
 
 
 ## [0.2.3] - 2026-11-25

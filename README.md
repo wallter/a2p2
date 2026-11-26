@@ -270,7 +270,8 @@ machine.) And `a2p2 net on --map-port` asks the home router to forward
 the port (PCP, NAT-PMP or UPnP; not on Windows); this opens a port on the
 router to the internet, so it is asked at a terminal and never turned on
 by default. The mapping is removed by `a2p2 net off` and `a2p2 stop`. If
-a2p2 crashes, a mapping lapses within two hours, except on a router that
+a2p2 crashes, a mapping lapses when the router's lease ends (a2p2 asks
+for two hours; a router may grant more), except on a router that
 grants only permanent ones: that rule stays until a2p2 starts again on
 the same network, or until you delete the rule named `a2p2` on the
 router's own page. If a2p2 cannot use its record of mappings

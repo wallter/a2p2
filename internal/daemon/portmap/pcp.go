@@ -56,8 +56,22 @@ func (c *Client) mapPCP(ctx context.Context, internal uint16, lifetime time.Dura
 		return Mapping{}, err
 	}
 	got, err := c.pcp(ctx, internal, lifetime, &m)
-	if err != nil && ctx.Err() == nil && !errors.Is(err, errUnsure) {
-		_ = note(m, false) // a definite answer, or none at all: nothing was made
+	// A definite answer, or none at all: nothing was made. The version
+	// answer is not definite: it holds nothing of the request, so a host
+	// on the network can send it while the router made the mapping. That
+	// handle stays noted, and a PCP deletion of it costs nothing. With no
+	// answer at all the router may still have made it and lost every
+	// reply: one deletion is sent, not waited for, before it is let go.
+	// Keeping such a handle would fill the keeper on a network without
+	// PCP, where no deletion is ever answered either. A renewal is never
+	// deleted so: its handle is the mapping held, which a short loss of
+	// the network must not remove from the router.
+	renewal := prev != nil && prev.Protocol == PCP
+	if err != nil && ctx.Err() == nil && !errors.Is(err, errUnsure) && !errors.As(err, new(*oldVersion)) {
+		if errors.Is(err, errNoAnswer) && !renewal {
+			c.send(pcpRequest(c.Local, internal, 0, &m))
+		}
+		_ = note(m, false)
 	}
 	return got, err
 }
@@ -69,28 +83,17 @@ var errUnsure = errors.New("the router's answer cannot be used")
 // pcp sends one MAP request for m (lifetime 0 deletes it) and returns the
 // mapping granted.
 func (c *Client) pcp(ctx context.Context, internal uint16, lifetime time.Duration, m *Mapping) (Mapping, error) {
-	q := make([]byte, pcpReqLen)
-	q[0], q[1] = pcpVersion, pcpOpMap
-	binary.BigEndian.PutUint32(q[4:], uint32(lifetime/time.Second))
-	local := v4mapped(c.Local)
-	copy(q[8:24], local[:])
-	copy(q[24:36], m.Nonce[:])
-	q[36] = pcpProtoTCP
-	binary.BigEndian.PutUint16(q[40:], internal)
-	if lifetime > 0 {
-		binary.BigEndian.PutUint16(q[42:], m.External.Port())
-	}
-	ext := v4mapped(netip.Addr{})
-	copy(q[44:60], ext[:])
+	q := pcpRequest(c.Local, internal, lifetime, m)
 	var out Mapping
 	err := c.exchange(ctx, q, func(b []byte) (bool, error) {
 		if len(b) >= 8 && b[0] == 0 {
 			// A NAT-PMP server's answer to a request of another version
 			// (RFC 6886 section 3.5, RFC 6887 section 9): opcode 128 + 1,
 			// result 1, unsupported version. Any other version-0 datagram
-			// is not an answer.
+			// is not an answer. It holds nothing of the request, so it is
+			// taken only if no PCP answer comes in any of the tries.
 			if len(b) <= 16 && b[1] == 0x80|pcpOpMap && binary.BigEndian.Uint16(b[2:]) == 1 {
-				return true, &oldVersion{}
+				return false, &oldVersion{}
 			}
 			return false, nil
 		}
@@ -101,7 +104,7 @@ func (c *Client) pcp(ctx context.Context, internal uint16, lifetime time.Duratio
 		if r := b[3]; r != 0 {
 			return true, fmt.Errorf("refused: %s", pcpText(r))
 		}
-		granted := time.Duration(binary.BigEndian.Uint32(b[4:])) * time.Second
+		granted := grantedFor(binary.BigEndian.Uint32(b[4:]), lifetime)
 		ip := netip.AddrFrom16([16]byte(b[44:60])).Unmap()
 		port := binary.BigEndian.Uint16(b[42:])
 		out = *m
@@ -115,6 +118,47 @@ func (c *Client) pcp(ctx context.Context, internal uint16, lifetime time.Duratio
 	return out, err
 }
 
+// pcpRequest is the MAP request for m from local (lifetime 0 deletes it).
+func pcpRequest(local netip.Addr, internal uint16, lifetime time.Duration, m *Mapping) []byte {
+	q := make([]byte, pcpReqLen)
+	q[0], q[1] = pcpVersion, pcpOpMap
+	binary.BigEndian.PutUint32(q[4:], uint32(lifetime/time.Second))
+	l := v4mapped(local)
+	copy(q[8:24], l[:])
+	copy(q[24:36], m.Nonce[:])
+	q[36] = pcpProtoTCP
+	binary.BigEndian.PutUint16(q[40:], internal)
+	if lifetime > 0 {
+		binary.BigEndian.PutUint16(q[42:], m.External.Port())
+	}
+	ext := v4mapped(netip.Addr{})
+	copy(q[44:60], ext[:])
+	return q
+}
+
+// send sends q once to the gateway's PCP and NAT-PMP port and waits for
+// nothing.
+func (c *Client) send(q []byte) {
+	conn, err := net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(netip.AddrPortFrom(c.Gateway, c.port())))
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	_, _ = conn.Write(q)
+}
+
+// grantedFor is the lifetime a router granted in seconds, taken as at most
+// what was asked: a longer grant, which a host answering as the router
+// can send, would stop renewal and keep its address for the whole run.
+// The router may still hold the mapping that long after a crash.
+func grantedFor(seconds uint32, asked time.Duration) time.Duration {
+	g := time.Duration(seconds) * time.Second
+	if asked > 0 && g > asked {
+		return asked
+	}
+	return g
+}
+
 func pcpText(r byte) string {
 	if s, ok := pcpResults[r]; ok {
 		return s
@@ -124,7 +168,10 @@ func pcpText(r byte) string {
 
 // exchange sends q to the gateway's PCP and NAT-PMP port, resending with
 // a doubling wait, until accept takes an answer (true) or the tries run
-// out. Datagrams from anywhere but the gateway's port are ignored.
+// out. Datagrams from anywhere but the gateway's port are ignored. An
+// answer accept does not take but returns an error for is the outcome
+// only if nothing is taken in all the tries: a forged one, which holds
+// nothing of the request, then outlasts only a router that never answers.
 func (c *Client) exchange(ctx context.Context, q []byte, accept func([]byte) (bool, error)) error {
 	server := net.UDPAddrFromAddrPort(netip.AddrPortFrom(c.Gateway, c.port()))
 	conn, err := net.ListenUDP("udp", nil)
@@ -136,6 +183,7 @@ func (c *Client) exchange(ctx context.Context, q []byte, accept func([]byte) (bo
 	defer stop()
 	wait, tries := c.tries()
 	buf := make([]byte, 1100)
+	var tentative error
 	for range tries {
 		if _, err := conn.WriteToUDP(q, server); err != nil {
 			return err
@@ -157,11 +205,18 @@ func (c *Client) exchange(ctx context.Context, q []byte, accept func([]byte) (bo
 			if from.Addr().Unmap() != c.Gateway || from.Port() != c.port() {
 				continue
 			}
-			if done, err := accept(buf[:n]); done {
+			done, err := accept(buf[:n])
+			if done {
 				return err
+			}
+			if err != nil {
+				tentative = err
 			}
 		}
 		wait *= 2
+	}
+	if tentative != nil {
+		return tentative
 	}
 	return errNoAnswer
 }

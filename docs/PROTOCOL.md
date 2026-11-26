@@ -631,7 +631,11 @@ address, internal port, external port even before any external address is
 known, lifetime, PCP nonce, UPnP control URL and service) is written to
 `portmap.json` in the home: a new temporary file created exclusively with
 mode 0600, synced, renamed over the old one, and the directory synced. A
-definite refusal or no answer at all removes it again. The file is read
+definite refusal or no answer at all removes it again (a PCP request with
+no answer is first sent one deletion, not waited for, but a renewal
+is not); NAT-PMP's version
+refusal to a PCP request does not. A run adds at most 8; a request past
+that, or one the file could not hold, is not sent. The file is read
 strictly: an unknown field, a value out of range, a field of another
 protocol, more than 16 mappings, a mapping on another router than this
 network's, or a file that does not parse, and nothing is sent to any
@@ -639,14 +643,21 @@ router, the file is kept, and `mapping.error` says that the record cannot
 be used and what to remove by hand. The daemon asks: PCP MAP (RFC 6887, UDP 5351, TCP,
 the listening port as internal and suggested external port, lifetime
 7,200 s, a random nonce kept for renewal and deletion); if the answer is
-NAT-PMP's version refusal (version 0, opcode 129, result 1), NAT-PMP (RFC
+NAT-PMP's version refusal (version 0, opcode 129, result 1) and no PCP
+answer with the nonce comes in any of the tries, NAT-PMP (RFC
 6886, opcode 2, then opcode 0 for the external address); if neither
 answers, UPnP IGD (an SSDP `M-SEARCH` for `InternetGatewayDevice:1`, only
 a 200 answer with that `ST` from the gateway's IP, the description and
 control URL followed only when their host is the gateway's IP,
-`AddPortMapping` for TCP with lease 7,200 s, the next three ports on
-error 718, lease 0 only on error 725, then `GetExternalIPAddress`). A
-grant with lifetime 0, external port 0 or no external address, a SOAP 200
+`AddPortMapping` for TCP with lease 7,200 s, the next three ports up to
+65535 on error 718, lease 0 only on error 725, then
+`GetExternalIPAddress`). Only a default gateway with a private IPv4
+address is asked for a mapping; recorded ones are still deleted on the
+gateway they name. A lifetime granted over what was asked counts as what
+was asked. A grant with lifetime 0, external port 0, or an external
+address that is not public (private, 100.64.0.0/10, loopback,
+link-local, multicast, 0.0.0.0/8, 240.0.0.0/4, or any IPv6 address),
+which is then deleted, a SOAP 200
 that is not a complete `…Response` envelope, and a datagram of the wrong
 length are not taken for success; only an HTTP 500 that is a complete SOAP
 `Fault` with a numeric UPnP `errorCode` is taken for a refusal (to try the

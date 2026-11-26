@@ -70,9 +70,10 @@ const (
 const MapPortText = "This machine will also ask the router of this network to forward the listening port to it " +
 	"(PCP, NAT-PMP or UPnP), which opens that port on the router to the whole internet. Anyone can then connect; " +
 	"only room members get anything from it, since every connection must prove a member's key first. The mapping " +
-	"is renewed while networking is on and removed by a2p2 net off or a2p2 stop; after a crash it lapses " +
-	"with its lifetime (2 hours), unless the router grants only permanent mappings, which the next start " +
-	"removes."
+	"is renewed while networking is on and removed by a2p2 net off or a2p2 stop. After a crash it stays until " +
+	"the next start removes it or the router lets it lapse: a2p2 asks for 2 hours, but a router may keep it " +
+	"longer, and one that grants only permanent mappings keeps it until it is removed. The router's answers " +
+	"are not authenticated, so another device on this network can answer in its place."
 
 // NetworkText says exactly what choosing n does, for the person deciding.
 func NetworkText(n Network) string {

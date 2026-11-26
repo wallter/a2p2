@@ -255,6 +255,46 @@ a second; a refused one is retried under the client's back-off. 0.2.3
 had no share per address: it queued connections past 256 in all instead
 of refusing them.
 
+## A device on your local network, with port mapping on
+
+Only after `a2p2 net on --map-port`. The CLI asks the person to confirm
+it at a terminal each time; the daemon takes it only from the local
+API's net call, which no agent tool or hook makes. The router's answers
+carry no authentication, so a device on the same network can answer in
+its place. a2p2 asks for a mapping only on a default gateway with a
+private IPv4 address on this machine's network. A PCP answer must carry
+the request's nonce, and NAT-PMP's version answer counts only if no PCP
+answer comes in any of the tries. A lifetime longer than the 2 hours
+asked counts as 2 hours. An external address that is not a public IPv4
+address (private, shared, loopback, link-local, multicast, reserved, or
+any IPv6 address) is not taken, and a2p2 tries to remove what the router
+made. Every request is recorded before it is sent, a run adds at most 8
+to the record (which loads with up to 16), and the record always loads.
+On `net off`, on a stop and when the listener stops, a2p2 tries to
+remove the mapping and stops giving its address out; a removal the
+router does not confirm stays recorded and is retried.
+
+Such a device can still:
+
+- Give a wrong public address and port. It goes first in your invites
+  before any member has reached it, so a joiner that dials it shows its
+  own address to whoever holds that address.
+- Relay a public port it mapped for itself to your listener. A member's
+  dial-back then reaches you and the address is advertised to every
+  member, so the device sees which members connect and when, and can
+  stall them. It cannot read or change anything: connections are TLS
+  pinned to each machine's key.
+- Get a wrong address advertised with the help of one member: a member
+  that says it reached the mapped address is believed, so one member
+  that says so falsely puts the device's address in what this machine
+  advertises to every member.
+- Answer NAT-PMP, which has no nonce, and the UPnP search for the router,
+  and so make mapping fail. A forged NAT-PMP refusal makes a2p2 forget a
+  NAT-PMP mapping the router may have made; it lapses with the router's
+  lease.
+- Keep a mapping on the real router after a crash for as long as the
+  router grants, which may be more than 2 hours.
+
 ## Release binaries
 
 Release binaries are built by GitHub Actions from the tag, with no module
