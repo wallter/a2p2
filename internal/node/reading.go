@@ -1315,8 +1315,8 @@ func (v *roomView) voided(g *agentState) ([]Entry, error) {
 }
 
 // expiredEntry is the expired notice of message h, whose text, or whose
-// newest replacement's text, expired here: Edited when it was replaced,
-// and ChangedBy names the replacement's writer as for a message entry.
+// newest replacement's text, expired here: Edited when it was replaced.
+// It shows no text, so it names no writer of one (ChangedBy is empty).
 func (v *roomView) expiredEntry(h *rec) (*Entry, error) {
 	e, err := v.entry(h, EntryExpired, "x:"+h.id)
 	if err != nil {
@@ -1327,7 +1327,6 @@ func (v *roomView) expiredEntry(h *rec) (*Entry, error) {
 		return nil, err
 	}
 	e.Edited = ver.id != h.id
-	e.ChangedBy = changedBy(h, ver)
 	return e, nil
 }
 
