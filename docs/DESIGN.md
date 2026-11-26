@@ -279,12 +279,21 @@ explanation whose wording may change, and the stored text is left as it
 is, so the version that wrote it can still open the database. A room
 whose stored log does not parse, does not verify, or replays to another
 disposition is set aside: it is not served or pulled, a send, replace,
-withdraw, handled report or send with files to it is refused, and setting
-it aside deletes nothing. Its stored messages can still be read here, and
-text expiry and the file rules still apply to what it holds. `status` and
-`a2p2 doctor` show it with the reason and what to do: run the version that
-stored it, or leave it (not the local room, which cannot be left). The
-other rooms open as usual. It prunes hourly and before every read, page
+withdraw, handled report, send with files, Seen or change of its files
+setting is refused, and setting it aside deletes nothing. Seen across
+rooms leaves its keys `not_shown` and confirms the other rooms. Its stored
+messages can still be read here (a read still records what it showed,
+which marks nothing seen). Its reading frontier is not known, so a stream
+without a cursor is held back, and missing text is neither shown as
+expired nor marked expired. Other text past retention still expires, and the file
+sweep drops only files whose text is withdrawn or past retention; the
+stored member cache decides nothing. `status` and `a2p2 doctor` show it
+with the reason and what to do: run the version that stored it, or leave
+it and join it again (not the local room, which cannot be left). The
+other rooms open as usual. A batch that drops entries (over the held or
+branch bound) is decided again without them, as a start would decide the
+rows it leaves, so no input a peer delivers makes a room fail its own
+replay. It prunes hourly and before every read, page
 and offer. Text past expiry becomes `expired` permanently. The daemon
 deletes withdrawn text when it stores the withdraw [R6].
 
@@ -515,12 +524,17 @@ first entry as a request [M4].
 accepts and sends with files) wait at most 32 per room, checked again in
 the transaction that stores one. A proposal to remove an admin passes
 that budget, once per target. Requests raised to second another admin's
-entry have their own budgets: at most 4 per signing admin and 32 in all
-per room, counting only requests whose entry still waits. A removal of an
-admin passes both, once per signing admin and target. So one admin that
-signs many waiting entries takes at most 4 places (and one per admin it
-proposes to remove) on each other admin, and cannot stop a removal of
-itself from being proposed or raised. A pending request whose entry no
+entry have their own budgets, counting only requests whose entry still
+waits: 32 in all per room, and 4 per signing admin. A signing admin past
+its 4 takes only a spare place: one left after every other admin of the
+room but this machine keeps the places of its 4 that it has not used. The
+first removal of an admin per signing admin and target passes both
+budgets and takes no place in them. So one admin that signs many waiting
+entries takes the spare places on each other admin but not the 4 of
+another admin (while the room has at most 9 admins: 8 others times 4 is
+32), and cannot stop a removal of itself from being proposed or raised;
+removals waiting do not crowd out other requests. With more admins, those
+under their 4 can fill the 32 together. A pending request whose entry no
 longer waits (another admin seconded it, or a later entry changed its
 effect) is closed as
 failed; if the entry waits again it is raised again. The flooder's

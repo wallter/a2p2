@@ -1194,9 +1194,9 @@ not, `status` with `show_notice` and the page return the notice (section
 7). Per room at most 32 requests this machine started wait (proposals,
 invite accepts, sends with files; a removal of an admin passes it once
 per target), and requests raised to second another admin's entry wait at
-most 4 per signing admin and 32 in all, a removal of an admin past both
-once per signer and target (DESIGN section 7). 256 refused dependants and
-256 invalid entries are kept. A `log` row's `reason` is explanation only:
+most 32 in all, 4 per signing admin unless the place is spare, the first
+removal of an admin per signer and target outside both (DESIGN section
+7). 256 refused dependants and 256 invalid entries are kept. A `log` row's `reason` is explanation only:
 a replay compares `state`, and a room whose stored log does not replay to
 the same states is set aside, not opened (DESIGN section 5).
 

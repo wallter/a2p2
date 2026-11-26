@@ -1640,24 +1640,42 @@ ship first.
   sends with files) keep a budget of 32 per room, checked again in the
   transaction that stores each one; a proposal to remove an admin passes
   it once per target. Requests raised to second another admin's entry
-  have their own: at most 4 per signing admin and 32 in all, counting
-  only those whose entry still waits; a removal of an admin passes both,
-  once per signer and target. A pending one whose entry stopped waiting
+  have their own, counting only those whose entry still waits: 32 in
+  all, and 4 per signing admin. Past its 4 a signer takes only a spare
+  place, one left after every other admin of the room but this machine
+  keeps the places of its 4 it has not used. The first removal of an
+  admin per signer and target passes both and takes no place in them.
+  A pending one whose entry stopped waiting
   is closed as failed (`ReasonNotWaiting`), and raised again if the entry
   waits again. Every waiting entry without a request is raised once there
   is a place: after each batch, after a decline or failure, and at start,
   removals of admins first, then in arrival order. A raise that fails
   after a decision or at start is retried at the room's next batch or
   pull and does not stop the start. Stored entries are decoded for form
-  and signature only (`core.StoredEntryFromParts`). The replay compares
+  and signature only (`core.StoredEntryFromParts`). A batch that drops
+  entries (over the held or branch bound) is decided again in a new
+  machine from the rows it leaves, until that drops nothing more, and
+  that decision is stored: otherwise a refused entry released by a
+  settled fork, waiting for a parent and dropped over the held bound, left
+  its dependant refused, and the next start set the room aside. The
+  replay compares
   dispositions, not reason text, keeps the new reason in memory and
   leaves the stored text as it is. A room whose stored log does not
-  parse, verify or replay is set aside: not served or pulled, every write
-  to it refused (`not_allowed`), nothing deleted by setting it aside,
-  listed in `status` (`quarantined`) and `a2p2 doctor` with a fix, and it
-  may be left unless it is the local room. Its messages can still be
-  read, and expiry and the file rules still run on it. Leaving a room
-  runs its file deletions after the rooms lock is released (F68).
+  parse, verify or replay is set aside: not served or pulled, every
+  write to it refused (`not_allowed`: sends, replaces, withdraws, handled
+  reports, sends with files, Seen and a change of its files setting;
+  Seen across rooms leaves its keys `not_shown` and confirms the others),
+  nothing deleted by setting it aside, listed in `status` (`quarantined`)
+  and `a2p2 doctor` with a fix, and it may be left unless it is the local
+  room. Its messages can still be read; a read still records what it
+  showed, which marks nothing seen. Its reading frontier is unknown, so
+  a stream without a cursor is held back and missing text is neither
+  shown as expired nor marked expired by a prune. Other text past
+  retention expires, and the file sweep drops only files whose text is
+  withdrawn or past retention and staged sends past their staging life
+  (`store.SweepRetained`); the stored member cache and wants decide
+  nothing. Leaving a room runs its file deletions after the rooms lock is
+  released (F68).
 - **No wire, entry or schema change.** Old and new machines see the same
   entries. Requests are local rows. By reading the code, a database
   written by 0.2.0 to 0.2.3 opens, and they can still open one this
@@ -1676,8 +1694,13 @@ ship first.
   it also reads the id, entry and state of every seconding request the
   room ever had (no drafts), under the rooms lock. That is bounded by the
   log, which has no cap of its own. A flooding admin still costs the other people one decline per
-  entry, four at a time. A room set aside is unusable until the person
-  runs the version that stored it or leaves it and joins again.
+  entry, and while the room has spare places it can hold up to 32 less
+  4 for each other admin at a time. In a room of more than 9 admins,
+  admins under their own 4 can fill the 32 together. A batch that drops
+  entries decides the room's kept log again, so a peer that keeps the
+  held bound full pays that for each such batch. A room set aside is
+  unusable until the person runs the version that stored it (the
+  repair), or leaves it and joins it again (not the local room).
 - **Still open.** A "decline all from this machine" action and showing
   which admin signed each waiting entry need new UI and wording. A change
   of disposition under a new rule (a per-signer cap in `members`) sets

@@ -163,6 +163,11 @@ func (m *Machine) Seen(ctx context.Context, room, agent string, reads []store.Re
 	if err := checkAgent(agent); err != nil {
 		return nil, err
 	}
+	if m.setAside != nil {
+		if err := m.setAside(room); err != nil {
+			return nil, err
+		}
+	}
 	if err := m.pruneIfDue(ctx); err != nil {
 		return nil, err
 	}
@@ -431,6 +436,9 @@ type roomView struct {
 // not held: until it is, missing text of author is not shown as expired
 // (it may be text this machine may not read: not_admitted).
 func (v *roomView) undecidedAuthor(author string) bool {
+	if v.front.Unknown {
+		return true
+	}
 	if v.front.All || len(v.front.From[author]) == 0 {
 		return false
 	}
@@ -457,6 +465,9 @@ func (v *roomView) undecidedAuthor(author string) bool {
 func (v *roomView) unseeded(g *agentState, k streamKey) (bool, error) {
 	if _, ok := g.cursor[k]; ok {
 		return false, nil
+	}
+	if v.front.Unknown {
+		return true, nil
 	}
 	for _, head := range v.front.From[k.author] {
 		h, err := v.get(head)
