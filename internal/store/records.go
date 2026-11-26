@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/wallter/a2p2/internal/core"
@@ -754,29 +753,68 @@ func (s *Store) ExpireTextWith(ctx context.Context, now time.Time, undecided fun
 	var n int64
 	cutoff := ms(now.Add(-Retention))
 	err := s.tx(ctx, func(tx *sql.Tx) error {
-		var keep []any
+		var keep map[[2]string]bool
 		if undecided != nil {
-			u, err := undecided(&Reader{tx: tx})
+			var err error
+			if keep, err = undecided(&Reader{tx: tx}); err != nil {
+				return err
+			}
+		}
+		const q = `UPDATE records SET body = NULL, reason = ? WHERE reason IN ('live', 'missing') AND created <= ?`
+		if len(keep) == 0 {
+			res, err := tx.Exec(q, ReasonExpired, cutoff)
 			if err != nil {
 				return err
 			}
-			for k := range u {
-				keep = append(keep, k[0]+"/"+k[1])
-			}
+			n, err = res.RowsAffected()
+			return err
 		}
-		q := `UPDATE records SET body = NULL, reason = ? WHERE reason IN ('live', 'missing') AND created <= ?`
-		args := []any{ReasonExpired, cutoff}
-		if len(keep) > 0 {
-			q += ` AND NOT (reason = 'missing' AND room || '/' || author IN (` +
-				strings.TrimSuffix(strings.Repeat("?,", len(keep)), ",") + `))`
-			args = append(args, keep...)
-		}
-		res, err := tx.Exec(q, args...)
+		// The pairs to keep are left out in Go, not as one SQL variable
+		// each: a room can have more undecided pairs than SQLite takes
+		// variables (F32). Live text expires in one statement. Missing
+		// text past retention is expired one (room, author) pair at a
+		// time, for the pairs not kept: one statement per such pair, on
+		// the (room, author) prefix of the records position index.
+		res, err := tx.Exec(`UPDATE records SET body = NULL, reason = ? WHERE reason = 'live' AND created <= ?`,
+			ReasonExpired, cutoff)
 		if err != nil {
 			return err
 		}
-		n, err = res.RowsAffected()
-		return err
+		if n, err = res.RowsAffected(); err != nil {
+			return err
+		}
+		rows, err := tx.Query(`SELECT DISTINCT room, author FROM records WHERE reason = 'missing' AND created <= ?`, cutoff)
+		if err != nil {
+			return err
+		}
+		var pairs [][2]string
+		for rows.Next() {
+			var k [2]string
+			if err := rows.Scan(&k[0], &k[1]); err != nil {
+				rows.Close()
+				return err
+			}
+			if !keep[k] {
+				pairs = append(pairs, k)
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, k := range pairs {
+			res, err := tx.Exec(`UPDATE records SET body = NULL, reason = ? WHERE reason = 'missing' AND created <= ?
+				AND room = ? AND author = ?`, ReasonExpired, cutoff, k[0], k[1])
+			if err != nil {
+				return err
+			}
+			c, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			n += c
+		}
+		return nil
 	})
 	return n, err
 }

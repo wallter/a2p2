@@ -281,6 +281,28 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 - A test now opens databases written by each release from v0.2.0 to
   v0.2.3 with the current code, so a rule that would refuse old data
   fails it.
+- **The local API marks a replaced message, and a handled report is tied
+  to the text shown.** Since 0.1.0, the author of a message could replace
+  it after a reader answered, and thread, branch and history showed the
+  new text above the answer with nothing to tell it was changed; a
+  handled report was accepted for a version replaced since the read.
+  Message entries in the local API now say `edited` when their text is a
+  replacement. The CLI, the MCP tools and the page do not show the mark
+  yet. A handled report is refused as `not_shown` until a read shows the
+  newest text held, and while newer text is announced but not here. A
+  signed reply or handled report still names only the message, not the
+  version answered.
+- **A peer's report can no longer add stream rows without limit.** Since
+  0.1.0, any member could name made-up epochs of other authors in an
+  unsigned pull report, and each became a stream row here, kept for the
+  life of the room and listed as still being fetched. Now at most 32 such
+  rows per author are kept on one peer's word, also when it takes them
+  over from another peer, and they are deleted when it stops naming them
+  or leaves the author out of a whole report.
+- Pruning no longer fails in a room with more than about 32,000 authors
+  whose readability is undecided, and an inbox read writes no receipts
+  for a room left, or left and joined again, while it ran (both since
+  0.1.0).
 
 
 ## [0.2.3] - 2026-11-25

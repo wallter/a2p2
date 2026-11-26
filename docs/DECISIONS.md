@@ -2137,3 +2137,73 @@ would run the workflow, and the fixes need no protocol change.
 **Revisit if** an action is moved to a new major release, GitHub offers
 immutable releases or a required environment here, the attestation check
 can be done without `gh`, or a mixed-version chaos run is added.
+
+## D-NEW-N-records. Replaced text is marked, answers are tied to the text shown, and peer hints are bounded (2026-11-25)
+
+A security review showed that the author of a message could replace it
+after a reader answered, and every view but the inbox then showed the
+new text above the answer as if it was the text answered (F30). A
+handled report was accepted for a version replaced since the read (F67).
+Any member could make this machine keep a stream row, for the life of
+the room, for each epoch it named in an unsigned pull report (F9). A
+prune failed outright past about 32,000 undecided (room, author) pairs
+(F32), and an inbox read could leave receipts for a room left while it
+ran (F70). Rooms that span owners make the first three real now.
+
+- **What changed.** Message entries carry `Edited` (local API `edited`,
+  omitted when false) when their text is the author's replacement, in
+  the inbox, thread, branch, history, `recent` and `skipped` views.
+  `Handled` needs, unless the message was withdrawn, that a read showed
+  the agent the version reads show now: the newest replacement held
+  with text, or the message itself while its text is live. While a
+  replacement's text is missing here it is refused, as the inbox and
+  thread wait for it; an expired message with no live replacement is
+  not checked, and neither is one the agent confirmed no text of, since
+  then every view shows only the expired notice. Each refusal is `not_shown` with its own sentence. The
+  delivery model's `Handle` has the same rule, so the differential tests
+  hold the two together. `Draft.ReplyVersion`, when set, refuses a reply
+  by the same rule. `Tx.NoteKnown` keeps at most `MaxHintedStreams` (32)
+  streams that hold nothing per author on one peer's word, lowest epochs
+  first; a higher report that takes such a stream over from another
+  peer counts against the peer that takes it. Such a stream is deleted
+  when the peer that set its known position stops naming it, or leaves
+  its author out of a whole report (`Tx.Observe`); the model drops those
+  hints too. A prune expires live text in one statement and missing text
+  with one statement per (room, author) pair not left undecided that has
+  missing text past retention, so it binds no variable per undecided
+  pair. Entries carry the room's generation their read saw, and
+  `Store.ShowAt` writes no receipt for a room left, or left and joined
+  again, since the read.
+- **No wire, record or schema change.** The record format has no field
+  for the version a reply answers, and adding one would change signed
+  records, so the reply check is local and optional. Rows written before
+  the bound load as before; a peer's next report lowers or deletes them
+  as it would have. 0.2.0 to 0.2.3 open the database unchanged.
+- **Costs.** An agent shown a message and not yet its replacement must
+  read again before `ack`, and waits while the replacement's text is
+  missing. An honest peer that holds more than 32 streams of one author
+  that this machine holds nothing of gets the rest listed as waiting only
+  as the first arrive. A prune with undecided pairs runs one more query
+  and one statement per pair with missing text past retention; the test
+  with 40,001 undecided pairs has one such pair, so the time for many
+  pairs to update is not measured.
+- **Still open.** The CLI, the MCP results and the page do not show
+  `edited` yet. The local API's send, the page's reply, the MCP reply
+  tool and a staged reply with files do not pass `reply_version`, so no
+  client reply is tied to the version it drew yet. A signed reply and a
+  handled report name only the message, not the version answered. F31 is
+  deferred: the author's clock still orders every view and starts
+  retention. A member can date a message before an answer given after
+  it, or date a reply before the message it answers, so views show them
+  out of order. A member can also date a message so far back that its
+  text expires minutes after it arrives, since expiry counts from the
+  sender's clock, not from when this machine got it. Fixing that needs
+  either an arrival time per record (a migration, which 0.2.3 would then
+  refuse to open), a tighter future bound in P1, or an order clamped to
+  the parent's and the previous record's time in every view and the
+  model; that choice is the owner's. Hint rows set by a peer since
+  removed stay until another peer reports the stream (at most 32 per
+  author and peer).
+
+**Revisit if** a record format change is due (carry the version a
+reply answers), or a schema change lets records keep their arrival time.

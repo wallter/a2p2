@@ -25,6 +25,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 )
 
 const schemaReading = `
@@ -47,13 +48,29 @@ type Shown struct {
 	Msg     string
 }
 
-// Show records rows for agent in room, in one transaction. A row for a
-// key already recorded takes the new version.
+// Show records rows for agent in room, in one transaction: ShowAt with
+// no generation, so only a room no longer held is refused.
 func (s *Store) Show(ctx context.Context, agent, room string, rows []Shown) error {
+	return s.ShowAt(ctx, agent, room, 0, rows)
+}
+
+// ShowAt records rows for agent in room, in one transaction. A row for a
+// key already recorded takes the new version. The read that showed them
+// was an earlier transaction, at generation gen of room (RoomGen; 0: not
+// known): if room is no longer held, or was left and joined again since
+// (another generation), nothing is recorded, so no receipt outlives the
+// leave into a rejoin (F70).
+func (s *Store) ShowAt(ctx context.Context, agent, room string, gen int64, rows []Shown) error {
 	if len(rows) == 0 {
 		return nil
 	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
+		switch err := checkGen(tx, room, gen); {
+		case errors.Is(err, ErrLeft), errors.Is(err, ErrNotFound), errors.Is(err, ErrStaleGeneration):
+			return nil
+		case err != nil:
+			return err
+		}
 		for _, r := range rows {
 			if _, err := tx.Exec(`INSERT INTO shown (agent, room, key, version, msg) VALUES (?,?,?,?,?)
 				ON CONFLICT (agent, room, key) DO UPDATE SET version = excluded.version, msg = excluded.msg`,
@@ -63,6 +80,21 @@ func (s *Store) Show(ctx context.Context, agent, room string, rows []Shown) erro
 		}
 		return nil
 	})
+}
+
+// RoomGen returns room's generation, or 0 when room is not held (never
+// joined, or left).
+func (rd *Reader) RoomGen(room string) (int64, error) {
+	gen, left, err := roomGen(rd.tx, room)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return 0, nil
+	case err != nil:
+		return 0, err
+	case left:
+		return 0, nil
+	}
+	return gen, nil
 }
 
 // Receipts returns agent's receipts in room: entry key -> version listed.

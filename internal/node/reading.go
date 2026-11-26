@@ -49,7 +49,10 @@ type Entry struct {
 	// Version is the record whose text is shown (the message or a
 	// replace); empty for notices without text.
 	Version string
-	Kind    string
+	// Edited, in a message entry: the text shown is its author's
+	// replacement, not the text first sent (Version is not ID).
+	Edited bool
+	Kind   string
 	// ID is the message concerned; Record is the record at this position
 	// (the same for a message; the withdraw or replace for a notice).
 	ID     string
@@ -91,6 +94,9 @@ type Entry struct {
 	Request       string
 	RequestState  string
 	RequestReason string
+	// gen is the generation of Room the read that built the entry saw
+	// (0: not known), so Showed writes no receipt into a later one.
+	gen int64
 }
 
 // Wait is a stream the inbox cannot pass yet (PROTOCOL Wait).
@@ -252,9 +258,20 @@ func (m *Machine) Seen(ctx context.Context, room, agent string, reads []store.Re
 // text was shown and that the agent may report handled. Either lets the
 // agent report a message whose text it was shown handled. It moves no
 // cursor and marks nothing seen.
+//
+// Its transaction comes after the read's: rows are written only while
+// room is at the generation the read saw, so a read made before a leave
+// and a rejoin leaves no receipt in the room joined again (F70).
 func (m *Machine) Showed(ctx context.Context, room, agent string, es []Entry, inbox bool) error {
 	var rows []store.Shown
+	var gen int64
 	for _, e := range es {
+		if e.gen != 0 {
+			if gen != 0 && gen != e.gen {
+				return nil // read across a leave and a rejoin: no receipts
+			}
+			gen = e.gen
+		}
 		switch {
 		case inbox:
 			rows = append(rows, store.Shown{Key: e.Key, Version: e.Version, Msg: e.ID})
@@ -265,7 +282,7 @@ func (m *Machine) Showed(ctx context.Context, room, agent string, es []Entry, in
 			rows = append(rows, store.Shown{Key: store.TextMarkKey(e.ID), Version: e.Version, Msg: e.ID})
 		}
 	}
-	return m.st.Show(ctx, agent, room, rows)
+	return m.st.ShowAt(ctx, agent, room, gen, rows)
 }
 
 // mayHandle is store.CanHandle over an entry: agent is an addressee, or
@@ -430,6 +447,8 @@ type roomView struct {
 	// undecided caches, per author, whether a head of it is not held.
 	front     readFront
 	undecided map[string]bool
+	// gen is the room's generation when the view was loaded (0: not held).
+	gen int64
 }
 
 // undecidedAuthor reports whether a head of author's reading frontier is
@@ -538,6 +557,11 @@ func (v *roomView) requireAgent(agent string) error {
 // order come out oldest first. Streams only known of (nothing held) come
 // last and hold nothing to walk.
 func (v *roomView) load() error {
+	gen, err := v.rd.RoomGen(v.room)
+	if err != nil {
+		return err
+	}
+	v.gen = gen
 	ms, err := v.rd.RoomMembers(v.room)
 	if err != nil {
 		return err
@@ -932,7 +956,7 @@ func (v *roomView) parentState(p string) (string, error) {
 func (v *roomView) entry(h *rec, kind, key string) (*Entry, error) {
 	e := &Entry{Key: key, Kind: kind, ID: h.id, Record: h.id, Room: v.room,
 		From: core.AgentID(h.f.Agent, h.author), FromNode: h.author, Created: h.f.Created,
-		Epoch: h.f.Epoch, Seq: h.f.Seq, AuthorRemoved: v.removed(h.author)}
+		Epoch: h.f.Epoch, Seq: h.f.Seq, AuthorRemoved: v.removed(h.author), gen: v.gen}
 	msg := h
 	if h.f.Kind != core.KindMessage {
 		e.ID = h.f.Ref
@@ -1020,7 +1044,7 @@ func (v *roomView) decide(g *agentState, agent string, h *rec, heads map[string]
 			if e, err = v.entry(h, EntryMessage, h.id); err != nil {
 				return nil, nil, err
 			}
-			e.Text, e.Choices, e.Version = text.f.Text, text.f.Choices, ver.id
+			e.Text, e.Choices, e.Version, e.Edited = text.f.Text, text.f.Choices, ver.id, ver.id != h.id
 			v.fileState(e, ver)
 		}
 	case core.KindWithdraw:
@@ -1224,7 +1248,7 @@ func (v *roomView) voided(g *agentState) ([]Entry, error) {
 		}
 		out = append(out, Entry{Key: key, Kind: EntryVoided, ID: x.id, Record: x.id, Room: v.room,
 			From: core.AgentID(x.f.Agent, x.author), FromNode: x.author, AuthorRemoved: true,
-			Created: x.f.Created, Epoch: x.f.Epoch, Seq: x.f.Seq})
+			Created: x.f.Created, Epoch: x.f.Epoch, Seq: x.f.Seq, gen: v.gen})
 	}
 	return out, nil
 }
@@ -1245,7 +1269,7 @@ func (v *roomView) threadEntry(h *rec) (*Entry, error) {
 		if err != nil {
 			return nil, err
 		}
-		e.Text, e.Choices, e.Version = text.f.Text, text.f.Choices, ver.id
+		e.Text, e.Choices, e.Version, e.Edited = text.f.Text, text.f.Choices, ver.id, ver.id != h.id
 		v.fileState(e, ver)
 		return e, nil
 	}

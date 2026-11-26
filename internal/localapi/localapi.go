@@ -147,6 +147,7 @@ type (
 	Entry struct {
 		Key           string   `json:"key"`
 		Version       string   `json:"version,omitempty"`
+		Edited        bool     `json:"edited,omitempty"` // a message shown with its author's replacement text
 		Kind          string   `json:"kind"`
 		ID            string   `json:"id"`
 		Room          string   `json:"room"`
@@ -707,7 +708,7 @@ func waitOf(ms int64) (time.Duration, error) {
 
 // EntryOf renders a node entry (PROTOCOL section 7, Entry).
 func EntryOf(e node.Entry) Entry {
-	out := Entry{Key: e.Key, Version: e.Version, Kind: e.Kind, ID: e.ID, Room: e.Room, RoomLabel: e.RoomLabel,
+	out := Entry{Key: e.Key, Version: e.Version, Edited: e.Edited, Kind: e.Kind, ID: e.ID, Room: e.Room, RoomLabel: e.RoomLabel,
 		From: e.From, FromNode: e.FromNode, AuthorRemoved: e.AuthorRemoved, Parent: e.Parent, Thread: e.Thread,
 		ParentState: e.ParentState, Late: e.Late, Created: Time(e.Created), Text: e.Text, Choices: e.Choices,
 		AskHandled: e.AskHandled, Skipped: e.Skipped, FilesPending: e.FilesPending, FilesNote: e.FilesNote,
