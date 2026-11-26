@@ -618,8 +618,9 @@ func status(c *cmd) error {
 		}
 	}()
 	if *c.json {
-		// Without the page's address: it carries the page's token, and
-		// agents run status --json into their transcripts. a2p2 ui
+		// Without the page's address: it carries a code that opens the
+		// page as the person, and agents run status --json into their
+		// transcripts. a2p2 ui
 		// --print gives it to a person who asks.
 		cl, err := c.client()
 		if err != nil {

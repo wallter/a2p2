@@ -617,7 +617,7 @@ type (
 		Network  Network       `json:"network"`
 		Waiting  int           `json:"waiting"` // requests waiting for this machine's person
 		Listen   []string      `json:"listen"`  // addresses other machines can dial; empty: no listener
-		UI       string        `json:"ui"`      // URL of the web page including its access token
+		UI       string        `json:"ui"`      // URL of the web page with a one-time code (internal/web, session.go)
 		Version  string        `json:"version"`
 		PID      int           `json:"pid"`
 		Notice   string        `json:"notice,omitempty"`

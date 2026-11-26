@@ -320,8 +320,8 @@ func (sv *server) ack(r *http.Request) (any, error) {
 // exactly what was named. The request must carry this page's exact
 // Origin, so that another site the browser opens cannot decide. This
 // keeps decisions out of the agents' tools and recorded; it does not prove
-// that a person clicked, since a program running as this user can read the
-// page's token from status.
+// that a person clicked, since a program running as this user can get a
+// one-time code from status and trade it for a session.
 func (sv *server) confirm(r *http.Request) (any, error) {
 	if r.Header.Get("Origin") != "http://"+r.Host {
 		return nil, &node.UserError{Msg: "a decision must come from the page itself (its exact Origin)"}

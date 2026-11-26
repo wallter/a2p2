@@ -584,7 +584,7 @@ as its MCP tools would in the same directory under the default label,
 and says so on stderr. Elsewhere `send`, `ack` and an `inbox` that marks
 entries seen act as the person only with stdin a terminal; `inbox
 --peek`, `--thread`, `history` and `fetch` need no terminal. `a2p2 ui`,
-whose address carries the page's token, is refused in an agent's shell
+whose address carries a one-time code that opens the page as the person, is refused in an agent's shell
 and away from a terminal. `--person` overrides each refusal; used away
 from a terminal or in an agent's shell, the daemon logs it as a warning. These
 are guard rails against mistakes and injected instructions: a program
