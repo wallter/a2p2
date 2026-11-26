@@ -420,6 +420,35 @@ and `a2p2 join`, each with a typed `yes` that the daemon records; the page
 offers neither. No decision goes through agent tools. A same-user agent
 set on bypassing it can; an OS-separated approver may come later.
 
+A request's text is built from local facts and escapes every string that
+can come from another machine (`EscapeDisplay`, PROTOCOL 10.8): the room
+label a remote creator chose and the names in entries. Its line cannot be
+cleared, reordered or split by them. A seconding request says the name
+it carries was written by the admin who signed the first entry, shows
+the name the room records for the machine, and names other members with
+the name shown, compared without case, up to three by fingerprint and
+the rest counted; the page and `confirm` no longer say the machine chose
+it. Because the text depends on the room's members, the page's approval
+carries the text it showed and the daemon compares it again under the
+decision lock; `a2p2 confirm` decides by id. The stored label and entries
+are not checked or changed: logs signed before keep loading. The
+alert that this machine may have been removed from a room, and the CLI's
+join preview, escape the room's label the same way.
+
+On the page, room labels, machine names, agent ids, message text,
+notices, thread entries, reply previews and choices are escaped when
+drawn (`escapeDisplay`, `escapeText`, `escapeChoice` in `app.js`, the
+same tables as the daemon's). Two rooms whose labels are drawn the same
+(escaped, and without case) are shown with their ids. A message that
+asks the person (choices, or addressed to `human`) is drawn under its
+own heading, apart from requests, with who asked, from which machine as
+that room records it, and whether it was asked of the person or of
+everyone; it says it approves nothing, and its choices are plain buttons.
+A choice whose button would not show it exactly as it is sent (a hidden
+character, a line break, a blank other than U+0020, a space at either
+end or next to another) is not sent: the person types the reply instead.
+An emoji sequence in a choice is shown and sent as it is.
+
 | Change | Entries | Confirmed on |
 |---|---|---|
 | Add a machine | one `add` by any admin [M3] | that admin and the joiner |
@@ -857,7 +886,8 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    opens each path once, refuses anything but a regular file after
    opening, and copies and hashes from that one handle into staging. The
    request shows each path as resolved from the opened file, in full,
-   with control and bidirectional characters escaped, its size and
+   with control, bidirectional and invisible characters escaped
+   (`EscapeDisplay`, PROTOCOL 10.8), its size and
    SHA-256, the room, the recipients, and for a replacement which message
    it replaces. The CLI and the page show the whole text, every line
    escaped, and send back the terms digest they showed; an approval

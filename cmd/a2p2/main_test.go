@@ -58,7 +58,7 @@ func TestConfirmNotCaughtUpWithoutASecondYesDecidesNothing(t *testing.T) {
 
 func TestConfirmShowsExactTermsOnceAndInviteDeadline(t *testing.T) {
 	q := localapi.Request{
-		ID: "q_1", Name: "laptop", Deadline: "2026-11-24T12:35:00Z",
+		ID: "q_1", Name: "laptop", NameFrom: node.NameFromMachine, Deadline: "2026-11-24T12:35:00Z",
 		Text: "add machine 0123 4567 (laptop) to room team (r_1) as an admin, without earlier history",
 	}
 	var out bytes.Buffer

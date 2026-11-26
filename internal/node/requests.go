@@ -285,7 +285,16 @@ type ConfirmOpts struct {
 	// surface asks for it only after showing the risk; it is recorded
 	// with the request.
 	NotCaughtUpOK bool
+	// Shown, when set, is the request's text as the person was shown it.
+	// An approval is refused, with nothing signed, unless the text built
+	// now, under the decision lock, is the same: the text names the
+	// room's members, and a pull may have changed them since.
+	Shown string
 }
+
+// RequestChangedText is the refusal when a request's text changed since
+// the person was shown it (ConfirmOpts.Shown).
+const RequestChangedText = "the request changed since the page showed it; reload and decide again"
 
 // ConfirmWith is Confirm with the person's options.
 func (r *Rooms) ConfirmWith(ctx context.Context, id string, approve bool, o ConfirmOpts) (Confirmation, error) {
@@ -315,6 +324,19 @@ func (r *Rooms) ConfirmWith(ctx context.Context, id string, approve bool, o Conf
 	}
 	if q.State != store.RequestPending {
 		return Confirmation{}, &UserError{errNotPendingText, ErrorAlreadyDone}
+	}
+	if approve && o.Shown != "" && q.Kind != store.RequestSendFiles {
+		label := ""
+		if q.Room != "" {
+			lr, err := r.m.st.LogRoom(ctx, q.Room)
+			if err != nil {
+				return Confirmation{}, err
+			}
+			label = lr.Label
+		}
+		if requestText(q, label, r.memberNamesLocked(q.Room)) != o.Shown {
+			return Confirmation{}, &UserError{Msg: RequestChangedText}
+		}
 	}
 	now := r.m.now()
 	if !approve {

@@ -214,7 +214,7 @@ func (r *Rooms) Alerts(ctx context.Context) ([]Alert, error) {
 		labels[info.ID] = info.Label
 		for _, q := range info.Requests {
 			out = append(out, Alert{Kind: AlertRequest, ID: q.ID, Room: info.ID, Since: q.Created,
-				Text: requestText(q, info.Label)})
+				Text: requestText(q, info.Label, info.Members)})
 		}
 		for _, f := range info.Forks {
 			if f.Open {
@@ -316,16 +316,17 @@ func (r *Rooms) wantedText(ctx context.Context, m store.MissingRecord) (bool, er
 }
 
 // requestText says exactly what approving q does, naming the machine by
-// its full fingerprint and room by its label and id.
-func requestText(q store.Request, label string) string {
+// its full fingerprint and room by its label and id. The label and names
+// can come from other machines, so each is escaped for one line
+// (EscapeDisplay): the text a person approves cannot be rewritten by them.
+// members are the room's members as this machine holds them, so that a
+// seconding request names the machine as the room records it.
+func requestText(q store.Request, label string, members []MemberInfo) string {
 	if q.Kind == store.RequestNetwork {
 		return "networking " + q.Action + ": " + NetworkText(Network{State: q.Action, Listen: q.Name})
 	}
-	m := "machine " + Fingerprint(q.Node)
-	if q.Name != "" {
-		m += " (" + q.Name + ")"
-	}
-	room := "room " + label + " (" + q.Room + ")"
+	m := "machine " + Fingerprint(q.Node) + machineNames(q, members)
+	room := "room " + EscapeDisplay(label) + " (" + q.Room + ")"
 	hist := map[bool]string{true: "with earlier history", false: "without earlier history"}[q.History]
 	var s string
 	switch q.Action {
@@ -347,6 +348,120 @@ func requestText(q store.Request, label string) string {
 		s += ", seconding another admin's entry"
 	}
 	return s
+}
+
+// Who chose the name a request carries (RequestView.NameFrom).
+const (
+	// NameFromMachine: the machine asking to join chose its own name.
+	NameFromMachine = "machine"
+	// NameFromAdmin: another admin wrote the name into the entry this
+	// request seconds.
+	NameFromAdmin = "admin"
+	// NameFromHere: this machine's person or agent proposed the change.
+	NameFromHere = "here"
+)
+
+// nameFrom says who chose q's name, or "" when it has none.
+func nameFrom(q store.Request) string {
+	switch {
+	case q.Name == "" || q.Kind == store.RequestNetwork || q.Kind == store.RequestSendFiles:
+		return ""
+	case q.Seconds != "":
+		return NameFromAdmin
+	case !q.Deadline.IsZero():
+		return NameFromMachine
+	}
+	return NameFromHere
+}
+
+// memberNames are room's members with the names this machine records
+// for them, or nil when room has no log here.
+func (r *Rooms) memberNames(room string) []MemberInfo {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.memberNamesLocked(room)
+}
+
+// memberNamesLocked is memberNames with r.mu held.
+func (r *Rooms) memberNamesLocked(room string) []MemberInfo {
+	if room == "" {
+		return nil
+	}
+	rl, err := r.room(room)
+	if err != nil {
+		return nil
+	}
+	out := make([]MemberInfo, 0, len(rl.st.Members))
+	for _, n := range rl.st.Members {
+		out = append(out, MemberInfo{Node: n, Name: rl.cache[n].Name, Admin: slices.Contains(rl.st.Admins, n)})
+	}
+	return out
+}
+
+// recordedName is the name the room records for node, or "".
+func recordedName(members []MemberInfo, node string) string {
+	for _, mi := range members {
+		if mi.Node == node {
+			return mi.Name
+		}
+	}
+	return ""
+}
+
+// maxSameName bounds how many other members with the target's name a
+// request's text lists by fingerprint; the rest are counted.
+const maxSameName = 3
+
+// machineNames is how requestText names the target after its fingerprint.
+// A name another admin wrote into the entry this request seconds is said
+// to be that admin's, and the name the room records is shown beside it,
+// so that the other admin cannot pass one machine off as another. Other
+// members whose name is the one shown (the entry's or the room's record,
+// whoever chose it, compared without case) are named too, up to
+// maxSameName by fingerprint and the rest counted, so the text stays short
+// in a room of any size.
+func machineNames(q store.Request, members []MemberInfo) string {
+	recRaw := recordedName(members, q.Node)
+	name, rec := EscapeDisplay(q.Name), EscapeDisplay(recRaw)
+	var parts []string
+	switch {
+	case q.Seconds == "" && name != "":
+		parts = append(parts, name)
+	case q.Seconds == "":
+	case name == "" && rec != "":
+		parts = append(parts, "recorded in the room as \""+rec+"\"")
+	case name == "":
+	case rec == "" || rec == name:
+		parts = append(parts, "named \""+name+"\" by the admin who signed the first entry")
+	default:
+		parts = append(parts, "recorded in the room as \""+rec+"\"", "named \""+name+"\" by the admin who signed the first entry")
+	}
+	shown := func(n string) bool {
+		return n != "" && (q.Name != "" && strings.EqualFold(n, q.Name) || q.Seconds != "" && recRaw != "" && strings.EqualFold(n, recRaw))
+	}
+	var same []string
+	count := 0
+	for _, mi := range members {
+		if mi.Node != q.Node && shown(mi.Name) {
+			if count++; len(same) < maxSameName {
+				same = append(same, Fingerprint(mi.Node))
+			}
+		}
+	}
+	switch {
+	case count == 1:
+		parts = append(parts, "machine "+same[0]+" in the room has this name too")
+	case count > 1:
+		s := "machines " + strings.Join(same, ", ")
+		if count > len(same) {
+			s += " and " + strconv.Itoa(count-len(same)) + " more"
+		}
+		parts = append(parts, s+" in the room have this name too")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, "; ") + ")"
 }
 
 func an(role string) string {

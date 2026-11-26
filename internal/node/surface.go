@@ -428,12 +428,19 @@ func (s *Surface) Requests(ctx context.Context) ([]store.Request, error) { retur
 // request's current terms (terms_changed), so that what is approved is
 // what was displayed.
 func (s *Surface) Confirm(ctx context.Context, id string, approve, notCaughtUpOK bool, terms string) (Confirmation, error) {
+	return s.ConfirmShown(ctx, id, approve, notCaughtUpOK, terms, "")
+}
+
+// ConfirmShown is Confirm for a surface that showed the person the
+// request's text: with shown set, an approval is refused unless the text
+// is still the same when the decision is made (ConfirmOpts.Shown).
+func (s *Surface) ConfirmShown(ctx context.Context, id string, approve, notCaughtUpOK bool, terms, shown string) (Confirmation, error) {
 	if approve && s.r.files != nil {
 		if q, err := s.m.st.GetRequest(ctx, id); err == nil && q.Kind == store.RequestSendFiles {
 			return s.r.files.ApproveSend(ctx, id, terms)
 		}
 	}
-	c, err := s.r.ConfirmWith(ctx, id, approve, ConfirmOpts{NotCaughtUpOK: notCaughtUpOK})
+	c, err := s.r.ConfirmWith(ctx, id, approve, ConfirmOpts{NotCaughtUpOK: notCaughtUpOK, Shown: shown})
 	if errors.Is(err, ErrNotCaughtUp) {
 		return Confirmation{ID: id, State: store.RequestFailed, Reason: ReasonNotCaughtUp}, nil
 	}
@@ -1605,7 +1612,7 @@ func (s *Surface) Alerts(ctx context.Context, wait time.Duration) ([]Alert, erro
 		if rs, err := s.RoomList(ctx, ""); err == nil {
 			for _, r := range rs {
 				if r.MayBeRemoved {
-					as = append(as, Alert{Kind: AlertRemoved, Room: r.ID, Text: "room " + r.Label + ": " + MaybeRemovedText})
+					as = append(as, Alert{Kind: AlertRemoved, Room: r.ID, Text: "room " + EscapeDisplay(r.Label) + ": " + MaybeRemovedText})
 				}
 			}
 		} else {

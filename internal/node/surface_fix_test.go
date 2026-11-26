@@ -332,7 +332,7 @@ func TestRequestTextNamesTheFullFingerprintAndEachTerm(t *testing.T) {
 			"let machine " + fp + " (box), already a member of room team (r_1) as a member, with earlier history, " +
 				"fetch the room's log again; approving changes nothing"},
 	} {
-		if got := requestText(tc.q, "team"); got != tc.want {
+		if got := requestText(tc.q, "team", nil); got != tc.want {
 			t.Errorf("%s/%s:\n got %q\nwant %q", tc.q.Kind, tc.q.Action, got, tc.want)
 		}
 	}

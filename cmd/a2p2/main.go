@@ -732,12 +732,7 @@ func join(c *cmd, args []string) error {
 	if err := cl.Call(c.ctx, "room/join", localapi.JoinReq{Token: token}, &pv); err != nil {
 		return err
 	}
-	hist := "without earlier history"
-	if pv.History {
-		hist = "with earlier history"
-	}
-	fmt.Fprintf(os.Stderr, "Invite to room %q (%s), as %s, %s, from admin machine %s; expires %s.\n",
-		pv.Room.Label, pv.Room.ID, pv.Role, hist, short(pv.Admin), clock(pv.Expires))
+	fmt.Fprintln(os.Stderr, previewText(pv))
 	if pv.Member {
 		fmt.Fprintln(os.Stderr, "This machine is a member already: approving fetches the room's log and changes nothing.")
 	}
@@ -897,11 +892,37 @@ func printTerms(w io.Writer, q localapi.Request) {
 		return
 	}
 	if q.Name != "" && q.Kind != store.RequestNetwork {
-		fmt.Fprintln(w, "  The machine chose its own name. Check its fingerprint.")
+		fmt.Fprintln(w, "  "+nameNote(q))
 	}
 	if q.Deadline != "" {
 		fmt.Fprintf(w, "  Invite expires %s\n", clock(q.Deadline))
 	}
+}
+
+// previewText is the invite a person accepts or not. The room's label was
+// chosen by the room's creator, on another machine: it is escaped as
+// every remote string a person approves (node.EscapeDisplay).
+func previewText(pv localapi.PreviewResp) string {
+	hist := "without earlier history"
+	if pv.History {
+		hist = "with earlier history"
+	}
+	return fmt.Sprintf("Invite to room \"%s\" (%s), as %s, %s, from admin machine %s; expires %s.",
+		node.EscapeDisplay(pv.Room.Label), node.EscapeDisplay(pv.Room.ID), pv.Role, hist, short(pv.Admin), clock(pv.Expires))
+}
+
+// nameNote says who chose the name a request carries (node.NameFrom*),
+// so that a name another admin wrote is not read as the machine's own.
+func nameNote(q localapi.Request) string {
+	switch q.NameFrom {
+	case node.NameFromMachine:
+		return "The machine chose its own name. Check its fingerprint."
+	case node.NameFromAdmin:
+		return "The admin who signed the first entry chose this name. Check the fingerprint against the room's members."
+	case node.NameFromHere:
+		return "The name was given on this machine. Check the fingerprint."
+	}
+	return "Check the machine's fingerprint, not its name."
 }
 
 // printSendTerms shows every term of a send with files (DESIGN 12 item

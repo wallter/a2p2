@@ -1624,3 +1624,67 @@ withdraw drops.
 **Revisit if** a SQLite upgrade changes a plan (the test fails), the store
 starts running `ANALYZE`, or the pull summary or the unread walk shows up
 in a measurement.
+
+## D-NEW-E-escaping-page. Text from other machines is escaped where it is shown (2026-11-25)
+
+A security review showed that a room label chosen by a hostile room
+creator went raw into the text a person approves for a membership
+change. A carriage return, terminal escapes, a right-to-left override or
+a newline could hide that a seconding request makes the creator's second
+machine an admin. The page also drew labels, names, message text and
+choices as sent, and the escape helper missed characters that draw as
+nothing (zero width, tag characters, variation selectors). Rooms that
+span owners make this a real attack now, so it is fixed before the CLI
+and MCP work that will use the same helper.
+
+- **What changed:** one helper, `internal/node/escape.go`:
+  `EscapeDisplay` (one line), `EscapeDisplayLines` (approval text over
+  lines), `EscapeDisplayText` (message text: keeps newlines, tabs, a
+  joiner between two emoji, a joiner or non-joiner between two letters
+  of a script that needs them, and one emoji selector after an emoji or
+  keycap base), `EscapeChoice` and `ChoiceHidden` (a choice, shown
+  exactly as it is sent or refused), `DisplayHidden` and the tables. The
+  table is every Cc, Cf, Zl and Zp character, every other default
+  ignorable code point and every variation selector, plus a few
+  invisible ones of other classes; a test checks it against Go's Unicode
+  tables, and another that `app.js` has the same tables and gives the
+  same output. Request text escapes the room label and names. A
+  seconding request says the other admin chose its name, shows the name
+  the room records and names other members with the name shown (bounded).
+  The local API's request gains `name_from` and `recorded_name`; no new
+  call, tool, command, key or table. The page's approval is compared
+  with the text it showed again under the decision lock. On the page,
+  room labels, names, agent ids and message text are escaped; rooms
+  drawn alike get their ids; a message that asks the person is drawn
+  apart from requests with who asked and of whom; a choice its button
+  cannot show exactly as sent is not sent.
+- **Per position:** escape visibly wherever remote text is shown,
+  including signed data, which must still be shown and still load; refuse
+  only where this machine would send a remote string as its person's own
+  words (a clicked choice). Nothing is dropped.
+- **Why at display, not on receipt:** stored logs are signed and must
+  still load, and a new receipt rule needs the replay change first. A
+  later rule that refuses controls in new room labels can come after it.
+- **Costs:** text that had such characters reads with `\u{...}` in it,
+  including a CR at the end of a line and emoji tag sequences such as
+  subdivision flags. A joiner in Latin, Greek or Cyrillic text, or a
+  selector after punctuation, is shown escaped. What the text rule keeps
+  can still carry about one bit per position nobody sees, inside emoji
+  and the joining scripts only; escaping those would break them. A
+  choice with a non-breaking space or two spaces in a row is refused. A
+  page open across the upgrade must reload before it can approve, since
+  the request text changed. The escape is not reversible: a literal
+  `\u{202e}` reads the same as an escaped one, which is why the page
+  compares labels as drawn. Lookalike letters from other scripts are not
+  detected.
+- **Still open:** the CLI's own printing of messages, choices, alerts
+  and room lists (`printEntry`, `printAlert`, the room list), the question
+  alert text (`surface.go`, `q.From + " asks: " + q.Text`), and the MCP
+  tools' text for the model. Each can call this helper. `a2p2 confirm`
+  decides by id and does not compare the text it showed. Names are not
+  compared with this machine's own name when it is not yet recorded in
+  the room.
+
+**Revisit if** Unicode adds a format character (the table test fails on
+a Go upgrade), a script needs a character the table escapes, or receipt
+rules for labels land.

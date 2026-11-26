@@ -1,6 +1,8 @@
 // Runs static/app.js in Node against a real a2p2 web handler.
 //
-//   node page_harness.js INDEX_HTML APP_JS BASE_URL TOKEN ROOM_ID
+//   node page_harness.js INDEX_HTML APP_JS BASE_URL TOKEN ROOM_ID [PROBE_JSON]
+//
+// With PROBE_JSON it also runs escapeScenario (below).
 //
 // Node has no DOM, so a small stand-in supplies the parts app.js uses. Its
 // elements are built from INDEX_HTML: an id the HTML does not define is null
@@ -15,7 +17,7 @@
 "use strict";
 const fs = require("fs");
 const vm = require("vm");
-const [htmlPath, appPath, base, token, roomId] = process.argv.slice(2);
+const [htmlPath, appPath, base, token, roomId, probePath] = process.argv.slice(2);
 const errors = [];
 
 class Text {
@@ -165,6 +167,40 @@ async function idle(what) {
   }
 }
 
+// escapeScenario runs with PROBE_JSON, a JSON array of strings: it writes
+// the page's escapeDisplay, escapeText, displayHidden, escapeChoice and
+// choiceHidden of each, what the
+// "Needs you" section shows for each question, and the posts made by
+// clicking each choice, the ones the page shows escaped first.
+async function escapeScenario(out) {
+  const probe = JSON.parse(fs.readFileSync(probePath, "utf8"));
+  const fns = ["escapeDisplay", "escapeText", "displayHidden", "escapeChoice", "choiceHidden"].map(inPage);
+  out.probe = probe.map((s) => fns.map((f) => f(s)));
+  out.questionsTitleHidden = $("questions-title").hidden;
+  out.nodeOpen = $("node").textContent; // the details of the room opened
+  out.questions = $("questions").children.map((card) => ({
+    cls: card.className, text: card.textContent,
+    choices: card.querySelectorAll("button.choice").map((b) => b.textContent),
+    primary: card.querySelectorAll("button.pri").length,
+  }));
+  out.clicks = [];
+  const card = $("questions").children[0];
+  if (!card) return;
+  const buttons = card.querySelectorAll("button.choice");
+  buttons.sort((a, b) => Number(!a.textContent.includes("\\u{")) - Number(!b.textContent.includes("\\u{")));
+  for (const b of buttons) {
+    posts.length = 0;
+    b.dispatch("click");
+    await sleep(300); await idle("a choice"); await sleep(100);
+    // The stand-in has no isConnected, so the page writes the error to the
+    // outcome line instead of the card.
+    out.clicks.push({ label: b.textContent, posts: posts.slice(),
+      error: card.querySelector("div.question-error").textContent || $("outcome").textContent });
+    inPage("S.outcome = ''");
+    if (posts.length) break;
+  }
+}
+
 (async () => {
   const out = { errors, scenario: {} };
   try {
@@ -210,9 +246,11 @@ async function idle(what) {
       out.scenario.refusedPosts = posts.slice();
       out.scenario.refusedErr = $("err").textContent;
     }
+    if (probePath) await escapeScenario(out);
   } catch (e) {
     errors.push("harness: " + e.message);
   }
-  process.stdout.write(JSON.stringify(out) + "\n");
-  process.exit(0);
+  // Exit only once the output is written: a pipe write is asynchronous,
+  // and exiting at once cuts a large output short.
+  process.stdout.write(JSON.stringify(out) + "\n", () => process.exit(0));
 })();

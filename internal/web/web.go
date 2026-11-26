@@ -343,7 +343,7 @@ func (sv *server) confirm(r *http.Request) (any, error) {
 	for _, q := range qs {
 		if q.ID == in.ID {
 			if q.Text != in.Text {
-				return nil, &node.UserError{Msg: "the request changed since the page showed it; reload and decide again"}
+				return nil, &node.UserError{Msg: node.RequestChangedText}
 			}
 			shown = true
 		}
@@ -351,7 +351,9 @@ func (sv *server) confirm(r *http.Request) (any, error) {
 	if !shown {
 		return nil, &node.UserError{Msg: "no such request is waiting"}
 	}
-	c, err := sv.s.Confirm(r.Context(), in.ID, in.Approve, in.NotCaughtUpOK, in.Terms)
+	// The text is compared again under the decision lock: a pull between
+	// this check and the decision can change the members it names.
+	c, err := sv.s.ConfirmShown(r.Context(), in.ID, in.Approve, in.NotCaughtUpOK, in.Terms, in.Text)
 	return localapi.ConfirmResp{ID: c.ID, State: c.State, Reason: c.Reason, Entries: c.Entries, Effect: c.Effect}, err
 }
 

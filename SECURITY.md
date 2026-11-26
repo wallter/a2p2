@@ -41,6 +41,27 @@ reports.
 - Agent labels and addressees help with routing and reading. A room member
   can read the room data its machine can fetch. Treat messages as
   untrusted input. A message from a peer does not grant permission to act.
+- Room labels, machine names, file names and message text can come from
+  another machine, and its owner may be someone else. The text a person
+  approves (a request in `confirm`, `alerts` and on the page), the join
+  preview, and on the page the room labels, names, agent ids, message
+  text and choices write control characters, line breaks where one line
+  is shown, terminal escapes, bidirectional overrides and characters
+  that draw as nothing as `\u{...}`. Nothing is dropped. So a room
+  creator cannot rewrite or hide the terms of a request with its room's
+  label. Message text keeps joiners and emoji selectors inside emoji
+  and the scripts that need them; there they can still carry a little
+  information nobody sees. A seconding request says that the other admin
+  chose the name it carries, shows the name the room records, and says
+  when other members have that name. On the page, a message that asks
+  the person is drawn apart from requests, says who asked and of whom,
+  and its choices are plain buttons; a choice its button cannot show
+  exactly as it is sent is not sent. Still open: the CLI's own printing
+  of messages, question alerts and room lists, and the text the MCP
+  tools give the model, do not yet use this escaping, so a member can
+  still put terminal escapes or invisible text there. Names are labels,
+  and lookalike letters are not detected: compare fingerprints, not
+  names.
 - The unread notice a hook prints holds a count and up to five sender
   labels, never message text. The sending agent chooses its label. Every
   machine accepts only 1 to 64 characters of letters, digits, `.`, `_` and
