@@ -2664,10 +2664,13 @@ to pass another owner's text off as the local person's.
     the author's label: the person's inbox never holds them, so a local
     agent's replacement of one is not offered as a question.
   - Still open: any program of that OS user can send as `human`
-    anyway. The request
-    card of a send with files (`node/surface_files.go`, the files group)
-    writes the addressees and a parent's author with short ids and no
-    marks.
+    anyway.
+- **After integration.** The request card of a send with files
+  (`node/surface_files.go`) wrote the asking agent, the addressees and a
+  parent's author with short ids and no marks. It now writes them as
+  entries do: in full when another known machine shares the short id,
+  each followed by its mark from the full key (`AuthorMark`), outside
+  the isolated id. The local API's request fields carry the same ids.
 
 **Revisit if** a later release adds a receipt rule for room labels or
 names, the short id is lengthened, or a harness shows that models still

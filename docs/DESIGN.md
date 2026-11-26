@@ -521,7 +521,9 @@ local agent can replace or withdraw the person's messages), gives
 lists which senders are this machine, and the hook marks this
 machine's person and another machine's `human` in its notice, keeping
 this machine's person among the 5 senders it names; a
-question alert writes the mark after the asker. The CLI, the page and
+question alert writes the mark after the asker, and the approval card of
+a send with files writes it after the asking agent, each addressee and
+a parent's author. The CLI, the page and
 the hook draw each mark apart from message text (CLI bodies are
 indented, a question alert's later body lines deeper than its asker
 line; page marks are their own elements, hook labels lose every
@@ -529,7 +531,8 @@ character but letters, digits and `._@-`).
 The surface compares the short ids of this machine, every member of
 every room held and the authors and addressees shown; a key whose short
 id another has is written in full and marked `id_shared` in entries,
-writers, status and the person's id, and a short id that names two
+writers, status and the person's id (the approval card of a send with
+files writes such an id in full too), and a short id that names two
 members is refused as an addressee. Agent-facing labels are shown so
 that only the local room reads as `local` and no two rooms read alike
 (`<label>#<8 hex of the id>`, then the whole id, then the bare id,
