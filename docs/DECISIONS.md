@@ -2720,3 +2720,79 @@ address in an invite reaches other owners' joiners.
 
 **Revisit if** the owner decides on invites or permanent leases, a
 dial-back can tell a relayed connection, or port mapping is removed.
+
+## D-NEW-M-team-script. The team launcher keeps its state from other users and its options from manifest values (2026-11-25)
+
+A security review found three gaps in `scripts/team` (F74 to F76). The
+state directory was checked only by its owner, so another user who made
+a directory above it, such as `/tmp/a2p2-team-example` from the shipped
+example, could rename it and put their own `launch.json` in its place
+before the supervisor read it. The `allowed_tools` check let through
+`Read,Bash` and `Bash(sh:*)`, which give unscoped shell access. And
+`team status` and `team logs` printed C1 controls and bidi overrides.
+Rooms now span owners, so text a member copies from a peer reaches the
+operator's terminal.
+
+- **What changed.** `up` refuses a `state_dir` or `a2p2_home` on a path
+  where a directory, symlinks followed, belongs to another user than this
+  one or root, or lets group or others write without the sticky bit, or
+  where an entry in such a sticky directory belongs to another user.
+  Group write does not count when the group is this user's alone: its
+  primary group, with no other member and no other account whose
+  primary group it is, as Linux systems with the umask 002 give. It
+  refuses an existing state directory that group or others may write
+  instead of making it 0700, since files may have been planted. It makes
+  each missing directory 0700 whatever the umask, and checks the home's
+  path again after making it, before the first `a2p2` command. `status`,
+  `stop`, `logs`, `report` and the supervisor refuse such a state
+  directory too, before they read or write in it, and the reports and the
+  roster are written through a new file renamed into place, never through
+  a symlink. The supervisor runs from the copy of the manifest `up`
+  checked and saved as `manifest.json` in the state directory, not from
+  the manifest file. Each `allowed_tools` entry must be one tool with at
+  most one rule in parentheses, matched whole, with no `,`, no space
+  outside them and no control, format character or space other than
+  U+0020; a `Bash` rule whose command, compared without case, is a shell,
+  `env`, `xargs`, `sudo`, an interpreter, `find`, `make`, a wildcard or
+  quote, or `git` with no subcommand or a wildcard in its place, is
+  refused. A model, or a headless member's prompt, that starts with `-` is
+  refused; the prelude is read once, and each prompt is checked again with
+  the real ids as it is saved for launch. The kickoff and notices go to
+  `a2p2 send` after `--`. `team status` and `team logs` escape by the
+  daemon's rules, and `logs` escapes each log's path, reads logs line by
+  line and `-n` from the end. `team logs --raw` (a new option of the
+  launcher, not of a2p2) prints the bytes.
+- **The daemon's helper, ported.** The launcher is Python with no
+  dependency and cannot call `internal/node/escape.go` (D58). It holds a
+  port of `escapeText` with the same tables and text rules, as `app.js`
+  does: a test checks that its tables equal the Go ones and that it gives
+  `EscapeDisplay` and `EscapeDisplayText` output for every row of
+  `internal/node/testdata/escape_cases.json`. Status shows one line, so it
+  turns line breaks and tabs into spaces first; logs keep lines.
+- **Costs.** A state directory or home under a group-writable directory
+  that worked before is refused when another user is in the group or has
+  it as primary group, as `staff` on macOS; the error says to run
+  `chmod g-w`. Accounts that `pwd` cannot list, as some directory
+  services give, are not seen when the group is judged private.
+  An existing state directory from an earlier run that is now refused can
+  no longer be read or stopped with `team`; its supervisor, if alive,
+  still ends with its members. An honest `Bash(git:*)`, `Bash(git *)` or
+  `Bash(make:*)` is refused; name the subcommands.
+- **Still open.** Each member's prompt is an argument on its harness's
+  command line, so `ps` shows it to every local user. Passing it on
+  stdin (`claude -p` and `codex exec -` read it) changes how each harness
+  is started and needs a real run of each first (AGENTS.md). Without
+  `-m` the launcher reads `./team.json`, and `status` and `report` run
+  the `a2p2` it names; the README now says a manifest is code, and
+  dropping the default is the owner's choice. The `allowed_tools` deny
+  list cannot know every program that runs another. A rule such as
+  `Bash(go test:*)` runs code a member that may edit files can write; the
+  README says so, and a key to consent to such rules was not added, since
+  naming the rule in the manifest already is that choice. How Claude Code
+  parses `--allowedTools` is checked against its documentation, not a
+  real run.
+
+**Revisit if** a harness is started with its prompt on stdin, Claude Code
+changes how it splits `--allowedTools` or matches a rule, the daemon's
+escape rules change (the parity test fails), or the launcher gains a way
+to call the daemon's escape.
