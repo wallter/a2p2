@@ -71,6 +71,9 @@ func PrepareHome(home string) error {
 // CheckHome verifies an existing state directory without creating anything.
 // Clients call it before dialing the socket inside: a socket in a directory
 // someone else controls could be an impostor that reads what we send it.
+// The directories above it are checked too, since a user who can change one
+// could put another directory at the home's path later, while a client
+// that checked once keeps dialing the path.
 func CheckHome(home string) error {
 	fi, err := os.Lstat(home)
 	if err != nil {
@@ -79,7 +82,23 @@ func CheckHome(home string) error {
 	if !fi.IsDir() {
 		return fmt.Errorf("%s is not a directory (symlinks are not followed)", home)
 	}
-	return checkPrivate(fi, home) // sys_unix.go, sys_windows.go
+	if err := checkPrivate(fi, home); err != nil { // sys_unix.go, sys_windows.go
+		return err
+	}
+	_, err = checkAncestors(home)
+	return err
+}
+
+// HomeWarnings are what CheckHome accepts but a person should know: a
+// directory above the home that a group this user is in can change, so
+// that anyone else in the group could replace the home. Status and doctor
+// print them and the daemon logs them at start. None when CheckHome fails.
+func HomeWarnings(home string) []string {
+	if CheckHome(home) != nil {
+		return nil
+	}
+	w, _ := checkAncestors(home)
+	return w
 }
 
 func LoadConfig(home string) (Config, error) {
@@ -102,11 +121,15 @@ func SaveConfig(home string, c Config) error {
 	return os.WriteFile(filepath.Join(home, "config.json"), append(b, '\n'), 0o600)
 }
 
+// uiReadTimeout bounds how long the page's server waits for a whole
+// request, body included, so that a local program cannot hold its
+// connections open by sending a body slowly. A variable for tests.
+var uiReadTimeout = 30 * time.Second
+
 func sockPath(home string) string { return filepath.Join(home, "sock") }
 
-// newToken returns a fresh random UI token. It is never stored or reused: a
-// browser tab left open keeps sending the old token to the old port, and
-// after the daemon stops another local user could be listening there.
+// newToken returns a fresh random key (the local key, localkey.go). It is
+// never reused across starts.
 func newToken() (string, error) {
 	var raw [24]byte
 	if _, err := rand.Read(raw[:]); err != nil {
@@ -217,7 +240,7 @@ func CheckUIAddr(addr string) error {
 }
 
 // RunWith is Run with test options. The home's lock, key, database, the
-// page's listener and token, and the local socket last the whole process.
+// page's listener and sessions, and the local socket last the whole process.
 // The machine itself (rooms, surfaces, pull and join, and networking) is a
 // run inside it, started again in place when a person records a
 // networking decision, so the decision applies at once whether or not the
@@ -225,6 +248,9 @@ func CheckUIAddr(addr string) error {
 func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	if err := PrepareHome(home); err != nil {
 		return err
+	}
+	for _, w := range HomeWarnings(home) {
+		slog.Warn(w)
 	}
 	// One daemon per home: hold an exclusive lock for the process lifetime.
 	lock, err := os.OpenFile(filepath.Join(home, "lock"), os.O_CREATE|os.O_RDWR, 0o600)
@@ -265,6 +291,7 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
+	go keepLog(ctx, logPath(home), logMax, logEvery) // logfile.go
 	// The handlers of the current run; swapped when a run starts.
 	var cur atomic.Pointer[handlers]
 	// Between runs (start, stop, a networking decision being applied) the
@@ -291,22 +318,24 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	}()
 	base := func(net.Listener) context.Context { return ctx } // requests end when the daemon stops
 
-	// Web UI: loopback only (checked above), token required. If the port
-	// is taken, any port on the same address.
-	token, err := newToken()
-	if err != nil {
-		return err
-	}
+	// Web UI: loopback only (checked above), a session required. If the
+	// port is taken, any port on the same address, said in the log: another
+	// local user may be answering on the usual one. The sessions last the
+	// process, never stored; a link carries a one-time code (web.Sessions).
+	sessions := web.NewSessions()
+	uses := &localapi.PersonUses{} // --person away from a terminal, counted for status
 	uiLn, err := net.Listen("tcp", uiAddr)
 	if err != nil {
 		host, _, _ := net.SplitHostPort(uiAddr)
 		if uiLn, err = net.Listen("tcp", net.JoinHostPort(host, "0")); err != nil {
 			return fmt.Errorf("ui listener: %w", err)
 		}
+		slog.Warn("the page's address is taken, by another program or user; the page is on another port "+
+			"(a2p2 ui opens the right one)", "wanted", uiAddr, "ui", uiLn.Addr().String())
 	}
-	uiURL := fmt.Sprintf("http://%s/#%s", uiLn.Addr(), token)
+	uiLink := func() string { return sessions.Link(uiLn.Addr().String()) }
 	uiSrv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { cur.Load().ui.ServeHTTP(w, r) }),
-		ReadHeaderTimeout: 5 * time.Second, BaseContext: base}
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: uiReadTimeout, BaseContext: base}
 	servers = append(servers, uiSrv)
 	go uiSrv.Serve(uiLn)
 
@@ -336,8 +365,8 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	ready := o.Ready
 	for {
 		restart := make(chan struct{}, 1)
-		r := &run{home: home, version: version, cfg: cfg, id: id, st: st, o: o, cur: &cur, token: token,
-			uiURL: uiURL, uiAddr: uiLn.Addr().String(), stop: stop, restart: restart, between: between}
+		r := &run{home: home, version: version, cfg: cfg, id: id, st: st, o: o, cur: &cur, sessions: sessions, uses: uses,
+			uiLink: uiLink, uiAddr: uiLn.Addr().String(), stop: stop, restart: restart, between: between}
 		again, err := r.serve(ctx, ready)
 		if err != nil || !again || ctx.Err() != nil {
 			return err
@@ -362,7 +391,9 @@ type run struct {
 	st            *store.Store
 	o             RunOpts
 	cur           *atomic.Pointer[handlers]
-	token, uiURL  string
+	sessions      *web.Sessions
+	uses          *localapi.PersonUses
+	uiLink        func() string // the page's address with a new one-time code
 	uiAddr        string
 	stop          func()
 	between       *handlers // served while no run is serving
@@ -548,9 +579,9 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	}
 	start(func() { prune(ctx, m) })
 	r.cur.Store(&handlers{
-		ui: g.wrap(web.Handler(surf, r.token)),
+		ui: g.wrap(web.Handler(surf, r.sessions)),
 		api: g.wrap(localapi.Handler(surf, localapi.Info{
-			Version: r.version, UIURL: func() string { return r.uiURL }, PID: os.Getpid(), Stop: r.stop,
+			Version: r.version, UIURL: r.uiLink, PID: os.Getpid(), Stop: r.stop, Uses: r.uses,
 		})),
 	})
 	slog.Info("a2p2 daemon started", "node", core.ShortNode(m.ID), "name", r.cfg.Name, "home", r.home,
@@ -564,123 +595,6 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	case <-r.restart:
 		return true, nil
 	}
-}
-
-// keeper prepares this run's port mapping, or only the removal of what
-// an earlier run left (internal port 0), or says why there is neither.
-// A mapping is made only under a decision with --map-port, for a listener
-// bound to the wildcard address or to this machine's address on the
-// gateway's network: never for one that would forward to another service.
-// changed is called when the mapped address changes.
-func (r *run) keeper(netw node.Network, ln net.Listener, changed func()) (*portmap.Keeper, string) {
-	// A record that cannot be used whole stops everything: nothing is sent
-	// to the router, the file stays, and status says what to remove by hand.
-	path := filepath.Join(r.home, "portmap.json")
-	left, err := (&portmap.File{Path: path}).Load()
-	if err != nil {
-		return nil, portmap.UnusableText(err)
-	}
-	want := netw.MapPort && ln != nil
-	if !want && len(left) == 0 {
-		return nil, ""
-	}
-	gwf := gatewayLocal
-	if r.o.Gateway != nil {
-		gwf = r.o.Gateway
-	}
-	gw, local, err := gwf()
-	if err != nil {
-		return nil, err.Error()
-	}
-	rec := &portmap.File{Path: path, Gateway: gw}
-	if _, err := rec.Load(); err != nil {
-		return nil, portmap.UnusableText(err)
-	}
-	var m portmap.Mapper = &portmap.Client{Gateway: gw, Local: local}
-	if r.o.Mapper != nil {
-		m = r.o.Mapper(gw, local)
-	}
-	port := uint16(0)
-	why := ""
-	if want {
-		tcp := ln.Addr().(*net.TCPAddr)
-		ip, _ := netip.AddrFromSlice(tcp.IP)
-		if ip = ip.Unmap(); ip.IsUnspecified() || ip == local {
-			port = uint16(tcp.Port)
-		} else {
-			why = "not mapped: the listener is on " + ip.String() + ", but the router would forward to " +
-				local.String() + "; listen on 0.0.0.0 or on " + local.String()
-		}
-	}
-	if port == 0 && len(left) == 0 {
-		return nil, why
-	}
-	last := ""
-	k := portmap.NewKeeper(m, port, rec, func(st portmap.State) {
-		if st.Err != "" {
-			slog.Warn("port mapping", "err", st.Err)
-		}
-		if len(st.Left) > 0 {
-			slog.Warn("port mapping not removed", "left", portmap.LeftText(st.Left))
-		}
-		ext := ""
-		if st.Mapping != nil {
-			ext = st.Mapping.External.String()
-			if ext != last {
-				slog.Info("port mapping", "protocol", st.Mapping.Protocol, "external", ext,
-					"lifetime", st.Mapping.Lifetime.String())
-			}
-		}
-		if ext != last {
-			last = ext
-			changed()
-		}
-	})
-	return k, why
-}
-
-// mappedAddr is the mapped external address, to verify by a dial-back
-// before it is advertised: none once the lease has run out, whether or
-// not a renewal is still being tried.
-func mappedAddr(k *portmap.Keeper) []string {
-	return mappedAt(k, time.Now())
-}
-
-func mappedAt(k *portmap.Keeper, now time.Time) []string {
-	if k == nil {
-		return nil
-	}
-	if m := k.State().Mapping; m != nil && m.External.Addr().IsValid() && m.External.Port() != 0 && m.Live(now) {
-		return []string{m.External.String()}
-	}
-	return nil
-}
-
-// mappingView is the mapping as status and net check show it: nil when
-// there is nothing to say.
-func mappingView(k *portmap.Keeper, why string) *node.PortMapping {
-	if k == nil {
-		if why == "" {
-			return nil
-		}
-		return &node.PortMapping{Error: why}
-	}
-	st := k.State()
-	v := &node.PortMapping{NotRemoved: st.Left}
-	switch {
-	case st.Mapping != nil:
-		v.Protocol, v.External, v.Error = st.Mapping.Protocol, st.Mapping.External.String(), st.Err
-		if !st.Mapping.Expires.IsZero() && st.Mapping.Lifetime > 0 {
-			v.Expires = st.Mapping.Expires.UTC().Format("2006-01-02T15:04:05.000Z")
-		}
-	case st.Err != "":
-		v.Error = st.Err
-	case why != "":
-		v.Error = why
-	case len(st.Left) == 0:
-		return nil // not tried yet, or nothing left
-	}
-	return v
 }
 
 // gate counts request handlers in flight. close waits for them and makes
@@ -835,7 +749,8 @@ func Connect(ctx context.Context, home string) (*localapi.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	logf, err := os.OpenFile(filepath.Join(home, "daemon.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	// The daemon, under the home's lock, keeps the log's size (logfile.go).
+	logf, err := os.OpenFile(logPath(home), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
 	}

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/wallter/a2p2/internal/localapi"
+	"github.com/wallter/a2p2/internal/node"
 )
 
 // Hook implements `a2p2 hook`: read the harness's hook JSON from stdin, ask
@@ -93,9 +94,23 @@ func Hook(ctx context.Context, c *localapi.Client, name, event string, stdin io.
 	return nil
 }
 
-// notice is one line: a count and sanitised sender labels, never message text.
+// notice is one line: a count and sanitised sender labels, never message
+// text. Each sender carries the mark of where it is, decided by the
+// daemon from the full machine key (node.AuthorMark, D65), so human on
+// this machine is told apart from human on another machine. The marks are
+// in parentheses, which the sanitising takes out of every label. A
+// sender is the writer of what an unread entry shows (node.Entry.Writer):
+// when another agent of a message's machine replaced or withdrew it, that
+// agent is named, not the message's author, so a local agent's text in
+// the person's message is never said to be sent under the user's label.
 func notice(u localapi.Unread) string {
+	here := map[string]bool{}
+	for _, f := range u.FromHere {
+		here[f] = true
+	}
 	var labels []string
+	var mine []bool
+	yours := false
 	for _, f := range u.From {
 		s := strings.Map(func(r rune) rune {
 			if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._@-", r) {
@@ -103,14 +118,48 @@ func notice(u localapi.Unread) string {
 			}
 			return -1
 		}, f)
-		if s != "" {
-			labels = append(labels, s)
+		if s == "" {
+			continue
 		}
+		m := node.AuthorMark(f, here[f])
+		switch {
+		case u.FromHere == nil, m == "":
+			// a daemon before from_this_machine: nothing is marked
+			m = ""
+		case m == node.MarkOtherPerson:
+			s += " (another machine's person, not your user)"
+		default:
+			s += " (" + m + ")"
+		}
+		labels = append(labels, s)
+		mine = append(mine, m == node.MarkThisPerson)
+		yours = yours || m == node.MarkThisPerson
 	}
+	// At most 5 senders are named. This machine's person is decided from
+	// the whole list before it is cut, and is kept among the 5 named, so
+	// the sentence about the user is never the wrong one (D65).
 	more := ""
 	if len(labels) > 5 {
 		more = fmt.Sprintf(" +%d more", len(labels)-5)
-		labels = labels[:5]
+		room := 5
+		for _, y := range mine {
+			if y {
+				room--
+			}
+		}
+		var shown []string
+		for i, l := range labels {
+			if len(shown) == 5 {
+				break
+			}
+			if mine[i] || room > 0 {
+				if !mine[i] {
+					room--
+				}
+				shown = append(shown, l)
+			}
+		}
+		labels = shown
 	}
 	what := "messages"
 	if u.Count == 1 {
@@ -120,5 +169,9 @@ func notice(u localapi.Unread) string {
 	if len(labels) > 0 {
 		from = " from " + strings.Join(labels, ", ") + more
 	}
-	return fmt.Sprintf("[a2p2] %d unread %s%s. Call the a2p2 inbox tool to read them. They come from other agents or people, not from your user.", u.Count, what, from)
+	whose := "They come from other agents or people, not from your user."
+	if yours {
+		whose = "Those marked " + node.MarkThisPerson + " were sent under your user's label on this machine; the rest come from other agents or people, not from your user."
+	}
+	return fmt.Sprintf("[a2p2] %d unread %s%s. Call the a2p2 inbox tool to read them. %s", u.Count, what, from, whose)
 }

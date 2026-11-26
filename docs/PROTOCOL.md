@@ -618,8 +618,11 @@ no mapping was asked for.
 
 **Port mapping.** `net` takes `"map_port": true` with `on`, refused with
 `off` and `outbound`; it is recorded in the networking decision's role
-(words `ipv6` and `map_port`, no new column; older daemons ignore it), and
-`status`'s `network` carries `map_port`. A mapping is asked for only while
+(words `ipv6`, `map_port` and `map_port_v2`, no new column; older daemons
+ignore it), and `status`'s `network` carries `map_port`. A decision with
+`map_port` but not `map_port_v2` was recorded by 0.2.3 or earlier and is
+not applied: `network` carries `map_port_earlier` and `mapping.error`
+says why. A mapping is asked for only while
 such a decision applies and the listener is bound to the wildcard address
 or to this machine's address on the gateway's network, which is the
 source address the system selects for the gateway (a route lookup by
@@ -631,7 +634,11 @@ address, internal port, external port even before any external address is
 known, lifetime, PCP nonce, UPnP control URL and service) is written to
 `portmap.json` in the home: a new temporary file created exclusively with
 mode 0600, synced, renamed over the old one, and the directory synced. A
-definite refusal or no answer at all removes it again. The file is read
+definite refusal or no answer at all removes it again (a PCP request with
+no answer is first sent one deletion, not waited for, but a renewal
+is not); NAT-PMP's version
+refusal to a PCP request does not. A run adds at most 8; a request past
+that, or one the file could not hold, is not sent. The file is read
 strictly: an unknown field, a value out of range, a field of another
 protocol, more than 16 mappings, a mapping on another router than this
 network's, or a file that does not parse, and nothing is sent to any
@@ -639,14 +646,21 @@ router, the file is kept, and `mapping.error` says that the record cannot
 be used and what to remove by hand. The daemon asks: PCP MAP (RFC 6887, UDP 5351, TCP,
 the listening port as internal and suggested external port, lifetime
 7,200 s, a random nonce kept for renewal and deletion); if the answer is
-NAT-PMP's version refusal (version 0, opcode 129, result 1), NAT-PMP (RFC
+NAT-PMP's version refusal (version 0, opcode 129, result 1) and no PCP
+answer with the nonce comes in any of the tries, NAT-PMP (RFC
 6886, opcode 2, then opcode 0 for the external address); if neither
 answers, UPnP IGD (an SSDP `M-SEARCH` for `InternetGatewayDevice:1`, only
 a 200 answer with that `ST` from the gateway's IP, the description and
 control URL followed only when their host is the gateway's IP,
-`AddPortMapping` for TCP with lease 7,200 s, the next three ports on
-error 718, lease 0 only on error 725, then `GetExternalIPAddress`). A
-grant with lifetime 0, external port 0 or no external address, a SOAP 200
+`AddPortMapping` for TCP with lease 7,200 s, the next three ports up to
+65535 on error 718, lease 0 only on error 725, then
+`GetExternalIPAddress`). Only a default gateway with a private IPv4
+address is asked for a mapping; recorded ones are still deleted on the
+gateway they name. A lifetime granted over what was asked counts as what
+was asked. A grant with lifetime 0, external port 0, or an external
+address that is not public (private, 100.64.0.0/10, loopback,
+link-local, multicast, 0.0.0.0/8, 240.0.0.0/4, or any IPv6 address),
+which is then deleted, a SOAP 200
 that is not a complete `…Response` envelope, and a datagram of the wrong
 length are not taken for success; only an HTTP 500 that is a complete SOAP
 `Fault` with a numeric UPnP `errorCode` is taken for a refusal (to try the
@@ -742,7 +756,17 @@ generation in the same write. The joiner reports success only when the
 last page is applied, no entry was refused, it has accepted every entry in
 `heads`, and its own state shows it a member; it then reports the role and
 history its own state shows, and says so if they differ from the preview
-(the log is the truth; a promotion may have landed meanwhile). After signed, the
+(the log is the truth; a promotion may have landed meanwhile). The joiner
+refuses, on receipt only: a preview of a room it does not hold whose label
+reads as `local` or holds a character the display escapes (10.8); a
+create entry whose label is not the preview's; and, for a room it holds,
+a preview naming another create entry or label, and entries from an
+admin machine that is not a member there before or after each batch (as
+T4 for a pull; pages are kept until they make it one, up to 1,024
+entries or 4 MiB not held there), and any page over 256 entries or
+3 MiB, or marked `more` without moving past the last `next`. A last
+page without `heads`, or from a machine that is not a member there, does
+not count as caught up. After signed, the
 answer stays signed, expired or not, while the key is a member; once it is
 removed the answer is 403 `removed`. A pending promotion of the joiner
 (third admin) is visible in the returned log as an entry waiting for a
@@ -1025,17 +1049,54 @@ Every result is one JSON object, with `<`, `>` and `&` as written; a
 refusal is a tool error whose text is one JSON object
 `{"error","code","retryable"}` as in section 7 (the shim adds
 `unavailable` when the daemon cannot be reached).
-A room is `room` (its id) with `room_label`, a machine `machine` (its short
-id) with `machine_name`, an agent `agent`. `send`, `reply` and `ask_human`
-return `{"id","room","room_label","to","note"}` (`to` is `["everyone"]` for
+A room is `room` (its id) with `room_label` and `local: true` only for
+this machine's own room, a machine `machine` (its short id, or its full
+key with `id_shared: true` when another machine known here has the same
+short id) with `machine_name`, an agent `agent`. Only the local room's
+label is shown as `local`; another room whose label reads as `local`, or
+two rooms whose labels read alike (`node.LabelKey`), are shown as
+`<label>#<first 8 hex of the id>`, then `<label>#<whole id>`, then the
+bare room id, each step repeated until no two rooms read alike (a label
+that reads as another room's id counts too), so no label is shown for
+two rooms. A room argument may be the id, the label as shown (escaped or
+not), the stored label, or the stored label with `#` and at least 8 hex
+of the id; a name that could mean two rooms is refused, so a label shown
+before another room arrived never picks that room. `send`, `reply` and `ask_human`
+return `{"id","room","room_label","local"?,"to","note"}` (`to` is `["everyone"]` for
 a room-wide post; `replaced` or `withdrew` instead for `replaces`), `reply`
-also `handled_report`; `ack` returns `{"handled","report","already"?}`; `inbox`
-returns `{"notice","marked_seen","messages":[…],"rooms"?:[{"room","room_label"}],"streams_still_fetching"?,"waited"?,"levels"?:[{"room","room_label","level"}]}`,
-and with `peek` `{"notice","marked_seen":false,"unread","rooms":[{"room","room_label","unread"}],"first_lines":[{"id","room_label","from","line"}],"levels"?}`.
-`whoami` returns `{"agent","machine","machine_name","rooms":[{"room","room_label","level","unread"}],"human","note"}`.
-Results are compact JSON. An inbox message is `{"id","kind"?,"room_label","from","author_removed"?,"to"?,"parent"?,"thread"?,"parent_state"?,"late"?,"created","text"?,"choices"?}`:
+also `handled_report`, `ask_human` also `answer_from`, the person's id
+by this machine's full key (`human@<full key>`), which does not change
+when machines join or leave. The answer is the reply whose `parent` is
+the question's id, with `from_this_machine: true` and `person` `yours`;
+its `from` shows the short id unless another machine shares it. Any
+program run by the same OS user can send as `human` through the local
+API, so `person` says where and under which label a message was
+written, not who typed it; `ack` returns `{"handled","report","already"?}`; `inbox`
+returns `{"notice","marked_seen","messages":[…],"rooms"?:[{"room","room_label","local"?}],"streams_still_fetching"?,"waited"?,"levels"?:[{"room","room_label","local"?,"level"}]}`,
+and with `peek` `{"notice","marked_seen":false,"unread","rooms":[{"room","room_label","local"?,"unread"}],"first_lines":[{"id","room_label","from","edited"?,"changed_by"?,"changed_by_person"?,"from_this_machine","person"?,"id_shared"?,"line"}],"levels"?}`.
+`changed_by` names another agent of the author's machine that wrote the
+text shown (every label on a machine signs with its key), and
+`changed_by_person` is `person` for it; `person` is about `from`.
+`whoami` returns `{"agent","machine","machine_id_shared"?,"machine_name","rooms":[{"room","room_label","local"?,"level","unread"}],"human","note"}`.
+`peers` marks each room's machine that is this one `this_machine: true`;
+a machine name that another machine in the result also uses, or that
+reads as another machine's id (compared as drawn; a machine with no name
+is drawn as its id), is shown as `<name>#<machine>`. Writer and local
+agent ids are never cut and use the full key when it is shared, as do
+the machines `inbox` with `fetch` names. A harness named `human` (any case) is
+refused: `a2p2 mcp` never registers as the person.
+Results are compact JSON. An inbox message is `{"id","kind"?,"edited"?,"room_label","from","changed_by"?,"changed_by_person"?,"from_this_machine","person"?,"id_shared"?,"author_removed"?,"to"?,"parent"?,"thread"?,"parent_state"?,"late"?,"created","text"?,"choices"?}`:
 `kind` is left out for `message`, `to` for everyone, `thread` when it equals
-`parent`, `parent_state` when `here`; `from` is `label@<short machine id>`.
+`parent`, `parent_state` when `here`; `from` is `label@<short machine id>`,
+or `label@<full key>` with `id_shared: true` when another machine known
+here has that short id (`to` likewise). `from_this_machine` is never left
+out: whether the author is this machine, by its full key. `person`
+appears when the author's label is `human` in any case: `yours: the
+person on this machine` only for `human` written here, `another
+machine's person, not yours` for one written elsewhere, `not yours: a
+look-alike label on this machine` otherwise. Messages of inbox, thread,
+recent, skipped and peek all carry these fields. `edited` (left out when
+false): the text is its author's replacement (D62).
 `key`, `version` and `from_node` stay inside the shim, which confirms
 `seen` with the exact key and version the daemon showed.
 
@@ -1053,7 +1114,7 @@ the code is `node.ErrorCodes`):
 | `invalid_request` | no | malformed, or names something that cannot be (the default) |
 | `not_found` | no | no such room, message, member or request here |
 | `not_allowed` | no | the caller may not do this (not addressed, its own message, not an admin, the local room, a room set aside) |
-| `not_shown` | no | a handled report before the agent was shown the text; reading it first makes the call succeed |
+| `not_shown` | no | a handled report before the agent was shown the text, or before it was shown the newest replacement held (or while a newer replacement's text is not here yet); reading it first makes the call succeed |
 | `already_done` | no | done before (a request already decided, an invite already used) |
 | `not_registered` | yes | the agent is not registered here; registering again (the MCP shim does) makes it succeed |
 | `too_large` | no | the message is too long or names too many addressees |
@@ -1081,12 +1142,12 @@ Linux the daemon writes no key and ignores the header (D47).
 | `inbox` (changed) | `{"agent","room"?,"limit"?,"wait_ms"?}` | `{"entries":[Entry],"waiting":[Wait]}` |
 | `thread` (changed) | `{"agent","id","after"?}`; `after` is a message id in that thread | `{"entries":[Entry]}`, only those after `after` when given (`not_found` if it is not in the thread); marks nothing |
 | `seen` (changed) | `{"agent","entries":[{"key","version"}]}` | `{"results":[{"key","ok","reason"?}]}`: each entry is confirmed only if a full `inbox` read listed this key at this version to this agent (its receipt) and the inbox would show exactly it now; the rest are applied. An entry only `unread`, `history` or `thread` showed is refused (`not_shown`). A replaced entry's key names the replace record |
-| `ack` (changed) | `{"agent","id"}` | `{"handled":"<record id>","already"?:true}`; a second report by the same agent is not written again: it succeeds with `already` and `handled` naming the first report. Refused (400) with the reason: no such message here (`not_found`), not addressed to the agent and no `ask_handled`, or its own message (`not_allowed`), not shown its text by any read yet (`not_shown`): `inbox`, `thread`, `history` (recent or skipped) all count, and none moves a cursor |
+| `ack` (changed) | `{"agent","id"}` | `{"handled":"<record id>","already"?:true}`; a second report by the same agent is not written again: it succeeds with `already` and `handled` naming the first report. Refused (400) with the reason: no such message here (`not_found`), not addressed to the agent and no `ask_handled`, or its own message (`not_allowed`), not shown its text by any read yet (`not_shown`): `inbox`, `thread`, `history` (recent or skipped) all count, and none moves a cursor. Also `not_shown` when the read showed an older version than the newest replacement held with text, or a replacement's text is not here yet |
 | `history` (changed) | `{"room","before"?,"limit"?,"agent"?,"skipped"?}`; `before` is a message id, and paging is by place (created, author, position, id), so one author's messages of one millisecond keep the order written and a boundary withdrawn or expired since still works. With `agent` and no `skipped`, entries the agent's level kept out say `skipped`. With `skipped: true` and `agent`: the messages for that agent whose text is here, that its level kept out of its inbox (now, or because they were held when the level last let them in) and that it has not confirmed or reported handled, after where its time began, and those whose text expired meanwhile (as `expired`); in `room`, or every room when `room` is empty; the newest `limit` (default 50, at most 500) before `before`, oldest first (U3) | `{"entries":[Entry]}`; marks nothing seen |
 | `level` (new) | `{"agent","room"?,"level"?}`; `level` is `all`, `addressed` or `none`; `room` empty means every room held. With `level`, sets the agent's level there first; refused for the person (`human`), whose reading has no level | `{"levels":[{"room","room_label","level"}]}`. Levels are local reading state (U1, U2): `all` (the default) shows every message for the agent; `addressed` only messages whose `to` names it and room-wide posts whose text begins with `@everyone` (ASCII, any case, then whitespace, punctuation or the end); `none` no message. While a text is missing, the inbox waits for it rather than classify the message. A message a full `inbox` read listed is never kept out. Notices about messages the agent was shown are never filtered. A change marks skipped every message held then that the old level kept out and the new one lets in, so the inbox continues from now; nothing is marked seen |
-| `trace` (changed) | `{"id"}` | `{"id","room","saved","reason","copies":[{"node","at","member","evidence"}],"handled":[{"agent","at"}]}`. `saved`: this machine holds the record's header; `reason`: the state of its text here. A copy's `at` is when this machine observed it, `member` is membership now, and `evidence` is `position` (the holder reported that position of the stream, section 4.3). A handled `at` is when the report was written. An unknown id is an error |
-| `unread` (changed) | `{"agent"?,"harness"?,"cwd"?,"lines"?,"room"?}`: an agent's tools name `agent`; a hook names its `harness` and `cwd`; `room` (label or id, resolved as everywhere) limits counts and first lines to that room before the first lines are capped | `{"agent","count","rooms":[{"room","label","count"}],"first"?:[{"id","room","from","line"}]}`: what `inbox` would show the agent now, so it follows the agent's level; marks nothing (U4) |
-| `alerts` (new) | `{"wait_ms"?}` (≤ 120,000) | `{"alerts":[{"kind":"request"\|"fork"\|"missing"\|"question"\|"network"\|"removed","id","room","text","since"}]}`; `missing`: text wanted for a day and still not here; `question`: a message for this machine's person (addressed to `human` by name, or carrying choices) not yet answered or dismissed, `id` the message, `text` `<from> asks: <text>`; a replacement of a question is a question with its new text; `network`: networking is on but this machine does not listen, `text` says why; `removed`: every other member of `room` has refused this machine as not a member for at least 10 minutes, so it may have been removed |
+| `trace` (changed) | `{"id"}` | `{"id","room","saved","reason","from","from_node","from_this_machine","id_shared"?,"copies":[{"node","at","member","evidence","id_shared"?}],"handled":[{"agent","node","from_this_machine","id_shared"?,"at"}]}`. `saved`: this machine holds the record's header; `reason`: the state of its text here. `from` and each handled `agent` are written as entries write them, with `from_this_machine` by the full key and `id_shared` as for entries (D65). A copy's `at` is when this machine observed it, `member` is membership now, and `evidence` is `position` (the holder reported that position of the stream, section 4.3). A handled `at` is when the report was written. An unknown id is an error |
+| `unread` (changed) | `{"agent"?,"harness"?,"cwd"?,"lines"?,"room"?}`: an agent's tools name `agent`; a hook names its `harness` and `cwd`; `room` (label or id, resolved as everywhere) limits counts and first lines to that room before the first lines are capped | `{"agent","count","from","from_this_machine":[...],"rooms":[{"room","label","count"}],"first"?:[{"id","room","from","changed_by"?,"edited"?,"from_this_machine","line"}]}`: what `inbox` would show the agent now, so it follows the agent's level; marks nothing (U4). `from` lists the senders, each the writer of the text shown (`changed_by` when set, else the author); `from_this_machine`, always a list, the ones whose author is this machine by the full key |
+| `alerts` (new) | `{"wait_ms"?}` (≤ 120,000) | `{"alerts":[{"kind":"request"\|"fork"\|"missing"\|"question"\|"network"\|"removed","id","room","text","since"}]}`; `missing`: text wanted for a day and still not here; `question`: a message for this machine's person (addressed to `human` by name, or carrying choices) not yet answered or dismissed, `id` the message, `text` `<from> asks: <text>`, with the author's mark in brackets after `<from>` when it has one (`another machine's person, not you`, `this machine`, and so on, by the full key) and `[edited]` for a replaced question; a replacement of a question is a question with its new text; `network`: networking is on but this machine does not listen, `text` says why; `removed`: every other member of `room` has refused this machine as not a member for at least 10 minutes, so it may have been removed |
 | `requests` (new) | `{}` | `{"requests":[{"id","kind","action","room","room_label","node","fingerprint","name","role","history","seconding","created","deadline","text"}]}`; `kind` `network` is a recorded decision about networking |
 | `confirm` (new) | `{"id","approve":bool,"not_caught_up_ok"?:true}` | `{"id","state":"approved"\|"declined"\|"failed","reason"?,"entries"?,"effect"?}`; `reason` `not_caught_up` means this machine has not checked the room's log with another member since it started (DESIGN 3); the surface shows the warning and may repeat with `not_caught_up_ok`, which is recorded |
 | `net` (changed) | `{"state":"off"\|"outbound"\|"on","listen"?}` | `{"state","listen","request","text","applies"}`; a person's decision with the same authority as `confirm`, recorded as a decided request. The daemon applies it at once, without a restart; `applies` is `"now: the daemon applies it at once"` |
@@ -1100,7 +1161,9 @@ Linux the daemon writes no key and ignores the header (D47).
 | `room/list` (new) | `{"room"?}` | `{"rooms":[{"id","label","members":[…],"admins":[…],"pending":[…],"no_effect":[{"entry","reason"}],"forks":[…],"limits":[…],"waiting","may_be_removed"?}]}`; `waiting` counts the room's requests for this machine's person; `may_be_removed: true` when every other member has refused this machine as not a member for at least 10 minutes (never for `local`). It only changes what the surfaces show |
 
 At first start each machine creates `local` with itself as the only
-member. The room cannot be shared by invite or left.
+member. The room cannot be shared by invite or left. `room create`
+refuses the label `local` in any case, and `local` as a room name always
+means this room, whatever another room is labelled.
 
 Networking states:
 
@@ -1113,15 +1176,25 @@ and `room/join/accept` are kept out of the agent tools and hooks and every
 use is recorded, which is a guard rail and not a lock (REQUIREMENTS 6).
 
 The web page (`a2p2 ui`; `a2p2 ui --print` prints its address and opens
-nothing) uses its own routes on loopback, each requiring
-the page's token as a bearer token: `GET /api/state`, `/api/history`, `/api/thread` and
+nothing) uses its own routes on loopback. Its address, the `ui` of
+`status`, is `http://HOST:PORT/#c=CODE`: a new one-time code at each
+`status`, good once and for 30 seconds (a daemon before 0.2.4 put its
+long-lived token after the `#`). `POST /api/session` with `{"code"}` and
+the page's exact `Origin` answers `{"session","run"}`; a code unknown or
+expired, or traded before, is answered 401, and a second trade also
+ends the first trade's session. On Linux a trade from a connection whose
+client socket another user owns is answered 403 and leaves the code
+untouched. Every other route requires a session
+as a bearer token, and every answer to one carries the session's run in
+the `A2P2-Run` header: `GET /api/state` (which also carries `run`, the
+value given with the presenting session; each session has its own), `/api/history`, `/api/thread` and
 `/api/trace`, and `POST /api/send`, `/api/seen`, `/api/ack`,
 `/api/confirm` and `/api/notice-shown`. `GET /api/state` reads the status
 as shown to a person, so it carries the one-time `notice` until the page
 reports with `POST /api/notice-shown` (answer `{}`) that it drew it. Questions and the person's unread messages come back without being
 marked seen; the page confirms what it showed.
 
-`Entry`: `{"key","version","kind":"message"|"withdrawn"|"replaced"|"expired"|"voided","id","room","room_label","from","from_node","author_removed","to","parent","thread","parent_state":"here"|"missing"|"expired"|"withdrawn","late","created","text","choices","ask_handled"?,"skipped"?}`. `ask_handled` (omitted when false): a room-wide post asking for handled reports. `skipped` (omitted when false): in `history` for an agent, its level kept this one out. Every list is in place order (created, author, position, id).
+`Entry`: `{"key","version","edited"?,"kind":"message"|"withdrawn"|"replaced"|"expired"|"voided","id","room","room_label","from","from_node","from_this_machine","id_shared"?,"author_removed","to","parent","thread","parent_state":"here"|"missing"|"expired"|"withdrawn","late","created","text","choices","ask_handled"?,"skipped"?}`. `edited` (omitted when false): a message shown with its author's replacement text, so `version` is not `id`, and every `replaced` notice. A notice's `from` is the message's author as the message gives it, whichever agent of that machine wrote the replace or withdraw. `changed_by` (omitted when it would equal `from`'s agent): the agent of the author's machine that wrote the replacement shown, or the notice's replace or withdraw, written like `from`. `ask_handled` (omitted when false): a room-wide post asking for handled reports. `skipped` (omitted when false): in `history` for an agent, its level kept this one out. `from_this_machine` (always present): `from_node` is this machine's key. `id_shared` (omitted when false): the author's or an addressee's short id is another known machine's too, so `from` and `to` name it by its full key. `room_label` is the label as shown (section 6): only the local room is `local`. `unread` first lines carry `from_this_machine` too; `status` marks such machines `id_shared` in members and peers, sets `id_shared` when this machine's own short id is shared, and then gives `human` with the full key. A `"human"` addressee is this machine's person by its full key. An addressee whose short id names two members is refused. `room/list` marks members `id_shared` the same way. An agent id may name this machine by its short id or its full key. The ids `send` returns are written as entries write them; reading the memberships for that never turns a committed send into an error. Every list is in place order (created, author, position, id).
 `Wait`: `{"room","author","have","known","since","reason":"text"|"link"|"gap"}`.
 
 The CLI follows the socket calls above. See `a2p2 help` for the full syntax.
@@ -1144,8 +1217,18 @@ The CLI follows the socket calls above. See `a2p2 help` for the full syntax.
   `[asks for handled reports]`; `inbox --peek` marks nothing.
 - `net on [<addr>] [--outbound-only]` and `net off` change network state.
 
-`confirm`, `net` and the approval step of `join` require a terminal on
-stdin. Without one, `join` prints the preview and stops.
+`confirm`, `net`, `room leave`, a change of `room files` and the
+approval step of `join` require a terminal on stdin. Without one, `join`
+prints the preview and stops. Without `--as`, `send`, `ack` and an
+`inbox` that marks entries seen act as the person only at a terminal or
+with `--person`; away from a terminal or in an agent's shell `register`
+then carries `unattended` (the command), which the daemon logs and
+counts: `status` then carries `unattended` `{"count","last","command"}`,
+the uses since the daemon started (absent when none). In an
+agent's shell the CLI registers as that
+harness instead (DESIGN 7). An empty `--as` is refused. `status --json`
+leaves out `ui`; `ui --print` gives it, at a terminal outside an agent's
+shell or with `--person` (then logged as `unattended` `ui`).
 
 ## 8. Schema (migrations 2 to 12)
 
@@ -1158,7 +1241,7 @@ Migration 13 adds the tables for attachments; they are in
 | `log` | `room`, `id`, `author`, `seq`, `bytes`, `sig`, `state` (`accepted`, `held`, `refused`, `invalid`: kept for replay, never passed on), `batch` int, `batch_pos` int | unique (`room`,`id`); index (`room`,`author`,`seq`), not unique, so both branches of a fork fit |
 | `room_members` | `room`, `node`, `admin`, `name`, `addrs`, `seen_at` (cache of `Resolve`; named apart from v0.2's `members` table, which migration 10 dropped) | (`room`,`node`) |
 | `records` | `room`, `id`, `author`, `epoch`, `seq`, `kind`, `ref`, `parent`, `thread`, `agent`, `created`, `hdr`, `sig`, `body` nullable, `reason` (`live`, `expired`, `withdrawn`, `not_admitted`, `missing`), `effect` (`ok`, `bad_reference`, `unresolved`) | unique (`room`,`id`); unique (`room`,`author`,`epoch`,`seq`); (`room`,`ref`); (`room`,`parent`); (`room`,`thread`) |
-| `streams` | `room`, `author`, `epoch`, `contig`, `known`, `known_at`, `known_from` (the peer whose report set `known`; its later report can lower it) | (`room`,`author`,`epoch`) |
+| `streams` | `room`, `author`, `epoch`, `contig`, `known`, `known_at`, `known_from` (the peer whose report set `known`; its later report can lower it). A report makes, or takes over from another peer, at most 32 streams per author and peer that hold nothing here, and a stream that holds nothing is deleted when the peer that set `known` stops reporting it, also by leaving its author out of a whole report, unless another peer's last observed detail reports it: then `known` falls back to that report | (`room`,`author`,`epoch`) |
 | `observed` | `room`, `peer`, `author`, `digest`, `detail` json, `at`; the row with an empty `author` holds the peer's last log heads and extra | (`room`,`peer`,`author`) |
 | `refusals` | `room`, `peer`, `reason`, `count`, `last_at` | (`room`,`peer`,`reason`) |
 | `peer_addrs` (migration 8) | `node`, `addr`, `source` (`self`, `peer`), `seen_at`, `failed_at`, `fails`; only for members of a room this machine is in | (`node`,`addr`) |
@@ -1403,7 +1486,16 @@ answers 202 "not yet" and starts one carry job: a want to the author
 request for the same file joins the same job. A job lapses as a want
 does; for the next 24 hours requests for that file are answered `202`
 with body `{"state":"gave_up"}`, and the reader shows `unavailable` with
-reason `not_carried`. With setting `off` it answers 404. A carried file is
+reason `not_carried`. With setting `off` it answers 404. A request from
+the message's author is answered 404 and starts nothing. A new carry job,
+or a `keep` want, is not started while the live wants of the same
+author's files in the room, each counted at its full size (bytes received
+are checked only when the file is whole), would reserve more than a quarter of the room budget with it; the
+request is then answered 404, as over the budget. When a want lapses,
+or goes because an edit made another version the one to keep, the part
+an upload left for it is dropped. Wants stored before this rule keep
+their reservation and lapse as before; a part left under a want already
+lapsed is dropped if it was reserved no later than the lapse. A carried file is
 held and served like a fetched one; F1 deletes it with the text. Setting
 `keep` wants every file of every message it may keep, within the budget.
 
@@ -1426,7 +1518,7 @@ readable text.
 
 | Call | Request | Response |
 |---|---|---|
-| `send` (changed) | adds `"files":["<path>",…]` (1–8): an absolute path, or `"sha256:<hex>"` naming verified bytes this machine holds for the version being replaced, kept by listing it again. With `replaces`, absent means the replacement has no files. Approval of a replacement checks again that the replaced version is still the winning one, readable here, and lists each kept file; otherwise the request fails and its staging is removed | `{"request","state":"waiting"}` only: nothing is written, and the agent learns no size or hash of what was staged. Refused before anything is read: `too_large` (over 8 files), `invalid_request` (a path not absolute, empty text, choices). A path that cannot be staged, for any reason (missing, unreadable, not a regular file once opened, over 256 MiB or a budget, the same bytes twice), is refused with `invalid_request` and the one message "cannot attach that path: not a readable regular file within the limits"; the reason goes to the daemon's debug log without the path |
+| `send` (changed) | adds `"files":["<path>",…]` (1–8): an absolute path, or `"sha256:<hex>"` naming verified bytes this machine holds for the version being replaced, kept by listing it again. With `replaces`, absent means the replacement has no files. Approval of a replacement checks again that the replaced version is still the winning one, readable here, and lists each kept file; otherwise the request fails and its staging is removed | `{"request","state":"waiting"}` only: nothing is written, and the agent learns no size or hash of what was staged. Refused before anything is read: `too_large` (over 8 files), `invalid_request` (a path not absolute, empty text, choices). With 32 of this machine's requests waiting in the room: `rate_limited`, before any path is touched. A path that cannot be staged, for any reason (missing, unreadable, not a regular file once opened, a remote or device path, one of a2p2's own files, over 256 MiB or a budget, the requests filled while staging), is refused with `invalid_request` and the one message "cannot attach that path: not a readable regular file within the limits"; the reason goes to the daemon's debug log without the path. The same bytes listed twice are listed once |
 | `fetch` (new) | `{"agent","room"?,"sha256","message"?,"wait_ms"?}` (≤ 120,000; the tool sends at most 30,000). `message` picks the message when several list the same bytes. The agent must have been shown the version that lists the file: by its inbox, or by a thread, history or skipped view, which mark a message with files as shown for this purpose (only an inbox read lets it report the message handled); a read the agent confirmed counts too. On the author's machine the agent that wrote the winning version may fetch without being shown it; every other id, the person's included, needs one of those marks, and is answered `not_shown` without one | `{"state","room","message","name","path"?,"size","have"?,"from"?,"reason"?,"holders"?:[{"node","at","answer"}]}`; `state` is `here` (with `path`), `partial`, `coming`, `fetching`, `unavailable`, `gone` (`reason`: `withdrawn`, `replaced`, `expired`, `before_you_joined`) or `too_large` |
 | `requests` (changed) | | kind `send_files`: `agent`, `room`, the effective recipients `to` (agent ids, or `["everyone"]` with `members`, the member count; for a replacement, those of the message it replaces), `reply_to` and, for a reply to its author, `reply_author`, `replaces` (`{"id","version","line"}`: the message, the version replaced and its first line), `text_line` (the first line) and `body` (the whole text, each line escaped), `files:[{"path","name","size","sha256","type"?,"kept"?}]` with `path` escaped (10.8) and `"sha256:<hex>"` for a kept file, `terms` |
 | `confirm` (changed) | adds `"terms"`: an approval of a `send_files` request must carry the `terms` the person was shown, and is refused `terms_changed` with nothing decided and nothing sent if they are missing or not the request's current terms; there is no other way to approve one. A decline needs none. The approval covers `terms`: SHA-256 over `a2p2 send files 3`, room, agent, the effective recipients (each, or `everyone`, the member count and the SHA-256 over `a2p2 members 1` and the members' sorted keys, one per line; for a replacement, those of the message it replaces), the thread parent, `replaces` and the version of it replaced, the whole text's hash and each file's path, size and SHA-256. Approval copies each staged file into a new private file while hashing and publishes only if its size and digest are the approved ones | `approved` with `effect` the message id; expires as `declined` after 24 hours |
@@ -1555,10 +1647,25 @@ to the MCP default; the shim strips them from `tools/list` (D51).
 | `blobs/.staging/<request id>/<n>` | a send waiting for a person |
 | `files/<room id>/<name>` | the copy written for an agent, for one message, 0600 |
 
-Staging refuses, before any I/O, a Windows UNC path, a `\\?\` or `\\.\`
-namespace and a reserved device name; it opens the path once (following
-links, non-blocking on Unix), checks with `fstat` on the
-handle that it is a regular file, and copies and hashes from that handle.
+Staging is refused while the room has 32 requests of this machine
+waiting, before any path is touched. Staging refuses, before any I/O, a
+Windows path that is not a drive letter, a colon and a separator followed
+by names: so a UNC path, a `\\?\`, `\\.\` or `\??\` namespace, a colon
+after the drive (a stream, `NUL:`), a wildcard and a reserved device name
+in any component (CON, PRN, AUX, NUL, COM0 to COM9, LPT0 to LPT9, the
+superscript COM and LPT names, CONIN$, CONOUT$, CLOCK$). On Unix it
+refuses by name a path under `/dev`, `/proc`, `/sys`, `/net` and, on
+macOS, `/Network`, `/home` and their `/System/Volumes/Data` forms. It
+walks the path one component at a time, each looked up in the directory
+opened before it; it reads each link on the way and checks its target
+the same way before looking at it; it opens the last component once,
+only if it is a regular file and still the entry checked (non-blocking on
+Unix); it refuses a walk through the home other than into `files/` and a
+file that is the same file as one in the home outside `files/`; and it
+copies and hashes from that handle. On Windows a handle path
+`\\server\share\...` is taken only for a path that began with a drive
+letter mapped to a network share. The same bytes listed twice are listed
+once.
 The path shown is the one the system reports for the open handle, with C0,
 C1, U+200E, U+200F, U+061C, U+202A to U+202E and U+2066 to U+2069 written
 as `\u{…}`. A copy's name is the manifest's `name` sanitised as before
@@ -1638,6 +1745,9 @@ directory not yet synced; retried at a start, as on Windows).
 | Telling refusals apart | one 404, one body, decided from rows (10.3) |
 | Path tricks in `name` | never a path (10.8) |
 | Swapping the file during confirmation | staged from one open handle; approval checks the staged digest, never the source |
+| An agent told to attach a2p2's own key or database | refused at staging, by a walk through the home and by file identity, a hard link to a nested file included; a request staged by an older binary is refused at approval |
+| A path that makes the machine connect out before approval | refused by name before any I/O, links on the way included (10.8) |
+| An author that never uploads, or uploads part of each file, holds a carrier's budget | its own requests start no carry job; one author's live wants, each counted at its full size, reserve at most a quarter of the room budget; a part goes when its want lapses or an edit ends it (10.5) |
 | A path that hides its end | shown in full, controls and bidi characters escaped |
 | A member lists a hash it may not read in its own message | served only for the message the bytes are held for (F2) |
 | A withdraw after others fetched | every member that learns deletes bytes, parts and copies; active transfers stop (F1, F2) |
@@ -1708,6 +1818,9 @@ with the test that holds it.
 | Every refusal on the file route is the same status and body whatever its reason | `TestEveryNotHeldAnswerIsTheSameBytes` |
 | A response or upload in progress stops when the sender commits a withdraw, replacement, removal, narrower grant or void that ends it | `TestARevocationStopsATransferInProgress` |
 | Staging opens the path once, refuses a non-regular file after opening (a FIFO, a device, a directory), and copies from that handle | `TestStagingCopiesFromTheHandleItOpenedAndRefusesAFifo` |
+| Staging reads and checks each link before following it, and opens only the entry it checked (on Unix without following a link at the open) | `TestStagingNeverFollowsALinkAtTheLastComponentWhenItOpens`, `TestADirectorySwappedOnTheWayAfterItsCheckIsRefused`, `TestALinkSwappedInAfterTheLookIsNeverOpened`, `TestAPathUnderAnAutomountOrDevicePointIsRefusedBeforeAnyIO`, `TestAFileOnADriveLetterMappedToAShareIsStagedAsALocalFile` (the rule; Windows unverified) |
+| The Windows name rule refuses every form but a drive and plain names | `TestAWindowsPathOfAnyFormButADriveAndPlainNamesIsRefusedByNameBeforeAnyIO` (the rule, run on every system; the open is unverified on Windows) |
+| a2p2's own files are never staged, nor sent from a request staged before this rule | `TestASendCannotAttachTheMachineKeyOrDatabaseEvenThroughAHardLink`, `TestAnAgentCannotAttachTheMachineKeyOrTheDatabase`, `TestARequestStagedFromTheMachineKeyBeforeTheFixIsNotPublished` |
 | The approval display shows the resolved path in full with controls and bidirectional characters escaped, and the replaced message | `TestTheRequestEscapesBidiCharactersInThePathAndNamesTheReplacedMessage`, added with the surfaces (10.6) |
 | One transfer per peer per direction, 8 in all | `TestFileTransfersAreLimitedPerPeerAndInAll` |
 | 120 seconds per response and 64 KiB/s over 30 seconds | `TestASlowTransferIsCut` |

@@ -255,6 +255,20 @@ func TestTheMappingIsRemovedWhenTheListenerStops(t *testing.T) {
 	m.ln.mu.Unlock()
 	v.Close() // Accept now fails: the listener has stopped
 	eventually(t, "removed with the listener", func() bool { held, _ := r.count(); return held == 0 })
+	// And no longer given out: not in status, not in a new invite.
+	eventually(t, "withdrawn from status", func() bool {
+		st := call[localapi.Status](m, "status", localapi.Empty{})
+		return st.Mapping == nil || st.Mapping.External == ""
+	})
+	call[localapi.Room](m, "room/create", localapi.RoomReq{Room: "team"})
+	inv := call[localapi.InviteResp](m, "room/invite", localapi.InviteReq{Room: "team"})
+	tok, err := core.DecodeToken(inv.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(tok.Addrs, "198.51.100.7:40001") {
+		t.Fatalf("invite addresses %v after the listener stopped", tok.Addrs)
+	}
 }
 
 // A mapping is recorded in the home before the router is asked. A crash

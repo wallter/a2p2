@@ -53,7 +53,7 @@ func TestPageScriptDrawsTheSidebarInNode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := exec.Command(nodeBin, "testdata/page_harness.js", "static/index.html", "static/app.js", e.srv.URL, tok, ids[0]).Output()
+	out, err := exec.Command(nodeBin, "testdata/page_harness.js", "static/index.html", "static/app.js", e.srv.URL, "c="+e.ss.Code(), ids[0]).Output()
 	if err != nil {
 		t.Fatalf("node: %v\n%s", err, out)
 	}

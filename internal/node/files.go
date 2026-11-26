@@ -96,7 +96,12 @@ type Files struct {
 	// that first ask is not a failed answer (the holders may be fetching
 	// it at the same moment), the second one is.
 	tried map[string]bool
+	// staging bounds the sends that open and copy files at once.
+	staging chan struct{}
 }
+
+// StagingAtOnce is how many sends with files are staged at the same time.
+const StagingAtOnce = 4
 
 // FilesOpts shape the attachment part.
 type FilesOpts struct {
@@ -109,7 +114,8 @@ type FilesOpts struct {
 // Start once before serving.
 func NewFiles(r *Rooms, t FileTransport, o FilesOpts) *Files {
 	f := &Files{m: r.m, r: r, t: t, tr: newTransfers(core.FileTransfers), old: map[string]time.Time{}, writing: map[[3]string]bool{},
-		chunk: o.Chunk, limits: o.Limits, soon: make(chan string, 64), tried: map[string]bool{}}
+		chunk: o.Chunk, limits: o.Limits, soon: make(chan string, 64), tried: map[string]bool{},
+		staging: make(chan struct{}, StagingAtOnce)}
 	if f.chunk <= 0 || f.chunk > core.FileChunk {
 		f.chunk = core.FileChunk
 	}
@@ -310,9 +316,14 @@ func (b *servedBody) Close() error {
 // file this machine may keep but does not hold for the message. With the
 // room's setting carry or keep and the file within the budget it answers
 // "not yet" and starts one carry job (a want of the author); a lapsed job
-// is answered "gave up" for a day; otherwise the same 404.
+// is answered "gave up" for a day; otherwise the same 404. The author
+// itself is never carried for: it wrote the file, and a want it asked for
+// would only hold this machine's budget while it never uploads (F10). One
+// author's live carry jobs, counted by the bytes not yet received, reserve
+// at most a quarter of the room budget (store.FileWant.Capped).
 func (f *Files) carry(ctx context.Context, peer string, q FileGet, c fileCheck) (*FileServe, error) {
-	if c.mode == store.FilesOff || c.isList || c.ref.Size < 1 || c.ref.Size > core.MaxFileSize || c.selfAuth {
+	if c.mode == store.FilesOff || c.isList || c.ref.Size < 1 || c.ref.Size > core.MaxFileSize || c.selfAuth ||
+		peer == c.mf.Author {
 		return nil, ErrNotHeldFile
 	}
 	switch {
@@ -324,7 +335,7 @@ func (f *Files) carry(ctx context.Context, peer string, q FileGet, c fileCheck) 
 		return nil, ErrNotHeldFile
 	}
 	_, err := f.issueWant(ctx, store.FileWant{Room: q.Room, Msg: q.Msg, Version: c.mf.Winner.ID, SHA256: q.SHA256,
-		Author: c.mf.Author, Size: c.ref.Size, At: f.m.now()})
+		Author: c.mf.Author, Size: c.ref.Size, At: f.m.now(), Capped: true})
 	if errors.Is(err, store.ErrNoSpace) {
 		return nil, ErrNotHeldFile
 	}

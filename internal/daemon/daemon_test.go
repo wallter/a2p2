@@ -129,6 +129,8 @@ type machine struct {
 	// local, if valid, is this machine's address on the fake router's
 	// network; otherwise 127.0.0.1, where the test listener is.
 	local netip.Addr
+	// gw, if valid, is the fake router's address; otherwise 127.0.0.1.
+	gw netip.Addr
 }
 
 func (m *machine) gateway() (gw, local netip.Addr, err error) {
@@ -141,7 +143,11 @@ func (m *machine) gateway() (gw, local netip.Addr, err error) {
 	if m.local.IsValid() {
 		local = m.local
 	}
-	return netip.MustParseAddr("127.0.0.1"), local, nil
+	gw = netip.MustParseAddr("127.0.0.1")
+	if m.gw.IsValid() {
+		gw = m.gw
+	}
+	return gw, local, nil
 }
 
 func (m *machine) mapper(netip.Addr, netip.Addr) portmap.Mapper {
@@ -263,21 +269,49 @@ func (m *machine) hook(path string, enter bool) {
 	}
 }
 
-// ui calls the page's API of m with its token.
-func (m *machine) ui(method, path string, body any, out any) int {
+// uiSession trades the one-time code of the link status gives for a
+// session of m's page, as the page does, and returns the page's host and
+// the session.
+func (m *machine) uiSession() (host, session string) {
 	m.t.Helper()
 	st := call[localapi.Status](m, "status", localapi.Empty{})
 	u, err := url.Parse(st.UI)
 	if err != nil {
 		m.t.Fatal(err)
 	}
+	code, ok := strings.CutPrefix(u.Fragment, "c=")
+	if !ok {
+		m.t.Fatalf("the page's link carries no one-time code: %q", st.UI)
+	}
+	req, _ := http.NewRequest("POST", "http://"+u.Host+"/api/session", strings.NewReader(`{"code":"`+code+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://"+u.Host)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var out struct {
+		Session string `json:"session"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil || res.StatusCode != 200 || out.Session == "" {
+		m.t.Fatalf("trading the link's code: %d %v", res.StatusCode, err)
+	}
+	return u.Host, out.Session
+}
+
+// ui calls the page's API of m with a session.
+func (m *machine) ui(method, path string, body any, out any) int {
+	m.t.Helper()
+	host, session := m.uiSession()
+	u := &url.URL{Host: host}
 	var rd io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
 		rd = strings.NewReader(string(b))
 	}
 	req, _ := http.NewRequest(method, "http://"+u.Host+path, rd)
-	req.Header.Set("Authorization", "Bearer "+u.Fragment)
+	req.Header.Set("Authorization", "Bearer "+session)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Origin", "http://"+u.Host)
@@ -769,12 +803,11 @@ func TestPageDecisionNeedsTheExactOriginAndShowsTheFullFingerprint(t *testing.T)
 		t.Fatalf("request as the page shows it: %+v", q)
 	}
 	// Without the page's Origin, or with another, nothing is decided.
-	st := call[localapi.Status](a, "status", localapi.Empty{})
-	u, _ := url.Parse(st.UI)
+	host, session := a.uiSession()
 	for _, origin := range []string{"", "http://evil.example"} {
 		body := strings.NewReader(`{"id":"` + q.ID + `","approve":true,"text":` + jsonString(q.Text) + `}`)
-		req, _ := http.NewRequest("POST", "http://"+u.Host+"/api/confirm", body)
-		req.Header.Set("Authorization", "Bearer "+u.Fragment)
+		req, _ := http.NewRequest("POST", "http://"+host+"/api/confirm", body)
+		req.Header.Set("Authorization", "Bearer "+session)
 		req.Header.Set("Content-Type", "application/json")
 		if origin != "" {
 			req.Header.Set("Origin", origin)

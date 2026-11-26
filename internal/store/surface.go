@@ -45,7 +45,10 @@ CREATE INDEX records_history ON records (room, kind, created, id);
 `
 
 // Place is where a message sits in the order readers see: (created,
-// author, seq, id), every field signed (shown.go).
+// author, seq, id), every field signed (shown.go). Created is the author's
+// clock, so an author can place a message before a reply written after it,
+// or date it so early that its text expires soon after it arrives (F31,
+// deferred: DECISIONS D62).
 type Place struct {
 	Created time.Time
 	Author  string

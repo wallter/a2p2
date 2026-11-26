@@ -44,7 +44,64 @@ const (
 	ReasonJoinNoCreate  = "the admin machine's signed log does not start with the room's create entry"
 	ReasonJoinLeft      = "the room was left or joined again here during the join"
 	ReasonNotAccepted   = "the accept did not reach the admin machine: preview and accept the invite again"
+	// ReasonJoinServerNotMember: the room is held here, and the admin
+	// machine is not a member of it here, nor do its entries make it one
+	// (F7). Nothing it sent was stored.
+	ReasonJoinServerNotMember = "this machine holds the room, and the admin machine is not a member of it here; " +
+		"nothing it sent was stored. Ask a current member for an invite, or leave the room here and join again"
+	// ReasonJoinBadPage: a signed page with more entries or bytes than a
+	// page holds (PROTOCOL 5.2), or one that says more follows but does
+	// not move past the last page.
+	ReasonJoinBadPage = "the admin machine's signed answer breaks the page limits or does not move on"
+	// ReasonJoinTooLong: the signed answer of one join, over all its runs
+	// since the daemon started, passed maxJoinPages pages or maxJoinBytes
+	// bytes, took joinPagingMax of reading, or joinStallMax of reading
+	// without a page that brought an entry this machine lacks. What
+	// earlier pages committed stays; nothing more is read.
+	ReasonJoinTooLong = "the admin machine's signed answer went past what one join reads " +
+		"(256 pages, 64 MiB, 15 minutes, or 2 minutes without an entry this machine lacks)"
 )
+
+// maxJoinPending and maxJoinPendingBytes bound the entries a join keeps
+// in memory, while the answering machine is not yet a member here, before
+// it gives up (ReasonJoinServerNotMember). Entries held here already are
+// not kept, so only what this machine lacks counts. Variables so tests
+// can lower them.
+var (
+	maxJoinPending      = 4 * MaxJoinEntries
+	maxJoinPendingBytes = 4 << 20
+)
+
+// The bounds of one join's signed answer, whatever the admin machine
+// sends: pages and bytes read, the time reading may take, and the time it
+// may take without a page that brings an entry this machine lacks. They
+// count over every run (follow) of the join since the daemon started, not
+// one run: a run cut short by an error or a 202 does not start them again
+// (Joiner.runs). Time counts only while a run reads the answer, so the
+// time between runs does not. Past one, the join ends refused
+// (ReasonJoinTooLong). Variables so tests can lower them.
+var (
+	maxJoinPages  = 256
+	maxJoinBytes  = 64 << 20
+	joinPagingMax = 15 * time.Minute
+	joinStallMax  = 2 * time.Minute
+)
+
+// joinTryAgain is how many new entries a join keeps, while the admin
+// machine is not a member here, before it gives them all to the rooms
+// again: each try checks every entry kept, under the rooms lock, so a
+// page of one new entry does not cost a check of all of them. The last
+// page, and one that passes a limit, are always tried.
+const joinTryAgain = MaxJoinEntries / 4
+
+// labelChanged is the reason a join is refused when the room is held here
+// under a label other than the one the person approved (F12).
+// Both are shown as ShownLabel shows them, so a stored label that reads
+// as local is not named as this machine's room.
+func (r *Rooms) labelChanged(room, held, approved string) string {
+	return "the room is held here as " + Isolate(EscapeDisplay(r.ShownLabel(room, held))) + ", not " +
+		Isolate(EscapeDisplay(r.ShownLabel(room, approved))) + " as the preview showed; the label of a room cannot change"
+}
 
 // acceptTries is how many times JoinAccept sends an accept that the
 // admin machine answers 429 or 503, waiting its Retry-After (at most
@@ -90,6 +147,10 @@ type Joiner struct {
 	// accepts or follows a join, and a caller for another invite never
 	// waits behind it.
 	following map[string]chan struct{}
+	// runs holds, by invite hash, the paging of each join still accepted:
+	// the cursor, the entries kept and the bounds, carried from one run of
+	// follow to the next. Only memory: a restart starts them again.
+	runs map[string]*paging
 }
 
 type previewed struct {
@@ -145,7 +206,8 @@ func NewJoiner(r *Rooms, t JoinTransport, o JoinerOpts) *Joiner {
 			}
 		}
 	}
-	return &Joiner{r: r, t: t, o: o, previews: map[string]*previewed{}, following: map[string]chan struct{}{}}
+	return &Joiner{r: r, t: t, o: o, previews: map[string]*previewed{},
+		following: map[string]chan struct{}{}, runs: map[string]*paging{}}
 }
 
 // hold takes invite h's slot, waiting until it is free or ctx ends; with
@@ -256,7 +318,7 @@ func (j *Joiner) JoinPreview(ctx context.Context, token string) (Preview, error)
 	case p.State != JoinStatePreviewed:
 		return Preview{}, ErrNoRecord
 	}
-	gen, _, err := j.r.m.st.RoomGen(ctx, p.Room)
+	gen, err := j.r.checkPreview(ctx, p)
 	if err != nil {
 		return Preview{}, err
 	}
@@ -300,6 +362,63 @@ func answerPreview(rp JoinReply, a JoinAnswer, server string) (Preview, error) {
 		Role: a.Role, History: a.History, Member: a.Member, Admin: a.Admin, Expires: exp}
 	p.ID = previewID(p)
 	return p, nil
+}
+
+// checkPreview refuses a preview a person here must not be asked to
+// approve, and returns the room's generation here, read with the same
+// view of the rooms (a pin or a leave holds r.mu while it writes). For a
+// room held here, the admin machine must name the create entry and the
+// label this machine holds: a different label is shown as a change, not
+// as the room's name; a room held here whose label reads as local, which
+// an older version could store, is not offered again under that name.
+// For any other room, the label must pass remoteLabelProblem.
+func (r *Rooms) checkPreview(ctx context.Context, p Preview) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rl := r.rooms[p.Room]
+	switch {
+	case rl == nil:
+		if why := remoteLabelProblem(p.Label); why != "" {
+			return 0, userErr("this invite's room cannot be joined here: %s", why)
+		}
+	case rl.createID != p.Create:
+		return 0, userErr("this machine holds room %s with another create entry; the invite cannot be used here", p.Room)
+	case rl.label != p.Label:
+		return 0, userErr("the admin machine names room %s %s, but it is held here as %s; the label of a room cannot change, so the invite is refused",
+			p.Room, Isolate(EscapeDisplay(p.Label)), Isolate(EscapeDisplay(r.ShownLabel(p.Room, rl.label))))
+	case p.Room != localRoomID(r.m.ID) && reservedLocal(rl.label):
+		return 0, userErr("room %s is held here with a label that reads as %s, the name of this machine's own room; "+
+			"it still works here, but an invite cannot be used for it", p.Room, LocalLabel)
+	}
+	gen, _, err := r.m.st.RoomGen(ctx, p.Room)
+	return gen, err
+}
+
+// unheld is wires without the entries room holds here already and those
+// that do not parse, with the id of each: what a join must keep to give
+// again. It also counts the entries of wires held here, and all those the
+// room holds.
+func (r *Rooms) unheld(room string, wires [][]byte) (out [][]byte, ids []string, held, holds int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rl := r.rooms[room]
+	if rl != nil {
+		holds = len(rl.state)
+	}
+	for _, w := range wires {
+		e, err := core.ParseEntry(w)
+		if err != nil {
+			continue
+		}
+		if rl != nil {
+			if _, kept := rl.state[e.ID()]; kept {
+				held++
+				continue
+			}
+		}
+		out, ids = append(out, w), append(ids, e.ID())
+	}
+	return out, ids, held, holds
 }
 
 func validJoinRoom(r *JoinRoom) bool {
@@ -418,6 +537,7 @@ func (j *Joiner) Resume(ctx context.Context, wait time.Duration) ([]JoinOutcome,
 	if err != nil {
 		return nil, err
 	}
+	j.prune(ctx, js)
 	var out []JoinOutcome
 	for _, jn := range js {
 		release, ok, _ := j.hold(ctx, jn.Invite, true)
@@ -432,6 +552,27 @@ func (j *Joiner) Resume(ctx context.Context, wait time.Duration) ([]JoinOutcome,
 		out = append(out, o)
 	}
 	return out, nil
+}
+
+// prune drops the paging of joins that ended without follow seeing it
+// (the room was left), keeping those of js and those a caller follows.
+func (j *Joiner) prune(ctx context.Context, js []store.Join) {
+	j.mu.Lock()
+	var gone []string
+	for h := range j.runs {
+		if !slices.ContainsFunc(js, func(jn store.Join) bool { return jn.Invite == h }) {
+			gone = append(gone, h)
+		}
+	}
+	j.mu.Unlock()
+	for _, h := range gone {
+		if release, ok, _ := j.hold(ctx, h, true); ok {
+			j.mu.Lock()
+			delete(j.runs, h)
+			j.mu.Unlock()
+			release()
+		}
+	}
 }
 
 func refusedOutcome(room, code string) JoinOutcome {
@@ -461,8 +602,34 @@ func (j *Joiner) end(ctx context.Context, jn store.Join, o JoinOutcome) (JoinOut
 
 // follow polls the admin machine for jn until an outcome, or until wait
 // has passed (then the join stays accepted). It polls every retry_ms,
-// doubling to JoinRetryMax.
+// doubling to JoinRetryMax. The caller holds jn's slot. The paging of the
+// join, its cursor and bounds, carries over to the next run while the
+// join stays accepted, and is dropped once it ends.
 func (j *Joiner) follow(ctx context.Context, jn store.Join, wait time.Duration) (JoinOutcome, error) {
+	j.mu.Lock()
+	pg := j.runs[jn.Invite]
+	if pg == nil {
+		pg = &paging{}
+		j.runs[jn.Invite] = pg
+	}
+	j.mu.Unlock()
+	o, err := j.run(ctx, jn, pg, wait)
+	pg.stop(j.r.m.now())
+	// A join answered previewed stays recorded as accepted, so its paging
+	// stays too: an answer cannot start the bounds again by saying so.
+	if err == nil && o.State != JoinStateAccepted && o.State != JoinStatePreviewed {
+		j.mu.Lock()
+		delete(j.runs, jn.Invite)
+		j.mu.Unlock()
+	}
+	return o, err
+}
+
+// run is one run of follow, with the join's paging pg.
+func (j *Joiner) run(ctx context.Context, jn store.Join, pg *paging, wait time.Duration) (JoinOutcome, error) {
+	// A failed run leaves only a room its own pin made: between runs the
+	// room may have become this machine's another way (another join).
+	pg.pinned = false
 	deadline := j.r.m.now().Add(wait)
 	delay := JoinRetry
 	check := func(server string) error {
@@ -471,7 +638,6 @@ func (j *Joiner) follow(ctx context.Context, jn store.Join, wait time.Duration) 
 		}
 		return nil
 	}
-	pg := &paging{}
 	ended := func() (bool, error) {
 		cur, err := j.r.m.st.GetJoin(ctx, jn.Invite)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -497,6 +663,7 @@ func (j *Joiner) follow(ctx context.Context, jn store.Join, wait time.Duration) 
 		if done, err := ended(); err != nil || done {
 			return left, err
 		}
+		sent := j.r.m.now()
 		rp, a, err := j.call(ctx, jn.Addrs, check, JoinRequest{Op: JoinPoll, Invite: jn.Invite, After: pg.after})
 		var pause time.Duration
 		switch {
@@ -524,6 +691,19 @@ func (j *Joiner) follow(ctx context.Context, jn store.Join, wait time.Duration) 
 			}
 			pause = delay
 		case rp.Status == http.StatusOK && a.State == JoinStateSigned:
+			// A page marked more is read at once, past wait: the answer
+			// has bounds of its own over all runs (ReasonJoinTooLong).
+			if pg.from.IsZero() {
+				pg.from = sent // the clock runs from this run's first page
+			}
+			if pg.pages == 0 {
+				pg.moved = pg.read(j.r.m.now())
+			}
+			pg.pages++
+			pg.bytes += len(rp.Body)
+			if pg.pages > maxJoinPages || pg.bytes > maxJoinBytes {
+				return fail(ReasonJoinTooLong)
+			}
 			reason, err := j.apply(ctx, jn, pg, a)
 			switch {
 			case err != nil:
@@ -533,6 +713,9 @@ func (j *Joiner) follow(ctx context.Context, jn store.Join, wait time.Duration) 
 			case reason != "":
 				return fail(reason)
 			case a.More:
+				if d := pg.read(j.r.m.now()); d > joinPagingMax || d-pg.moved > joinStallMax {
+					return fail(ReasonJoinTooLong)
+				}
 				continue
 			}
 			o, reason := j.verify(jn, pg, a.Heads)
@@ -562,11 +745,85 @@ func (j *Joiner) follow(ctx context.Context, jn store.Join, wait time.Duration) 
 	}
 }
 
-// paging is one run of reading a signed log.
+// paging is the reading of one join's signed log, over its runs.
 type paging struct {
 	after  int64 // the last page's next
 	gen    int64 // the generation the room is held at, once pinned or found
-	pinned bool  // this run's pin made it
+	pinned bool  // this run's pin made it; each run starts without it
+	// held: the room was held here before this join, so the admin
+	// machine's entries count only if it is a member here or they make it
+	// one (receiveJoin); pending are the entries kept until they do.
+	held    bool
+	pending [][]byte
+	kept    map[string]bool // the ids of pending
+	fresh   int             // entries kept since pending was last given
+	// The bounds of the join over its runs: signed pages and bytes read;
+	// the time spent reading in runs that ended (spent), and since from in
+	// the current one (zero between runs); the reading time at the last
+	// page that moved the join on (moved); and how many entries held here
+	// the pages brought (again).
+	pages, bytes int
+	spent, moved time.Duration
+	from         time.Time
+	again        int
+}
+
+// read is the time spent reading the answer so far, at now.
+func (pg *paging) read(now time.Time) time.Duration {
+	if pg.from.IsZero() {
+		return pg.spent
+	}
+	return pg.spent + now.Sub(pg.from)
+}
+
+// stop ends the current run's clock at now.
+func (pg *paging) stop(now time.Time) {
+	pg.spent, pg.from = pg.read(now), time.Time{}
+}
+
+// keep adds to pending the entries of wires (with ids) it does not hold
+// yet, and reports how many it added.
+func (pg *paging) keep(wires [][]byte, ids []string) int {
+	if pg.kept == nil {
+		pg.kept = map[string]bool{}
+	}
+	n := 0
+	for i, w := range wires {
+		if !pg.kept[ids[i]] {
+			pg.kept[ids[i]] = true
+			pg.pending = append(pg.pending, w)
+			n++
+		}
+	}
+	pg.fresh += n
+	return n
+}
+
+// over reports whether pending passes maxJoinPending or maxJoinPendingBytes.
+func (pg *paging) over() bool {
+	size := 0
+	for _, w := range pg.pending {
+		size += len(w)
+	}
+	return len(pg.pending) > maxJoinPending || size > maxJoinPendingBytes
+}
+
+// pageProblem says why a signed page breaks the paging rules (PROTOCOL
+// 5.2), or "": at most MaxJoinEntries entries and maxJoinPageBytes bytes,
+// as a server of any version pages them, and a page that says more
+// follows must hold entries and move past the last one.
+func pageProblem(pg *paging, a JoinAnswer) string {
+	size := 0
+	for _, e := range a.Entries {
+		size += len(e) + 1
+	}
+	switch {
+	case len(a.Entries) > MaxJoinEntries, size > maxJoinPageBytes:
+		return ReasonJoinBadPage
+	case a.More && (len(a.Entries) == 0 || a.Next <= pg.after):
+		return ReasonJoinBadPage
+	}
+	return ""
 }
 
 // apply takes one signed page. The first time, it finds the generation to
@@ -583,24 +840,38 @@ func (j *Joiner) apply(ctx context.Context, jn store.Join, pg *paging, a JoinAns
 	if !validJoinRoom(a.Room) || a.Room.ID != jn.Room || a.Room.Create != jn.CreateID {
 		return "the admin machine's signed answer names another room", nil
 	}
+	if why := pageProblem(pg, a); why != "" {
+		return why, nil
+	}
 	wires := make([][]byte, len(a.Entries))
 	for i, e := range a.Entries {
 		wires[i] = e
 	}
 	if pg.gen == 0 {
+		j.r.mu.Lock()
 		gen, held, err := j.r.m.st.RoomGen(ctx, jn.Room)
+		rl := j.r.rooms[jn.Room]
+		sameRoom := rl != nil && rl.createID == jn.CreateID
+		heldLabel := ""
+		if rl != nil {
+			heldLabel = rl.label
+		}
+		j.r.mu.Unlock()
 		if err != nil {
 			return "", err
 		}
-		j.r.mu.Lock()
-		rl := j.r.rooms[jn.Room]
-		sameRoom := rl != nil && rl.createID == jn.CreateID
-		j.r.mu.Unlock()
 		switch {
+		case jn.PinnedGen != 0 && sameRoom && heldLabel != jn.Label:
+			// Pinned by an earlier run under a version that did not
+			// compare the labels: the room stays, the join goes no further.
+			return j.r.labelChanged(jn.Room, heldLabel, jn.Label), nil
 		case jn.PinnedGen != 0:
-			pg.gen = jn.PinnedGen // Receive refuses it if the room was left since
+			pg.gen = jn.PinnedGen // receiveJoin refuses it if the room was left since
+		case held && sameRoom && gen == jn.Gen && heldLabel != jn.Label:
+			// A join recorded by an older version, or a preview raced by a pin.
+			return j.r.labelChanged(jn.Room, heldLabel, jn.Label), nil
 		case held && sameRoom && gen == jn.Gen:
-			pg.gen = gen
+			pg.gen, pg.held = gen, true
 		case held:
 			return ReasonJoinLeft, nil
 		default:
@@ -610,6 +881,14 @@ func (j *Joiner) apply(ctx context.Context, jn store.Join, pg *paging, a JoinAns
 			e, err := core.ParseEntry(wires[0])
 			if err != nil || e.ID() != jn.CreateID || e.Fields().Room != jn.Room || e.Fields().Kind != core.EntryCreate {
 				return ReasonJoinNoCreate, nil
+			}
+			// The label pinned is the one the person approved (F12).
+			if l := e.Fields().Label; l != jn.Label {
+				return "the room's signed create entry labels it " + Isolate(EscapeDisplay(l)) +
+					", not " + Isolate(EscapeDisplay(jn.Label)) + " as the preview showed", nil
+			}
+			if why := remoteLabelProblem(jn.Label); why != "" {
+				return "the room cannot be held here: " + why, nil
 			}
 			if err := hookAt("join:pin"); err != nil {
 				return "", err
@@ -624,7 +903,48 @@ func (j *Joiner) apply(ctx context.Context, jn store.Join, pg *paging, a JoinAns
 			pg.gen, pg.pinned = gen, true
 		}
 	}
-	_, err := j.r.Receive(ctx, jn.Room, pg.gen, wires...)
+	// A room held here, or one this machine is a member of already: the
+	// answer counts only from a member here, or once it makes the admin
+	// machine one (F7, receiveJoin). Entries that do not are kept, without
+	// those held here or kept already, within maxJoinPending and
+	// maxJoinPendingBytes. Once some are kept, they are given again when
+	// joinTryAgain more are, on the last page, and before a limit ends the
+	// join; a page that brings nothing new is not given again at all.
+	// A page moves the join on if it brings an entry this machine lacks,
+	// or entries it holds while those pages brought no more of them than
+	// it holds: a log read again from the start after a restart moves on,
+	// a page of held entries sent over and over does not for long.
+	lack, ids, held, holds := j.r.unheld(jn.Room, wires)
+	pg.again += held
+	if slices.ContainsFunc(ids, func(id string) bool { return !pg.kept[id] }) || held > 0 && pg.again <= holds {
+		pg.moved = pg.read(j.r.m.now())
+	}
+	var err error
+	if len(pg.pending) == 0 {
+		_, err = j.r.receiveJoin(ctx, jn.Room, pg.gen, jn.Admin, pg.held, wires...)
+		if errors.Is(err, errServerNotMember) {
+			pg.keep(lack, ids)
+			pg.fresh = 0 // all of it was just tried
+			if !a.More || pg.over() {
+				return ReasonJoinServerNotMember, nil
+			}
+			err = nil
+		}
+	} else {
+		pg.keep(lack, ids)
+		over := pg.over()
+		if !a.More || over || pg.fresh >= joinTryAgain {
+			_, err = j.r.receiveJoin(ctx, jn.Room, pg.gen, jn.Admin, pg.held, pg.pending...)
+			switch {
+			case errors.Is(err, errServerNotMember) && (!a.More || over):
+				return ReasonJoinServerNotMember, nil
+			case errors.Is(err, errServerNotMember):
+				pg.fresh, err = 0, nil
+			case err == nil:
+				pg.pending, pg.kept, pg.fresh = nil, nil, 0
+			}
+		}
+	}
 	if errors.Is(err, ErrStaleGeneration) || errors.Is(err, ErrNoRoom) {
 		return ReasonJoinLeft, nil
 	}
@@ -640,9 +960,10 @@ func (j *Joiner) apply(ctx context.Context, jn store.Join, pg *paging, a JoinAns
 // verify, after the last page. The log is the truth: this machine must
 // have accepted every head the admin machine advertised (otherwise an
 // entry it accepted was refused or never arrived here) and be a member of
-// the pinned room in its own state. The outcome then reports the role and
-// history permission that state gives, with a note if they differ from
-// the preview.
+// the pinned room in its own state. The join lifts the not_caught_up
+// gate only if those heads are this log's heads. The outcome then
+// reports the role and history permission that state gives, with a note
+// if they differ from the preview.
 func (j *Joiner) verify(jn store.Join, pg *paging, heads []string) (JoinOutcome, string) {
 	j.r.mu.Lock()
 	defer j.r.mu.Unlock()
@@ -660,9 +981,16 @@ func (j *Joiner) verify(jn store.Join, pg *paging, heads []string) (JoinOutcome,
 	if !slices.Contains(st.Members, self) {
 		return JoinOutcome{}, ReasonJoinNotMember
 	}
-	// Every head of the admin machine's last page is accepted here: the
-	// room's log is caught up (maySign).
-	rl.pulled = true
+	// The heads of the admin machine's last page are the heads of the log
+	// here, every one and nothing else, and it is a member here: the
+	// room's log is caught up (maySign). An answer with no heads, from a
+	// machine that is not a member, or whose heads are older entries this
+	// log has gone past (a list of ancestors that hides newer entries)
+	// opens nothing (F7). A log here ahead of the admin machine's waits
+	// for a pull.
+	if len(heads) > 0 && slices.Contains(st.Members, jn.Admin) && sameSet(heads, acceptedHeads(rl)) {
+		rl.pulled = true
+	}
 	o := JoinOutcome{State: JoinStateSigned, Room: jn.Room, Role: RoleMember, History: st.Permissions[self].All}
 	if slices.Contains(st.Admins, self) {
 		o.Role = RoleAdmin

@@ -8,6 +8,7 @@ set -eu
 cd "$(dirname "$0")/.."
 
 allowed="github.com/modelcontextprotocol/go-sdk
+golang.org/x/sys
 modernc.org/sqlite"
 
 # Direct requirements of go.mod as `go mod edit -fmt` writes it: in a

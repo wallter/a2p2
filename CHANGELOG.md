@@ -51,6 +51,68 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Security
 
+- **A join can no longer write into a room this machine already holds
+  from a machine that is not a member.** Since 0.1.0, a removed admin, or
+  any machine holding a copy of the room, could send a member an invite.
+  Once its person approved, the answer's entries were applied (a removed
+  admin's late removals among them) and the `not_caught_up` gate opened,
+  even with no heads. Now, for a room held here, the preview must name
+  the create entry and label held here. Each batch of the answer counts
+  only if the admin machine is a member here before or after it, else
+  the whole batch is refused; this also holds for a join resumed after a
+  restart once this machine is a member. The gate opens only for an
+  answer from a member whose heads are exactly the heads of the log
+  here. A page that breaks the page limits or does not move on ends the
+  join, and so does an answer that passes 256 pages or 64 MiB, or pages
+  for 15 minutes, or for 2 minutes without an entry this machine lacks.
+  These count over every run of the join until the daemon restarts, so
+  an answer cut short each run does not start them again, and the next
+  run goes on from the last page read.
+  Entries kept while the admin machine is not yet a member are checked
+  again once a quarter page more of them is kept, not on every page.
+- **A joined room is held under the label its person approved, and never
+  as `local`.** Since 0.1.0, the label shown in a join preview was not
+  compared with the room's signed create entry, and a room created on
+  another machine could be labelled `local`, so its messages read as this
+  machine's local room. Now a create entry with another label is refused,
+  a new room's label may not read as `local` or hold control, direction
+  or invisible characters (a joiner the display keeps, such as one in an
+  emoji or between Persian letters, passes), and a stored room labelled
+  `local` that is not the local room is shown with its id in every result
+  and never resolves as `local`. A person is shown it as its label, `#`
+  and the first 8 hex of its id, which no other room changes, so the
+  text of a request waiting for approval stays the same. A join recorded by an older version
+  under another label is refused, and the room stays.
+- **An agent can tell this machine's person from a `human` on another
+  machine.** Since 0.1.0, any member machine of a shared room could post
+  as `human@<its id>`, MCP results left out the author's machine key,
+  and `ask_human` said only that the answer comes "from human", so an
+  agent of any owner in a shared room could take another machine's
+  `human` for its own person. A short id is 32 bits and nothing marked a
+  machine whose short id matched this one, and a room created elsewhere
+  could be labelled `local`. Now every message an agent reads says
+  `from_this_machine` (by the full key) and, for `human` in any case,
+  `person`; `ask_human` names the person's id by the full key; a machine
+  whose short id another known machine shares is written in full and
+  marked `id_shared` in tool results, the local API and status; only the
+  local room is shown as `local`, no two rooms are shown alike, and a
+  room name that could mean two rooms is refused; `room create` refuses
+  `local`; and in `peers` a machine name two machines use, or one that
+  reads as another machine's id, carries the id. Since 0.1.0 an agent could also register
+  as `Human`, and `a2p2 mcp --harness human` as the person; both are now
+  refused. The same marks now reach the page's notices and trace, the
+  CLI's `trace`, question alerts and the hook, whose notice used to say
+  no sender was the user even when this machine's person was one. A
+  replaced notice says `edited` and names the message's own label, as
+  the thread does; when another agent of the author's machine replaced
+  it, both name that agent in `changed_by`. `trace` gives the author and writes a handler with a shared short
+  id in full. `unread` first lines and MCP `peek` lines carry
+  `changed_by` and `edited` too, MCP gives `changed_by_person`, the CLI,
+  the page and question alerts mark a `human` editor, and the hook and
+  `unread`'s senders name the agent that wrote the text shown: a local
+  agent that replaced the person's message used to be summed up as the
+  person. Any agent on a machine can replace or withdraw the messages of
+  every other label there, the person's included; the marks show who did.
 - **One admin can no longer block its own removal by flooding requests.**
   Since 0.1.0, an admin of a room (for example the admin of another owner
   in a shared room) could sign many entries that wait for a second admin.
@@ -191,8 +253,8 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   bound. Refusals of keys that share no room, and refused connections,
   are now logged at Debug, with one Info line a minute about refused
   connections; a member's refusals reach Info 5 at once, then one per
-  10 s per key. At Debug each refusal is still a line, and the log file
-  is still not rotated.
+  10 s per key. At Debug each refusal is still a line; the log file is
+  now rotated (below).
 - **`a2p2 install codex` no longer approves every a2p2 tool without
   asking.** Since 0.1.0 it added `default_tools_approval_mode = "approve"`
   to `[mcp_servers.a2p2]` in `~/.codex/config.toml`, so a Codex agent
@@ -281,6 +343,219 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 - A test now opens databases written by each release from v0.2.0 to
   v0.2.3 with the current code, so a rule that would refuse old data
   fails it.
+- **The local API marks a replaced message, and a handled report is tied
+  to the text shown.** Since 0.1.0, the author of a message could replace
+  it after a reader answered, and thread, branch and history showed the
+  new text above the answer with nothing to tell it was changed; a
+  handled report was accepted for a version replaced since the read.
+  Message entries in the local API now say `edited` when their text is a
+  replacement, MCP inbox messages carry `edited`, the CLI prints
+  `[edited]` and the page marks the message edited. A replacement whose
+  text expired keeps the mark, and the message is shown as expired rather
+  than with its first text. A handled report is refused as `not_shown` until a read shows the
+  newest text held, and while newer text is announced but not here. So
+  is a reply by an addressee shown an older text, from any client. The
+  page sends the version it drew with a reply and a handled report
+  (local API `reply_version` on send), and its background requests keep
+  no receipt. A signed reply or handled report still names only the
+  message, not the version answered.
+- **A peer's report can no longer add stream rows without limit.** Since
+  0.1.0, any member could name made-up epochs of other authors in an
+  unsigned pull report, and each became a stream row here, kept for the
+  life of the room and listed as still being fetched. Now at most 32 such
+  rows per author are kept on one peer's word, also when it takes them
+  over from another peer, and they are deleted when it stops naming them
+  or leaves the author out of a whole report. A peer that raises another
+  peer's hint and then drops it leaves that peer's last report in place.
+- Pruning no longer fails in a room with more than about 32,000 authors
+  whose readability is undecided, and an inbox read writes no receipts
+  for a room left, or left and joined again, while it ran (both since
+  0.1.0).
+- **An agent can no longer attach a2p2's own key or database to a send.**
+  Since 0.2.0, an agent steered by room text could stage the machine key,
+  the local key or `a2p2.db`, and one careless approval sent it to every
+  member that may read the room. Staging now refuses every file under the
+  home except agents' copies in `files/`, and any file that is the same
+  file as one in the home, a hard link included. A request staged before
+  the upgrade from the machine key is refused at approval.
+- **A path to attach can no longer make the machine connect out before
+  anyone approves.** Since 0.2.0, on Windows a path such as
+  `\??\UNC\host\share\x` passed the name check and was opened, which can
+  send the user's Windows credentials to that host; on Unix a path under
+  an automount point such as `/net` could make the machine connect to the
+  host it names. Staging now accepts on Windows only a drive letter and
+  plain names, and on Unix refuses `/dev`, `/proc`, `/sys`, `/net` and the
+  macOS automount points, checking every link on the way before it is
+  followed. Each part of the path is looked up in the directory opened
+  before it. On macOS and Linux each part is opened without following a
+  link and kept only if it is the entry checked, so a link or directory
+  swapped in after its check is refused before its target is opened; on
+  Windows it is refused after the open. A drive letter mapped to a share
+  still works as in 0.2.3. A file under `/net`, `/home` on macOS or
+  another refused point must be copied elsewhere to be attached. The
+  Windows part has not been run on Windows.
+- **Staging tells an agent less about files it cannot read.** Since 0.2.0,
+  once 32 requests waited an agent could learn whether two files had the
+  same bytes, one bit per call, with no request for the person to see. A
+  full queue is now refused before any path is touched, and the same
+  bytes listed twice are listed once. Since 0.2.0, a send that named a
+  readable file beside an entry that could never be staged also opened,
+  sized and copied the file before it was refused, with no request
+  raised. The whole send is now checked before any path is opened, and a
+  refusal after opening (unreadable, too large, over the budget) has the
+  same words and steps. A request now says when a file has several names
+  on disk.
+- **A message's author can no longer hold another member's file budget.**
+  Since 0.2.0, the author of a message with files could ask a member in
+  the default `carry` setting for its own files: the member reserved
+  their size for a day while the author never uploaded, and for as long
+  as the message lived if the author uploaded one byte of each. Its own
+  sends with files were refused as too large. A request from the author
+  now starts no carry job, one author's unfinished carry jobs reserve at
+  most a quarter of the room budget, each counted at its full size so
+  that bytes uploaded but not yet checked free nothing, and
+  a part an upload left goes when its want lapses or the author edits
+  the message, and a part a 0.2.3 binary left under a lapsed want goes
+  at the next sweep.
+- **An agent with a shell no longer acts as the person by accident.**
+  Since 0.1.0 the CLI acted as `human@<machine id>` whenever `--as` was
+  left out or empty, with no check for a person. Any agent that ran
+  `a2p2` in its shell, or one told to by a room message, could answer
+  the person's questions as the person and mark them seen, so they left
+  the person's list. Now an empty `--as` is an error. In a shell that
+  Claude Code, Codex or Gemini CLI marks as its agent's, or with
+  `AI_AGENT` set, the CLI acts as that agent (under `A2P2_NAME` when the
+  shell has it) and says on stderr which id it used. Elsewhere `send`,
+  `ack` and an `inbox` that marks messages seen act as the person only
+  when stdin or stderr is a terminal (so text piped in at a terminal
+  works) or with the new `--person` flag. `a2p2 ui`, whose address
+  lets the page act as the person, is refused in an agent's shell and
+  away from a terminal unless `--person` is given, and takes no
+  `--json`. Over SSH it opens nothing on the remote computer and prints
+  the address with the port to forward; a browser that cannot be started
+  is said, with the address. The daemon log records `--person` used away
+  from a terminal or in an agent's shell, and `status` and `doctor` show
+  how many times since the daemon started, with the last time.
+  Scripts that read or sent as the person, or ran `ui`, without a
+  terminal must add `--person` or name themselves with `--as`. This is a
+  guard rail: any program running as you can still act as you.
+- **`room leave` asks first.** Since 0.1.0 it deleted the room's data at
+  once with no terminal check. It now asks at a terminal for a typed
+  `yes`, shows the room's id and leaves that id, and says when this
+  machine is the room's only admin or member. A room it cannot look up
+  is not left.
+- **`status --json` leaves out the page's address.** Since 0.1.0 it
+  printed the address with the page's access token, and agents run it.
+  `ui --print` gives the address to a person who asks.
+- `net on` now says that every member and invite holder gets the
+  addresses it advertises, which can include VPN and office addresses,
+  and lists the `advertise` addresses of `config.json` when they are
+  set.
+- **The page's address no longer carries a long-lived secret.** Since
+  0.1.0, `a2p2 ui` opened an address holding the page's token for the
+  daemon's whole run, and on Linux `xdg-open` and the browser it starts
+  keep that address in their command lines, which other users of the
+  machine can read; with it they could read every room, send as you and
+  approve requests on the page. Now the address holds a code that works
+  once and for 30 seconds; the page trades it for a session kept in the
+  tab. A code used twice ends the session it gave, however late the
+  second use. On Linux a code is refused to a connection that the kernel's socket
+  table, matched on both addresses and both ports, shows is another
+  user's; where that table cannot say (macOS, Windows, a cut-down
+  `/proc`), the code alone decides.
+  `a2p2 ui --print` still prints the address alone on
+  standard output, and says on standard error that it works once. With
+  a daemon before this release still running, `a2p2 ui` opens and prints
+  nothing and says to run `a2p2 stop`. A tab left open after its daemon
+  stopped no longer shows what another listener on its port answers
+  (every answer names its run), forgets its session when it signs out,
+  and sends a message or a decision only right after a state from its
+  own daemon for its own session.
+  A daemon whose page port was taken says so in its log.
+- **`daemon.log` no longer grows without end.** Since 0.1.0 another
+  machine could make it grow (a refused request is a line). Once over
+  10 MiB its last 10 MiB are moved to `daemon.log.1`, checked every 10
+  seconds, so about 20 MiB is kept plus what is written between checks;
+  if that copy fails, the log is emptied anyway.
+- **A home under a directory other users can change is refused.** On
+  macOS and Linux, a user who could change a directory above the a2p2
+  home could put another home with their own socket at its path, which a
+  running MCP session would then dial. a2p2 now refuses such a home and
+  names the directory, including one reached through links: one another
+  user owns, one others can write without the sticky bit, or one a group
+  you are not in can write. A directory a group you are in can write (on
+  macOS, `staff`) is not refused; the log, `status` and `doctor` warn.
+  A directory no other user can reach (under a 0700 directory of yours,
+  as `~/Documents` is on macOS) is neither refused nor warned about.
+- **A device on the local network has less hold on port mapping.**
+  Exposed since 0.2.0: a person who ran `a2p2 net on --map-port`, on a
+  network with another device that answers as the router. That device
+  could make a2p2 skip PCP with one datagram that holds nothing of the
+  request and forget the PCP mapping it may have made, grant a lifetime
+  of 136 years so a2p2 never renewed, report a multicast address so that
+  no later start mapped or removed anything, or report a private address
+  that a2p2 then put first in invites. Now a version answer counts only
+  if no PCP answer comes in any of the tries and the PCP request stays
+  recorded to be removed, a lifetime longer than the 2 hours asked counts
+  as 2 hours, an external address that is not a public IPv4 address is
+  not taken and a2p2 tries to remove what the router made, a UPnP port
+  past 65535 is never asked for, a run adds at most 8 mappings to remove,
+  and only a gateway with a private address, not a loopback one, is asked
+  for a mapping (what an earlier version recorded on another one is still
+  removed). The mapped address is no longer given out once networking
+  stops using it, even if the router did not confirm the removal, nor
+  after a renewal answered with something that cannot be used, until a
+  usable grant. Once a lease has run out, a router that does not answer
+  is asked every 5 minutes, not every second. Port mapping stays off
+  unless a person asks for it; the CLI asks at a terminal each time. The
+  `net on --map-port` text now says a router may keep a mapping past 2
+  hours after a crash.
+- **Port mapping turned on by 0.2.3 or earlier is off after the
+  upgrade.** A `--map-port` decision an earlier version recorded is not
+  applied: nothing is mapped, what that version left on the router is
+  removed, and `status` and `net on` say so. Run `a2p2 net on --map-port`
+  again to map. A decision taken now carries a new role word,
+  `map_port_v2`, next to `map_port`; 0.2.3 reads it as before. A removal
+  that fails at `net off` or a stop is logged and shown in `status` from
+  the start of the next run, and retried.
+- **The team launcher refuses a state directory another user could
+  swap.** Since 0.1.0 `scripts/team` used a `state_dir` that another user
+  of the machine could replace, for example under a directory they made
+  in `/tmp`, and its supervisor ran the command lines saved there, so
+  that user's command could run as you. `up` now refuses a `state_dir`
+  or `a2p2_home` whose path another user could change, and an existing
+  state directory group or others may write (a group that is only you,
+  as with the umask 002 on many Linux systems, does not count); it checks the home again
+  after making it, and makes missing directories 0700 whatever the umask.
+  `status`, `stop`, `logs`, `report` and the supervisor refuse such a
+  state directory too, and the supervisor runs from the manifest `up`
+  checked, saved in the state directory.
+- **The team launcher's `allowed_tools` check catches more ways to allow
+  every command.** Since 0.1.0 it let through `Read,Bash`, `Read Bash`
+  and rules such as `Bash(sh:*)`, `Bash(python3:*)` or `Bash(git *)`,
+  which give a Claude Code member unscoped shell access. These are
+  refused now, also in other case or with a control character, and so is
+  a model or prompt that starts with `-`. A kickoff that starts with `-`
+  is now posted as text. `dangerous` is refused in a tool's name only, so
+  a rule such as `Read(./notes/dangerous-ideas.md)` is accepted again.
+- **The team launcher tells members and the person apart by full key.**
+  Since 0.1.0 its watcher, `team status` and `team report` matched
+  messages by the 8-character short id and counted a message to any
+  `human@` as a question to the person. Another machine with the same
+  short id could hide a member's activity or have its person's
+  questions reported as this one's. They now use `from_node` and the
+  exact id `a2p2 status` gives the person.
+- **`team stop` tells the truth.** Since 0.1.0 it said "stopped" after
+  its wait even with a member still running, and when no supervisor
+  answered it marked the run ended, though a busy supervisor might still
+  run. It now exits non-zero in both cases and leaves the roster as it
+  was, and says when there is no member to stop.
+- **`team status` and `team logs` escape terminal controls.** Since 0.1.0
+  they printed C1 controls (such as CSI, U+009B) and bidi overrides that a
+  member wrote or a harness logged. They are written as `\u{...}` now, by
+  the daemon's rules, so a Persian non-joiner or an emoji with a joiner
+  still shows as written; `team logs --raw` prints the bytes, and
+  `team logs -n` reads only the end of each log.
 
 
 ## [0.2.3] - 2026-11-25

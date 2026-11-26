@@ -44,13 +44,27 @@ Python 3 and nothing else.
   shows. It does not read a harness's screen, and it never acts on what
   members write.
 - **`team status`** lists the roster: label, harness, guard pid, state,
-  the last room message and the elapsed time.
+  the last room message and the elapsed time. The message is shown on one
+  line, its line breaks and tabs as spaces, escaped by the daemon's rules
+  ([D58](../../docs/DECISIONS.md)): every control, format or invisible
+  character is written as `\u{hex}` unless ordinary writing needs it (a
+  joiner between two emoji, a non-joiner in Persian and the other cases
+  of `internal/node/escape.go`), so text a member copied from a peer
+  cannot move the cursor, recolour the terminal or reorder the line.
 - **`team stop [LABEL]`** asks the live supervisor, through a request file
   in the state directory that only the supervisor answers, to end one
-  member or all of them. If no supervisor answers within three seconds,
-  it says the run is not live, marks the roster ended and signals
-  nothing. It never signals a pid read from disk.
-- **`team logs LABEL [-n N]`** prints a member's output and error logs.
+  member or all of them, and waits up to ten seconds for them to end. It
+  exits non-zero when a member it asked about is still running then, and
+  when no supervisor answers within three seconds; in that case it
+  signals nothing and leaves the roster as it was, since a busy
+  supervisor may still be running. When no member it asks about is
+  running it says so and sends nothing. It never signals a pid read from
+  disk.
+- **`team logs LABEL [-n N] [--raw]`** prints a member's output and error
+  logs, escaped by the same rules as message text, and their paths escaped
+  too; a byte that is not UTF-8 is written `\x{hh}`, and a carriage return
+  that does not end a line is written `\u{d}`. With `-n` it reads only
+  the end of each log. `--raw` prints the bytes as the harness wrote them.
 - **`team report`** writes `report.json` and `report.md` in the state
   directory. The supervisor writes them when the last member has ended and
   only then marks the roster `ended`, so a run that shows `ended` has a
@@ -62,6 +76,15 @@ Python 3 and nothing else.
   run it counts messages from the lead, the watcher and the person, and
   requests waiting for the person. The supervisor writes the report when
   the last member finishes.
+
+  The watcher, `status` and the report tell this machine's messages by
+  the author's full machine key (`from_node`), never by the 8-character
+  short id another machine can share. A question to the person counts
+  only when it is addressed to this machine's person by the exact id
+  `a2p2 status` gives (`human`), or by the full key. With an `a2p2` of
+  0.2.3 or earlier, which never writes a shared short id in full, a
+  question to another machine's person with the same short id still
+  counts.
 
 ## Readiness
 
@@ -106,6 +129,10 @@ One JSON file. JSON because every Python 3 reads it without a library
 and a2p2 already speaks it; put long briefs in files with `brief_file`.
 Relative paths are relative to the manifest.
 
+A manifest is code, like a Makefile: `up` runs its `command` members, and
+`up`, `status` and `report` run the `a2p2` binary it names. Without `-m` or `$TEAM_MANIFEST` the launcher
+reads `./team.json`, so do not run `team` in a checkout you do not trust.
+
 ```json
 {
   "room": "crew",
@@ -134,6 +161,27 @@ name>` next to the manifest), `max_members` (default 4, at most 16),
 `lead` (the kickoff's author label, default `lead`), `watcher_label`
 (default `team`), `kickoff`, `prelude`, `poll_seconds` (default 5),
 `silence_seconds` (default 300) and `approve_a2p2_tools`.
+
+`up` refuses a `state_dir` or an `a2p2_home` that another user of the
+machine could replace: one where a directory on the way, symlinks
+followed, belongs to another user than you or root, or lets group or
+others write without the sticky bit, or where an entry in a sticky
+directory such as `/tmp` belongs to another user. Group write is allowed
+when the group is yours alone: your primary group, with no other member
+and no other account that has it as its primary group. Many Linux
+systems give each user such a group and the umask 002, so a project
+directory there is 0775 and works. On macOS the primary group, `staff`,
+is shared, so a 0775 directory is refused; run `chmod g-w` on it or set
+`state_dir` and `a2p2_home` elsewhere. An existing state
+directory that group or others may write is refused, not repaired, since
+they may have put files in it. `up` makes each missing directory 0700,
+whatever the umask, and checks the home's path again after making it,
+before the first `a2p2` command. `status`, `stop`, `logs` and `report`
+refuse such a state directory too, before they read or write anything in
+it. The supervisor checks the state directory again before it reads the
+command lines saved there, and runs from the copy of the manifest that
+`up` checked and saved there (`manifest.json`), not from the manifest
+file, which may have changed since.
 
 `approve_a2p2_tools` must be `true` for a run with a `claude`, `codex` or
 `agy` member, or `up` is refused before anything starts. `status`,
@@ -170,9 +218,32 @@ Only profiles that keep the harness's own permission and sandbox
 controls are accepted; anything else is refused with the allowed values:
 
 - Claude Code `permission_mode`: `default`, `acceptEdits` or `plan`
-  (`bypassPermissions` and others are refused). `allowed_tools` may not
-  name `*`, unscoped `Bash` or `Bash(*)`; name scoped tools such as
-  `Read` or `Bash(git status:*)`.
+  (`bypassPermissions` and others are refused). Each `allowed_tools`
+  entry is one tool, a name with at most one rule in parentheses, such as
+  `Read` or `Bash(git status:*)`. Refused: `*`, unscoped `Bash` or
+  `Bash(*)`, a `,` anywhere or a space outside the parentheses (the
+  launcher joins the entries with `,` and Claude Code may also split at
+  spaces, so `Read,Bash` would allow unscoped Bash), and a `Bash` rule
+  whose command runs whatever its arguments say: a shell, `env`,
+  `xargs`, `sudo`, an interpreter such as `python3` or `node`, `find`,
+  `make`, a wildcard or quote in the command, and `git` without a
+  subcommand (`git -c` runs any command). This catches common mistakes;
+  it does not know every program that can run another, such as a
+  package manager's `exec`, so a manifest still needs reading. A
+  wildcard where git's subcommand stands (`Bash(git *)`) counts as no
+  subcommand, and command names are compared without case, since
+  `/usr/bin/GIT` is git on the default macOS file system. An entry may
+  hold no control, format character or space other than U+0020.
+- A rule such as `Bash(go test:*)` or `Bash(npm run test:*)` runs code
+  from the working directory. A member that may also edit files there
+  can run any command through it, so give such a rule only to a member
+  you would let run any command. The launcher does not refuse it: naming
+  it in the manifest is the choice.
+- A Claude Code, Codex or Antigravity member's `model` may not start with
+  `-`, and its prompt (the prelude, then the brief) may not either: both
+  are arguments on the harness's command line. The prelude is read once,
+  and each prompt is checked before anything starts and again, with the
+  real lead and kickoff ids, as it is saved for launch.
 - Codex `sandbox`: `read-only` (the default) or `workspace-write`
   (`danger-full-access` is refused).
 - Antigravity has no profile key; its MCP tools are allowed for the run.
@@ -185,9 +256,15 @@ yet: if the member's directory already has `.agents/mcp_config.json`
 (for example from a checked-out worktree), or it or `.agents` is a
 symlink, `up` is refused and the file is left as it was.
 
-The state directory holds `roster.json`, `supervisor.log`, a `control`
+The state directory holds `manifest.json`, `roster.json`, `supervisor.log`, a `control`
 directory for stop requests, the reports, and per member `launch.json`,
 `prompt.md`, `out.log`, `err.log` and `final.txt`.
+
+The kickoff and the watcher's notices go to `a2p2 send` after `--`, so a
+kickoff that starts with `-` is posted as text. Each member's prompt is
+one argument on its harness's command line (except for `command`
+members, which read `{prompt_file}`), so other users of the machine can
+read it with `ps`; keep secrets out of briefs.
 
 ## Example
 

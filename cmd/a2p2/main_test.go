@@ -210,21 +210,90 @@ func TestFlagsAfterPositionalArgumentsAreParsed(t *testing.T) {
 	}
 }
 
+// F14: stdout holds the address alone, as before; stderr says that it
+// works once and for a short time.
 func TestUIPrintOnlyPrintsTheAddressAndOpensNothing(t *testing.T) {
-	const url = "http://127.0.0.1:7777/#token"
+	const url = "http://127.0.0.1:7777/#c=0123abcd"
 	for _, tc := range []struct {
 		printOnly bool
 		opened    bool
 	}{{true, false}, {false, true}} {
-		var out bytes.Buffer
+		var out, note bytes.Buffer
 		opened := false
-		showUI(&out, url, tc.printOnly, func(u string) { opened = u == url })
+		if err := showUI(&out, &note, url, version, tc.printOnly, false, func(u string) error { opened = u == url; return nil }); err != nil {
+			t.Fatal(err)
+		}
 		if out.String() != url+"\n" {
 			t.Errorf("--print=%v printed %q", tc.printOnly, out.String())
+		}
+		if !strings.Contains(note.String(), "once, within 30 seconds") || strings.Contains(note.String(), "a2p2 stop") {
+			t.Errorf("note %q", note.String())
 		}
 		if opened != tc.opened {
 			t.Errorf("--print=%v: opened=%v, want %v", tc.printOnly, opened, tc.opened)
 		}
+	}
+}
+
+// F14, F72: after an upgrade, a daemon before 0.2.4 may still run, and its
+// address carries its long-lived token. a2p2 ui neither opens that (the
+// browser's arguments show it to other users) nor, since the second
+// review, prints it with --print (it works for the daemon's whole run):
+// both say to restart the daemon. A newer daemon of another version is
+// opened, with a note.
+func TestUIDoesNotOpenOrPrintAnOldDaemonsTokenAddress(t *testing.T) {
+	const legacy = "http://127.0.0.1:7777/#0123456789abcdef"
+	for _, printOnly := range []bool{false, true} {
+		var out, note bytes.Buffer
+		opened := false
+		err := showUI(&out, &note, legacy, "0.2.3", printOnly, false, func(string) error { opened = true; return nil })
+		if err == nil || opened || out.Len() != 0 || strings.Contains(err.Error()+note.String(), "0123456789abcdef") ||
+			!strings.Contains(err.Error(), "a2p2 stop") || !strings.Contains(err.Error(), "0.2.3") {
+			t.Fatalf("--print=%v of an old daemon's address: err %v, opened %v, printed %q", printOnly, err, opened, out.String())
+		}
+	}
+	var note bytes.Buffer
+	opened := false
+	if err := showUI(io.Discard, &note, "http://127.0.0.1:7777/#c=ab", "9.9.9", false, false, func(string) error { opened = true; return nil }); err != nil || !opened ||
+		!strings.Contains(note.String(), "9.9.9") {
+		t.Fatalf("another version's one-time address: err %v, opened %v, note %q", err, opened, note.String())
+	}
+}
+
+// Second review: a browser that cannot be started was said nowhere. The
+// address is printed and the error names the failure; a browser that
+// starts gives no error.
+func TestUISaysWhenTheBrowserCouldNotBeOpened(t *testing.T) {
+	const url = "http://127.0.0.1:7777/#c=0123abcd"
+	var out, note bytes.Buffer
+	err := showUI(&out, &note, url, version, false, false, func(string) error { return errors.New("xdg-open: exit status 3") })
+	if err == nil || !strings.Contains(err.Error(), "exit status 3") || !strings.Contains(err.Error(), "address printed above") || out.String() != url+"\n" {
+		t.Fatalf("a failed open: err %v, printed %q", err, out.String())
+	}
+	if err := showUI(io.Discard, io.Discard, url, version, false, false, func(string) error { return nil }); err != nil {
+		t.Fatalf("an open that works: %v", err)
+	}
+}
+
+// Agy, second review: over SSH, a2p2 ui opened a browser on the remote
+// computer, which would use the one-time code up there. It now prints the
+// address with the port to forward and opens nothing; at a local terminal
+// it still opens the page.
+func TestUIOverSSHPrintsTheAddressAndOpensNothing(t *testing.T) {
+	const url = "http://127.0.0.1:7777/#c=0123abcd"
+	d := newDaemonForCLIInfo(t, nil, localapi.Info{Version: version, UIURL: func() string { return url }})
+	old := openURL
+	t.Cleanup(func() { openURL = old })
+	opened := 0
+	openURL = func(string) error { opened++; return nil }
+	inShell(t, map[string]string{"SSH_CONNECTION": "10.0.0.2 50000 10.0.0.3 22"})
+	out, serr, err := d.run(t, true, "", "ui")
+	if err != nil || out != url+"\n" || opened != 0 || !strings.Contains(serr, "ssh -L 7777:127.0.0.1:7777") {
+		t.Fatalf("over SSH: out %q, stderr %q, opened %d, %v", out, serr, opened, err)
+	}
+	inShell(t, nil)
+	if out, _, err := d.run(t, true, "", "ui"); err != nil || out != url+"\n" || opened != 1 {
+		t.Fatalf("at a local terminal: out %q, opened %d, %v", out, opened, err)
 	}
 }
 

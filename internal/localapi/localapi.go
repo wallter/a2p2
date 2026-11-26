@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/wallter/a2p2/internal/core"
@@ -40,6 +41,11 @@ type (
 		Harness string `json:"harness"`
 		Label   string `json:"label,omitempty"`
 		Cwd     string `json:"cwd,omitempty"`
+		// Unattended names the CLI command that acts as the person, or
+		// gives the page's address (ui), with --person away from a
+		// terminal or in an agent's shell; the daemon logs it. Older
+		// daemons ignore it.
+		Unattended string `json:"unattended,omitempty"`
 	}
 	SendReq struct {
 		Agent      string   `json:"agent"`
@@ -53,6 +59,10 @@ type (
 		// Thread, with reply_to and no to: also address every agent that
 		// has posted in the thread (the reply tool).
 		Thread bool `json:"thread,omitempty"`
+		// ReplyVersion: the version of reply_to's text the caller showed
+		// (an entry's version). The reply is refused if the message has
+		// newer text since. Older daemons ignore it.
+		ReplyVersion string `json:"reply_version,omitempty"`
 		// Files (1 to 8): absolute paths, or "sha256:<hex>" for a file of
 		// the version replaced, kept by listing it again. With files
 		// nothing is written: a request waits for this machine's person
@@ -145,16 +155,26 @@ type (
 		WaitMS int64  `json:"wait_ms,omitempty"`
 	}
 	Entry struct {
-		Key           string   `json:"key"`
-		Version       string   `json:"version,omitempty"`
-		Kind          string   `json:"kind"`
-		ID            string   `json:"id"`
-		Room          string   `json:"room"`
-		RoomLabel     string   `json:"room_label"`
-		From          string   `json:"from"`
-		FromNode      string   `json:"from_node"`
-		AuthorRemoved bool     `json:"author_removed,omitempty"`
-		To            []string `json:"to,omitempty"`
+		Key       string `json:"key"`
+		Version   string `json:"version,omitempty"`
+		Edited    bool   `json:"edited,omitempty"` // a message shown with its author's replacement text
+		Kind      string `json:"kind"`
+		ID        string `json:"id"`
+		Room      string `json:"room"`
+		RoomLabel string `json:"room_label"`
+		From      string `json:"from"`
+		FromNode  string `json:"from_node"`
+		// ChangedBy: the agent of the author's machine that wrote the
+		// replacement shown, or this notice's replace or withdraw, when
+		// it is not from's agent (D65).
+		ChangedBy string `json:"changed_by,omitempty"`
+		// FromThisMachine: the author is this machine, by its full key.
+		// IDShared: the author's or an addressee's short id is another
+		// known machine's too, so from and to name it in full.
+		FromThisMachine bool     `json:"from_this_machine"`
+		IDShared        bool     `json:"id_shared,omitempty"`
+		AuthorRemoved   bool     `json:"author_removed,omitempty"`
+		To              []string `json:"to,omitempty"`
 		// AskHandled: the post asked for handled reports.
 		AskHandled  bool     `json:"ask_handled,omitempty"`
 		Parent      string   `json:"parent,omitempty"`
@@ -277,22 +297,33 @@ type (
 		At       string `json:"at"`
 		Member   bool   `json:"member"`
 		Evidence string `json:"evidence"`
+		IDShared bool   `json:"id_shared,omitempty"`
 	}
 	// Handled: at is when the report was written, as its author signed it.
+	// agent is written as entries write from; node is the writer's key.
 	Handled struct {
-		Agent string `json:"agent"`
-		At    string `json:"at"`
+		Agent           string `json:"agent"`
+		Node            string `json:"node"`
+		FromThisMachine bool   `json:"from_this_machine"`
+		IDShared        bool   `json:"id_shared,omitempty"`
+		At              string `json:"at"`
 	}
 	// TraceResp: saved is true when this machine holds the message's
 	// signed header; reason is the state of its text here. An id not held
 	// here is an error.
 	TraceResp struct {
-		ID      string    `json:"id"`
-		Room    string    `json:"room"`
-		Saved   bool      `json:"saved"`
-		Reason  string    `json:"reason"`
-		Copies  []Copy    `json:"copies"`
-		Handled []Handled `json:"handled"`
+		ID     string `json:"id"`
+		Room   string `json:"room"`
+		Saved  bool   `json:"saved"`
+		Reason string `json:"reason"`
+		// From, from_node, from_this_machine and id_shared: the message's
+		// author, as an entry gives them (D65).
+		From            string    `json:"from"`
+		FromNode        string    `json:"from_node"`
+		FromThisMachine bool      `json:"from_this_machine"`
+		IDShared        bool      `json:"id_shared,omitempty"`
+		Copies          []Copy    `json:"copies"`
+		Handled         []Handled `json:"handled"`
 		// Files are the files of the winning version, with what this
 		// machine holds of each and each member's last answer.
 		Files []TraceFile `json:"files,omitempty"`
@@ -476,6 +507,9 @@ type (
 		Listen  string `json:"listen,omitempty"`
 		Request string `json:"request,omitempty"`
 		MapPort bool   `json:"map_port,omitempty"`
+		// MapPortEarlier: port mapping an earlier version recorded, not
+		// applied until a person decides again (D68).
+		MapPortEarlier bool `json:"map_port_earlier,omitempty"`
 		// IPv4Only: a decision from before IPv6 (DESIGN 11): IPv4 only until decided again.
 		IPv4Only bool   `json:"ipv4_only,omitempty"`
 		Applied  string `json:"applied,omitempty"`
@@ -497,10 +531,13 @@ type (
 	RoomListReq struct {
 		Room string `json:"room,omitempty"`
 	}
+	// Member: id_shared, another machine known here has the same short
+	// id (the first 8 hex characters of node), so ids name it in full.
 	Member struct {
-		Node  string `json:"node"`
-		Name  string `json:"name,omitempty"`
-		Admin bool   `json:"admin,omitempty"`
+		Node     string `json:"node"`
+		Name     string `json:"name,omitempty"`
+		Admin    bool   `json:"admin,omitempty"`
+		IDShared bool   `json:"id_shared,omitempty"`
 	}
 	Change struct {
 		Entry  string `json:"entry"`
@@ -568,39 +605,55 @@ type (
 		ID   string `json:"id"`
 		Room string `json:"room"`
 		From string `json:"from"`
-		Line string `json:"line"`
+		// ChangedBy, Edited: as on an entry; the line is changed_by's text
+		// when it is set (D65).
+		ChangedBy       string `json:"changed_by,omitempty"`
+		Edited          bool   `json:"edited,omitempty"`
+		FromThisMachine bool   `json:"from_this_machine"`
+		IDShared        bool   `json:"id_shared,omitempty"`
+		Line            string `json:"line"`
 	}
 	// Unread is counts and sender labels, and first lines only when asked.
 	// It never marks anything seen.
 	Unread struct {
-		Agent string      `json:"agent,omitempty"` // empty: no agent matches this hook
-		Count int         `json:"count"`
-		From  []string    `json:"from,omitempty"`
-		Rooms []RoomCount `json:"rooms,omitempty"`
-		First []FirstLine `json:"first,omitempty"`
+		Agent string `json:"agent,omitempty"` // empty: no agent matches this hook
+		Count int    `json:"count"`
+		// From: the writers of what the entries show, the editor of a
+		// message another agent of its machine changed (node.Entry.Writer).
+		From []string `json:"from,omitempty"`
+		// FromHere: the ids in from whose author is this machine, by the
+		// full key (D65); always a list, so a hook can tell a daemon
+		// before this field (none) from one with no such id.
+		FromHere []string    `json:"from_this_machine"`
+		Rooms    []RoomCount `json:"rooms,omitempty"`
+		First    []FirstLine `json:"first,omitempty"`
 	}
 	Peer struct {
 		Node      string   `json:"node"`
 		Name      string   `json:"name,omitempty"`
+		IDShared  bool     `json:"id_shared,omitempty"`
 		Rooms     []string `json:"rooms"`
 		Addrs     []string `json:"addrs,omitempty"`
 		LastHeard string   `json:"last_heard,omitempty"`
 	}
 	Status struct {
-		Node    string        `json:"node"`
-		Name    string        `json:"name"`
-		Human   string        `json:"human"`
-		Local   string        `json:"local"`
-		Rooms   []Room        `json:"rooms"`
-		Agents  []store.Agent `json:"agents"`
-		Peers   []Peer        `json:"peers"`
-		Network Network       `json:"network"`
-		Waiting int           `json:"waiting"` // requests waiting for this machine's person
-		Listen  []string      `json:"listen"`  // addresses other machines can dial; empty: no listener
-		UI      string        `json:"ui"`      // URL of the web page including its access token
-		Version string        `json:"version"`
-		PID     int           `json:"pid"`
-		Notice  string        `json:"notice,omitempty"`
+		Node  string `json:"node"`
+		Name  string `json:"name"`
+		Human string `json:"human"`
+		Local string `json:"local"`
+		// IDShared: another machine known here has this machine's short
+		// id, so human and this machine's agents in entries name it in full.
+		IDShared bool          `json:"id_shared,omitempty"`
+		Rooms    []Room        `json:"rooms"`
+		Agents   []store.Agent `json:"agents"`
+		Peers    []Peer        `json:"peers"`
+		Network  Network       `json:"network"`
+		Waiting  int           `json:"waiting"` // requests waiting for this machine's person
+		Listen   []string      `json:"listen"`  // addresses other machines can dial; empty: no listener
+		UI       string        `json:"ui"`      // URL of the web page with a one-time code (internal/web, session.go)
+		Version  string        `json:"version"`
+		PID      int           `json:"pid"`
+		Notice   string        `json:"notice,omitempty"`
 		// Levels are the local agents' reading levels other than the
 		// default: an agent and room not listed is at "all".
 		Levels []store.AgentLevel `json:"levels"`
@@ -616,6 +669,18 @@ type (
 		// does not load in this version: not served or pulled, nothing
 		// deleted. Absent when there are none.
 		Quarantined []Quarantined `json:"quarantined,omitempty"`
+		// Unattended counts the CLI's uses of --person away from a
+		// terminal or in an agent's shell since the daemon started.
+		// Absent when there were none, and from daemons before 0.2.4.
+		Unattended *Unattended `json:"unattended,omitempty"`
+	}
+	// Unattended is how often the person's identity was taken with
+	// --person where no person was seen typing, the last time and the
+	// command then. Kept in the daemon's memory only.
+	Unattended struct {
+		Count   int    `json:"count"`
+		Last    string `json:"last"`
+		Command string `json:"command"`
 	}
 	// Quarantined is one room set aside (node.Quarantine).
 	Quarantined struct {
@@ -632,6 +697,32 @@ type Info struct {
 	UIURL   func() string
 	PID     int
 	Stop    func() // asks the daemon to shut down
+	// Uses keeps the count of unattended --person uses; the daemon makes
+	// one for its process, so it outlives a run. Nil: Handler makes one.
+	Uses *PersonUses
+}
+
+// PersonUses counts the uses of --person away from a terminal or in an
+// agent's shell, in memory.
+type PersonUses struct {
+	mu   sync.Mutex
+	last Unattended
+}
+
+func (p *PersonUses) add(command string, at time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.last = Unattended{Count: p.last.Count + 1, Last: Time(at), Command: command}
+}
+
+func (p *PersonUses) get() *Unattended {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.last.Count == 0 {
+		return nil
+	}
+	u := p.last
+	return &u
 }
 
 // apiError is every refusal: the sentence, a code from node.ErrorCodes and
@@ -707,13 +798,17 @@ func waitOf(ms int64) (time.Duration, error) {
 
 // EntryOf renders a node entry (PROTOCOL section 7, Entry).
 func EntryOf(e node.Entry) Entry {
-	out := Entry{Key: e.Key, Version: e.Version, Kind: e.Kind, ID: e.ID, Room: e.Room, RoomLabel: e.RoomLabel,
-		From: e.From, FromNode: e.FromNode, AuthorRemoved: e.AuthorRemoved, Parent: e.Parent, Thread: e.Thread,
+	out := Entry{Key: e.Key, Version: e.Version, Edited: e.Edited, Kind: e.Kind, ID: e.ID, Room: e.Room, RoomLabel: e.RoomLabel,
+		From: e.From, FromNode: e.FromNode, ChangedBy: e.ChangedBy, FromThisMachine: e.Here, IDShared: e.IDShared, AuthorRemoved: e.AuthorRemoved, Parent: e.Parent, Thread: e.Thread,
 		ParentState: e.ParentState, Late: e.Late, Created: Time(e.Created), Text: e.Text, Choices: e.Choices,
 		AskHandled: e.AskHandled, Skipped: e.Skipped, FilesPending: e.FilesPending, FilesNote: e.FilesNote,
 		Request: e.Request, State: e.RequestState, Reason: e.RequestReason}
-	for _, a := range e.To {
-		out.To = append(out.To, node.AgentID(a))
+	if e.ToIDs != nil {
+		out.To = append(out.To, e.ToIDs...)
+	} else {
+		for _, a := range e.To {
+			out.To = append(out.To, node.AgentID(a))
+		}
 	}
 	for _, f := range e.Files {
 		out.Files = append(out.Files, EntryFile{SHA256: f.SHA256, Name: f.Name, Size: f.Size, Type: f.Type, State: f.State})
@@ -800,7 +895,8 @@ func RequestOf(q node.RequestView) Request {
 
 // NetworkOf renders a networking state.
 func NetworkOf(n node.Network) Network {
-	return Network{State: n.State, Listen: n.Listen, Request: n.Request, MapPort: n.MapPort, IPv4Only: n.IPv4Only}
+	return Network{State: n.State, Listen: n.Listen, Request: n.Request, MapPort: n.MapPort,
+		MapPortEarlier: n.MapPortEarlier, IPv4Only: n.IPv4Only}
 }
 
 // AlertOf renders an alert.
@@ -810,12 +906,13 @@ func AlertOf(a node.Alert) Alert {
 
 // TraceOf renders a trace.
 func TraceOf(t node.TraceView) TraceResp {
-	out := TraceResp{ID: t.ID, Room: t.Room, Saved: t.Saved, Reason: t.Reason, Copies: []Copy{}, Handled: []Handled{}}
+	out := TraceResp{ID: t.ID, Room: t.Room, Saved: t.Saved, Reason: t.Reason, Copies: []Copy{}, Handled: []Handled{},
+		From: t.From, FromNode: t.FromNode, FromThisMachine: t.Here, IDShared: t.IDShared}
 	for _, c := range t.Copies {
-		out.Copies = append(out.Copies, Copy{Node: c.Node, At: Time(c.At), Member: c.Member, Evidence: "position"})
+		out.Copies = append(out.Copies, Copy{Node: c.Node, At: Time(c.At), Member: c.Member, Evidence: "position", IDShared: c.IDShared})
 	}
 	for _, h := range t.Handled {
-		out.Handled = append(out.Handled, Handled{Agent: h.Agent, At: Time(h.At)})
+		out.Handled = append(out.Handled, Handled{Agent: h.Agent, Node: h.Node, FromThisMachine: h.Here, IDShared: h.IDShared, At: Time(h.At)})
 	}
 	for _, f := range t.Files {
 		tf := TraceFile{SHA256: f.SHA256, Name: f.Name, Size: f.Size, State: f.State, Holders: []Holder{}}
@@ -835,7 +932,7 @@ func PreviewOf(p node.Preview) PreviewResp {
 
 // StatusOf renders the machine at a glance.
 func StatusOf(st node.StatusView, listen []string, info Info) Status {
-	out := Status{Node: st.Node, Name: st.Name, Human: st.Human, Local: st.Local, Rooms: roomsOf(st.Rooms),
+	out := Status{Node: st.Node, Name: st.Name, Human: st.Human, Local: st.Local, IDShared: st.Shared[st.Node], Rooms: roomsOf(st.Rooms),
 		Agents: st.Agents, Peers: []Peer{}, Listen: listen, Version: info.Version, PID: info.PID, Notice: st.Notice,
 		Network: statusNetwork(st), Waiting: st.Waiting, Levels: st.Levels, Reach: st.Reach,
 		Mapping: st.Mapping}
@@ -847,6 +944,9 @@ func StatusOf(st node.StatusView, listen []string, info Info) Status {
 		out.Quarantined = append(out.Quarantined, Quarantined{ID: q.Room, Label: q.Label, Reason: q.Reason})
 	}
 	for i := range out.Rooms {
+		for k := range out.Rooms[i].Members {
+			out.Rooms[i].Members[k].IDShared = st.Shared[out.Rooms[i].Members[k].Node]
+		}
 		for _, w := range st.Writers[out.Rooms[i].ID] {
 			out.Rooms[i].Agents = append(out.Rooms[i].Agents, Writer{Agent: w.Agent, LastSeen: Time(w.Last)})
 		}
@@ -862,7 +962,7 @@ func StatusOf(st node.StatusView, listen []string, info Info) Status {
 		out.Agents = []store.Agent{}
 	}
 	for _, p := range st.Peers {
-		out.Peers = append(out.Peers, Peer{Node: p.Node, Name: p.Name, Rooms: p.Rooms, Addrs: p.Addrs, LastHeard: Time(p.LastHeard)})
+		out.Peers = append(out.Peers, Peer{Node: p.Node, Name: p.Name, IDShared: st.Shared[p.Node], Rooms: p.Rooms, Addrs: p.Addrs, LastHeard: Time(p.LastHeard)})
 	}
 	if info.UIURL != nil {
 		out.UI = info.UIURL()
@@ -887,22 +987,34 @@ func statusNetwork(st node.StatusView) Network {
 // Handler serves the local API over s.
 func Handler(s *node.Surface, info Info) http.Handler {
 	mux := http.NewServeMux()
+	if info.Uses == nil {
+		info.Uses = &PersonUses{}
+	}
 	handle(mux, "register", func(ctx context.Context, r RegisterReq) (store.Agent, error) {
-		return s.Register(ctx, r.Harness, r.Label, r.Cwd)
+		a, err := s.Register(ctx, r.Harness, r.Label, r.Cwd)
+		if err == nil && r.Unattended != "" && a.Label == node.HumanLabel {
+			// The record of a2p2 --person: the person's identity taken
+			// where no person was seen typing. Status counts it.
+			command := core.CleanLabel(r.Unattended)
+			info.Uses.add(command, time.Now())
+			slog.Warn("acting as the person with --person, away from a terminal or in an agent's shell", "command", command, "agent", a.ID)
+		}
+		return a, err
 	})
 	handle(mux, "send", func(ctx context.Context, r SendReq) (any, error) {
 		in := node.SendInput{Agent: r.Agent, Room: r.Room, Text: r.Text, To: r.To, ReplyTo: r.ReplyTo,
-			AskHandled: r.AskHandled, Replaces: r.Replaces, Choices: r.Choices, Thread: r.Thread}
+			AskHandled: r.AskHandled, Replaces: r.Replaces, Choices: r.Choices, Thread: r.Thread, ReplyVersion: r.ReplyVersion}
 		if len(r.Files) > 0 {
 			f, err := s.SendFiles(ctx, in, r.Files)
 			return SendFilesOf(f), err
 		}
 		m, err := s.Send(ctx, in)
 		out := SendResp{ID: m.ID, Room: m.Room, RoomLabel: m.Label, Created: Time(m.Created), ToOmitted: m.ToOmitted}
-		for _, a := range m.To {
-			out.To = append(out.To, node.AgentID(a))
+		if err != nil || len(m.To) == 0 {
+			return out, err
 		}
-		return out, err
+		out.To = s.AgentIDs(ctx, m.To) // a shared short id in full; never fails a committed send
+		return out, nil
 	})
 	// fetch is an agent's request for one file's bytes, copied for it
 	// under the daemon's home and never opened (PROTOCOL 10.6).
@@ -1059,7 +1171,17 @@ func Handler(s *node.Surface, info Info) http.Handler {
 	})
 	handle(mux, "room/list", func(ctx context.Context, r RoomListReq) (RoomsResp, error) {
 		rs, err := s.RoomList(ctx, r.Room)
-		return RoomsResp{roomsOf(rs)}, err
+		if err != nil {
+			return RoomsResp{}, err
+		}
+		out := roomsOf(rs)
+		shared, err := s.SharedIDs(ctx)
+		for i := range out {
+			for k := range out[i].Members {
+				out[i].Members[k].IDShared = shared[out[i].Members[k].Node]
+			}
+		}
+		return RoomsResp{out}, err
 	})
 	handle(mux, "unread", func(ctx context.Context, r UnreadReq) (Unread, error) {
 		id := r.Agent
@@ -1071,12 +1193,12 @@ func Handler(s *node.Surface, info Info) http.Handler {
 			id = a.ID
 		}
 		u, err := s.Unread(ctx, id, r.Room, r.Lines)
-		out := Unread{Agent: u.Agent, Count: u.Count, From: u.From}
+		out := Unread{Agent: u.Agent, Count: u.Count, From: u.From, FromHere: append([]string{}, u.FromHere...)}
 		for _, c := range u.Rooms {
 			out.Rooms = append(out.Rooms, RoomCount{Room: c.Room, Label: c.Label, Count: c.Count})
 		}
 		for _, f := range u.First {
-			out.First = append(out.First, FirstLine{ID: f.ID, Room: f.Room, From: f.From, Line: f.Line})
+			out.First = append(out.First, FirstLine{ID: f.ID, Room: f.Room, From: f.From, ChangedBy: f.ChangedBy, Edited: f.Edited, FromThisMachine: f.Here, IDShared: f.IDShared, Line: f.Line})
 		}
 		return out, err
 	})
@@ -1087,7 +1209,9 @@ func Handler(s *node.Surface, info Info) http.Handler {
 			}
 		}
 		st, err := s.Status(ctx, r.ShowNotice)
-		return StatusOf(st, s.Addrs(), info), err
+		out := StatusOf(st, s.Addrs(), info)
+		out.Unattended = info.Uses.get()
+		return out, err
 	})
 	// net records a person's networking decision, with the authority of
 	// confirm: the CLI asks for it at a terminal and no agent tool or hook

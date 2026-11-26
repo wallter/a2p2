@@ -63,7 +63,12 @@ import (
 //     message, the winning version and the hash, reserves its size, lapses
 //     after WantLife or WantTries answers without the bytes, and the
 //     receiver takes an upload only from the author against a want it
-//     issued. A lapsed carry is answered "gave up" for WantLife.
+//     issued. A lapsed carry is answered "gave up" for WantLife. The
+//     author itself is never carried for (it wrote the file), and one
+//     author's live carry and keep wants reserve, each by its whole size,
+//     at most 1/AuthorWantShare of a set budget. A part left by
+//     an upload goes when its want lapses or its version is replaced:
+//     nothing can complete it.
 //   - F10 Durable storing and cleanup. Bytes are on disk before the row
 //     that makes them live; a send is written only after its bytes are;
 //     deletions are queued in the step that decides them and never remove
@@ -85,6 +90,9 @@ const (
 	WantLife    = Day // a want, or a carry job, lapses after this
 	WantTries   = 3   // answers to the author's pulls without the bytes, then it lapses
 	ListTries   = 8   // failed answers for a missing manifest, then it is unavailable
+	// AuthorWantShare: one author's carry and keep wants reserve, each by
+	// its whole size, at most this share of the budget.
+	AuthorWantShare = 4
 )
 
 // FileRef is one file of a manifest.
@@ -342,6 +350,25 @@ func (f *fileState) used() int {
 	return n
 }
 
+// reservedFor is what author's live wants reserve, each by its whole
+// size: bytes received are checked only once the file is whole, so a part
+// frees nothing of the share.
+func (f *fileState) reservedFor(author MachineID) int {
+	n := 0
+	for _, j := range f.want {
+		if j.from == author {
+			n += j.size
+		}
+	}
+	return n
+}
+
+// authorFits says whether a carry or keep want of size for author's file
+// stays within the author's share of a set budget.
+func (f *fileState) authorFits(author MachineID, size int) bool {
+	return f.budget == 0 || f.reservedFor(author)+size <= f.budget/AuthorWantShare
+}
+
 func (f *fileState) wanting(k pkey) bool   { _, ok := f.want[k]; return ok }
 func (f *fileState) hasLapsed(k pkey) bool { _, ok := f.lapsed[k]; return ok }
 
@@ -572,10 +599,20 @@ func (m *Machine) dropFiles(now Time) {
 		v, _, ok := m.listed(k.msg, k.hash, now)
 		switch {
 		case !ok || v.rec.ID != j.ver:
-			delete(f.want, k) // the version it was for is no longer the one to keep
+			// the version it was for is no longer the one to keep; after an
+			// edit no want is left to count its part or finish it
+			delete(f.want, k)
+			if f.partial[k] != nil {
+				delete(f.partial, k)
+				f.queue = append(f.queue, partPath(k))
+			}
 		case m.clock(now) >= j.at+WantLife || j.tries >= WantTries:
 			delete(f.want, k)
 			f.lapsed[k] = m.clock(now)
+			if f.partial[k] != nil { // only the author could finish it, and no want is left
+				delete(f.partial, k)
+				f.queue = append(f.queue, partPath(k))
+			}
 		}
 	}
 	for k, at := range f.lapsed {
@@ -715,7 +752,7 @@ func (s *Machine) carry(p MachineID, msg RecordID, hash string, now Time) Answer
 		return AnsNo
 	}
 	h := s.get(msg)
-	if h == nil || h.rec.Kind != Message || h.dropped == Withdrawn {
+	if h == nil || h.rec.Kind != Message || h.dropped == Withdrawn || p == h.rec.Author {
 		return AnsNo
 	}
 	v := s.winner(h)
@@ -739,7 +776,7 @@ func (s *Machine) carry(p MachineID, msg RecordID, hash string, now Time) Answer
 	if _, dup := f.want[k]; dup {
 		return AnsNotYet
 	}
-	if !f.fits(ref.Size) {
+	if !f.fits(ref.Size) || !f.authorFits(h.rec.Author, ref.Size) {
 		return AnsNo
 	}
 	f.want[k] = wantJob{from: h.rec.Author, ver: v.rec.ID, at: s.clock(now), size: ref.Size}
@@ -1256,7 +1293,7 @@ func (w *World) exchangeFiles(p, s *Machine) {
 				j := wantJob{from: p.ID, ver: s.winner(h).rec.ID, at: s.clock(w.Now)}
 				if !manifest {
 					_, ref, _ := s.listed(k.msg, k.hash, w.Now)
-					if !s.st.files.fits(ref.Size) {
+					if !s.st.files.fits(ref.Size) || !s.st.files.authorFits(p.ID, ref.Size) {
 						continue
 					}
 					j.size = ref.Size // Keep: a want issued now, reserved

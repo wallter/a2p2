@@ -9,7 +9,6 @@ package web
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -36,15 +35,19 @@ var assets embed.FS
 
 const maxBody = 64 << 10
 
+// runHeader carries the presenting session's run on every API answer.
+const runHeader = "A2P2-Run"
+
 type server struct {
-	s     *node.Surface
-	token string
+	s  *node.Surface
+	ss *Sessions
 }
 
-// Handler serves the page. Every API request must present token; see
-// PROTOCOL.md section 7.
-func Handler(s *node.Surface, token string) http.Handler {
-	sv := &server{s, token}
+// Handler serves the page. Every API request but the trade of a link's
+// code must present a session of ss (session.go); see PROTOCOL.md
+// section 7.
+func Handler(s *node.Surface, ss *Sessions) http.Handler {
+	sv := &server{s, ss}
 	mux := http.NewServeMux()
 	for path, file := range map[string]string{"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"} {
 		mux.HandleFunc("GET "+path, sv.static(file))
@@ -52,6 +55,7 @@ func Handler(s *node.Surface, token string) http.Handler {
 	// No icon: answered empty, so the browser logs no missing file (an
 	// inline data: icon would be refused by the page's own CSP).
 	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	mux.HandleFunc("POST /api/session", sv.session)
 	mux.HandleFunc("GET /api/state", sv.api(sv.state))
 	mux.HandleFunc("GET /api/history", sv.api(sv.history))
 	mux.HandleFunc("GET /api/thread", sv.api(sv.thread))
@@ -105,15 +109,23 @@ func (sv *server) guard(next http.Handler) http.Handler {
 	})
 }
 
-// allowed applies the checks every API route shares: the Bearer token,
-// and for a POST a JSON content type and the body limit. It answers a
-// refusal itself and reports whether the request may go on.
+// allowed applies the checks every API route shares: a session as the
+// Bearer token, and for a POST a JSON content type and the body limit. It
+// answers a refusal itself and reports whether the request may go on.
+// Every answer to a session carries its run in the A2P2-Run header, so the
+// page refuses any answer, a history or a file as well as a state, that
+// another listener on the port gives.
 func (sv *server) allowed(w http.ResponseWriter, r *http.Request) bool {
-	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || subtle.ConstantTimeCompare([]byte(got), []byte(sv.token)) != 1 {
+	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	run, valid := "", false
+	if ok {
+		run, valid = sv.ss.runOf(got)
+	}
+	if !valid {
 		writeJSON(w, 401, map[string]string{"error": "missing or invalid token; run `a2p2 ui` for a fresh link"})
 		return false
 	}
+	w.Header().Set(runHeader, run)
 	if r.Method == http.MethodPost {
 		if mt, _, _ := strings.Cut(r.Header.Get("Content-Type"), ";"); strings.TrimSpace(strings.ToLower(mt)) != "application/json" {
 			writeJSON(w, 415, map[string]string{"error": "content-type must be application/json"})
@@ -195,15 +207,17 @@ func entries(es []node.Entry, err error) (any, error) {
 
 // state is everything the page shows at once. The human's unread entries
 // and the questions waiting for the person are read without marking
-// anything seen; the page confirms what it showed. A one-time notice comes
-// back until the page reports it drew it (notice-shown).
+// anything seen, and without keeping a receipt: the page polls this in
+// the background and before each change, and may not draw what it gets
+// (seen keeps the receipts of what it drew). A one-time notice comes back
+// until the page reports it drew it (notice-shown).
 func (sv *server) state(r *http.Request) (any, error) {
 	ctx := r.Context()
 	st, err := sv.s.Status(ctx, true)
 	if err != nil {
 		return nil, err
 	}
-	in, err := sv.s.Inbox(ctx, sv.s.HumanID(), "", node.MaxInboxLimit, 0)
+	in, err := sv.s.InboxPeek(ctx, sv.s.HumanID(), node.MaxInboxLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -216,13 +230,12 @@ func (sv *server) state(r *http.Request) (any, error) {
 		return nil, err
 	}
 	questions, err := sv.s.Questions(ctx)
-	if err == nil { // shown to the person: the page may confirm them
-		err = sv.s.Listed(ctx, sv.s.HumanID(), questions)
-	}
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]any{"status": localapi.StatusOf(st, sv.s.Addrs(), localapi.Info{})}
+	// run is the presenting session's: the page refuses a state with another.
+	run, _ := sv.ss.runOf(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	out := map[string]any{"status": localapi.StatusOf(st, sv.s.Addrs(), localapi.Info{}), "run": run}
 	unread := make([]localapi.Entry, 0, len(in.Entries))
 	for _, e := range in.Entries {
 		unread = append(unread, localapi.EntryOf(e))
@@ -270,11 +283,15 @@ func (sv *server) send(r *http.Request) (any, error) {
 		Text    string   `json:"text"`
 		To      []string `json:"to"`
 		ReplyTo string   `json:"reply_to"`
+		// ReplyVersion: the version of reply_to's text the page drew; a
+		// reply is refused if the message has newer text since.
+		ReplyVersion string `json:"reply_version"`
 	}
 	if err := decode(r, &in); err != nil {
 		return nil, err
 	}
-	m, err := sv.s.Send(r.Context(), node.SendInput{Agent: sv.s.HumanID(), Room: in.Room, Text: in.Text, To: in.To, ReplyTo: in.ReplyTo})
+	m, err := sv.s.Send(r.Context(), node.SendInput{Agent: sv.s.HumanID(), Room: in.Room, Text: in.Text, To: in.To, ReplyTo: in.ReplyTo,
+		ReplyVersion: in.ReplyVersion})
 	return localapi.SendResp{ID: m.ID, Room: m.Room, Created: localapi.Time(m.Created)}, err
 }
 
@@ -292,6 +309,9 @@ func (sv *server) seen(r *http.Request) (any, error) {
 	for _, e := range in.Entries {
 		reads = append(reads, store.Read{Key: e.Key, Version: e.Version})
 	}
+	if err := sv.drawn(r.Context(), reads); err != nil {
+		return nil, err
+	}
 	res, err := sv.s.Seen(r.Context(), sv.s.HumanID(), reads)
 	out := []localapi.SeenResult{}
 	for _, x := range res {
@@ -300,14 +320,45 @@ func (sv *server) seen(r *http.Request) (any, error) {
 	return map[string]any{"results": out}, err
 }
 
+// drawn keeps a receipt of each entry the page says it drew, with the
+// key and version it drew, that the person's inbox or questions list so
+// now: the only receipts the page leaves, so that Seen, and a handled
+// report after it, rest on text the page drew (state keeps none).
+func (sv *server) drawn(ctx context.Context, reads []store.Read) error {
+	want := map[string]string{}
+	for _, rd := range reads {
+		want[rd.Key] = rd.Version
+	}
+	in, err := sv.s.InboxPeek(ctx, sv.s.HumanID(), node.MaxInboxLimit)
+	if err != nil {
+		return err
+	}
+	qs, err := sv.s.Questions(ctx)
+	if err != nil {
+		return err
+	}
+	var es []node.Entry
+	kept := map[string]bool{}
+	for _, e := range append(in.Entries, qs...) {
+		if v, ok := want[e.Key]; ok && v == e.Version && e.Kind != node.EntryRequest && !kept[e.Key] {
+			kept[e.Key] = true
+			es = append(es, e)
+		}
+	}
+	return sv.s.Listed(ctx, sv.s.HumanID(), es)
+}
+
 func (sv *server) ack(r *http.Request) (any, error) {
 	var in struct {
 		ID string `json:"id"`
+		// Version: the version of the message's text the page drew; the
+		// report is refused if the message has newer text since.
+		Version string `json:"version"`
 	}
 	if err := decode(r, &in); err != nil {
 		return nil, err
 	}
-	h, err := sv.s.Ack(r.Context(), sv.s.HumanID(), in.ID)
+	h, err := sv.s.AckShown(r.Context(), sv.s.HumanID(), in.ID, in.Version)
 	return localapi.AckResp{Handled: h.ID}, err
 }
 
@@ -317,8 +368,8 @@ func (sv *server) ack(r *http.Request) (any, error) {
 // exactly what was named. The request must carry this page's exact
 // Origin, so that another site the browser opens cannot decide. This
 // keeps decisions out of the agents' tools and recorded; it does not prove
-// that a person clicked, since a program running as this user can read the
-// page's token from status.
+// that a person clicked, since a program running as this user can get a
+// one-time code from status and trade it for a session.
 func (sv *server) confirm(r *http.Request) (any, error) {
 	if r.Header.Get("Origin") != "http://"+r.Host {
 		return nil, &node.UserError{Msg: "a decision must come from the page itself (its exact Origin)"}

@@ -220,6 +220,10 @@ type DraftFile struct {
 	Path string `json:"path,omitempty"` // as resolved from the opened file, for the person
 	Name string `json:"name"`
 	Type string `json:"type,omitempty"`
+	// Links, when above one, is how many names the staged file had on
+	// disk: the path shown is only one of them. A draft an older binary
+	// wrote has none, and an older binary ignores it.
+	Links int `json:"links,omitempty"`
 }
 
 // MarshalJSON keeps the draft's files flat.
@@ -232,8 +236,9 @@ func (d DraftFile) MarshalJSON() ([]byte, error) {
 		Path   string `json:"path,omitempty"`
 		Name   string `json:"name"`
 		Type   string `json:"type,omitempty"`
+		Links  int    `json:"links,omitempty"`
 	}
-	return json.Marshal(flat{d.N, d.SHA256, d.Size, d.Kept, d.Path, d.Name, d.Type})
+	return json.Marshal(flat{d.N, d.SHA256, d.Size, d.Kept, d.Path, d.Name, d.Type, d.Links})
 }
 
 // UnmarshalJSON reads the flat form.
@@ -246,11 +251,13 @@ func (d *DraftFile) UnmarshalJSON(b []byte) error {
 		Path   string `json:"path"`
 		Name   string `json:"name"`
 		Type   string `json:"type"`
+		Links  int    `json:"links"`
 	}
 	if err := json.Unmarshal(b, &f); err != nil {
 		return err
 	}
-	*d = DraftFile{StagedFile: StagedFile{N: f.N, SHA256: f.SHA256, Size: f.Size, Kept: f.Kept}, Path: f.Path, Name: f.Name, Type: f.Type}
+	*d = DraftFile{StagedFile: StagedFile{N: f.N, SHA256: f.SHA256, Size: f.Size, Kept: f.Kept}, Path: f.Path, Name: f.Name, Type: f.Type,
+		Links: f.Links}
 	return nil
 }
 
@@ -290,6 +297,7 @@ const (
 	ReasonSendVoided   = "this machine's admission to the room was voided"
 	ReasonSendReplaced = "the message it replaces changed, or a file it keeps is gone"
 	ReasonSendChanged  = "a staged file changed or is gone"
+	ReasonSendHomeFile = "a staged file is one of a2p2's own files"
 )
 
 // SweepFiles applies [F1], the staging rules of [F6] and [F8], and [F11]
@@ -486,11 +494,26 @@ func sweepTx(tx *sql.Tx, room, self string, now time.Time, aside bool) (int, err
 		_, _, listed := mf.Listed(w.SHA256)
 		switch {
 		case !listed || mf.Winner.ID != w.Version:
+			// An edit: the want goes, and so does what an upload against it
+			// left, or the part would hold its size with no want left to
+			// count it or finish it (F10).
 			err = exec(`DELETE FROM file_wants WHERE room = ? AND msg = ? AND sha256 = ?`, room, w.Msg, w.SHA256)
+			if err == nil {
+				err = dropPartFrom(tx, room, w.Msg, w.SHA256, w.Lapsed, now)
+			}
 		case !w.Lapsed.IsZero() && !now.Before(w.Lapsed.Add(core.GaveUpLife)):
 			err = exec(`DELETE FROM file_wants WHERE room = ? AND msg = ? AND sha256 = ?`, room, w.Msg, w.SHA256)
+			if err == nil {
+				err = dropPartFrom(tx, room, w.Msg, w.SHA256, w.Lapsed, now)
+			}
 		case w.Lapsed.IsZero() && (!now.Before(w.At.Add(core.WantLife)) || w.Tries >= core.WantTries):
 			err = exec(`UPDATE file_wants SET lapsed_at = ? WHERE room = ? AND msg = ? AND sha256 = ?`, ms(now), room, w.Msg, w.SHA256)
+			if err == nil {
+				err = dropLapsedPart(tx, room, w.Msg, w.SHA256, now)
+			}
+		case !w.Lapsed.IsZero():
+			// lapsed by a 0.2.3 binary, which kept the part (F10)
+			err = dropPartFrom(tx, room, w.Msg, w.SHA256, w.Lapsed, now)
 		}
 		if err != nil {
 			return 0, err

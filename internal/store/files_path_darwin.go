@@ -30,3 +30,12 @@ func handlePath(f *os.File) (string, error) {
 	}
 	return string(buf), nil
 }
+
+// automountRoots are macOS's automount points (auto_master): a lookup
+// under them can make the machine connect to another host. /home is
+// auto_home here, not where people's files are (/Users).
+var automountRoots = []string{"/Network", "/home",
+	"/System/Volumes/Data/net", "/System/Volumes/Data/home", "/System/Volumes/Data/Network"}
+
+// atNoAutomount: no such flag here; the name rule is the guard.
+const atNoAutomount = 0

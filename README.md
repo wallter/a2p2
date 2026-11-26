@@ -205,8 +205,12 @@ Nov 24 05:24:23  alice@1f646db7
 ```
 
 `a2p2 inbox` marks what it shows as seen. Use `a2p2 inbox --peek` for a
-preview. `a2p2 ui` opens the local web page (`a2p2 ui --print` only prints its
-address, which carries the page's access token). State lives in `~/.a2p2`
+preview. Without `--as`, `send`, `ack` and `inbox` act as you only at a
+terminal; a script adds `--person`, which the daemon log records, and in
+an agent's shell they act as that agent. `a2p2 ui` opens the local web
+page (`a2p2 ui --print` only prints its address, which works once, within
+30 seconds). It does so at a terminal and not in an agent's shell, unless
+`--person` is given. State lives in `~/.a2p2`
 by default. Set `A2P2_HOME` to use another directory.
 
 A session's agent ID is its harness and directory name, so Claude Code
@@ -270,7 +274,8 @@ machine.) And `a2p2 net on --map-port` asks the home router to forward
 the port (PCP, NAT-PMP or UPnP; not on Windows); this opens a port on the
 router to the internet, so it is asked at a terminal and never turned on
 by default. The mapping is removed by `a2p2 net off` and `a2p2 stop`. If
-a2p2 crashes, a mapping lapses within two hours, except on a router that
+a2p2 crashes, a mapping lapses when the router's lease ends (a2p2 asks
+for two hours; a router may grant more), except on a router that
 grants only permanent ones: that rule stays until a2p2 starts again on
 the same network, or until you delete the rule named `a2p2` on the
 router's own page. If a2p2 cannot use its record of mappings

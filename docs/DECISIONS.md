@@ -2137,3 +2137,1002 @@ would run the workflow, and the fixes need no protocol change.
 **Revisit if** an action is moved to a new major release, GitHub offers
 immutable releases or a required environment here, the attestation check
 can be done without `gh`, or a mixed-version chaos run is added.
+
+## D62. Replaced text is marked, answers are tied to the text shown, and peer hints are bounded (2026-11-25)
+
+A security review showed that the author of a message could replace it
+after a reader answered, and every view but the inbox then showed the
+new text above the answer as if it was the text answered (F30). A
+handled report was accepted for a version replaced since the read (F67).
+Any member could make this machine keep a stream row, for the life of
+the room, for each epoch it named in an unsigned pull report (F9). A
+prune failed outright past about 32,000 undecided (room, author) pairs
+(F32), and an inbox read could leave receipts for a room left while it
+ran (F70). Rooms that span owners make the first three real now.
+
+- **What changed.** Message entries carry `Edited` (local API `edited`,
+  omitted when false) when their text is the author's replacement, in
+  the inbox, thread, branch, history, `recent` and `skipped` views.
+  `Handled` needs, unless the message was withdrawn, that a read showed
+  the agent the version reads show now: the newest replacement held
+  with text, or the message itself while its text is live. While a
+  replacement's text is missing here it is refused, as the inbox and
+  thread wait for it; an expired message with no live replacement is
+  not checked, and neither is one the agent confirmed no text of, since
+  then every view shows only the expired notice. Each refusal is `not_shown` with its own sentence. The
+  delivery model's `Handle` has the same rule, so the differential tests
+  hold the two together. `Draft.ReplyVersion`, when set, refuses a reply
+  by the same rule. `Tx.NoteKnown` keeps at most `MaxHintedStreams` (32)
+  streams that hold nothing per author on one peer's word, lowest epochs
+  first; a higher report that takes such a stream over from another
+  peer counts against the peer that takes it. Such a stream is deleted
+  when the peer that set its known position stops naming it, or leaves
+  its author out of a whole report (`Tx.Observe`); the model drops those
+  hints too. A prune expires live text in one statement and missing text
+  with one statement per (room, author) pair not left undecided that has
+  missing text past retention, so it binds no variable per undecided
+  pair. Entries carry the room's generation their read saw, and
+  `Store.ShowAt` writes no receipt for a room left, or left and joined
+  again, since the read.
+- **No wire, record or schema change.** The record format has no field
+  for the version a reply answers, and adding one would change signed
+  records, so the reply check is local and optional. Rows written before
+  the bound load as before; a peer's next report lowers or deletes them
+  as it would have. 0.2.0 to 0.2.3 open the database unchanged.
+- **Costs.** An agent shown a message and not yet its replacement must
+  read again before `ack`, and waits while the replacement's text is
+  missing. An honest peer that holds more than 32 streams of one author
+  that this machine holds nothing of gets the rest listed as waiting only
+  as the first arrive. A prune with undecided pairs runs one more query
+  and one statement per pair with missing text past retention; the test
+  with 40,001 undecided pairs has one such pair, so the time for many
+  pairs to update is not measured.
+- **Still open.** (The CLI, the MCP results and the page show
+  `edited` since the merge of this wave; see D65. Replies are tied to
+  the text shown since the second review, below.) A signed reply and a
+  handled report name only the message, not the version answered. F31 is
+  deferred: the author's clock still orders every view and starts
+  retention. A member can date a message before an answer given after
+  it, or date a reply before the message it answers, so views show them
+  out of order. A member can also date a message so far back that its
+  text expires minutes after it arrives, since expiry counts from the
+  sender's clock, not from when this machine got it. Fixing that needs
+  either an arrival time per record (a migration, which 0.2.3 would then
+  refuse to open), a tighter future bound in P1, or an order clamped to
+  the parent's and the previous record's time in every view and the
+  model; that choice is the owner's. Hint rows set by a peer since
+  removed stay until another peer reports the stream (at most 32 per
+  author and peer).
+- **After the second review.** Two reviews of another model family
+  found three gaps. Replies and handled reports were not tied to the
+  text drawn: no client passed `reply_version`, and the page's state
+  request, which it makes in the background and before every change,
+  kept a receipt of entries it might not draw, so an `ack` passed on
+  text the person never saw. Now the page sends the version it drew with
+  a reply (`reply_version`, also a local API field) and an `ack`
+  (`Machine.HandledShown`), and both are refused as `not_shown` if the
+  message changed since. The state request keeps no receipt
+  (`Surface.InboxPeek`); the page's seen first keeps one for each entry
+  it drew that the inbox or the questions still list at that version. A
+  reply without a version, from the CLI or the MCP reply tool, is held
+  to the `ack` rule when the agent may report the message handled and a
+  read showed it some text of it; the model's `Send` has the same rule.
+  Second, an expired replacement was ignored, so an author could date one
+  to expire minutes after it arrived and every view fell back to the
+  first text, unmarked. An expired replacement now counts in
+  `currentText` (node and model): when it is the newest, every view
+  shows the message as expired with `edited`, and it has no version to
+  check. Third, a peer could raise a hint another peer set and then drop
+  it, deleting the other's hint. `Tx.lowerKnown` now falls back to the
+  highest report in another peer's last observed detail, within that
+  peer's bound of 32; the model's `observe` does the same. No wire,
+  record or schema change. Still open: a reply by an agent no read
+  showed the message, or one it may not report handled, is not checked
+  without a version; a staged reply with files passes none; a history
+  page the page loads and then drops on a room switch still leaves text
+  marks; and an agent that confirmed the first text is told nothing when
+  a replacement expires before its next read. Ordering and expiry under
+  the sender's clock (F31), and a record dated more than 24 hours ahead,
+  which P1 refuses so that its stream stalls at new peers until their
+  clock reaches it, stay as above: each needs a record or schema change
+  or the owner's choice.
+
+**Revisit if** a record format change is due (carry the version a
+reply answers), or a schema change lets records keep their arrival time.
+
+## D63. What may be staged, and what one author can reserve (2026-11-25)
+
+A security review found four gaps in attachments (F10, F23, F33/F40,
+F35). Rooms now span owners, so text from another owner's member can
+steer an agent into naming a path, and that member's machine can ask
+for files. Each gap needs only that.
+
+- **What changed.** Staging opens each path once through
+  `store.OpenSource`. A send is refused while 32 of this machine's
+  requests wait in the room, before any path is touched. A path is then
+  checked by name before anything touches it: on Windows only a drive
+  letter, a colon, a separator and plain names (no UNC, `\\?\`, `\\.\` or
+  `\??\` form, no colon after the drive, no wildcard, no device name in
+  any component, with COM0, LPT0, the superscript names, CONIN$, CONOUT$
+  and CLOCK$ added); on Unix nothing under `/dev`, `/proc`, `/sys`,
+  `/net` or, on macOS, `/Network`, `/home` and their
+  `/System/Volumes/Data` forms. The path is walked one component at a
+  time with `os.Root`, each looked up in the directory opened before it
+  and opened only if it is still the entry looked at (`os.SameFile`), so
+  a directory or link swapped in after its check is refused, and a
+  lookup never leaves the directory it was checked in. Every link on the
+  way is read and its target checked by name before it is looked at.
+  Only a regular file is opened. The handle's reported path passes the
+  name check again; on Windows a `\\server\share` handle path is taken
+  only for a path that began with a drive letter `GetDriveTypeW` reports
+  as a network drive, as 0.2.3 staged such files. The walk refuses a
+  path through the home other than into `files/`, and a file with
+  several names is compared by identity with every file in the home
+  outside `files/`. Approval checks a pending request again by its path
+  and by the bytes of the home's small files (the keys), so one staged by
+  an older binary is not sent (reason "a staged file is one of a2p2's own
+  files"). Sizes, the path shown and the staged bytes come from that
+  handle. The same bytes listed twice are listed once instead of refused.
+  A queue that fills while staging is refused with the one staging
+  refusal. At most four sends stage files at a time. A staged file with
+  several names says so in the request text (draft field `links`). A
+  request for a file from its own author starts no carry job, and live
+  carry or `keep` wants of one author's files reserve at most a quarter
+  of the room budget, each counted by the bytes not yet received
+  (`core.AuthorWantShare`); a want this machine's agent asked for is not
+  capped. When a want lapses, or goes because an edit made another
+  version the one to keep, its part is dropped in the same transaction:
+  only the author could finish it, against a live want. A part reserved
+  no later than the lapse of a want that 0.2.3 left lapsed is dropped
+  too; one reserved after it is an agent's fetch and stays. The delivery model has these rules. No
+  wire, record, schema or tool change.
+- **Why links are followed, not refused.** The links are read and
+  checked one by one, the person sees the resolved path, and the open
+  follows none. Refusing every link would break honest paths through
+  `/tmp` on macOS or a linked checkout and adds little, since the path
+  shown is the file opened. The owner can choose to refuse them.
+- **Compatibility.** New rules apply to new requests only. Stored wants
+  over the quarter keep their reservation, take uploads and lapse as
+  before (`TestWantsAnOlderBinaryReservedOverTheAuthorsShareStillLoadAndLapse`,
+  `TestLiveWantsAnOlderBinaryIssuedOverTheAuthorsShareStillWorkAndLapse`).
+  A pending request staged by an older binary is approved as before,
+  unless its file is one of a2p2's own. An older binary reading a draft
+  ignores `links`; one that finds a part dropped at a lapse sees what a
+  failed upload leaves. Checked once by hand: v0.2.3's store opened a
+  database this code wrote (a pending send with `links`, a carry want
+  with a part), read the draft, reconciled and swept it. No file was
+  moved between an old and a new binary over the network. Machines from 0.2.0 to
+  0.2.3 see only a 404 where they saw 202 for an author's own request,
+  which they already handle as "not held".
+- **Costs.** An agent that names a file under the home, or a symbolic
+  link into it, gets the one staging refusal. A path through a macOS
+  `/home` or `/Network` mount is refused. On Windows a path through a
+  junction or a `\??\` link target to anything but a local drive is
+  refused. A carrier asked for many large files of one author that
+  never connects in carries a quarter of its room budget at a time. Per
+  path component, one directory opened, one `lstat` and one `fstat`; a
+  walk of the home only for a file with several names; at approval, a
+  hash of each small file directly in the home.
+- **Still open.** The Windows walk (`os.Root` there), link reading,
+  handle path and drive type were written from documentation and built,
+  not run. A network file system the person mounted, or a drive letter
+  mapped to a share, is read as local, so a path on it contacts the
+  host the person chose; refusing them is an owner's choice. A request
+  an older binary staged from a hard link to the database is not caught
+  at approval (its bytes are no longer the database's); it expires
+  within a day. The room usage in local status, which agents' tools do
+  not show, still counts equal files once. A cloud placeholder file can
+  download its bytes when read. Below the request limit an agent can
+  still learn roughly how large a file is, at the cost of requests the
+  person sees. Several machines of one owner can each take a quarter of a
+  carrier's room budget; a per-owner share needs owner sides.
+- **After the second review.** Two reviewers found three gaps, each
+  confirmed in the code and closed:
+  - *The open followed a link swapped in after the look.* `os.Root`
+    opens with `O_NOFOLLOW` but then follows a link that stays inside
+    its directory by itself, and from "/" every link does; `os.SameFile`
+    refused it only after its target was opened. On Unix the walk now
+    uses plain descriptors: `fstatat(AT_SYMLINK_NOFOLLOW)` to look,
+    `openat(O_NOFOLLOW|O_NONBLOCK)` to open, and the handle's device and
+    inode compared with the look before a byte is read
+    (`TestALinkSwappedInAfterTheLookIsNeverOpened` fails on the old
+    walk). This makes `golang.org/x/sys` a direct dependency: the
+    standard `syscall` package has no `openat` on macOS, and the module
+    was already built into a2p2 through `modernc.org/sqlite`, so the
+    binary gains no new code. Windows keeps `os.Root`, with the old
+    order.
+  - *The author's quarter counted only bytes not yet received.* Bytes
+    are checked only when a file is whole, so an author that uploaded
+    all but one byte of garbage for each want freed nearly all of it and
+    could reserve nearly the whole room budget. Each live want now
+    counts its whole size, as the room's usage does
+    (`TestAnAuthorsUnfinishedUploadsStillCountTheirWholeSizeInItsShare`);
+    the delivery model has the same rule. Wants stored before keep their
+    reservation, as before.
+  - *An invalid entry was refused only after the paths were staged.* A
+    `sha256:` entry with nothing replaced, an unlisted hash or a relative
+    path beside a real path let the path be opened, sized, copied and
+    hashed with no request raised. Every entry is now checked by its
+    form before any path is opened, and a refusal after opening
+    (unreadable, over 256 MiB, over the budget, a manifest rule) comes
+    only after every path was opened and the budget read, with the one
+    staging refusal (`TestAnInvalidEntryBesideAPathIsRefusedBeforeAnyPathIsOpened`,
+    `TestEveryRefusalBeforeCopyingTakesTheSameSteps`).
+  A file of the home that cannot be compared with a file of several
+  names now refuses the send instead of being skipped. Declined: the
+  name rule compares without case on Linux too, which refuses an odd
+  path such as `/Net/x`; Linux file systems can ignore case (vfat, ext4
+  casefold), so it errs toward refusing. Still open: honest files under
+  `/net` or a macOS automount point such as `/home` must be copied elsewhere,
+  since a lookup there can connect to a host the path names; on Linux an
+  automount point not on the list is mounted by the open, then refused
+  as changed; a mount made over a directory between its look and its
+  open is reached by the open (making one needs the person's own mount
+  tools or privilege); on Windows a swapped link is still opened before
+  it is refused; small timing differences between refusals remain; and
+  the quarter bounds only automatic wants, not files held in full or
+  fetches an agent asked for. No wire, record or schema change.
+
+**Revisit if** the Windows paths are run, a harness sandbox gives agents
+the socket without file access, or owner sides exist.
+
+## D64. A join into a held room counts only from a member, and a joined room keeps the label approved (2026-11-25)
+
+A security review showed two flaws in the joiner (F7, F12). A machine
+that is not a member of a room this machine holds, such as a removed
+admin that has not heard of its removal, could send an invite for it.
+After one approval its answer's entries were applied, a removal it
+signed late among them, and the answer opened the `not_caught_up` gate
+even with no heads. And the label of a joined room came from the signed
+create entry without a comparison with the preview the person approved,
+and could be `local`, so another owner's messages read as this
+machine's local room. Rooms now span owners, so both are fixed now,
+after D57, which lets a receipt rule land without stopping a start.
+
+- **What changed.** For a room held here, a preview must name the create
+  entry and the label held here; a different label is refused and named
+  as a change. Each batch of the answer counts only as a pull's does
+  (T4): if the admin machine is a member here before the batch or after
+  it (`Rooms.receiveJoin`), or the whole batch is refused. The same test
+  applies to a join that pinned the room in an earlier run, as soon as
+  this machine is a member of it here by any path; the test and the
+  write are one step under the rooms lock. Pages are kept in memory until
+  they make the admin machine a member, up to 1,024 entries or 4 MiB,
+  not counting entries held here already. Otherwise nothing is stored
+  and the join ends refused with `ReasonJoinServerNotMember`. A page over
+  256 entries or 3 MiB, or one marked `more` that holds nothing or does
+  not move past the last `next`, ends the join (`ReasonJoinBadPage`), so
+  a hostile admin machine cannot keep a resume polling at once forever. A join lifts the gate only
+  when its last page lists heads, all accepted here, and the admin
+  machine is a member here (and, since the second review, the heads are the log's heads). For a new room, the
+  create entry's label must equal the preview's, may not read as `local`
+  (`LabelKey`, so any case and surrounding blanks) and may hold no
+  character the display would escape (`DisplayHidden`: controls,
+  direction marks and invisible characters outside the places honest
+  writing needs them: a joiner inside an emoji, or a joiner or
+  non-joiner between letters of Arabic, Indic and other scripts that
+  need one). The rule runs at the
+  preview and again on the answer, so a join approved under an older
+  version is also refused. A join an older version recorded for a room
+  held here, or pinned without comparing the labels, under a label other
+  than the one held, is refused before any entry of it is applied, and
+  the room stays. The preview reads the room and its generation in one
+  step, so a pin cannot slip between them. A stored room labelled
+  `local` that is not this machine's local room is shown with its id
+  (`Rooms.ShownLabel`: `local#` and the first 8 hex of the id, as agents
+  see it) in room
+  info, quarantine, inbox labels, unread
+  counts, levels, request texts (both where they are shown and where an
+  approval compares them) and `ResolveRoom`, so `local` resolves only to
+  the local room. An invite for such a room is refused at the preview:
+  preview terms stay raw, and the room keeps working by pulls.
+- **Where the rule lives.** In the joiner, not in `core`: `core` cannot
+  use the display tables of `node`, and a create entry is parsed again
+  on every pull of a room already held, where a new rule would mark it
+  invalid. Only a join starts a room from another machine's create entry.
+  `PinRoom` does not run the rule; tests use it to place a room as an
+  older version stored it.
+- **No wire, entry or schema change.** Stored labels and entries are not
+  checked or changed. A database written by 0.2.0 to 0.2.3 opens, rooms
+  labelled `local` included, and 0.2.3 opens one this version wrote.
+  Older admin machines send the label they hold, which is the create
+  entry's, so honest joins are unchanged.
+- **Costs.** A machine that holds a room and does not know the admin
+  that invites it, whose own admission comes after 1,024 entries (or
+  4 MiB) of its log that this machine lacks, cannot join through it: it
+  pulls from a member first, or leaves and joins again. While pages
+  wait, they are held in memory and checked again together under the
+  rooms lock; the limits bound that work. A room an honest older machine labelled `local`, or
+  gave a label with such a character, cannot be joined by this version;
+  rooms cannot be renamed, so it must be made again under another label.
+- **Still open.** Lookalike letters (`lоcal` with a Cyrillic `о`) are not
+  detected. A room created here under the label `local` is only shown
+  with its id; refusing it at `room create` and a `local: true` flag in
+  results belong to the surface's wording (group G). The server's own
+  preview still sends the label it holds raw; the joiner checks it. A
+  pull's answer still writes a non-member's log entries before it checks
+  membership (`Exchange.apply`); the fix belongs with the pull code.
+  Joins between this version and
+  0.2.0 to 0.2.3 machines, and 0.2.3 reopening a database this version
+  wrote, are argued from the unchanged formats, not run in a test.
+- **After the second review.** Two reviewers found the whole join
+  unbounded, the caught-up gate open to stale heads and the shown label
+  unstable. Now a join ends refused with
+  `ReasonJoinTooLong` past 256 signed pages, 64 MiB of answers, 15
+  minutes of paging, or 2 minutes without a page that brings an entry
+  this machine lacks; earlier pages' entries stay. The bounds, the
+  cursor and the kept entries live on the `Joiner` in memory by invite
+  (`runs`) and carry from one run of `follow` to the next, so a run cut
+  short by an error or a 202 does not start them again; they go when
+  the join ends or the daemon restarts, with no schema change. Time
+  counts only while a run reads the answer. A log read again from the
+  start after a restart counts pages of held entries as moving on, up
+  to as many entries as the room holds here. Pages marked `more`
+  still pass `wait`, which a daemon's resume sets to zero. While the
+  admin machine is not a member here, kept entries are deduplicated and
+  given to `receiveJoin` again only once 64 more are kept, on the last
+  page, or before a limit ends the join; a page that brings nothing new
+  is not tried, so one entry per page no longer checks all of them again
+  under the rooms lock. The gate opens only if the last page's heads are
+  exactly the heads of the log here (`acceptedHeads`); a log here ahead
+  of the admin machine's waits for a pull, and the join is still signed.
+  `Rooms.ShownLabel` shows a stored room labelled `local` as its label,
+  `#` and the first 8 hex of its id, from that room alone, so a waiting
+  request's text no longer changes when another room arrives; if
+  another room's label reads as that form, agents see a longer one
+  (`ShownLabels`) and the request text still names the room by id. A
+  refused older join names such a room in that form. Still open: joins
+  resume one at a time, so a hostile admin machine can delay the others
+  by up to those bounds in all, again after each restart; an honest join of more than 64 MiB, or
+  slower than those times, is refused; `Exchange.apply` and `caughtUp`
+  in the pull code still take a non-member's entries and stale heads.
+
+**Revisit if** rooms gain a rename, a second built-in label is reserved,
+or a joiner reports a refused join of a room it holds.
+
+## D65. What an agent reads says who wrote it and which room it is (2026-11-25)
+
+A security review and a council of models found that an agent could not
+tell this machine's mail from another machine's. MCP entries left out the
+author's machine key and gave 8 hex characters to compare. `ask_human`
+said the answer comes "from human", while in a shared room any member
+machine can post as `human@<its id>`. Short ids are 32 bits, and nothing
+marked two machines that share one. A room created elsewhere could be
+labelled `local`, the room the `send` tool calls "this machine only"
+(F12, F55). An agent could register as `Human`, and `a2p2 mcp --harness
+human` as the person (F42). A member could take this machine's name or a
+colleague's (F44). Rooms shared between owners make each of these a way
+to pass another owner's text off as the local person's.
+
+- **What changed.** All of it is display, in `node.Surface`, the local
+  API and the shim; nothing stored or accepted changes.
+  - Every entry carries `Here`, set by comparing the author's full key
+    with this machine's. The local API writes it as `from_this_machine`
+    on entries and `unread` first lines; MCP results write it on every
+    message (inbox, thread, recent, skipped, peek), never left out.
+  - MCP results add `person` to a message labelled `human` in any case:
+    "yours: the person on this machine" only for exactly `human` written
+    here, "another machine's person, not yours" otherwise (or "not
+    yours: a look-alike label on this machine").
+  - `ask_human` returns `answer_from`, the person's id by this
+    machine's full key, so it stays the same when a machine with the
+    same short id joins or leaves. Its note says the answer is the reply
+    whose `parent` is the question, with `from_this_machine` true and
+    `person` yours. A `human` addressee is this machine's person by its
+    full key. `person` says where and under which label a message was
+    written: any program run by the same OS user can send as `human`
+    through the local API, so it does not prove who typed it.
+  - The surface compares the short ids of this machine, every member of
+    every room held and the authors and addressees about to be shown. A
+    key whose short id another has is written in full in `from`, `to`,
+    writers and status's `human`, and marked `id_shared` (entries,
+    members, peers, status, and in `peers` and `whoami`). An addressee
+    whose short id names two members is refused with a sentence that
+    says so. An agent id may name this machine by the full key, as
+    status gives `human` then. `unread` and `peek` lines, `room/list`
+    members, `fetch` authors and holders, writers and local agents in
+    `peers` carry the same marks; writer ids are never cut. One snapshot
+    of the memberships serves a whole `unread`. The ids a `send` returns
+    are drawn after it commits and never turn it into an error.
+  - Agent-facing labels (`node.ShownLabels`: entries, send and reply
+    results, levels, unread, and the shim's whoami and peers) show only
+    the local room as `local`. Another room whose label reads as `local`,
+    two rooms that read alike (`LabelKey`), or a label that reads as
+    another room's id get `#` and the first 8 hex of the id, then `#` and
+    the whole id, then the bare id, each step repeated until no two rooms
+    read alike. A room argument may be the id, the shown label (escaped
+    or not), the stored label or the stored label with `#` and 8 or more
+    hex of the id; a name that could mean two rooms is refused, so a
+    label shown before a room arrived never picks the new room. `local`
+    always names the local room.
+    `room create` refuses `local` in any case. Room lists and status keep
+    the stored label: the page and the CLI draw rooms that read alike
+    their own way (D58). MCP room references gain `local: true` for the
+    local room only.
+  - The `human` label is reserved in any case; only harness `human` with
+    label `human` registers it. `a2p2 mcp` refuses a harness named
+    `human` in any case.
+  - In `peers`, a machine name that another machine in the result also
+    uses, or that reads as another machine's id, is shown as
+    `<name>#<machine>`, this machine's included, and this machine is
+    marked `this_machine`. Names are compared as drawn, so a machine with
+    no name counts under its id.
+  - The person's questions exclude the person's own posts by the full key,
+    not by comparing the short id.
+- **No wire, entry, record or schema change.** Old machines see the same
+  bytes. A database written by 0.2.0 to 0.2.3 opens as before, and one
+  this version used opens in 0.2.3, since nothing new is stored. The
+  local API and MCP results gain fields; old clients ignore them. The
+  seven tool definitions are unchanged (3,991 bytes).
+- **Costs.** Each message in a tool result is about 26 bytes longer
+  (`"from_this_machine":false,`), and a `human` one about 50 more. Every
+  read that returns entries, and status, reads the room list once more
+  and walks every room's member list in memory. An agent registered as
+  `Human` before this version can no longer register under that label.
+  A room that reads like another is addressed by its shown label or id;
+  a name that could mean two rooms is refused where it used to pick one.
+- **Still open.**
+  - Refusing to admit a key whose short id matches this machine's or a
+    current member's belongs to the join and membership code (group D:
+    `node/joiner.go`, `node/invite.go`, and the request text of
+    `node/requests.go`): the admin's request should say the short id is
+    taken and the join should be refused there, applied only to new
+    requests. Until then such a machine is shown in full, not refused.
+    The approval side needs, in group D's files: the join, add and admin
+    requests show that the key's short id is already held by this
+    machine or a member, and the check runs again under the approval
+    lock before signing. It applies to new requests only (D57: a stored
+    entry still replays), with a test that a database holding such a
+    member still opens with the room working. No scheduler or pull
+    change is needed.
+  - The page and the CLI did not show `from_this_machine` or `person`
+    (groups E and F). Since the merge of this wave they mark, beside
+    the author, a message this machine wrote and one from `human` on
+    another machine as another machine's person, and print or draw
+    `edited` (D62). The default mailbox label is still the
+    directory's base name (F39). The CLI acts as the person by default
+    (F11, group F).
+  - Per-message room ids are not added to tool results: labels in one
+    result are unique, and its `rooms` list gives each label's id
+    (`TestInboxEntriesAreCompact` holds entries small).
+  - A name taken by a machine that is not yet recorded in any room this
+    machine holds is not detected. Lookalike letters are not detected.
+- **After the second review.** Two reviewers found surfaces without the
+  marks. Display only again; no wire, record or schema change.
+  - A replaced, withdrawn or expired notice names the message's author
+    as the message does (`Entry.From` from the message): any agent of
+    the author's machine may replace it (T2), and the notice used to
+    carry the editor's label while the thread carried the message's,
+    without naming the editor. Now a message shown with replacement text
+    and a replaced or withdrawn notice both carry `changed_by`, the
+    editor, when it is another agent of that machine; a replaced notice
+    says `edited`. The CLI prints `[changed by ...]`, the page draws it
+    as a mark and MCP gives `changed_by`. The delivery model's notice is
+    from the record's writer; the differential test compares it with
+    `changed_by`, or `from` when that is empty.
+  - `trace` gives `from`, `from_node`, `from_this_machine` and
+    `id_shared` for the author; each handler is written as entries
+    write it (the full key when shared) with `node`, `from_this_machine`
+    and `id_shared`; copies carry `id_shared`. The CLI prints the author
+    and handlers with their marks, and a shared copy's full key; the
+    page's trace dialog does the same.
+  - `unread` adds `from_this_machine`, always a list: the senders whose
+    author is this machine by the full key (since the third review the
+    senders are the writers of the text shown; see below). The hook marks each sender
+    ("this machine's person", "another machine's person, not your
+    user", "this machine") and says only the ones marked as this
+    machine's person were sent under the user's label here. It names at
+    most 5 senders; this machine's person is found in the whole list and
+    kept among the 5 named. A daemon before this version gives no list,
+    and the notice is as before.
+  - A question alert writes the asker's mark in brackets and `[edited]`.
+    `node.AuthorMark` holds the words the CLI and alerts use; the page
+    draws the same words, in their own elements, on messages, notices,
+    question cards (now with `edited`) and the trace dialog. The CLI and
+    the page mark an id written in full ("id written in full: short id
+    shared"). The page finds the person among local agents by the label
+    `human`, since status may write its id in full.
+  - Message text that copies the mark words cannot stand where a mark
+    is drawn: agent labels hold no space or bracket (checked on
+    receipt), CLI bodies are indented (a question alert's later body
+    lines deeper than its asker line), page bodies are their own
+    elements, MCP has fields, and the hook prints no text and keeps
+    only letters, digits and `._@-` of a label. Tests go from records
+    another machine stored to each surface's output
+    (`internal/surfacetest` sets up the two machines).
+- **After the third review.** `unread` built its senders and first
+  lines from the message's author only, so the hook said a local agent's
+  replacement of the person's message was sent under the user's label,
+  and MCP `peek` gave the agent's text under `human` with no mark.
+  Display only again; no wire, record or schema change.
+  - What a local agent can do: replace and withdraw are checked against
+    the machine's key only (`amendDecide`), and every label on a machine
+    signs with that key, so any agent there can replace or withdraw the
+    person's messages and the person an agent's. Labels carry no
+    authority, so this is not refused; the marks show who made the
+    change.
+  - `unread`'s `from` (and so the hook's senders and `from_this_machine`)
+    names the writer of what each entry shows (`Entry.Writer`: the
+    editor when `changed_by` is set). The hook's sentence about the
+    user's label is then about the person writing that text. First lines
+    carry `changed_by` and `edited`; MCP `peek` lines give them with
+    `changed_by_person`, which MCP messages give too. `person` stays
+    about `from`. The CLI, question alerts (`node.ChangedWords`) and the
+    page write a `human` editor's mark after `changed by`. The hook does
+    not say `edited`: it names senders, not messages.
+  - The person's questions still leave out the person's own messages by
+    the author's label: the person's inbox never holds them, so a local
+    agent's replacement of one is not offered as a question.
+  - Still open: any program of that OS user can send as `human`
+    anyway.
+- **After integration.** The request card of a send with files
+  (`node/surface_files.go`) wrote the asking agent, the addressees and a
+  parent's author with short ids and no marks. It now writes them as
+  entries do: in full when another known machine shares the short id,
+  each followed by its mark from the full key (`AuthorMark`), outside
+  the isolated id. The local API's request fields carry the same ids.
+
+**Revisit if** a later release adds a receipt rule for room labels or
+names, the short id is lengthened, or a harness shows that models still
+take another machine's `human` for their person.
+
+## D66. The CLI takes the person's identity only where a person is likely (2026-11-25)
+
+A security review found that the CLI acted as `human@<own id>` whenever
+`--as` was left out, and that `--as ""` counted as left out (F11). That
+id is the one other members and agents, other owners' included, are told
+is this machine's person. So any agent with a shell, or a Pi skill whose
+`$ME` was empty in a fresh shell, read as the person, which took the
+person's questions off their list, and could answer one as the person
+when a room message told it to. Rooms now span owners, so this is fixed
+now with the rest of the review. `room leave` (F38), the UI token in
+`status --json` (F41) and the advertised addresses (F51) are in the same
+pass.
+
+- **What changed.** An explicitly empty `--as` is a usage error, as is
+  `--as` with `--person`. Without either, in a shell whose environment
+  shows a harness's agent (`CLAUDECODE` and `AI_AGENT` seen in a Claude
+  Code 2.1.332 shell; `CODEX_THREAD_ID`, `CODEX_SANDBOX` and
+  `GEMINI_CLI` read from those binaries, and only simulated in the
+  tests), the CLI registers as that harness with the working directory,
+  so it gets `<harness>-<directory>`, the id the MCP shim gives the
+  agent when it runs in the same directory under the default label (not
+  when `A2P2_NAME` or `--name` sets another), and says so on stderr. Otherwise `send`, `ack`, `inbox` when it
+  marks entries seen and `inbox --level` act as the person only with
+  stdin a terminal. `a2p2 ui`, whose address carries the page's token
+  and so the person's identity on the page, is refused in an agent's
+  shell and away from a terminal. `--person` overrides each refusal.
+  Used away from a terminal or in an agent's shell, the CLI then sends
+  `unattended` with `register` (one optional field of the local API,
+  the command's name), which the daemon logs as a warning; at a
+  terminal outside an agent's shell nothing is logged.
+  Reads that mark nothing (`--peek`, `--thread`, `history`, `fetch`)
+  are unchanged. `room leave` asks at a terminal for a typed `yes`,
+  shows the room's id, isolates a right-to-left label as approvals do,
+  says when this machine is the room's only member or only admin, and
+  sends the daemon the id shown, never the label typed. A room set aside
+  is found by its id or label in `status`; a room it cannot look up is
+  not left. `status --json` prints the daemon's compact answer without
+  its `ui` member, the other members in order with their bytes. `net
+  on` says that every member and invite holder gets the advertised
+  addresses, and lists `config.json`'s `advertise` when it is set. The
+  demo's file step now sends and fetches as its agents.
+- **Costs.** A script that sent, acked or read as the person without a
+  terminal stops working until it adds `--person` or `--as`. A person
+  who runs `a2p2` inside an agent's shell (`!` in Claude Code) acts as
+  that agent unless they add `--person`. The stderr note adds a line to
+  every agent call. An older daemon still running after an upgrade
+  ignores `unattended`, so it logs nothing.
+- **Still open.** None of this is a boundary: a program running as the
+  user can pass `--person`, unset the variables, drive a terminal or
+  call the socket. The variable list covers the harnesses named; OpenCode,
+  Antigravity CLI, Hermes and Pi set nothing a2p2 knows, so their agents
+  are caught only by the terminal check (Pi's skill passes `--as`). The
+  Codex and Gemini variables were read from the binaries, not seen in a
+  run. The log line is a record for a person who looks, not an alert.
+  `net on` does not yet list the detected IPv4 addresses it will
+  advertise: that needs `daemon.FamiliesText` to name them
+  (daemon/netaddrs.go, another group's file). The UI token is still
+  returned by the socket's `status` to any caller; the one-time code of
+  F14 replaces it. `room leave` sends the id it showed, but if the room
+  is left and joined again under the same id while the prompt waits, the
+  new copy is the one deleted: refusing that needs the generation shown
+  to be checked under the leave lock in `internal/node`, outside this
+  change.
+
+**After the second review** (two reviewers of another model family):
+
+- `--person` away from a terminal was recorded only in the rotating
+  daemon log. The daemon now also counts it in memory, and `status`
+  carries `unattended` (`count`, `last`, `command`; one optional field
+  of the local API, absent when there were none and from older
+  daemons), which `status` and `doctor` print. It is needed now because
+  the log line alone is seldom read; it is not stored, so the count
+  starts again at each daemon start, and no schema changes.
+- A person who piped text in at a terminal (`echo hi | a2p2 send`) was
+  refused, since only stdin was checked. A person is now taken to be
+  there when stdin or stderr is a terminal; a harness's tool captures
+  both.
+- In a recognised agent's shell the CLI used the default label, another
+  mailbox than the agent's tools when their label was set. It now uses
+  `A2P2_NAME` when the shell has it, and its stderr line, printed at each
+  such call, says which id it used and that `--as` picks another. A label
+  set only in the harness's settings is not visible to the shell, so that
+  case still needs `--as`.
+- `a2p2 ui --json` printed the daemon's whole status, the address after
+  it, and opened the browser; `ui` now refuses `--json`. `--print` still
+  needs a terminal or `--person`, since whoever reads a printed address
+  can trade its code as a browser would: printing it is acting as the
+  person. Over SSH, `ssh -t` gives the command a terminal; with
+  `SSH_CONNECTION` set, `ui` opens nothing on the remote computer (whose
+  browser would use the code up) and names the port to forward. A
+  browser that cannot be started is now said, after the address.
+- Declined: `room leave`, `confirm`, `net`, `join` and `room files` do
+  not also refuse in a recognised agent's shell. They ask for a typed
+  answer at a terminal, which an agent's tool does not have, and a
+  person who runs them with `!` in Claude Code would be refused.
+- Still open: an agent whose harness sets none of the variables is
+  taken for the person, and acts as the person if its shell has a
+  terminal (SECURITY.md says so). Reads that mark nothing still read the
+  person's mail without a terminal.
+
+**Revisit if** a harness documents a variable for its agents' shells, an
+OS-separated approver arrives, or F14 changes how `a2p2 ui` gets its
+address.
+
+## D67. A one-time code opens the page, the daemon log is rotated, and a home under a shared directory is refused (2026-11-25)
+
+The security review of 2026-11-25 found that the page's address carried
+its token for the daemon's whole run (F14). `a2p2 ui` hands that address
+to `xdg-open`, and a browser it starts keeps it in its command line,
+which other users of a Linux machine can read; every OS user can reach a
+loopback port, so such a user could read every room and decide requests
+on the page. It also found that `daemon.log` was never rotated while
+another machine can make the daemon write to it (F19), that a daemon
+whose page port was taken said nothing while a tab left open from an
+earlier run would draw whatever the new listener answered (F47), and that
+the home was checked only at its own path (F53). Why now: rooms between
+owners and shared machines are the use the project is built for.
+
+What changed:
+
+- **Page sign-in.** No new local API call: `status`'s `ui` is the page's
+  address with a new one-time code (`#c=`) at each call, good once and
+  for 30 seconds. The page trades it with `POST /api/session` (a new
+  page route, exact `Origin`, JSON) for a session kept in the tab's
+  `sessionStorage`. Sessions are in memory for the daemon process, across
+  networking decisions, at most 32; untraded codes at most 64, oldest
+  first. Both are looked up by their SHA-256. A traded code is kept apart
+  from the untraded ones for as long as its session lives, so a code
+  traded twice ends the first trade's session and logs a warning however
+  late the second trade comes, and a race won by another user is seen,
+  not silent. Once that session has ended (by a second trade, or pushed
+  out by 32 newer ones) a further trade is refused as unknown. The
+  long-lived page token is gone. A 0.2.3 CLI opens the new address and
+  works. The new CLI with a 0.2.3 daemon still running gets the old
+  address: `a2p2 ui` does not open it and says to run `a2p2 stop`;
+  `--print` prints it with the same advice on standard error. The page's
+  server also has a 30 second limit on reading a whole request.
+- **Run check.** `/api/state` carries `run`, a random value the daemon
+  keeps with the presenting session and gives with it. Each session has
+  its own, not derived from the token (a listener on the port receives
+  the token), so a user who traded a code, their own or the person's
+  first, learns no run of the person's sessions. The page signs itself
+  out at a state with another run. After any state that fails (a 503 between runs, a refused
+  connection) it makes no call but the state until a state names its run
+  again, and before each POST and each download it reads a fresh state.
+  So what the person types, and a decision, reach another user's listener
+  only if it took the port between that check and the request, one
+  loopback round trip. The run is no secret from the daemon's own user,
+  and the page still shows what it drew before the daemon stopped.
+- **Port taken.** The fallback to another port is logged at Warn.
+- **Log.** The running daemon, which holds the home's lock, is the only
+  one that rotates `daemon.log`: at start and every 10 seconds, once it is
+  over 10 MiB, its last 10 MiB are copied to `daemon.log.1` and the file
+  is cut, since the daemon writes it through an inherited handle opened
+  for appending. If the copy fails (a full disk) the file is cut anyway.
+  Lines written during the copy may be lost.
+- **Home.** On Unix, `CheckHome` (the daemon and every client) refuses a
+  home under a directory owned by another user than this one or root,
+  or one others can write without the sticky bit, or one its group can
+  write unless the group is this user's primary group and named as the
+  user (a private group). The path is walked one name at a time without
+  following links; a link must be this user's or root's, and its target
+  is walked from the directory that holds it, so every directory a lookup
+  passes through is checked, in a chain of links too. The path is walked
+  as given, not cleaned, so a `..` after a link goes where the kernel
+  goes.
+
+What it costs: an address printed with `--print` must be opened within
+30 seconds (stderr says so); opening one link in two tabs signs the first
+out; a home under a group-writable directory of another group now fails
+to start, with the directory named, and on macOS that includes one
+writable by `staff`, the primary group of every account. A user of the
+same machine who reads the code and trades it before the browser does
+still gets a session until the browser's trade ends it, and keeps it if
+the browser never trades the code.
+
+Still open: a client does not check which user serves the socket it
+dials (getpeereid, `SO_PEERCRED`); that needs a dial hook in
+`internal/localapi`. The home is checked when a client connects, not at
+every dial. The MCP shim does not warn when the daemon runs another
+version than it does (F72); `status` carries the daemon's version, and
+only `a2p2 ui` checks it so far. On Windows the directories above the
+home are not checked.
+
+**After the second review** (two reviewers of another model family):
+
+- **Home.** A stock macOS account whose home sat under a directory its
+  `staff` group could write, or a Linux account whose group could not be
+  named (a static binary and a directory-service account), was refused,
+  so a database left by 0.2.3 there could not be reached. Now a
+  directory above the home is refused only where another user can
+  replace the home: another owner (root aside), others' write without
+  the sticky bit, or write by a group this user is not in. Write by a
+  group this user is in is accepted with a warning (the daemon's log at
+  start, `status`, and a `warn` line in `doctor`, which does not fail),
+  since a2p2 cannot tell whether anyone else is in the group; this
+  user's own private group gives none. A test starts a daemon on an
+  existing home with messages under such a directory, then refuses it
+  under a 0777 one and finds the same messages after the `chmod`.
+  After the third review, a directory counts only if another user can
+  reach it: under a directory of this user's or root's with no search
+  bit for others (`~/Documents` on macOS is 0700), a 0777 directory is
+  neither refused nor warned about, since 0.2.3 did not check the
+  directories above the home and a database there would otherwise be
+  cut off. Each class is followed on its own (a group's members by the
+  group bit of that group's directories, everyone else by the other
+  bit); ACLs are not read.
+- **Page.** A code is single-use already: a second trade is refused and
+  ends the first's session, and re-running `a2p2 ui` gives a new code
+  and leaves earlier sessions alone. On Linux the daemon now finds the
+  user of the client socket in `/proc/net/tcp` and refuses a trade from
+  another user before looking at the code, so that user can neither use
+  nor spend it. After the third review the socket is found by its whole
+  four-tuple (both addresses and both ports, IPv4, IPv6 and IPv4-mapped
+  IPv6 forms, in `tcp` and `tcp6`): matched by ports alone, another user
+  could hold a socket on 127.0.0.2 with the same two ports as the
+  person's browser (loopback is all of 127.0.0.0/8) and be taken for the
+  person, or make the person be taken for them. The user counts as known
+  only when exactly one connected socket (TIME_WAIT and LISTEN lines
+  aside) matches; a table that cannot be read (a missing `tcp6` aside),
+  a line that does not parse, or two matches make it unknown, and no
+  match is read again twice, since a table read in chunks while sockets
+  change can miss a line. Root is not refused, as it can read the home
+  anyway. **Unknown allows the trade**, as before the check existed: the
+  check must never lock the person out of their own page, and where it
+  cannot be made (macOS and Windows have no such table, and a sound
+  lookup there would need a new dependency or a privileged call; a
+  container or a cut-down `/proc` on Linux) there is nothing to tell an
+  honest browser from another user's. So the check is defence in depth
+  on Linux only. The race between accept and the read is harmless: the
+  client's socket lives while its connection carries the request, a
+  closed one cannot receive the session, and a four-tuple in use cannot
+  be taken by a second socket. `/proc/net` is the daemon's own
+  (`/proc/self/net`), which hidepid does not hide. The uid comes from the
+  kernel's table, never from the request. A session is not tied to one connection, since a
+  browser opens several. Every answer to a session carries its run in an
+  `A2P2-Run` header, so a listener that took the port between two states
+  can no longer have a history, thread or file drawn; the page signs out
+  and also forgets its session in the tab's storage. 1,024 untraded
+  codes are kept instead of 64, since every `status` call (the CLI's
+  connect, the MCP shim) makes one. With a daemon before 0.2.4 running,
+  `ui --print` no longer prints its long-lived token address either.
+- **Still open.** Where the user at the other end is not known (macOS,
+  Windows, and on Linux a `/proc` that cannot be read or a lookup with
+  no single match), a local user who can read another process's
+  arguments during the code's 30 seconds, and trades it before the
+  browser does, holds a session until the browser's trade ends it, or
+  keeps it if the browser never trades. On macOS and Windows another
+  user cannot normally read the arguments of the person's processes; on
+  Linux they can unless `/proc` is mounted with hidepid, and there the
+  check refuses them whenever the lookup succeeds, which is the normal
+  case. A duplicated tab
+  shares the session, as browsers copy the tab's storage. `status` still
+  makes a code for any caller of the socket.
+
+**Revisit if** a browser can be handed an address without a command
+line on Linux, or the local API gains a call that makes codes only for
+`a2p2 ui`.
+
+## D68. Port mapping checks what a host answering as the router says (2026-11-25)
+
+A security review (F61 to F66) showed that a device on the same network
+as a machine that ran `net on --map-port` could answer as the router. One
+datagram that holds nothing of the request made a2p2 skip PCP and forget
+the PCP mapping it may have made. A lifetime of 136 years stopped renewal
+for the run. A multicast external address was saved, and then no later
+start mapped or removed anything. A private address went first in every
+invite. A UPnP listener on port 65534 or 65535 could ask for port 0 and
+leave the same unusable record. Rooms now span owners, so a wrong first
+address in an invite reaches other owners' joiners.
+
+- **What changed.** NAT-PMP's version answer to a PCP request counts only
+  if no PCP answer with the nonce comes in any of the tries, and the PCP
+  request stays recorded, to be deleted later; a PCP deletion that gets
+  only the version answer in all its tries counts as done. A new PCP
+  request with no answer at all is sent one deletion, not waited for,
+  before its handle is let go; a renewal with no answer is not, since its handle is
+  the mapping held. A lifetime longer than asked counts as asked, in the
+  client and again in the keeper. A grant whose external address is not
+  a public IPv4 address (private, 100.64.0.0/10, loopback, link-local,
+  multicast, 0.0.0.0/8, 240.0.0.0/4, or any IPv6 address, since every
+  request is IPv4 and IPv6 can encode a private IPv4 address) is not
+  taken: status says why, and what it may have made is removed after the
+  attempt. The address given to the reacher and to invites is checked
+  again, is withdrawn when the keeper's run ends (listener stopped, `net
+  off`, stop) whether or not the router confirmed the removal, and is
+  withdrawn when a renewal is answered with an address that cannot be
+  used; the next renewal is then five minutes later, so a router that
+  answers at once is not asked every second. After any failed attempt the keeper removes what it holds but the
+  live mapping, so failures do not pile up. A keeper adds at most 8
+  mappings to remove (a record still loads with up to 16) and never sends
+  a request whose handle the record could not load, so the record always
+  loads. UPnP never asks for a port past 65535. Only a default gateway
+  with a private IPv4 address is asked for a mapping; one an earlier
+  version asked (a public or shared address on the local network) still
+  gets the deletions of what the record holds for it. The `net on
+  --map-port` text says a router may keep a mapping past 2 hours after a
+  crash and that its answers are not authenticated. The daemon's port
+  mapping code moved to `internal/daemon/mapport.go`, so removing the
+  feature is deleting that file and `internal/daemon/portmap`, and fixing
+  a few calls in `daemon.go`, `RunOpts` and `defaultGateway`.
+- **What did not change.** Port mapping was already off unless a person
+  asks for it: the CLI (`net on --map-port`) asks at a terminal each
+  time, and the daemon takes it only from the local API's net call. Any
+  later `net on` without it removes the mapping; a recorded decision
+  with it still applies after a restart (one an earlier version recorded
+  does not: see after the second review). No wire, record, schema or `portmap.json`
+  format change: a record written by 0.2.0 to 0.2.3 loads, and one written
+  now loads in them. Documentation addresses still pass the public check;
+  nobody holds them and the tests use them.
+- **Costs.** A router that speaks only NAT-PMP is now taken as one after
+  every PCP try (1.75 s) instead of at once, on each mapping, renewal and
+  PCP deletion. A router that does not answer PCP gets one more datagram,
+  a deletion, per attempt. A router that reports an IPv6 external
+  address gets no mapping. A router behind another NAT whose external address is private
+  or shared now gets no mapping where it got a useless one. A gateway with
+  a public or shared address is never asked. A failed attempt sends a
+  deletion for what it may have made.
+- **Still open.** A device that relays a public port it mapped for itself
+  to this machine's listener passes the dial-back, and the address is then
+  advertised to every member, and so does a wrong address that one
+  member falsely says it reached; detecting either needs the listener to tell
+  which inbound connection was a member's dial-back and from what source,
+  in `internal/peer` and `internal/node` (`dialback.go`, `reach.go`). The
+  unconfirmed mapped address still goes first in invites, because a room's
+  first invite comes before any member can confirm it; the owner chooses
+  between that, putting it last, and leaving it out until confirmed. A
+  forged NAT-PMP refusal still makes a2p2 forget a NAT-PMP mapping (it
+  lapses with the router's lease). A version answer forged on every try
+  of a PCP deletion, with every real answer lost, still lets a2p2 forget
+  a PCP mapping, and a PCP request with every reply and the deletion lost
+  is forgotten too; each lapses with the router's lease. Keeping them
+  instead would fill the keeper on a network without PCP. A permanent UPnP lease, asked for only
+  on error 725, is still unbounded after a crash. The SSDP answer's source
+  port is not checked (F65): the UPnP architecture does not fix it, and a
+  device that can spoof the gateway can do more by ARP.
+- **After the second review.** A `--map-port` decision an earlier
+  version recorded is no longer applied. The person agreed to it under
+  the earlier text and checks, so keeping it on without asking again was
+  the less safe choice. A decision taken now adds the role word
+  `map_port_v2` next to `map_port` (no schema change; 0.2.0 to 0.2.3 look
+  for `map_port` only, so they still map under it after a downgrade). One
+  without it maps nothing; what the earlier run left is still removed;
+  `status` gives the reason in the mapping line and `map_port_earlier`
+  in the network, and `net on` says what the new decision does with it.
+  A renewal answered with something that cannot be used, including a
+  grant of lifetime 0 or port 0 that the client refuses, withdraws the
+  address until a usable grant: a later renewal with no answer no longer
+  gives it out again. Once the lease held has run out, a router that
+  does not answer is asked every five minutes, not every second. A
+  loopback default gateway is not asked (the fake routers of tests are
+  allowed only through `RunOpts.Gateway`). What a run's end could not
+  remove is published, so it is logged at a stop and at `net off`, and
+  the next run shows what the record holds from its start, before its
+  first removal is tried; without a router, status names what may be
+  left. Still open: `a2p2 stop` prints nothing of a failed removal (the
+  daemon log and the next start's status do); a renewal that the router
+  refuses outright (a PCP result code) is still taken as no answer and
+  keeps the address given out until its lease ends.
+
+**Revisit if** the owner decides on invites or permanent leases, a
+dial-back can tell a relayed connection, or port mapping is removed.
+
+## D69. The team launcher keeps its state from other users and its options from manifest values (2026-11-25)
+
+A security review found three gaps in `scripts/team` (F74 to F76). The
+state directory was checked only by its owner, so another user who made
+a directory above it, such as `/tmp/a2p2-team-example` from the shipped
+example, could rename it and put their own `launch.json` in its place
+before the supervisor read it. The `allowed_tools` check let through
+`Read,Bash` and `Bash(sh:*)`, which give unscoped shell access. And
+`team status` and `team logs` printed C1 controls and bidi overrides.
+Rooms now span owners, so text a member copies from a peer reaches the
+operator's terminal.
+
+- **What changed.** `up` refuses a `state_dir` or `a2p2_home` on a path
+  where a directory, symlinks followed, belongs to another user than this
+  one or root, or lets group or others write without the sticky bit, or
+  where an entry in such a sticky directory belongs to another user.
+  Group write does not count when the group is this user's alone: its
+  primary group, with no other member and no other account whose
+  primary group it is, as Linux systems with the umask 002 give. It
+  refuses an existing state directory that group or others may write
+  instead of making it 0700, since files may have been planted. It makes
+  each missing directory 0700 whatever the umask, and checks the home's
+  path again after making it, before the first `a2p2` command. `status`,
+  `stop`, `logs`, `report` and the supervisor refuse such a state
+  directory too, before they read or write in it, and the reports and the
+  roster are written through a new file renamed into place, never through
+  a symlink. The supervisor runs from the copy of the manifest `up`
+  checked and saved as `manifest.json` in the state directory, not from
+  the manifest file. Each `allowed_tools` entry must be one tool with at
+  most one rule in parentheses, matched whole, with no `,`, no space
+  outside them and no control, format character or space other than
+  U+0020; a `Bash` rule whose command, compared without case, is a shell,
+  `env`, `xargs`, `sudo`, an interpreter, `find`, `make`, a wildcard or
+  quote, or `git` with no subcommand or a wildcard in its place, is
+  refused. A model, or a headless member's prompt, that starts with `-` is
+  refused; the prelude is read once, and each prompt is checked again with
+  the real ids as it is saved for launch. The kickoff and notices go to
+  `a2p2 send` after `--`. `team status` and `team logs` escape by the
+  daemon's rules, and `logs` escapes each log's path, reads logs line by
+  line and `-n` from the end. `team logs --raw` (a new option of the
+  launcher, not of a2p2) prints the bytes.
+- **The daemon's helper, ported.** The launcher is Python with no
+  dependency and cannot call `internal/node/escape.go` (D58). It holds a
+  port of `escapeText` with the same tables and text rules, as `app.js`
+  does: a test checks that its tables equal the Go ones and that it gives
+  `EscapeDisplay` and `EscapeDisplayText` output for every row of
+  `internal/node/testdata/escape_cases.json`. Status shows one line, so it
+  turns line breaks and tabs into spaces first; logs keep lines.
+- **Costs.** A state directory or home under a group-writable directory
+  that worked before is refused when another user is in the group or has
+  it as primary group, as `staff` on macOS; the error says to run
+  `chmod g-w`. Accounts that `pwd` cannot list, as some directory
+  services give, are not seen when the group is judged private.
+  An existing state directory from an earlier run that is now refused can
+  no longer be read or stopped with `team`; its supervisor, if alive,
+  still ends with its members. An honest `Bash(git:*)`, `Bash(git *)` or
+  `Bash(make:*)` is refused; name the subcommands.
+- **Still open.** Each member's prompt is an argument on its harness's
+  command line, so `ps` shows it to every local user. Passing it on
+  stdin (`claude -p` and `codex exec -` read it) changes how each harness
+  is started and needs a real run of each first (AGENTS.md). Without
+  `-m` the launcher reads `./team.json`, and `status` and `report` run
+  the `a2p2` it names; the README now says a manifest is code, and
+  dropping the default is the owner's choice. The `allowed_tools` deny
+  list cannot know every program that runs another. A rule such as
+  `Bash(go test:*)` runs code a member that may edit files can write; the
+  README says so, and a key to consent to such rules was not added, since
+  naming the rule in the manifest already is that choice. How Claude Code
+  parses `--allowedTools` is checked against its documentation, not a
+  real run.
+- **After the second review.** Two reviewers found that the launcher
+  still used short ids as identity, and that `team stop` could report
+  what had not happened. The watcher, `status` and the report now take a
+  message as a member's, the lead's, the watcher's or the person's only
+  when its `from_node` is this machine's full key (saved in the roster as
+  `node`; a roster without it gets it from status) and the label before
+  `@` matches; a question to the person counts only when an addressee is
+  exactly `human@<full key>` or the `human` id status gives. Readiness
+  matches status's agents by label, since status lists this machine's
+  agents only. The lead's, the watcher's and the members' ids in the
+  kickoff and the roster use the id status gives, so they are written in
+  full when the short id is shared. `team stop` sends nothing when no
+  member it asks about is running and says so; it exits non-zero when no
+  supervisor answers in three seconds, then changes nothing on disk, and
+  when a member it asked about is still running after ten seconds.
+  `dangerous` is refused in a tool's name only, not in its rule. A
+  `model` with a leading space is not changed: it is always the value
+  after `--model` or `-m`, never read as an option. Still open: with a
+  0.2.3 or earlier `a2p2`, status names the person by the short id, so a
+  question to a twin machine's person still counts. A run whose
+  supervisor died stays unended in the roster; `status` says the
+  supervisor is not running.
+
+**Revisit if** a harness is started with its prompt on stdin, Claude Code
+changes how it splits `--allowedTools` or matches a rule, the daemon's
+escape rules change (the parity test fails), or the launcher gains a way
+to call the daemon's escape.

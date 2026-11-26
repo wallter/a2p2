@@ -28,8 +28,13 @@ type Network struct {
 	Listen string // the address listened on, when on
 	// MapPort: with on, the router is asked to forward the listening port
 	// (a2p2 net on --map-port; DESIGN 11). Recorded in the decision's role
-	// as "map_port".
+	// as "map_port", with "map_port_v2" from this version on.
 	MapPort bool
+	// MapPortEarlier: a decision with map_port that an earlier version
+	// recorded (its role lacks "map_port_v2"). It is not applied: that
+	// person agreed under the earlier text and code (D68), so nothing is
+	// mapped until a person decides again; status and net on say so.
+	MapPortEarlier bool
 	// IPv4Only: with on, a decision recorded before IPv6 was part of one
 	// (its role lacks "ipv6"). Its listener and addresses stay IPv4 until
 	// the person decides again (DESIGN 11).
@@ -49,7 +54,9 @@ func LoadNetwork(ctx context.Context, st *store.Store) (Network, error) {
 	role := strings.Fields(q.Role)
 	n := Network{State: q.Action, Listen: q.Name, Request: q.ID}
 	if n.State == NetworkOn {
-		n.MapPort = slices.Contains(role, roleMapPort)
+		mapPort := slices.Contains(role, roleMapPort)
+		n.MapPort = mapPort && slices.Contains(role, roleMapPortV2)
+		n.MapPortEarlier = mapPort && !n.MapPort
 		n.IPv4Only = !slices.Contains(role, roleIPv6)
 	}
 	if n.State != NetworkOutbound && n.State != NetworkOn {
@@ -59,20 +66,30 @@ func LoadNetwork(ctx context.Context, st *store.Store) (Network, error) {
 }
 
 // The words of a networking decision's role: roleMapPort asks for port
-// mapping; roleIPv6 marks a decision taken knowing that a wildcard
+// mapping, and roleMapPortV2 marks it as decided under this version's
+// text and checks (an earlier version wrote roleMapPort alone; it reads
+// the new word as nothing); roleIPv6 marks a decision taken knowing that a wildcard
 // listener also takes IPv6 (every on decision from this version).
 const (
-	roleMapPort = "map_port"
-	roleIPv6    = "ipv6"
+	roleMapPort   = "map_port"
+	roleMapPortV2 = "map_port_v2"
+	roleIPv6      = "ipv6"
 )
 
 // MapPortText is what a person is told before deciding on port mapping.
 const MapPortText = "This machine will also ask the router of this network to forward the listening port to it " +
 	"(PCP, NAT-PMP or UPnP), which opens that port on the router to the whole internet. Anyone can then connect; " +
 	"only room members get anything from it, since every connection must prove a member's key first. The mapping " +
-	"is renewed while networking is on and removed by a2p2 net off or a2p2 stop; after a crash it lapses " +
-	"with its lifetime (2 hours), unless the router grants only permanent mappings, which the next start " +
-	"removes."
+	"is renewed while networking is on and removed by a2p2 net off or a2p2 stop. After a crash it stays until " +
+	"the next start removes it or the router lets it lapse: a2p2 asks for 2 hours, but a router may keep it " +
+	"longer, and one that grants only permanent mappings keeps it until it is removed. The router's answers " +
+	"are not authenticated, so another device on this network can answer in its place."
+
+// MapPortEarlierText is what status and net on say of a decision with
+// port mapping that an earlier version recorded (Network.MapPortEarlier).
+const MapPortEarlierText = "not mapped: port mapping was turned on by an earlier version of a2p2, and this " +
+	"version asks again before it maps, since the router's answers are checked differently now; " +
+	"run a2p2 net on --map-port at a terminal to turn it on again, or a2p2 net on to keep it off"
 
 // NetworkText says exactly what choosing n does, for the person deciding.
 func NetworkText(n Network) string {
@@ -131,7 +148,7 @@ func (s *Surface) SetNetwork(ctx context.Context, n Network) (Network, error) {
 	if n.State == NetworkOn {
 		role := []string{roleIPv6}
 		if n.MapPort {
-			role = append(role, roleMapPort)
+			role = append(role, roleMapPort, roleMapPortV2)
 		}
 		q.Role = strings.Join(role, " ")
 	}

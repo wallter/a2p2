@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/wallter/a2p2/internal/core"
 	"github.com/wallter/a2p2/internal/localapi"
 	"github.com/wallter/a2p2/internal/node"
 	"github.com/wallter/a2p2/internal/store"
@@ -24,6 +25,9 @@ import (
 // Run serves MCP on stdin/stdout until the harness closes the stream.
 // stdout belongs to the protocol; everything else goes to stderr via slog.
 func Run(ctx context.Context, c *localapi.Client, harness, label, cwd, version string) error {
+	if err := personHarness(harness); err != nil {
+		return err
+	}
 	// Register before serving, not at the first tool call: the agent should
 	// be visible to peers and the page, and its hook able to find its
 	// mailbox, as soon as the harness starts. Best effort; tool calls
@@ -38,6 +42,38 @@ type shim struct {
 	harness, label, cwd string
 	mu                  sync.Mutex
 	id                  string
+	// The local room's id and this machine's key, once status gave them;
+	// selfMu lets one call fetch them while others wait.
+	selfMu      sync.Mutex
+	local, node string
+}
+
+// personHarness refuses the harness name of the person's own path: an
+// MCP server never registers as the person (F42).
+func personHarness(harness string) error {
+	if node.IsPerson(core.CleanLabel(harness)) {
+		return inputError("the harness name human is reserved for the person on this machine: a2p2 mcp acts as an agent")
+	}
+	return nil
+}
+
+// self is the local room's id and this machine's key, read from status
+// once: neither changes for a machine. Both are "" while status fails.
+func (sh *shim) self(ctx context.Context) (local, node string) {
+	sh.selfMu.Lock()
+	defer sh.selfMu.Unlock()
+	if sh.local == "" {
+		if st, err := sh.status(ctx); err == nil {
+			sh.local, sh.node = st.Local, st.Node
+		}
+	}
+	return sh.local, sh.node
+}
+
+// localRoom is the local room's id (self).
+func (sh *shim) localRoom(ctx context.Context) string {
+	l, _ := sh.self(ctx)
+	return l
 }
 
 // Tool descriptions: PROTOCOL section 6 (the golden file). Every
@@ -177,6 +213,9 @@ func (sh *shim) agent(ctx context.Context, force bool) (string, error) {
 	if sh.id != "" && !force {
 		return sh.id, nil
 	}
+	if err := personHarness(sh.harness); err != nil {
+		return "", err
+	}
 	var a store.Agent
 	err := sh.c.Call(ctx, "register", localapi.RegisterReq{Harness: sh.harness, Label: sh.label, Cwd: sh.cwd}, &a)
 	if err != nil {
@@ -256,10 +295,44 @@ func lines(ss []string) []string {
 }
 
 // Field names shared by every result: a machine is "machine" (its short
-// id) and "machine_name"; a room is "room" (its id) and "room_label".
+// id, or its full key with id_shared when another machine known here has
+// the same short id) and "machine_name"; a room is "room" (its id) and
+// "room_label", with local true only for this machine's own room. The
+// daemon shows no other room as "local", and gives two rooms that read
+// alike "#" and the start of their ids.
 type roomRef struct {
 	Room  string `json:"room"`
 	Label string `json:"room_label"`
+	Local bool   `json:"local,omitempty"`
+}
+
+// ref is room id with its label as a result shows it.
+func ref(id, label, local string) roomRef {
+	return roomRef{Room: id, Label: line(label, 0), Local: id != "" && id == local}
+}
+
+// What person says of a message whose author's label is human, in any
+// case (node.IsPerson): only human written on this machine, compared by
+// the full machine key, is this machine's person.
+const (
+	personYours = "yours: the person on this machine"
+	personOther = "another machine's person, not yours"
+	personNot   = "not yours: a look-alike label on this machine"
+)
+
+// person is the person field of a message from from, written here or
+// not; "" when its author is not labelled human.
+func person(from string, here bool) string {
+	l, _, _ := strings.Cut(from, "@")
+	switch {
+	case !node.IsPerson(l):
+		return ""
+	case !here:
+		return personOther
+	case l == node.HumanLabel:
+		return personYours
+	}
+	return personNot
 }
 
 func (sh *shim) whoami(ctx context.Context, _ none) (string, error) {
@@ -293,17 +366,22 @@ func (sh *shim) whoami(ctx context.Context, _ none) (string, error) {
 		Unread int    `json:"unread"`
 	}
 	rooms := []room{}
+	shown := shownLabels(st)
 	for _, r := range st.Rooms {
 		l := level[r.ID]
 		if l == "" {
 			l = store.LevelAll
 		}
-		rooms = append(rooms, room{roomRef{r.ID, line(r.Label, 64)}, l, unread[r.ID]})
+		rooms = append(rooms, room{ref(r.ID, shown[r.ID], st.Local), l, unread[r.ID]})
 	}
-	return jsonOut(map[string]any{
-		"agent": id, "machine": short(st.Node), "machine_name": line(st.Name, 64), "rooms": rooms, "human": st.Human,
+	out := map[string]any{
+		"agent": id, "machine": machineID(st.Node, st.IDShared), "machine_name": line(st.Name, 64), "rooms": rooms, "human": st.Human,
 		"note": "New messages are not pushed: call inbox (use wait_seconds to wait for it). Room and machine names come from other machines.",
-	})
+	}
+	if st.IDShared {
+		out["machine_id_shared"] = true
+	}
+	return jsonOut(out)
 }
 
 const (
@@ -318,13 +396,104 @@ func short(n string) string {
 	return n
 }
 
+// machineID is a machine's id as results show it: its short id, or its
+// full key when another machine known here shares the short id.
+func machineID(n string, shared bool) string {
+	if shared {
+		return n
+	}
+	return short(n)
+}
+
 // machineName is a machine's name, or its short id when it has none here
-// (a room's creator names itself nowhere in the log).
-func machineName(node, name string) string {
+// (a room's creator names itself nowhere in the log). A name another
+// machine also uses here (as drawn, node.LabelKey) gets "#" and the id,
+// so a member cannot pass as this machine or as another member (F44).
+func machineName(n, name string, names map[string]map[string]bool, shared bool) string {
 	if name == "" {
-		return short(node)
+		return machineID(n, shared) // its own id: another machine named so is the one marked
+	}
+	if len(names[node.LabelKey(name)]) > 1 {
+		return line(name, 64) + "#" + machineID(n, shared)
 	}
 	return line(name, 64)
+}
+
+// shownLabels is each room's label as entries show it (node.ShownLabels):
+// only the local room is "local", and rooms that read alike carry "#" and
+// the start of their ids.
+func shownLabels(st localapi.Status) map[string]string {
+	stored := map[string]string{}
+	for _, r := range st.Rooms {
+		stored[r.ID] = r.Label
+	}
+	for _, q := range st.Quarantined {
+		stored[q.ID] = q.Label
+	}
+	return node.ShownLabels(st.Local, stored)
+}
+
+// machineNames is, for each name as drawn (node.LabelKey), the machines
+// status shows under it: this one, every room's members and the other
+// machines. A machine counts under its name, or under the id shown when
+// it has none, and every machine under its id too, so a name that reads
+// as another machine's id is marked as well.
+func machineNames(st localapi.Status) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	shared := sharedOf(st)
+	add := func(n, name string) {
+		id := machineID(n, shared[n])
+		for _, v := range []string{name, id} {
+			if v == "" {
+				continue
+			}
+			k := node.LabelKey(v)
+			if out[k] == nil {
+				out[k] = map[string]bool{}
+			}
+			out[k][n] = true
+		}
+	}
+	add(st.Node, st.Name)
+	for _, r := range st.Rooms {
+		for _, m := range r.Members {
+			add(m.Node, m.Name)
+		}
+	}
+	for _, p := range st.Peers {
+		add(p.Node, p.Name)
+	}
+	return out
+}
+
+// sharedOf is the machine keys status marks id_shared.
+func sharedOf(st localapi.Status) map[string]bool {
+	out := map[string]bool{}
+	if st.IDShared {
+		out[st.Node] = true
+	}
+	for _, r := range st.Rooms {
+		for _, m := range r.Members {
+			if m.IDShared {
+				out[m.Node] = true
+			}
+		}
+	}
+	for _, p := range st.Peers {
+		if p.IDShared {
+			out[p.Node] = true
+		}
+	}
+	return out
+}
+
+// localID is a local agent's id as entries show it: with this machine's
+// full key when another machine shares its short id.
+func localID(id string, st localapi.Status) string {
+	if l, _, ok := strings.Cut(id, "@"); ok && st.IDShared {
+		return l + "@" + st.Node
+	}
+	return id
 }
 
 func (sh *shim) peers(ctx context.Context, _ none) (string, error) {
@@ -336,10 +505,13 @@ func (sh *shim) peers(ctx context.Context, _ none) (string, error) {
 		return "", err
 	}
 	type machine struct {
-		Machine string `json:"machine"`
-		Name    string `json:"machine_name"`
-		Admin   bool   `json:"admin,omitempty"`
+		Machine  string `json:"machine"`
+		Name     string `json:"machine_name"`
+		Admin    bool   `json:"admin,omitempty"`
+		Here     bool   `json:"this_machine,omitempty"`
+		IDShared bool   `json:"id_shared,omitempty"`
 	}
+	names, shown := machineNames(st), shownLabels(st)
 	type writer struct {
 		Agent    string `json:"agent"`
 		LastSeen string `json:"last_seen"`
@@ -353,20 +525,21 @@ func (sh *shim) peers(ctx context.Context, _ none) (string, error) {
 	}
 	rooms := []room{}
 	for _, r := range st.Rooms {
-		x := room{roomRef: roomRef{r.ID, line(r.Label, 64)}, Machines: []machine{}, Agents: []writer{},
+		x := room{roomRef: ref(r.ID, shown[r.ID], st.Local), Machines: []machine{}, Agents: []writer{},
 			Pending: r.Waiting + len(r.Pending)}
 		for i, m := range r.Members {
 			if i >= maxListed {
 				x.Omitted = len(r.Members) - i
 				break
 			}
-			x.Machines = append(x.Machines, machine{short(m.Node), machineName(m.Node, m.Name), m.Admin})
+			x.Machines = append(x.Machines, machine{machineID(m.Node, m.IDShared), machineName(m.Node, m.Name, names, m.IDShared),
+				m.Admin, m.Node == st.Node, m.IDShared})
 		}
 		for i, w := range r.Agents {
 			if i >= maxListed {
 				break
 			}
-			x.Agents = append(x.Agents, writer{line(w.Agent, 80), w.LastSeen})
+			x.Agents = append(x.Agents, writer{line(w.Agent, 0), w.LastSeen}) // never cut: an id may be a full key
 		}
 		rooms = append(rooms, x)
 	}
@@ -383,12 +556,13 @@ func (sh *shim) peers(ctx context.Context, _ none) (string, error) {
 	}
 	local := []agent{}
 	for _, a := range agents {
-		local = append(local, agent{a.ID, clip(a.Harness, 64)})
+		local = append(local, agent{localID(a.ID, st), clip(a.Harness, 64)})
 	}
 	type peer struct {
-		Machine string `json:"machine"`
-		Name    string `json:"machine_name"`
-		State   string `json:"state"`
+		Machine  string `json:"machine"`
+		Name     string `json:"machine_name"`
+		State    string `json:"state"`
+		IDShared bool   `json:"id_shared,omitempty"`
 	}
 	others := []peer{}
 	for i, p := range st.Peers {
@@ -401,9 +575,9 @@ func (sh *shim) peers(ctx context.Context, _ none) (string, error) {
 		} else if p.LastHeard != "" {
 			state = "last heard " + p.LastHeard
 		}
-		others = append(others, peer{short(p.Node), machineName(p.Node, p.Name), state})
+		others = append(others, peer{machineID(p.Node, p.IDShared), machineName(p.Node, p.Name, names, p.IDShared), state, p.IDShared})
 	}
-	return jsonOut(map[string]any{"machine": short(st.Node), "machine_name": line(st.Name, 64), "rooms": rooms,
+	return jsonOut(map[string]any{"machine": machineID(st.Node, st.IDShared), "machine_name": machineName(st.Node, st.Name, names, st.IDShared), "rooms": rooms,
 		"local_agents": local, "local_agents_omitted": omitted, "other_machines": others})
 }
 
@@ -437,12 +611,12 @@ type sent struct {
 	Note          string   `json:"note"`
 }
 
-func sentOf(m localapi.SendResp) sent {
+func sentOf(m localapi.SendResp, local string) sent {
 	to := m.To
 	if len(to) == 0 {
 		to = []string{"everyone"}
 	}
-	return sent{ID: m.ID, roomRef: roomRef{m.Room, line(m.RoomLabel, 64)}, To: lines(to), Note: "Other machines fetch it."}
+	return sent{ID: m.ID, roomRef: ref(m.Room, m.RoomLabel, local), To: lines(to), Note: "Other machines fetch it."}
 }
 
 func (sh *shim) send(ctx context.Context, in sendIn) (string, error) {
@@ -458,7 +632,7 @@ func (sh *shim) send(ctx context.Context, in sendIn) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out := sentOf(m)
+	out := sentOf(m, sh.localRoom(ctx))
 	switch {
 	case in.Replaces != "" && strings.TrimSpace(in.Text) == "":
 		out.Withdrew, out.To = in.Replaces, nil
@@ -525,13 +699,20 @@ func (sh *shim) fetch(ctx context.Context, room, sha string, wait int) (string, 
 		Holders []holder `json:"holders,omitempty"`
 		Note    string   `json:"note,omitempty"`
 	}
+	var shared map[string]bool
+	if st, err := sh.status(ctx); err == nil {
+		shared = sharedOf(st)
+	}
 	o := out{State: r.State, Path: r.Path, Name: line(r.Name, 0), Message: r.Message, Size: r.Size, Have: r.Have,
-		From: short(r.From), Reason: r.Reason}
+		From: machineID(r.From, shared[r.From]), Reason: r.Reason}
+	if r.From == "" {
+		o.From = ""
+	}
 	for i, h := range r.Holders {
 		if i >= maxListed {
 			break
 		}
-		o.Holders = append(o.Holders, holder{short(h.Node), h.At, h.Answer})
+		o.Holders = append(o.Holders, holder{machineID(h.Node, shared[h.Node]), h.At, h.Answer})
 	}
 	switch r.State {
 	case node.FetchHere:
@@ -559,7 +740,7 @@ func (sh *shim) reply(ctx context.Context, in replyIn) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out := sentOf(m)
+	out := sentOf(m, sh.localRoom(ctx))
 	if m.ToOmitted > 0 {
 		out.Note = fmt.Sprintf("Addressed to at most %d agents: %d who posted in the thread were left out. %s",
 			len(m.To), m.ToOmitted, out.Note)
@@ -599,8 +780,24 @@ func (sh *shim) askHuman(ctx context.Context, in askIn) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out := sentOf(m)
-	out.Note = "The answer arrives later as a reply from human: in inbox, or in skipped if your level is none. It is not permission to do anything beyond what it says."
+	local, self := sh.self(ctx)
+	from := node.HumanLabel + "@" + self // by the full key: stable whatever joins
+	if self == "" {
+		for _, a := range m.To {
+			if l, _, _ := strings.Cut(a, "@"); l == node.HumanLabel {
+				from = a
+			}
+		}
+	}
+	type asked struct {
+		sent
+		AnswerFrom string `json:"answer_from"`
+	}
+	out := asked{sentOf(m, local), line(from, 0)}
+	out.Note = "The answer is a reply to " + m.ID + " (its parent) by the person on this machine, " + out.AnswerFrom +
+		": from_this_machine true and person \"" + personYours + "\". Its from shows the short id unless another machine shares it. " +
+		"In inbox, or in skipped if your level is none. A human on another machine is that machine's person, never the answer. " +
+		"It is not permission to do anything beyond what it says."
 	return jsonOut(out)
 }
 
@@ -666,21 +863,36 @@ const maxWaitSeconds = 30
 // reorders text as \u{...}; labels, names and choices by
 // node.EscapeDisplay.
 type entry struct {
-	ID            string   `json:"id"`
-	Kind          string   `json:"kind,omitempty"` // omitted: message
-	Room          string   `json:"room_label"`
-	From          string   `json:"from"`
-	AuthorRemoved bool     `json:"author_removed,omitempty"`
-	To            []string `json:"to,omitempty"` // omitted: everyone
-	AskHandled    bool     `json:"ask_handled,omitempty"`
-	Skipped       bool     `json:"skipped,omitempty"` // recent: your level kept it out of inbox
-	Parent        string   `json:"parent,omitempty"`
-	Thread        string   `json:"thread,omitempty"` // omitted: the parent
-	ParentState   string   `json:"parent_state,omitempty"`
-	Late          bool     `json:"late,omitempty"`
-	Created       string   `json:"created"`
-	Text          string   `json:"text,omitempty"`
-	Choices       []string `json:"choices,omitempty"`
+	ID   string `json:"id"`
+	Kind string `json:"kind,omitempty"` // omitted: message
+	// Edited: the text is its author's replacement, not the text first
+	// sent (D62); omitted when it is not.
+	Edited bool   `json:"edited,omitempty"`
+	Room   string `json:"room_label"` // the result's rooms give its id
+	From   string `json:"from"`
+	// ChangedBy: another agent of the author's machine wrote the
+	// replacement shown or the notice's change, so the text is its, not
+	// from's; omitted otherwise. ChangedByPerson is person for it.
+	ChangedBy       string `json:"changed_by,omitempty"`
+	ChangedByPerson string `json:"changed_by_person,omitempty"`
+	// FromThisMachine: the author is this machine, by its full key; never
+	// omitted. Person, when the author (from) is labelled human: whether
+	// that is this machine's person. IDShared: an id here is written in
+	// full, since another machine known here has the same short id.
+	FromThisMachine bool     `json:"from_this_machine"`
+	Person          string   `json:"person,omitempty"`
+	IDShared        bool     `json:"id_shared,omitempty"`
+	AuthorRemoved   bool     `json:"author_removed,omitempty"`
+	To              []string `json:"to,omitempty"` // omitted: everyone
+	AskHandled      bool     `json:"ask_handled,omitempty"`
+	Skipped         bool     `json:"skipped,omitempty"` // recent: your level kept it out of inbox
+	Parent          string   `json:"parent,omitempty"`
+	Thread          string   `json:"thread,omitempty"` // omitted: the parent
+	ParentState     string   `json:"parent_state,omitempty"`
+	Late            bool     `json:"late,omitempty"`
+	Created         string   `json:"created"`
+	Text            string   `json:"text,omitempty"`
+	Choices         []string `json:"choices,omitempty"`
 	// Files of the version shown; fetch one with inbox fetch.
 	Files        []localapi.EntryFile `json:"files,omitempty"`
 	FilesPending bool                 `json:"files_pending,omitempty"`
@@ -718,7 +930,15 @@ type peekLine struct {
 	ID   string `json:"id"`
 	Room string `json:"room_label"`
 	From string `json:"from"`
-	Line string `json:"line"`
+	// Edited, ChangedBy and ChangedByPerson as in entry: the line is
+	// changed_by's text when it is set.
+	Edited          bool   `json:"edited,omitempty"`
+	ChangedBy       string `json:"changed_by,omitempty"`
+	ChangedByPerson string `json:"changed_by_person,omitempty"`
+	FromThisMachine bool   `json:"from_this_machine"`
+	Person          string `json:"person,omitempty"`
+	IDShared        bool   `json:"id_shared,omitempty"`
+	Line            string `json:"line"`
 }
 
 // inboxOut is the result of inbox: messages is always present, and rooms
@@ -737,11 +957,14 @@ type inboxOut struct {
 	Levels []levelOut `json:"levels,omitempty"`
 }
 
-func view(es []localapi.Entry) inboxOut {
+// view renders entries; local is the local room's id ("" if unknown).
+func view(es []localapi.Entry, local string) inboxOut {
 	out := inboxOut{Notice: notice, Messages: []entry{}}
 	seen := map[string]bool{}
 	for _, e := range es {
-		x := entry{ID: e.ID, Kind: e.Kind, Room: line(e.RoomLabel, 64), From: line(e.From, 0), AuthorRemoved: e.AuthorRemoved,
+		x := entry{ID: e.ID, Kind: e.Kind, Edited: e.Edited, Room: line(e.RoomLabel, 0), From: line(e.From, 0), ChangedBy: line(e.ChangedBy, 0),
+			ChangedByPerson: person(e.ChangedBy, e.FromThisMachine),
+			FromThisMachine: e.FromThisMachine, Person: person(e.From, e.FromThisMachine), IDShared: e.IDShared, AuthorRemoved: e.AuthorRemoved,
 			To: lines(e.To), AskHandled: e.AskHandled, Skipped: e.Skipped, Parent: e.Parent, Thread: e.Thread, Late: e.Late, Created: e.Created,
 			Text: node.EscapeDisplayText(e.Text), Choices: lines(e.Choices),
 			Files: e.Files, FilesPending: e.FilesPending, FilesNote: e.FilesNote, Request: e.Request, State: e.State, Reason: line(e.Reason, 0)}
@@ -760,7 +983,7 @@ func view(es []localapi.Entry) inboxOut {
 		out.Messages = append(out.Messages, x)
 		if !seen[e.Room] {
 			seen[e.Room] = true
-			out.Rooms = append(out.Rooms, roomRef{e.Room, x.Room})
+			out.Rooms = append(out.Rooms, roomRef{e.Room, x.Room, e.Room != "" && e.Room == local})
 		}
 	}
 	return out
@@ -801,7 +1024,7 @@ func (sh *shim) inbox(ctx context.Context, in inboxIn) (string, error) {
 			return "", err
 		}
 		for _, l := range ls.Levels {
-			levels = append(levels, levelOut{roomRef{l.Room, line(l.RoomLabel, 64)}, l.Level})
+			levels = append(levels, levelOut{ref(l.Room, l.RoomLabel, sh.localRoom(ctx)), l.Level})
 		}
 	}
 	if in.Peek {
@@ -821,7 +1044,7 @@ func (sh *shim) inbox(ctx context.Context, in inboxIn) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		out := view(es.Entries)
+		out := view(es.Entries, sh.localRoom(ctx))
 		out.Levels = levels
 		return jsonOut(out)
 	}
@@ -834,7 +1057,7 @@ func (sh *shim) inbox(ctx context.Context, in inboxIn) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out := view(res.Entries)
+	out := view(res.Entries, sh.localRoom(ctx))
 	out.Levels = levels
 	out.Fetching = len(res.Waiting)
 	out.Waited = in.WaitSeconds > 0 && len(res.Entries) == 0
@@ -870,13 +1093,25 @@ func (sh *shim) peek(ctx context.Context, room string, levels []levelOut) (strin
 	// lines, so a quiet room's lines are not crowded out by another's.
 	out := peekOut{Notice: notice, Rooms: []peekRoom{}, First: []peekLine{}, Levels: levels}
 	labels := map[string]string{}
+	local := sh.localRoom(ctx)
 	for _, c := range u.Rooms {
-		labels[c.Room] = line(c.Label, 64)
+		r := ref(c.Room, c.Label, local)
+		labels[c.Room] = r.Label
 		out.Unread += c.Count
-		out.Rooms = append(out.Rooms, peekRoom{roomRef{c.Room, line(c.Label, 64)}, c.Count})
+		out.Rooms = append(out.Rooms, peekRoom{r, c.Count})
 	}
-	for _, f := range u.First {
-		out.First = append(out.First, peekLine{ID: f.ID, Room: labels[f.Room], From: line(f.From, 0), Line: line(f.Line, 0)})
-	}
+	out.First = append(out.First, peekLines(u.First, labels)...)
 	return jsonOut(out)
+}
+
+// peekLines are the first lines of peek, each saying whether its author
+// is on this machine as the daemon decided it from the full key.
+func peekLines(first []localapi.FirstLine, labels map[string]string) []peekLine {
+	var out []peekLine
+	for _, f := range first {
+		out = append(out, peekLine{ID: f.ID, Room: labels[f.Room], From: line(f.From, 0),
+			Edited: f.Edited, ChangedBy: line(f.ChangedBy, 0), ChangedByPerson: person(f.ChangedBy, f.FromThisMachine),
+			FromThisMachine: f.FromThisMachine, Person: person(f.From, f.FromThisMachine), IDShared: f.IDShared, Line: line(f.Line, 0)})
+	}
+	return out
 }

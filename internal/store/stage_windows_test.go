@@ -12,6 +12,7 @@ func TestRemoteAndDevicePathsAreRefusedByNameBeforeAnyIO(t *testing.T) {
 	for p, want := range map[string]bool{
 		`\\server\share\a.txt`: true, `\\?\C:\a.txt`: true, `\\.\PhysicalDrive0`: true, `//server/share/a.txt`: true,
 		`C:\tmp\NUL`: true, `C:\tmp\con.txt`: true, `C:\tmp\COM1 .log`: true,
+		`\??\UNC\evil.example\s\a.txt`: true, `C:\tmp\a.txt:s`: true, `C:\tmp\NUL:`: true, `C:\tmp\COM0`: true,
 		`C:\tmp\a.txt`: false, `C:\tmp\console.txt`: false,
 	} {
 		if got := RemoteOrDevice(p); got != want {

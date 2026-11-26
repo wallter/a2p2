@@ -35,6 +35,16 @@ def fake(label, mode, limit=20, **kw):
 RUN_DIRS = []   # every directory this run created
 
 
+def load_team():
+    """The launcher as a module, for tests of one function."""
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("team_under_test", TEAM)
+    team = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(team)
+    return team
+
+
 def proc_lines():
     """(pid, command line) of every process."""
     out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True).stdout
@@ -77,7 +87,9 @@ def alive(pid):
         return False
 
 
-class TeamTest(unittest.TestCase):
+class TeamCase(unittest.TestCase):
+    """A throwaway home, state directory and manifest per test."""
+
     def setUp(self):
         if not os.access(BIN, os.X_OK):
             self.fail(f"build first (make build): {BIN} not found")
@@ -168,6 +180,8 @@ class TeamTest(unittest.TestCase):
         self.assertEqual(len(got), 1, f"{prefix!r} in {posts}")
         return got[0]
 
+
+class TeamTest(TeamCase):
     def test_watcher_reports_each_ending_and_the_run_is_measured(self):
         self.write([fake("okay", "ok"), fake("bad", "fail"), fake("stuck", "hang", limit=3, silence_seconds=1),
                     fake("asker", "ask"), fake("ghost", "noconnect"), fake("loud", "inject")], max_members=6)
@@ -234,11 +248,16 @@ class TeamTest(unittest.TestCase):
             r["supervisor_pid"] = bystander.pid
             with open(os.path.join(self.state, "roster.json"), "w") as f:
                 json.dump(r, f)
-            out = self.team("stop").stdout
-            self.assertIn("not live", out)
+            with open(os.path.join(self.state, "roster.json"), "rb") as f:
+                before = f.read()
+            r = self.team("stop", ok=False)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("no supervisor answered", r.stderr)
+            self.assertIn("Nothing was signalled and the roster is unchanged", r.stderr)
             self.assertIsNone(bystander.poll(), "stop signalled a pid read from disk")
-            self.assertEqual(self.roster()["stuck"]["state"], "lost")
-            self.assertTrue(self.roster_raw()["ended"])
+            with open(os.path.join(self.state, "roster.json"), "rb") as f:
+                self.assertEqual(f.read(), before, "an unanswered stop changed the roster")
+            self.assertFalse(self.roster_raw()["ended"])
         finally:
             bystander.kill()
             bystander.wait()
@@ -375,11 +394,7 @@ class TeamTest(unittest.TestCase):
     def test_supervisor_starts_no_headless_member_whose_spec_lacks_the_approval(self):
         # The consent goes with the saved command line: a spec without it,
         # such as one written for another manifest, is not started.
-        import importlib.machinery
-        import importlib.util
-        loader = importlib.machinery.SourceFileLoader("team_under_test", TEAM)
-        team = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
-        loader.exec_module(team)
+        team = load_team()
         d = os.path.join(self.state, "members", "ag")
         os.makedirs(d)
         with open(os.path.join(d, "launch.json"), "w") as f:
@@ -419,13 +434,710 @@ class TeamTest(unittest.TestCase):
              "send, reply, ack and ask_human included"),
             ([{"label": "g", "harness": "agy", "model": "m"}], {"approve_a2p2_tools": "yes"}, "must be true or false"),
             ([{"label": "g", "harness": "agy", "model": "m"}], {}, '"approve_a2p2_tools": true'),
+            ([{"label": "c", "harness": "claude", "model": "--dangerously-skip-permissions"}],
+             {"approve_a2p2_tools": True}, "model must be one line of text that does not start with '-'"),
+            ([{"label": "c", "harness": "claude", "model": "haiku", "brief": "--permission-mode=bypassPermissions"}],
+             {"approve_a2p2_tools": True, "prelude": "empty.md"}, "the prompt (prelude, then brief) starts with '-'"),
         ]
+        # Each of these let Claude Code run any command: names joined into
+        # one --allowedTools value, or a command that runs its arguments.
+        for tool in ("Read,Bash", "Read Bash", "Bash(sh:*)", "Bash(bash -c:*)", "Bash(/bin/sh:*)",
+                     "Bash(python3:*)", "Bash(*:*)", "Bash(env:*)", "Bash(xargs:*)", "Bash(git:*)",
+                     "Bash(git -c core.pager=sh:*)", "Bash()", "bash", "Bash(sh)", "Read\nBash",
+                     # "git *" is "git:*"; file names match without case on macOS
+                     "Bash(git *)", "Bash(git * status)", "Bash( git *)", "Bash(git:* status)", "Bash(GIT:*)",
+                     "Bash(Git -c a=b:*)", "Bash(Python3.11:*)", "Bash(/usr/bin/PYTHON3:*)",
+                     # a trailing newline, a C1 control or a Unicode separator in an entry
+                     "Read\n", "Bash(git status\x85:*)", "Bash(git status\u2028Bash)", "Read\u200b",
+                     # "dangerous" stays refused in a tool's name
+                     "dangerouslySkipPermissions", "DangerousTool(x)"):
+            cases.append(([{"label": "c", "harness": "claude", "model": "haiku", "allowed_tools": [tool]}],
+                          {"approve_a2p2_tools": True}, "skip Claude Code's permission checks"))
+        open(os.path.join(self.dir, "empty.md"), "w").close()
         for members, extra, want in cases:
             with self.subTest(want=want, members=members):
                 self.write(members, **extra)
                 self.assertIn(want, self.team("up", ok=False).stderr)
         self.assertFalse(os.path.exists(self.home), "a refused manifest must not start a daemon")
         self.assertFalse(os.path.exists(self.state), "a refused manifest must not reserve the state")
+
+
+class TeamSecurityTest(TeamCase):
+    """Another user of this machine, a manifest written by mistake, and text
+    a member wrote reaching the operator's terminal."""
+
+    def shared(self, name, mode=0o777):
+        d = os.path.join(self.dir, name)
+        os.makedirs(d)
+        os.chmod(d, mode)
+        return d
+
+    def test_up_refuses_a_state_dir_another_user_could_replace(self):
+        # A directory that every user may write, on the way to the state
+        # directory: another user could rename the state directory and put
+        # their own launch.json in its place before the supervisor reads it.
+        shared = self.shared("shared")
+        os.symlink(shared, os.path.join(self.dir, "link"))
+        for state in (os.path.join(shared, "state"), os.path.join(self.dir, "link", "state")):
+            with self.subTest(state=state):
+                self.state = state
+                self.write([fake("okay", "ok")])
+                err = self.team("up", ok=False).stderr
+                self.assertIn("can be changed by other users", err)
+                self.assertFalse(os.path.exists(state), "a refused state_dir must not be created")
+        self.assertFalse(os.path.exists(self.home), "a refused state_dir must not start a daemon")
+
+    def test_up_refuses_an_existing_state_dir_others_could_write_and_writes_nothing_through_it(self):
+        # Another user planted a symlink at supervisor.log while the
+        # directory was open to them; making it 0700 now would not undo that.
+        self.state = self.shared("state")
+        victim = os.path.join(self.dir, "victim")
+        with open(victim, "w") as f:
+            f.write("keep")
+        os.symlink(victim, os.path.join(self.state, "supervisor.log"))
+        self.write([fake("okay", "ok")])
+        self.assertIn("can be changed by other users", self.team("up", ok=False).stderr)
+        with open(victim) as f:
+            self.assertEqual(f.read(), "keep")
+        self.assertEqual(sorted(os.listdir(self.state)), ["supervisor.log"])
+        self.assertEqual(os.stat(self.state).st_mode & 0o7777, 0o777, "a refused state_dir must keep its mode")
+        self.assertFalse(os.path.exists(self.home))
+
+    def test_up_refuses_an_a2p2_home_another_user_could_replace(self):
+        self.home = os.path.join(self.shared("shared"), "home")
+        self.write([fake("okay", "ok")])
+        self.assertIn("a2p2_home", self.team("up", ok=False).stderr)
+        self.assertFalse(os.path.exists(self.home))
+        self.assertFalse(os.path.exists(self.state), "the home is checked before the state is reserved")
+
+    def finished_run_that_reruns_into(self, sentinel):
+        """A run that ended, set back to pending, whose saved command line
+        makes the file sentinel: what another user who could swap the
+        state directory would plant."""
+        self.write([fake("okay", "ok")])
+        self.team("up", "--wait")
+        spec_path = os.path.join(self.state, "members", "okay", "launch.json")
+        with open(spec_path) as f:
+            spec = json.load(f)
+        spec["argv"] = [sys.executable, "-c", f"open({sentinel!r}, 'w').close()"]
+        os.remove(spec_path)
+        with open(spec_path, "w") as f:
+            json.dump(spec, f)
+        r = self.roster_raw()
+        for x in r["members"]:
+            x.update(state="pending", pid=None, launched=None, connected=None, ended=None, exit=None,
+                     wall_clock=None, stop_requested=None)
+        r["ended"] = None
+        os.remove(os.path.join(self.state, "roster.json"))
+        with open(os.path.join(self.state, "roster.json"), "w") as f:
+            json.dump(r, f)
+
+    def test_supervisor_refuses_a_state_dir_another_user_could_replace(self):
+        # A populated state directory with a saved command line: one that
+        # others could write (sticky or not), or under a directory they
+        # could write, is refused and nothing in it runs.
+        sentinel = os.path.join(self.dir, "ran")
+        self.finished_run_that_reruns_into(sentinel)
+        for target, mode in ((self.state, 0o1777), (self.state, 0o777), (self.dir, 0o777)):
+            with self.subTest(target=target, mode=oct(mode)):
+                before = os.stat(target).st_mode & 0o7777
+                os.chmod(target, mode)
+                try:
+                    r = self.team("_supervise", self.state, ok=False)
+                finally:
+                    os.chmod(target, before)
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("can be changed by other users", r.stderr)
+                self.assertFalse(os.path.exists(sentinel), "the supervisor ran a saved command line")
+        # The same state directory, private, does run it: the fixture is sound.
+        self.team("_supervise", self.state)
+        self.assertTrue(os.path.exists(sentinel))
+
+    def test_the_supervisor_runs_the_manifest_up_checked_not_the_file_read_again(self):
+        # The manifest is changed while `up` runs, after its checks: the
+        # supervisor must not run the a2p2 binary the new one names.
+        evil_calls = os.path.join(self.dir, "evil-calls")
+        evil = os.path.join(self.dir, "a2p2-evil")
+        with open(evil, "w") as f:
+            f.write(f'#!/bin/sh\necho "$1" >> "{evil_calls}"\nexec "{BIN}" "$@"\n')
+        evil_manifest = os.path.join(self.dir, "evil.json")
+        self.bin = evil
+        self.write([fake("okay", "ok")])
+        os.rename(self.manifest, evil_manifest)
+        swap = os.path.join(self.dir, "a2p2-swap")
+        with open(swap, "w") as f:
+            f.write(f'#!/bin/sh\n[ "$1" = send ] && cp "{evil_manifest}" "{self.manifest}"\nexec "{BIN}" "$@"\n')
+        for p in (evil, swap):
+            os.chmod(p, 0o755)
+        self.bin = swap
+        self.write([fake("okay", "ok")])
+        self.team("up", "--wait")
+        self.assertEqual(self.roster()["okay"]["state"], "done")
+        self.assertFalse(os.path.exists(evil_calls), "the supervisor ran the a2p2 of the changed manifest")
+
+    def test_commands_refuse_a_state_dir_others_could_write_and_write_nothing_through_it(self):
+        self.write([fake("okay", "ok")])
+        self.team("up", "--wait")
+        victim = os.path.join(self.dir, "victim")
+        with open(victim, "w") as f:
+            f.write("keep")
+        report = os.path.join(self.state, "report.json")
+        # In a private state directory a symlink at a report is replaced,
+        # never written through.
+        os.remove(report)
+        os.symlink(victim, report)
+        self.team("report")
+        self.assertFalse(os.path.islink(report))
+        with open(victim) as f:
+            self.assertEqual(f.read(), "keep")
+        # One that others could write is refused by every command.
+        os.remove(report)
+        os.symlink(victim, report)
+        listing = sorted(os.listdir(self.state))
+        os.chmod(self.state, 0o777)
+        try:
+            for args in (("report",), ("status",), ("stop",), ("logs", "okay")):
+                with self.subTest(args=args):
+                    r = self.team(*args, ok=False)
+                    self.assertEqual(r.returncode, 1, r.stdout)
+                    self.assertIn("can be changed by other users", r.stderr)
+                    self.assertEqual(r.stdout, "")
+        finally:
+            os.chmod(self.state, 0o700)
+        with open(victim) as f:
+            self.assertEqual(f.read(), "keep")
+        self.assertEqual(sorted(os.listdir(self.state)), listing)
+
+    def test_up_works_under_umask_002_with_directories_it_creates(self):
+        # Many Linux systems give each user a private group and umask 002.
+        # os.makedirs then made the directories above the last 0775, and
+        # the check after it refused the state directory `up` had made.
+        proj, proj2 = os.path.join(self.dir, "proj"), os.path.join(self.dir, "proj2")
+        for d in (proj, proj2):
+            os.makedirs(d)
+            os.chmod(d, 0o755)
+        self.state = os.path.join(proj, ".team", "team")
+        self.home = os.path.join(proj2, "sub", "home")
+        self.write([fake("okay", "ok")])
+        old = os.umask(0o002)
+        try:
+            self.team("up", "--wait")
+        finally:
+            os.umask(old)
+        self.assertEqual(self.roster()["okay"]["state"], "done")
+        for d in (os.path.join(proj, ".team"), self.state, os.path.join(proj2, "sub"), self.home):
+            self.assertEqual(os.stat(d).st_mode & 0o777, 0o700, d)
+
+    def test_up_under_umask_002_in_a_project_directory_of_the_users_own_group(self):
+        # mkdir and git clone under umask 002 make the project 0775. With a
+        # group that is only this user, as many Linux systems give, `up`
+        # works with the state next to the manifest; with a shared group,
+        # such as staff on macOS, it is refused and says how to fix it.
+        old = os.umask(0o002)
+        try:
+            proj = os.path.join(self.dir, "proj")
+            os.mkdir(proj)
+            self.assertEqual(os.stat(proj).st_mode & 0o777, 0o775)
+            self.state = os.path.join(proj, ".team", "team")
+            self.write([fake("okay", "ok")])
+            if load_team().private_group(os.stat(proj).st_gid):
+                self.team("up", "--wait")
+                self.assertEqual(self.roster()["okay"]["state"], "done")
+            else:
+                err = self.team("up", ok=False).stderr
+                self.assertIn("through its group", err)
+                self.assertIn("chmod g-w", err)
+                self.assertFalse(os.path.exists(self.state))
+        finally:
+            os.umask(old)
+
+    def test_a_group_writable_directory_is_private_only_when_the_group_is_this_user_alone(self):
+        # The same as above, whatever groups the test machine has: the
+        # group database is replaced by one of each case.
+        import types
+        from unittest import mock
+        team = load_team()
+        proj = os.path.join(self.dir, "proj")
+        os.mkdir(proj)
+        os.chmod(proj, 0o775)
+        gid, uid = os.stat(proj).st_gid, os.getuid()
+        me = types.SimpleNamespace(pw_name="me", pw_uid=uid, pw_gid=gid)
+        other = types.SimpleNamespace(pw_name="other", pw_uid=uid + 1, pw_gid=gid + 1)
+        cases = [
+            ("own group", gid, [], [me, other], None),
+            ("own group, listed as its member", gid, ["me"], [me, other], None),
+            ("another member", gid, ["me", "other"], [me, other], "through its group"),
+            ("another account's primary group", gid,
+             [], [me, types.SimpleNamespace(pw_name="other", pw_uid=uid + 1, pw_gid=gid)], "through its group"),
+            ("not this user's primary group", gid + 1, [], [me, other], "through its group"),
+        ]
+        for name, mygid, mem, accounts, refused in cases:
+            with self.subTest(case=name):
+                fake_pwd = types.SimpleNamespace(getpwall=lambda a=accounts: a,
+                                                 getpwuid=lambda u: me)
+                fake_grp = types.SimpleNamespace(getgrgid=lambda g, m=mem: types.SimpleNamespace(gr_mem=m))
+                state = os.path.join(proj, name.replace(" ", "-").replace(",", "").replace("'", ""), "state")
+                with mock.patch.object(team, "pwd", fake_pwd), mock.patch.object(team, "grp", fake_grp), \
+                        mock.patch.object(team.os, "getgid", lambda g=mygid: g):
+                    if refused is None:
+                        team.reserve({"state": state})
+                        self.assertEqual(os.stat(state).st_mode & 0o777, 0o700)
+                    else:
+                        with self.assertRaises(team.Fail) as cm:
+                            team.reserve({"state": state})
+                        self.assertIn(refused, str(cm.exception))
+                        self.assertIn("chmod g-w", str(cm.exception))
+                        self.assertFalse(os.path.exists(state))
+        # Others' write bit is never excused by the group.
+        os.chmod(proj, 0o777)
+        with mock.patch.object(team, "pwd", types.SimpleNamespace(getpwall=lambda: [me], getpwuid=lambda u: me)), \
+                mock.patch.object(team, "grp", types.SimpleNamespace(getgrgid=lambda g: types.SimpleNamespace(gr_mem=[]))), \
+                mock.patch.object(team.os, "getgid", lambda: gid):
+            with self.assertRaises(team.Fail) as cm:
+                team.reserve({"state": os.path.join(proj, "open", "state")})
+        self.assertIn("chmod o-w", str(cm.exception))
+
+    def test_up_checks_the_home_again_after_making_it(self):
+        # The home's parent is missing at the first check; another user
+        # makes it, open to all, in a sticky directory before `up` makes
+        # the home. No a2p2 command, which would start a daemon there, runs.
+        import argparse
+        team = load_team()
+        sticky = self.shared("sticky", 0o1777)
+        parent = os.path.join(sticky, "newparent")
+        self.home = os.path.join(parent, "home")
+        self.write([fake("okay", "ok")])
+        man = team.load_manifest(self.manifest)
+        prepare, calls = team.prepare_dirs, []
+
+        def racing(man_, m):
+            if not os.path.exists(parent):
+                os.mkdir(parent)
+                os.chmod(parent, 0o777)
+            return prepare(man_, m)
+
+        def no_a2p2(_man, *args, **_kw):
+            calls.append(args)
+            raise team.Fail("a2p2 was called")
+
+        team.prepare_dirs, team.a2p2 = racing, no_a2p2
+        with self.assertRaises(team.Fail) as cm:
+            team.cmd_up(man, argparse.Namespace(wait=False))
+        self.assertIn("a2p2_home", str(cm.exception))
+        self.assertIn(parent, str(cm.exception))
+        self.assertEqual(calls, [])
+
+    def test_a_state_dir_in_a_sticky_shared_dir_like_tmp_still_works(self):
+        # /tmp is writable by everyone but sticky: only the owner of an
+        # entry may rename it. An existing state directory of this user
+        # that only it can write is used and made 0700.
+        self.state = os.path.join(self.shared("sticky", 0o1777), "state")
+        os.makedirs(self.state)
+        os.chmod(self.state, 0o755)
+        self.write([fake("okay", "ok")])
+        self.team("up", "--wait")
+        self.assertEqual(self.roster()["okay"]["state"], "done")
+        self.assertEqual(os.stat(self.state).st_mode & 0o777, 0o700)
+
+    def test_shared_path_problem_follows_symlinks_and_names_the_directory(self):
+        team = load_team()
+        shared = self.shared("shared")
+        sticky = self.shared("sticky", 0o1777)
+        private = os.path.join(self.dir, "private")
+        os.makedirs(private)
+        os.symlink(shared, os.path.join(private, "to-shared"))
+        os.symlink(os.path.join("..", "private"), os.path.join(sticky, "to-private"))
+        self.assertIsNone(team.shared_path_problem(os.path.join(private, "state")))
+        self.assertIsNone(team.shared_path_problem(os.path.join(sticky, "state")))
+        self.assertIsNone(team.shared_path_problem(os.path.join(sticky, "to-private", "state")))
+        self.assertIn(shared, team.shared_path_problem(os.path.join(private, "to-shared", "state")))
+        self.assertIn(shared, team.shared_path_problem(os.path.join(shared, "a", "b")))
+
+    def test_scoped_tools_and_a_brief_that_starts_with_a_list_are_accepted(self):
+        team = load_team()
+        tools = ["Read", "Grep", "Bash(git status:*)", "Bash(git diff:*)", "Bash(npm run test:*)",
+                 "Bash(go test:*)", "Read(./src/**)", "WebFetch(domain:example.com)", "mcp__other-server__tool",
+                 # "dangerous" in a rule is a path, not a way past the checks
+                 "Read(./notes/dangerous-ideas.md)"]
+        self.write([{"label": "c", "harness": "claude", "model": "claude-haiku-4-5", "allowed_tools": tools,
+                     "brief": "- read the kickoff\n- reply"}], approve_a2p2_tools=True)
+        man = team.load_manifest(self.manifest)
+        self.assertEqual(man["members"][0]["allowed_tools"], tools)
+        team.require_safe_prompts(man)
+
+    def test_the_prompt_launched_is_the_prompt_checked(self):
+        # The prelude is read once: a change to the file after the check
+        # does not reach the prompt. And the prompt with the real lead and
+        # kickoff ids is checked again as it is saved for launch.
+        team = load_team()
+        prelude = os.path.join(self.dir, "prelude.md")
+        with open(prelude, "w") as f:
+            f.write("{kickoff} is the kickoff.\n")
+        self.write([{"label": "c", "harness": "claude", "model": "haiku"}], approve_a2p2_tools=True, prelude=prelude)
+        man = team.load_manifest(self.manifest)
+        team.read_prelude(man)
+        team.require_safe_prompts(man)
+        with open(prelude, "w") as f:
+            f.write("--permission-mode=bypassPermissions\n")
+        m = man["members"][0]
+        self.assertTrue(team.prompt_for(man, m, "k1", "lead@n").startswith("k1 is the kickoff."))
+        os.makedirs(team.mdir(man, "c"))
+        with self.assertRaises(team.Fail) as cm:
+            team.launch_spec(man, m, team.prompt_for(man, m, "--dangerously-skip-permissions", "lead@n"), self.dir)
+        self.assertIn("starts with '-'", str(cm.exception))
+        self.assertFalse(os.path.exists(os.path.join(team.mdir(man, "c"), "launch.json")))
+
+    def test_a_kickoff_that_starts_with_a_dash_is_posted_as_its_text(self):
+        # Before, the kickoff went to `a2p2 send` where a flag may stand,
+        # so "--as=human..." was read as a flag and `up` failed half way.
+        self.write([fake("okay", "ok")], kickoff="--as=human: posted as text")
+        self.team("up", "--wait")
+        out = subprocess.run([BIN, "history", "--room", "crew", "-n", "200", "--json"],
+                             env=dict(os.environ, A2P2_HOME=self.home), capture_output=True, text=True).stdout
+        lead = [e for e in json.loads(out)["entries"] if e["from"].startswith("lead@")]
+        self.assertEqual(len(lead), 1)
+        self.assertTrue(lead[0]["text"].startswith("--as=human: posted as text\n"), lead[0]["text"])
+
+    def test_status_and_logs_escape_terminal_controls_a_member_wrote(self):
+        self.write([fake("loud", "controls")])
+        self.team("up", "--wait")
+        status = self.team("status").stdout
+        self.assertIn("\\u{1b}[31m", status)
+        self.assertIn("\\u{9b}31m", status)
+        self.assertIn("\\u{202e}evil", status)
+        logs = subprocess.run([sys.executable, TEAM, "-m", self.manifest, "logs", "loud"],
+                              capture_output=True, timeout=60, env=self.env)
+        self.assertEqual(logs.returncode, 0, logs.stderr)
+        raw = subprocess.run([sys.executable, TEAM, "-m", self.manifest, "logs", "loud", "--raw"],
+                             capture_output=True, timeout=60, env=self.env).stdout
+        for out in (status.encode(), logs.stdout):
+            for c in (b"\x1b", "\u009b".encode(), "‮".encode(), b"\xff"):
+                self.assertNotIn(c, out)
+        self.assertIn(b"\\u{202e}evil \\x{ff} end\n", logs.stdout)
+        self.assertIn(b"\x1b[31m", raw)
+        self.assertIn("‮evil".encode() + b" \xff end\n", raw)
+        self.assertIn(b"whoami ->", logs.stdout)
+
+    def test_the_escape_covers_the_daemons_table_and_keeps_plain_text(self):
+        # The daemon's table is the reference (internal/node/escape.go,
+        # decision D58); the launcher may escape more, never less.
+        import re
+        team = load_team()
+        with open(os.path.join(ROOT, "internal", "node", "escape.go")) as f:
+            src = f.read()
+        table = src[src.index("var hiddenRanges"):]
+        table = table[:table.index("\n}\n")]
+        ranges = [(int(a, 16), int(b, 16)) for a, b in re.findall(r"\{0x([0-9a-f]+), 0x([0-9a-f]+)\}", table)]
+        self.assertGreater(len(ranges), 20)
+        missed = [hex(cp) for a, b in ranges for cp in range(a, b + 1) if team.escape(chr(cp)) == chr(cp)]
+        self.assertEqual(missed, [])
+        for plain in ("plan: say hello", "DONE: café, 日本語, עברית, 👍", "tab\there"):
+            self.assertEqual(team.escape(plain, lines=True), plain)
+        self.assertEqual(team.escape("a\\u{41}"), "a\\u{5c}u{41}")
+
+    def test_the_escape_is_the_daemons_with_its_tables_and_its_cases(self):
+        # D58: one set of rules. The launcher's tables equal escape.go's,
+        # and it gives what EscapeDisplay (line) and EscapeDisplayText
+        # (text) give for every row of the cases the page shares too.
+        import re
+        team = load_team()
+        with open(os.path.join(ROOT, "internal", "node", "escape.go")) as f:
+            src = f.read()
+        for go, py in (("hiddenRanges", team.HIDDEN), ("emojiRanges", team.EMOJI),
+                       ("joiningRanges", team.JOINING), ("rtlLetterRanges", team.RTL_LETTERS),
+                       ("spacelessRanges", team.SPACELESS), ("hanRanges", team.HAN)):
+            table = src[src.index(f"var {go} = "):]
+            table = table[:table.index("\n}\n")]
+            got = [(int(a, 16), int(b, 16)) for a, b in re.findall(r"\{0x([0-9a-f]+), 0x([0-9a-f]+)\}", table)]
+            self.assertEqual(list(py), got, go)
+        with open(os.path.join(ROOT, "internal", "node", "testdata", "escape_cases.json")) as f:
+            cases = json.load(f)
+        n = 0
+        for c in cases:
+            for key, lines in (("line", False), ("text", True)):
+                if key in c:
+                    n += 1
+                    self.assertEqual(team.escape(c["in"], lines=lines), c[key], f"{c['name']} ({key})")
+        self.assertGreater(n, 60)
+
+    def test_status_and_logs_escape_like_the_daemon_and_drop_nothing(self):
+        # Before, status stripped controls at either end of a message, the
+        # Persian non-joiner was escaped, a lone carriage return became a
+        # new line in logs, and the log's heading printed its path raw.
+        import argparse
+        import contextlib
+        import io
+        team = load_team()
+        out = os.path.join(self.dir, "out\x1b[2J.log")
+        with open(out, "wb") as f:
+            f.write(b"plain\r\nover\rwrite\n" + "تیم‌ما\n".encode() + b"last")
+        x = {"label": "m", "id": "m@node", "harness": "command", "pid": 1, "state": "running", "exit": None,
+             "wall_clock": 1, "launched": 1, "out": out, "err": os.path.join(self.dir, "missing.log")}
+        team.load_roster = lambda _man: {"members": [x], "ended": 1, "node": NODE}
+        team.history = lambda _man: [{"from": "m@node", "from_node": NODE, "created": "2026-01-01T00:00:00Z",
+                                      "text": "\x1c hi \u0085\nتیم‌ما"}]
+
+        def run(fn, n=0):
+            buf = io.BytesIO()
+            w = io.TextIOWrapper(buf, encoding="utf-8", write_through=True)
+            with contextlib.redirect_stdout(w):
+                fn({"state": self.dir}, argparse.Namespace(label="m", n=n, raw=False))
+            w.flush()
+            return buf.getvalue().decode()
+
+        status = run(team.cmd_status)
+        self.assertIn("\\u{1c} hi \\u{85} تیم‌ما", status)
+        logs = run(team.cmd_logs)
+        self.assertIn("==> " + os.path.join(self.dir, "out\\u{1b}[2J.log") + " <==\n", logs)
+        self.assertIn("plain\nover\\u{d}write\nتیم‌ما\nlast", logs)
+        self.assertNotIn("\x1b", logs)
+        self.assertNotIn("\r", logs)
+        tail = run(team.cmd_logs, n=2)
+        self.assertTrue(tail.endswith("<==\nتیم‌ما\nlast==> "
+                                      + os.path.join(self.dir, "missing.log") + " <==\n"), tail)
+
+    def test_logs_n_reads_the_end_of_a_log_not_all_of_it(self):
+        import io
+        team = load_team()
+
+        class Counting(io.BytesIO):
+            read_bytes = 0
+
+            def read(self, size=-1):
+                b = super().read(size)
+                self.read_bytes += len(b)
+                return b
+
+        data = b"".join(b"line %d\n" % i for i in range(200000))
+        for body, n in ((data, 1), (data, 3), (data, 900), (data + b"tail", 2), (b"a\nb\n", 5), (b"", 1), (b"x", 1)):
+            with self.subTest(size=len(body), n=n):
+                f = Counting(body)
+                got = team.tail_lines(f, n, block=4096)
+                lines = body.splitlines(keepends=True)   # no \r in these bodies
+                self.assertEqual(got, lines[-n:])
+                self.assertLessEqual(f.read_bytes, len(b"".join(lines[-n:])) + 2 * 4096)
+
+
+NODE = "ab12cd34" + "0" * 56      # this machine
+TWIN = "ab12cd34" + "f" * 56      # another machine with the same short id
+OTHER = "99887766" + "1" * 56     # another machine
+
+
+def entry(eid, label, node, shown, to=(), age=0, text="hi", parent=None):
+    """A history entry as `a2p2 history --json` gives it: "from" with the
+    id as shown (short, or full when shared), "from_node" the full key."""
+    return {"id": eid, "kind": "message", "from": f"{label}@{shown}", "from_node": node,
+            "from_this_machine": node == NODE, "to": list(to), "parent": parent, "text": text,
+            "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age))}
+
+
+class TeamIdentityTest(TeamCase):
+    """The launcher tells this machine's members and person by full key and
+    exact id, not by the short id another machine can share (D65)."""
+
+    def observe(self, hist, st, silence=30, connected_ago=1):
+        """One observer poll over hist with status st; the posts it made."""
+        import types
+        team = load_team()
+        posts = []
+        x = {"label": "okay", "id": "okay@ab12cd34", "harness": "command", "server_harness": "fake",
+             "model": "", "state": "running", "launched": time.time() - 200,
+             "connected": time.time() - connected_ago, "silence": silence, "workdir": self.dir}
+        sup = types.SimpleNamespace(man={"poll": 1}, roster={"node": NODE, "members": [x]},
+                                    lock=team.threading.Lock(), save=lambda: None)
+        team.post = lambda _man, text: posts.append(text)
+        team.a2p2_json = lambda _man, *args: st
+        team.history = lambda _man, **_kw: hist
+        team.Observer(sup).poll()
+        return posts
+
+    def test_a_twin_machines_question_to_its_person_is_not_this_members(self):
+        # Another machine with the same short id posts as "okay" to its own
+        # person; this machine's member, written in full since the ids
+        # collide, asks this machine's person and another machine's person.
+        st = {"node": NODE, "human": "human@" + NODE, "agents": []}
+        hist = [entry("e-twin", "okay", TWIN, TWIN, to=["human@" + TWIN]),
+                entry("e-mine", "okay", NODE, NODE, to=["human@" + NODE]),
+                entry("e-theirs", "okay", NODE, NODE, to=["human@" + OTHER[:8]])]
+        posts = self.observe(hist, st)
+        self.assertEqual([p for p in posts if p.startswith("needs input")],
+                         ["needs input: okay asked the person a question (message e-mine)."])
+
+    def test_a_twin_machines_old_style_short_ids_are_not_this_members(self):
+        # A daemon that does not write shared ids in full (0.2.3) shows the
+        # twin's member under this machine's short id: from_node tells them
+        # apart, so its question and its activity are not this member's.
+        st = {"node": NODE, "human": "human@ab12cd34", "agents": []}
+        hist = [entry("e-twin", "okay", TWIN, "ab12cd34", to=["human@ab12cd34"])]
+        posts = self.observe(hist, st, silence=10, connected_ago=100)
+        self.assertFalse([p for p in posts if p.startswith("needs input")], posts)
+        self.assertEqual(len([p for p in posts if p.startswith("silent: okay")]), 1, posts)
+
+    def test_this_members_activity_written_with_its_full_id_counts(self):
+        # Once a twin appears, this machine's member is written okay@<full
+        # key>: it is still this member's, so it is not called silent.
+        st = {"node": NODE, "human": "human@" + NODE, "agents": []}
+        posts = self.observe([entry("e1", "okay", NODE, NODE)], st, silence=10, connected_ago=100)
+        self.assertFalse([p for p in posts if p.startswith("silent")], posts)
+
+    def test_honest_short_ids_still_work(self):
+        st = {"node": NODE, "human": "human@ab12cd34", "agents": []}
+        posts = self.observe([entry("e1", "okay", NODE, "ab12cd34", to=["human@ab12cd34"])], st,
+                             silence=10, connected_ago=100)
+        self.assertEqual(posts, ["needs input: okay asked the person a question (message e1)."])
+        team = load_team()
+        self.assertEqual(team.shown_id({"node": NODE, "human": "human@ab12cd34"}), "ab12cd34")
+        self.assertEqual(team.shown_id({"node": NODE, "human": "human@" + NODE}), NODE)
+
+    def test_report_and_status_count_this_machines_messages_only(self):
+        import argparse
+        import contextlib
+        import io
+        team = load_team()
+        x = {"label": "okay", "id": "okay@ab12cd34", "harness": "command", "model": "", "state": "done",
+             "exit": 0, "wall_clock": 1, "launched": time.time() - 100, "connected": time.time() - 99,
+             "pid": 1, "final": os.path.join(self.dir, "none"), "out": os.path.join(self.dir, "none"),
+             "err": os.path.join(self.dir, "none")}
+        roster = {"room": "crew", "kickoff": "k", "lead": "lead@ab12cd34", "watcher": "team@ab12cd34",
+                  "node": NODE, "started": time.time() - 100, "ended": time.time(), "members": [x]}
+        hist = [entry("t1", "okay", TWIN, "ab12cd34", to=["human@ab12cd34"], text="twin says"),
+                entry("t2", "human", TWIN, "ab12cd34", text="twin person"),
+                entry("t3", "lead", TWIN, "ab12cd34", text="twin lead"),
+                entry("m1", "okay", NODE, NODE, to=["human@" + NODE], text="DONE: mine", age=5),
+                entry("m2", "human", NODE, NODE, text="my person", age=5),
+                entry("m3", "lead", NODE, NODE, text="my lead", age=5)]
+        team.load_roster = lambda _man: roster
+        team.history = lambda _man, **_kw: hist
+        team.a2p2_json = lambda _man, *args: {"node": NODE, "human": "human@" + NODE, "rooms": []}
+        rep = team.build_report({"state": self.dir})
+        m = rep["members"][0]
+        self.assertEqual((m["messages_sent"], m["questions_to_person"], m["final_report"]), (1, 1, "DONE"))
+        self.assertEqual((rep["messages_from_person"], rep["messages_from_lead"]), (1, 1))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            team.cmd_status({"state": self.dir}, argparse.Namespace())
+        self.assertIn("DONE: mine", buf.getvalue())
+        self.assertNotIn("twin says", buf.getvalue())
+
+    def test_report_counts_only_this_machines_person_lead_watcher_and_inboxes(self):
+        team = load_team()
+        x = {"label": "okay", "id": "okay@ab12cd34", "harness": "command", "model": "", "state": "done",
+             "exit": 0, "wall_clock": 1, "launched": time.time() - 100, "connected": time.time() - 99,
+             "pid": 1, "final": os.path.join(self.dir, "none"), "out": os.path.join(self.dir, "none"),
+             "err": os.path.join(self.dir, "none")}
+        roster = {"room": "crew", "kickoff": "k", "lead": "lead@ab12cd34", "watcher": "team@ab12cd34",
+                  "node": NODE, "started": time.time() - 100, "ended": time.time(), "members": [x]}
+        hist = [
+            # This member asks the person of another machine and of the twin:
+            # neither is this machine's person.
+            entry("q1", "okay", NODE, NODE, to=["human@99887766"], age=5),
+            entry("q2", "okay", NODE, NODE, to=["human@" + OTHER], age=5),
+            entry("q3", "okay", NODE, NODE, to=["human@" + TWIN], age=5),
+            entry("q4", "okay", NODE, NODE, to=["human@" + NODE], age=5),
+            # A reply that names this member by its full id and one other
+            # inbox reaches one inbox; a reply to two others reaches two.
+            entry("r1", "okay", NODE, NODE, to=["okay@" + NODE, "lead@" + NODE], parent="k", age=5),
+            entry("r2", "okay", NODE, NODE, to=["lead@" + NODE, "okay@" + TWIN], parent="k", age=5),
+            # The twin's lead and watcher, written with the short id the
+            # roster holds; this machine's, written in full.
+            entry("t1", "lead", TWIN, "ab12cd34"),
+            entry("t2", "lead", TWIN, "ab12cd34"),
+            entry("t3", "team", TWIN, "ab12cd34"),
+            entry("t4", "team", TWIN, "ab12cd34"),
+            entry("m1", "lead", NODE, NODE, age=5),
+            entry("m2", "team", NODE, NODE, age=5)]
+        team.load_roster = lambda _man: roster
+        team.history = lambda _man, **_kw: hist
+        team.a2p2_json = lambda _man, *args: {"node": NODE, "human": "human@" + NODE, "rooms": []}
+        rep = team.build_report({"state": self.dir})
+        m = rep["members"][0]
+        self.assertEqual((m["messages_sent"], m["questions_to_person"], m["replies_to_more_than_one_inbox"]),
+                         (6, 1, 1))
+        self.assertEqual((rep["messages_from_lead"], rep["watcher_messages"]), (1, 1))
+
+
+class TeamStopTest(TeamCase):
+    """`team stop` says what happened and exits non-zero when it did not."""
+
+    def run_stop(self, members, answer=None, label=None):
+        """cmd_stop on a roster of members; answer(roster, request) plays
+        the supervisor, or none answers. Returns (stdout, Fail or None)."""
+        import argparse
+        import contextlib
+        import io
+        import threading
+        team = load_team()
+        team.ACK_WAIT, team.STOP_WAIT = 0.5, 0.5
+        man = {"state": self.state}
+        os.makedirs(team.control_dir(man))
+        team.save_roster(man, {"ended": None, "members": members})
+        stop = threading.Event()
+
+        def supervisor():
+            while not stop.is_set():
+                for name in os.listdir(team.control_dir(man)):
+                    if name.startswith("req-") and name.endswith(".json"):
+                        path = os.path.join(team.control_dir(man), name)
+                        with open(path) as f:
+                            req = json.load(f)
+                        os.remove(path)
+                        hit = answer(man, req)
+                        with open(os.path.join(team.control_dir(man), "ack-" + name[4:]), "w") as f:
+                            json.dump({"stopping": hit}, f)
+                        return
+                time.sleep(0.02)
+
+        t = threading.Thread(target=supervisor) if answer else None
+        if t:
+            t.start()
+        buf, err = io.StringIO(), None
+        try:
+            with contextlib.redirect_stdout(buf):
+                team.cmd_stop(man, argparse.Namespace(label=label))
+        except team.Fail as e:
+            err = e
+        finally:
+            stop.set()
+            if t:
+                t.join()
+        self.after = team.load_roster(man)
+        self.requests = [n for n in os.listdir(team.control_dir(man)) if n.startswith("req-")]
+        return buf.getvalue(), err
+
+    def test_a_stop_whose_member_is_still_running_after_its_wait_fails(self):
+        out, err = self.run_stop([{"label": "stuck", "state": "stopping"}], answer=lambda man, req: ["stuck"])
+        self.assertIsNotNone(err, out)
+        self.assertIn("still running after", str(err))
+        self.assertNotIn("stopped 1", out)
+
+    def test_a_stop_whose_member_ends_reports_it(self):
+        team = load_team()
+
+        def answer(man, req):
+            team.save_roster(man, {"ended": None, "members": [{"label": "stuck", "state": "stopped"}]})
+            return ["stuck"]
+        out, err = self.run_stop([{"label": "stuck", "state": "running"}], answer=answer)
+        self.assertIsNone(err)
+        self.assertIn("stopped 1 member(s): stuck", out)
+
+    def test_an_unanswered_stop_fails_and_leaves_the_roster_as_it_was(self):
+        # A supervisor that is busy, such as writing the report, or dead:
+        # the roster is not marked ended or lost, and stop exits non-zero.
+        members = [{"label": "stuck", "state": "running"}]
+        out, err = self.run_stop(members)
+        self.assertIsNotNone(err, out)
+        self.assertIn("no supervisor answered", str(err))
+        self.assertIn("stuck", str(err))
+        self.assertEqual(self.after, {"ended": None, "members": members})
+        self.assertEqual(self.requests, [], "an unanswered request was left behind")
+
+    def test_a_second_stop_says_no_member_is_running(self):
+        members = [{"label": "stuck", "state": "stopped"}, {"label": "okay", "state": "done"}]
+        out, err = self.run_stop(members)
+        self.assertIsNone(err)
+        self.assertIn("no member to stop: stuck is stopped, okay is done", out)
+        self.assertEqual(self.after, {"ended": None, "members": members})
+        self.assertEqual(self.requests, [])
 
 
 def main():

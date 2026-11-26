@@ -12,10 +12,11 @@ members post is never treated as an instruction to the launcher.
     team [-m MANIFEST] up [--wait]
     team [-m MANIFEST] status
     team [-m MANIFEST] stop [LABEL]
-    team [-m MANIFEST] logs LABEL [-n LINES]
+    team [-m MANIFEST] logs LABEL [-n LINES] [--raw]
     team [-m MANIFEST] report
 
-MANIFEST defaults to $TEAM_MANIFEST, then ./team.json. See README.md.
+MANIFEST defaults to $TEAM_MANIFEST, then ./team.json. A manifest is code:
+up, status and report run the a2p2 binary it names. See README.md.
 Python 3 standard library only.
 
 Processes: `up` starts one supervisor per run. The supervisor starts each
@@ -26,10 +27,13 @@ Nothing ever signals a pid read from disk. If the supervisor dies, each
 guard sees the pipe close and ends its own group.
 """
 import argparse
+import bisect
 import datetime
+import grp
 import json
 import math
 import os
+import pwd
 import queue
 import re
 import select
@@ -56,11 +60,60 @@ KILL_GRACE = 5.0
 TICK = 0.1          # supervisor loop: deadlines, exits and stop requests
 HEARTBEAT_STALE = 3.0
 ACK_WAIT = 3.0
+STOP_WAIT = KILL_GRACE + 5   # team stop: how long the members it asked about may take to end
 
 # Profiles that keep the harness's own permission and sandbox controls.
 CLAUDE_MODES = ("", "default", "acceptEdits", "plan")
 CODEX_SANDBOXES = ("read-only", "workspace-write")
-CLAUDE_TOOLS_REFUSED = re.compile(r"^(\*|Bash|Bash\(\*\)|Bash\(:\*\))$|dangerous", re.I)
+CLAUDE_TOOLS_REFUSED = re.compile(r"^(\*|Bash|Bash\(\*\)|Bash\(:\*\))$", re.I)
+# One tool as Claude Code names it: a name, and for some tools one rule in
+# parentheses. The names are joined with "," into one --allowedTools value,
+# and Claude Code may also split that value at spaces, so "," anywhere and a
+# space outside the parentheses would name another tool.
+CLAUDE_TOOL_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*(\([^(),]*\))?")
+# Commands that run whatever their arguments say: allowing one by prefix
+# allows every command. Not a complete list; see README.md.
+CLAUDE_BASH_REFUSED = {
+    "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "busybox", "env", "xargs", "exec", "eval",
+    "command", "builtin", "nohup", "nice", "timeout", "time", "watch", "sudo", "su", "doas", "ssh",
+    "python", "python2", "python3", "perl", "ruby", "node", "deno", "bun", "php", "lua", "osascript",
+    "awk", "gawk", "find", "make", "npx", "uvx", "pipx", "script"}
+
+
+def claude_tool_problem(t):
+    """Why an allowed_tools entry would skip Claude Code's permission
+    checks for more than one scoped tool, or None."""
+    # The whole entry must match, and no character in it may be a control,
+    # a format character or a space other than U+0020: Claude Code could
+    # split at one, and a person reading the manifest would not see it.
+    if CLAUDE_TOOLS_REFUSED.search(t.strip()) or not CLAUDE_TOOL_RE.fullmatch(t) or \
+            any(c != " " and (c.isspace() or hidden(ord(c))) for c in t):
+        return "is not one scoped tool"
+    name, _, rule = t.partition("(")
+    # "dangerous" is refused in a tool's name only: a rule is a path, a
+    # domain or a command, where the word is ordinary text.
+    if "dangerous" in name.lower():
+        return "is not one scoped tool"
+    if name.lower() != "bash":
+        return None
+    rule = rule[:-1]
+    # ":*" ends a prefix rule; anywhere else it is a wildcard like "*".
+    rule = rule[:-2] if rule.endswith(":*") else rule
+    words = rule.split()
+    if not words:
+        return "allows every command"
+    # File names are compared without case: on the default macOS file
+    # system /usr/bin/GIT is git.
+    word = os.path.basename(words[0]).lower()
+    if any(c in words[0] for c in WILDCARDS) or word in CLAUDE_BASH_REFUSED or re.fullmatch(r"python[0-9.]*", word):
+        return f"allows {word} with any arguments, which runs any command"
+    # A wildcard in the subcommand's place, as in "git *", is "git" alone.
+    if word == "git" and (len(words) == 1 or words[1].startswith("-") or any(c in words[1] for c in WILDCARDS)):
+        return "allows git with any options, and git -c runs any command"
+    return None
+
+
+WILDCARDS = "*?[]$`'\"\\;&|<>{}~=:"
 
 TOP_KEYS = {"room", "a2p2_home", "a2p2", "state_dir", "max_members", "lead", "watcher_label",
             "kickoff", "prelude", "poll_seconds", "silence_seconds", "approve_a2p2_tools", "members"}
@@ -162,10 +215,14 @@ def load_manifest(path):
         tools = mm.get("allowed_tools", [])
         if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
             raise Fail(f"manifest: {label}: allowed_tools must be a list of tool names")
-        bad = [t for t in tools if CLAUDE_TOOLS_REFUSED.search(t.strip())]
+        bad = [f"{t!r} {why}" for t in tools for why in [claude_tool_problem(t)] if why]
         if bad:
-            raise Fail(f"manifest: {label}: allowed_tools {bad} would skip Claude Code's permission checks; "
-                       "name scoped tools such as Read or Bash(git status:*)")
+            raise Fail(f"manifest: {label}: allowed_tools {'; '.join(bad)}: it would skip Claude Code's permission "
+                       "checks; name one scoped tool per entry, such as Read or Bash(git status:*)")
+        model = mm.get("model", "")
+        if not isinstance(model, str) or model.startswith("-") or re.search(r"[\x00-\x1f\x7f]", model):
+            raise Fail(f"manifest: {label}: model must be one line of text that does not start with '-', "
+                       "so the harness cannot read it as an option")
         sandbox = mm.get("sandbox", "read-only")
         if h == "codex" and sandbox not in CODEX_SANDBOXES:
             raise Fail(f"manifest: {label}: sandbox {sandbox!r} is not allowed; use one of {', '.join(CODEX_SANDBOXES)}")
@@ -216,6 +273,34 @@ def require_tool_approval(man):
                    "accept that, and use a home whose rooms only this team shares")
 
 
+def read_prelude(man):
+    """Reads the prelude once, into the manifest: the prompts are checked
+    and launched from this text, not from the file read again later."""
+    try:
+        with open(man["prelude"]) as f:
+            man["prelude_text"] = f.read()
+    except OSError as e:
+        raise Fail(f"cannot read prelude {man['prelude']}: {e}")
+
+
+def require_safe_prompt(m, prompt):
+    """A harness's prompt is one argument of its command line; one that
+    starts with '-' could be read as an option."""
+    if m["harness"] in HEADLESS and prompt.lstrip().startswith("-"):
+        raise Fail(f"manifest: {m['label']}: the prompt (prelude, then brief) starts with '-', "
+                   "so the harness could read it as an option")
+
+
+def require_safe_prompts(man):
+    """Checked before anything starts, with the lead's id and a kickoff id
+    in their places; launch_spec checks each prompt again as it is
+    launched, with the real ones."""
+    if "prelude_text" not in man:
+        read_prelude(man)
+    for m in man["members"]:
+        require_safe_prompt(m, prompt_for(man, m, "kickoff", man["lead"] + "@node"))
+
+
 # ------------------------------------------------------------------- a2p2
 
 def a2p2(man, *args, check=True):
@@ -234,7 +319,7 @@ def a2p2_json(man, *args):
 def post(man, text):
     """An ordinary room message from the watcher label. Never peer text."""
     try:
-        return a2p2(man, "send", "--as", man["watcher"], "--room", man["room"], text).strip()
+        return a2p2(man, "send", "--as", man["watcher"], "--room", man["room"], "--", text).strip()
     except (Fail, subprocess.SubprocessError) as e:
         log(f"post failed: {e}")
         return ""
@@ -246,7 +331,7 @@ def history(man, since=None, page=200):
     while True:
         args = ["history", "--room", man["room"], "-n", str(page)]
         if before:
-            args += ["--before", before]
+            args.append("--before=" + before)
         try:
             ents = a2p2_json(man, *args).get("entries", [])
         except (Fail, ValueError, subprocess.SubprocessError):
@@ -256,6 +341,60 @@ def history(man, since=None, page=200):
             break
         before = ents[0]["id"]
     return out
+
+
+# --------------------------------------------------------------- identity
+#
+# A short id is 8 hex characters of a machine's key, and another machine
+# in a room can have the same one (decision D65). The launcher therefore
+# tells this machine's messages by the author's full key (from_node), and
+# the person on this machine by the exact id the daemon gives it.
+
+def label_of(ident):
+    return (ident or "").partition("@")[0]
+
+
+def wrote(e, node, label):
+    """Whether entry e was written under label on this machine: its
+    author's full key is node and its label is label. "from" alone can
+    name another machine with the same short id."""
+    return bool(node) and e.get("from_node") == node and label_of(e.get("from")) == label
+
+
+def shown_id(st):
+    """This machine's id as the daemon writes it now: the short id, or the
+    full key when another machine it knows shares the short id."""
+    human = st.get("human")
+    if isinstance(human, str) and human.startswith("human@") and len(human) > len("human@"):
+        return human[len("human@"):]
+    return st["node"][:8]
+
+
+def person_ids(node, st):
+    """The exact ids that name the person on this machine: by its full
+    key, and as status writes it now. Another machine's person is
+    "human@" too, so a prefix is never enough."""
+    ids = {"human@" + node} if node else set()
+    if st and st.get("node") == node and isinstance(st.get("human"), str):
+        ids.add(st["human"])
+    return ids
+
+
+def to_person(e, ids):
+    return any(t in ids for t in e.get("to") or [])
+
+
+def status_or_none(man):
+    try:
+        return a2p2_json(man, "status")
+    except (Fail, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def run_node(r, st):
+    """This machine's full key: from the roster, or for a roster written
+    before it held one, from status."""
+    return r.get("node") or (st or {}).get("node") or ""
 
 
 def ts(iso_):
@@ -285,10 +424,7 @@ def load_roster(man):
 
 
 def save_roster(man, r):
-    tmp = roster_path(man) + f".{os.getpid()}.tmp"
-    with open(tmp, "w") as f:
-        json.dump(r, f, indent=2)
-    os.replace(tmp, roster_path(man))
+    replace_file(roster_path(man), json.dumps(r, indent=2))
 
 
 def mdir(man, label):
@@ -308,6 +444,125 @@ def supervisor_live(man):
         return False
 
 
+def private_group(gid):
+    """Whether only this user is in group gid: this user's primary group,
+    with no other member and no other account that has it as primary
+    group. Many Linux systems give each user such a group and the umask
+    002, so the user's own directories are 0775; a group-writable one is
+    then as private as 0755. On macOS the primary group (staff) is shared
+    and this is False. Accounts that pwd cannot list, such as some
+    directory services give, are not seen."""
+    if gid != os.getgid():
+        return False
+    try:
+        me = pwd.getpwuid(os.getuid()).pw_name
+        if any(u != me for u in grp.getgrgid(gid).gr_mem):
+            return False
+        return not any(e.pw_gid == gid and e.pw_uid != os.getuid() for e in pwd.getpwall())
+    except (KeyError, OSError):
+        return False
+
+
+def others_may_write(st):
+    """Whether a user other than this one or root may write the entry:
+    others have the write bit, or the group does and is not this user's
+    private group."""
+    if st.st_mode & 0o002:
+        return True
+    return bool(st.st_mode & 0o020) and not private_group(st.st_gid)
+
+
+def shared_path_problem(path):
+    """Why another user of this machine could replace `path` or a directory
+    on the way to it, or None. Every directory passed through, symlinks
+    followed, must belong to this user or root, and one that group or
+    others may write must have the sticky bit (a group that is only this
+    user does not count, see private_group); in such a directory the
+    entry passed through must belong to this user or root, so that nobody
+    else can rename it. The part of the path that does not exist yet is
+    created by the launcher in the last directory checked."""
+    uid = os.getuid()
+    todo = [c for c in os.path.abspath(path).split(os.sep) if c]
+    cur, hops = os.sep, 0
+    cst = os.stat(cur)
+    while todo:
+        name = todo.pop(0)
+        if name == ".":
+            continue
+        if name == "..":
+            cur = os.path.dirname(cur)
+            cst = os.stat(cur)
+            continue
+        nxt = os.path.join(cur, name)
+        try:
+            st = os.lstat(nxt)
+        except FileNotFoundError:
+            return None
+        if others_may_write(cst) and st.st_uid not in (uid, 0):
+            return f"{nxt} belongs to another user (uid {st.st_uid}) in {cur}, which others may write"
+        if stat.S_ISLNK(st.st_mode):
+            hops += 1
+            if hops > 40:
+                return f"{path} has too many symlinks"
+            target = os.readlink(nxt)
+            if os.path.isabs(target):
+                cur, cst = os.sep, os.stat(os.sep)
+            todo = [c for c in target.split(os.sep) if c] + todo
+            continue
+        if not stat.S_ISDIR(st.st_mode):
+            return f"{nxt} is not a directory"
+        if st.st_uid not in (uid, 0):
+            return f"{nxt} belongs to another user (uid {st.st_uid}), who could replace what is in it"
+        if others_may_write(st) and not st.st_mode & stat.S_ISVTX:
+            how, fix = (" through its group", "g-w") if not st.st_mode & 0o002 else ("", "o-w")
+            return (f"{nxt} can be changed by other users{how} (mode {stat.S_IMODE(st.st_mode):o}), "
+                    f"who could replace what is in it (if it is yours, chmod {fix} it)")
+        cur, cst = nxt, st
+    return None
+
+
+def require_private_path(path, what):
+    why = shared_path_problem(path)
+    if why:
+        raise Fail(f"{what} {path}: {why}; choose a directory only you can change")
+
+
+def require_private_state(state):
+    """The state directory of a run: on a path no other user can change,
+    and, if it exists, a directory of this user that group and others
+    cannot write. Every command checks it before it reads or writes there,
+    the supervisor before it runs the command lines saved there."""
+    require_private_path(state, "state_dir")
+    try:
+        st = os.lstat(state)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise Fail(f"{state} is not a directory of this user; set another state_dir")
+    if others_may_write(st):
+        raise Fail(f"{state} can be changed by other users (mode {stat.S_IMODE(st.st_mode):o}); "
+                   "remove it or set another state_dir")
+
+
+def make_private_dirs(path):
+    """Creates path and each missing directory above it with mode 0700,
+    whatever the umask: os.makedirs gives the directories above the last
+    the umask's mode, 0775 under the umask 002 of many Linux systems,
+    which require_private_path would then refuse. A directory that exists
+    is left as it is; the caller checks the path again afterwards."""
+    missing = []
+    p = os.path.abspath(path)
+    while not os.path.lexists(p):
+        missing.append(p)
+        p = os.path.dirname(p)
+    for d in reversed(missing):
+        try:
+            os.mkdir(d, 0o700)
+        except FileExistsError:
+            continue
+        os.chmod(d, 0o700)
+
+
 def create_new(path, text):
     """Write a file that must not exist yet; refuses existing files and symlinks."""
     try:
@@ -318,11 +573,18 @@ def create_new(path, text):
         f.write(text)
 
 
+def replace_file(path, text):
+    """Write path through a new file renamed over it, so a symlink planted
+    at path is replaced, never written through."""
+    tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+    create_new(tmp, text)
+    os.replace(tmp, path)
+
+
 # ----------------------------------------------------------------- launch
 
 def prompt_for(man, m, kickoff_id, lead_id):
-    with open(man["prelude"]) as f:
-        prelude = f.read()
+    prelude = man["prelude_text"]
     for k, v in (("{label}", m["label"]), ("{room}", man["room"]),
                  ("{lead}", lead_id), ("{kickoff}", kickoff_id)):
         prelude = prelude.replace(k, v)
@@ -366,9 +628,9 @@ def prepare_dirs(man, m):
 
 def launch_spec(man, m, prompt, work):
     """The member's command line and environment additions."""
+    require_safe_prompt(m, prompt)
     d = mdir(man, m["label"])
-    with open(os.path.join(d, "prompt.md"), "w") as f:
-        f.write(prompt)
+    create_new(os.path.join(d, "prompt.md"), prompt)
     final = os.path.join(d, "final.txt")
     label, home, exe = m["label"], man["home"], man["a2p2"]
     env = {"A2P2_HOME": home}
@@ -404,8 +666,7 @@ def launch_spec(man, m, prompt, work):
     # The consent `up` checked goes with the command line, so the
     # supervisor starts a member with approved tools only if it was given.
     spec = {"argv": argv, "cwd": work, "env": env, "approve_a2p2_tools": man["approve_a2p2_tools"]}
-    with open(os.path.join(d, "launch.json"), "w") as f:
-        json.dump(spec, f)
+    create_new(os.path.join(d, "launch.json"), json.dumps(spec))
     return final
 
 
@@ -418,11 +679,12 @@ def server_harness(m):
 def reserve(man):
     """Claims the state directory for one run; a second `up` is refused.
     The directory is this user's alone: the supervisor runs the command
-    lines saved in it."""
-    os.makedirs(man["state"], mode=0o700, exist_ok=True)
-    st = os.lstat(man["state"])
-    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
-        raise Fail(f"{man['state']} is not a directory of this user; set another state_dir")
+    lines saved in it, and no other user may be able to replace it, a
+    directory above it or anything in it. One that group or others could
+    write is refused, not repaired: they may have planted files in it."""
+    require_private_state(man["state"])
+    make_private_dirs(man["state"])
+    require_private_state(man["state"])
     os.chmod(man["state"], 0o700)
     try:
         os.close(os.open(os.path.join(man["state"], "reserved"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
@@ -430,36 +692,66 @@ def reserve(man):
         raise Fail(f"{man['state']} already holds a run; remove it or set another state_dir")
 
 
+SNAPSHOT = "manifest.json"
+
+
+def load_snapshot(state):
+    """The manifest as `up` checked it, saved in the state directory: the
+    supervisor runs from it, not from the manifest file, which may have
+    changed since, a2p2 binary included."""
+    state = os.path.abspath(state)
+    require_private_state(state)
+    try:
+        with open(os.path.join(state, SNAPSHOT)) as f:
+            man = json.load(f)
+    except (OSError, ValueError) as e:
+        raise Fail(f"no run found in {state}: {e}")
+    if man.get("state") != state:
+        raise Fail(f"{state}/{SNAPSHOT} belongs to the run in {man.get('state')!r}")
+    return man
+
+
 def cmd_up(man, args):
     require_tool_approval(man)
+    read_prelude(man)
+    require_safe_prompts(man)
+    # The home holds the node's key and the socket members' tool servers
+    # use; one that another user could swap is refused before anything.
+    require_private_path(man["home"], "a2p2_home")
     reserve(man)
+    create_new(os.path.join(man["state"], SNAPSHOT), json.dumps(man, indent=2))
     os.makedirs(os.path.join(man["state"], "members"))
     os.makedirs(control_dir(man))
     works = {m["label"]: prepare_dirs(man, m) for m in man["members"]}
     if not os.path.isdir(man["home"]):
-        os.makedirs(man["home"], mode=0o700)
+        make_private_dirs(man["home"])
+    # Checked again just before the first a2p2 call starts a daemon there:
+    # a directory missing at the first check could have been made by
+    # another user since, and the daemon checks only the home itself.
+    require_private_path(man["home"], "a2p2_home")
     st = a2p2_json(man, "status")
-    node8 = st["node"][:8]
+    node, node8, me = st["node"], st["node"][:8], shown_id(st)
     if man["room"] not in [r["label"] for r in st.get("rooms", [])]:
         a2p2(man, "room", "create", man["room"])
     # An agent sees only room posts made after it registered, so register
     # every label (and the watcher) before the kickoff is posted.
     for label in [m["label"] for m in man["members"]] + [man["watcher"]]:
         a2p2(man, "inbox", "--as", label, "--room", man["room"], "--peek", "--json")
-    lead_id = f"{man['lead']}@{node8}"
+    lead_id = f"{man['lead']}@{me}"
     roster_line = ", ".join(f"{m['label']} ({m['harness']})" for m in man["members"])
     kickoff = man["kickoff"] or "Kickoff. Each member has its own brief."
     kickoff += (f"\n\nMembers: {roster_line}. Lead: {lead_id}. Reply to this message with your plan, "
                 "and later with your DONE: or BLOCKED: report.")
-    kickoff_id = a2p2(man, "send", "--as", man["lead"], "--room", man["room"], kickoff).strip()
-    roster = {"room": man["room"], "home": man["home"], "node8": node8, "lead": lead_id,
-              "watcher": f"{man['watcher']}@{node8}", "kickoff": kickoff_id, "started": time.time(),
+    # "--" ends the flags: a kickoff that starts with '-' is text, not an option.
+    kickoff_id = a2p2(man, "send", "--as", man["lead"], "--room", man["room"], "--", kickoff).strip()
+    roster = {"room": man["room"], "home": man["home"], "node": node, "node8": node8, "lead": lead_id,
+              "watcher": f"{man['watcher']}@{me}", "kickoff": kickoff_id, "started": time.time(),
               "ended": None, "manifest": man["path"], "supervisor_pid": None, "members": []}
     for m in man["members"]:
         final = launch_spec(man, m, prompt_for(man, m, kickoff_id, lead_id), works[m["label"]])
         d = mdir(man, m["label"])
         roster["members"].append({
-            "label": m["label"], "id": f"{m['label']}@{node8}", "harness": m["harness"],
+            "label": m["label"], "id": f"{m['label']}@{me}", "harness": m["harness"],
             "server_harness": server_harness(m), "model": m["model"], "limit": m["limit"],
             "silence": m["silence"], "workdir": works[m["label"]], "out": os.path.join(d, "out.log"),
             "err": os.path.join(d, "err.log"), "final": final, "pid": None, "state": "pending",
@@ -467,7 +759,7 @@ def cmd_up(man, args):
             "limit_hit": False, "stop_requested": None, "note": ""})
     save_roster(man, roster)
     with open(os.path.join(man["state"], "supervisor.log"), "a") as wl:
-        w = subprocess.Popen([sys.executable, SELF, "-m", man["path"], "_supervise"],
+        w = subprocess.Popen([sys.executable, SELF, "_supervise", man["state"]],
                              stdin=subprocess.DEVNULL, stdout=wl, stderr=subprocess.STDOUT,
                              start_new_session=True)
     deadline = time.time() + 30
@@ -739,9 +1031,10 @@ class Observer:
         name, this run's working directory, and a last-seen time at or after
         the launch time taken before the process started. A CLI call under
         the label keeps an earlier harness name and directory, so a label
-        reused from another run or directory does not count."""
+        reused from another run or directory does not count. Status lists
+        this machine's agents only, so the label names the agent."""
         for a in agents:
-            if a.get("id") != x["id"] or a.get("harness") != x["server_harness"] or not a.get("last_seen"):
+            if a.get("label") != x["label"] or a.get("harness") != x["server_harness"] or not a.get("last_seen"):
                 continue
             if not a.get("cwd") or os.path.realpath(a["cwd"]) != os.path.realpath(x["workdir"]):
                 continue
@@ -754,10 +1047,10 @@ class Observer:
         # Only exits that happened before the agents were read are
         # classified, so a registration just before the exit is not missed.
         exited = {x["label"] for x in sup.roster["members"] if x["state"] == "exited"}
-        try:
-            agents = a2p2_json(self.man, "status").get("agents", [])
-        except (Fail, ValueError, subprocess.SubprocessError):
-            agents = []
+        st = status_or_none(self.man)
+        agents = (st or {}).get("agents", [])
+        node = run_node(sup.roster, st)
+        person = person_ids(node, st)
         hist = history(self.man)
         now = time.time()
         for x in sup.roster["members"]:
@@ -770,9 +1063,9 @@ class Observer:
                         x["state"] = "running"
                 post(self.man, f"started: {x['label']} ({x['harness']}{', ' + x['model'] if x['model'] else ''}); "
                                f"its a2p2 tool server connected as {x['id']} within {now - x['launched']:.0f}s.")
-            mine = [e for e in hist if e.get("from") == x["id"] and ts(e["created"]) >= x["launched"]]
+            mine = [e for e in hist if wrote(e, node, x["label"]) and ts(e["created"]) >= x["launched"]]
             for e in mine:
-                if e["id"] not in self.asked and any(t.startswith("human@") for t in e.get("to") or []):
+                if e["id"] not in self.asked and to_person(e, person):
                     self.asked.add(e["id"])
                     post(self.man, f"needs input: {x['label']} asked the person a question (message {e['id']}).")
             if x["label"] in exited:
@@ -835,8 +1128,11 @@ def extract_claude_final(x):
         pass
 
 
-def cmd_supervise(man, _args):
-    Supervisor(man).run()
+def cmd_supervise(args):
+    # The supervisor runs the command lines saved in the state directory,
+    # so load_snapshot checks again that no other user could have replaced
+    # them, before it reads anything there.
+    Supervisor(load_snapshot(args.state)).run()
 
 
 # ------------------------------------------------------------ status/stop
@@ -848,17 +1144,134 @@ def ago(t):
     return f"{s}s" if s < 120 else f"{s // 60}m"
 
 
+# Display escaping, as the daemon does it (decision D58, PROTOCOL 10.8):
+# a port of escapeText in internal/node/escape.go, with the same tables and
+# the same text rules, as internal/web/static/app.js is. The launcher is
+# Python with no dependency and cannot call the Go helper. A test checks
+# that these tables equal the daemon's and that both give the output of
+# every row of internal/node/testdata/escape_cases.json.
+HIDDEN = (
+    (0x0000, 0x001f), (0x007f, 0x009f), (0x00ad, 0x00ad), (0x034f, 0x034f), (0x0600, 0x0605),
+    (0x061c, 0x061c), (0x06dd, 0x06dd), (0x070f, 0x070f), (0x0890, 0x0891), (0x08e2, 0x08e2),
+    (0x115f, 0x1160), (0x17b4, 0x17b5), (0x180b, 0x180f), (0x200b, 0x200f), (0x2028, 0x202e),
+    (0x2060, 0x206f), (0x3164, 0x3164), (0xd800, 0xdfff), (0xfe00, 0xfe0f), (0xfeff, 0xfeff),
+    (0xffa0, 0xffa0), (0xfff0, 0xfffb), (0x110bd, 0x110bd), (0x110cd, 0x110cd), (0x13430, 0x1343f),
+    (0x1bca0, 0x1bca3), (0x1d173, 0x1d17a), (0xe0000, 0xe0fff))
+EMOJI = (
+    (0x00a9, 0x00a9), (0x00ae, 0x00ae), (0x203c, 0x203c), (0x2049, 0x2049),
+    (0x2122, 0x2122), (0x2139, 0x2139), (0x2194, 0x21aa), (0x231a, 0x23ff),
+    (0x24c2, 0x24c2), (0x25aa, 0x27bf), (0x2934, 0x2935), (0x2b05, 0x2b55),
+    (0x3030, 0x3030), (0x303d, 0x303d), (0x3297, 0x3297), (0x3299, 0x3299),
+    (0x1f000, 0x1faff))
+JOINING = ((0x0600, 0x08ff), (0x0900, 0x0dff), (0x1000, 0x109f), (0x1780, 0x18af),
+           (0xfb50, 0xfdff), (0xfe70, 0xfefe))
+RTL_LETTERS = (
+    (0x05d0, 0x05ea), (0x05ef, 0x05f2), (0x0620, 0x064a), (0x066e, 0x066f), (0x0671, 0x06d3),
+    (0x06d5, 0x06d5), (0x06ee, 0x06ef), (0x06fa, 0x06fc), (0x06ff, 0x06ff), (0x0710, 0x0710),
+    (0x0712, 0x072f), (0x074d, 0x07a5), (0x07b1, 0x07b1), (0x07ca, 0x07ea), (0x0800, 0x0815),
+    (0x0840, 0x0858), (0x0860, 0x086a), (0x0870, 0x0887), (0x0889, 0x088e), (0x08a0, 0x08c9),
+    (0xfb1d, 0xfb1d), (0xfb1f, 0xfb28), (0xfb2a, 0xfb36), (0xfb38, 0xfb3c), (0xfb3e, 0xfb3e),
+    (0xfb40, 0xfb41), (0xfb43, 0xfb44), (0xfb46, 0xfbb1), (0xfbd3, 0xfd3d), (0xfd50, 0xfd8f),
+    (0xfd92, 0xfdc7), (0xfdf0, 0xfdfb), (0xfe70, 0xfe74), (0xfe76, 0xfefc))
+SPACELESS = ((0x0e00, 0x0fff), (0x1000, 0x109f), (0x1780, 0x17ff))
+HAN = ((0x3400, 0x4dbf), (0x4e00, 0x9fff), (0xf900, 0xfaff), (0x20000, 0x3ffff))
+FLAG_TAGS = tuple("".join(chr(0xe0000 + ord(c)) for c in s) + "\U000e007f" for s in ("gbeng", "gbsct", "gbwls"))
+CLS_EMOJI, CLS_SELECTOR, CLS_JOINING, CLS_KEYCAP, CLS_RTL, CLS_SPACELESS, CLS_HAN = (1 << i for i in range(7))
+
+
+def in_ranges(tab, o):
+    i = bisect.bisect_right(tab, (o, 0x10ffff))
+    return i > 0 and tab[i - 1][0] <= o <= tab[i - 1][1]
+
+
+def hidden(o):
+    """Whether code point o is in the daemon's table (Hidden)."""
+    return in_ranges(HIDDEN, o)
+
+
+def text_class(o):
+    if hidden(o):
+        return 0
+    c = CLS_KEYCAP if 0x30 <= o <= 0x39 or o in (0x23, 0x2a) else 0
+    for tab, bit in ((EMOJI, CLS_EMOJI), (JOINING, CLS_JOINING), (RTL_LETTERS, CLS_RTL),
+                     (SPACELESS, CLS_SPACELESS), (HAN, CLS_HAN)):
+        if in_ranges(tab, o):
+            c |= bit
+    return c
+
+
+def escape(s, lines=False):
+    """Text a member wrote, or a line of a harness log, as the terminal
+    should show it: EscapeDisplay of the daemon, or with lines
+    EscapeDisplayText. Every character of the table is written \\u{hex}
+    unless the text rules keep it (a joiner between two emoji or two
+    letters of a script that needs it, and the others of escape.go), a
+    byte that is not UTF-8 (read with surrogateescape) is written \\x{hh},
+    and a backslash before "u{" or "x{" is written \\u{5c}. With lines, a
+    newline and a tab stay and a carriage return straight before a
+    newline is shown as that line break; any other carriage return is
+    escaped."""
+    out, prev, i, n = [], 0, 0, len(s)
+    while i < n:
+        c = s[i]
+        o = ord(c)
+        if o == 0x1f3f4:
+            tail = next((t for t in FLAG_TAGS if s.startswith(t, i + 1)), "")
+            if tail:
+                out.append(c + tail)
+                prev, i = CLS_EMOJI, i + 1 + len(tail)
+                continue
+        if lines and c == "\r" and s.startswith("\n", i + 1):
+            out.append("\n")
+            prev, i = 0, i + 2
+            continue
+        byte = 0xdc80 <= o <= 0xdcff
+        hide, nxt = hidden(o), 0
+        nc = text_class(ord(s[i + 1])) if i + 1 < n else 0
+        if byte:
+            pass
+        elif c in "\n\t":
+            hide = not lines
+        elif c == "\\" and (s.startswith("u{", i + 1) or s.startswith("x{", i + 1)):
+            hide = True
+        elif (o == 0x200d and prev & (CLS_EMOJI | CLS_SELECTOR) and nc & CLS_EMOJI) or \
+                (o in (0x200c, 0x200d) and prev & CLS_JOINING and nc & CLS_JOINING) or \
+                (o in (0x200f, 0x061c) and prev & CLS_RTL and nc & CLS_RTL) or \
+                (o == 0x200b and prev & CLS_SPACELESS and nc & CLS_SPACELESS) or \
+                (0xe0100 <= o <= 0xe01ef and prev & CLS_HAN):
+            hide = False
+        elif o in (0xfe0e, 0xfe0f) and prev & CLS_EMOJI:
+            hide, nxt = False, CLS_SELECTOR
+        elif o in (0xfe0e, 0xfe0f) and prev & CLS_KEYCAP:
+            hide = False
+        elif not hide:
+            nxt = text_class(o)
+        if byte:
+            out.append(f"\\x{{{o - 0xdc00:02x}}}")
+        elif hide:
+            out.append(f"\\u{{{o:x}}}")
+        else:
+            out.append(c)
+        prev = nxt
+        i += 1
+    return "".join(out)
+
+
 def clean(s, n):
-    s = re.sub(r"[\x00-\x1f\x7f]+", " ", s or "").strip()
-    return s if len(s) <= n else s[: n - 1] + "~"
+    """One line of a member's text for the status table: each line break
+    and tab as one space, cut to n characters, then escaped. Nothing else
+    is dropped: a control at either end is escaped like any other."""
+    s = re.sub(r"(?:\r?\n|\t)+", " ", s or "").strip(" ")
+    return escape(s if len(s) <= n else s[: n - 1] + "~")
 
 
 def cmd_status(man, _args):
     r = load_roster(man)
     hist = history(man)
+    node = run_node(r, None if r.get("node") else status_or_none(man))
     rows = [("LABEL", "HARNESS", "PID", "STATE", "LAST ROOM MESSAGE", "ELAPSED")]
     for x in r["members"]:
-        mine = [e for e in hist if e.get("from") == x["id"]]
+        mine = [e for e in hist if wrote(e, node, x["label"])]
         last = f"{ago(ts(mine[-1]['created']))} ago: {clean(mine[-1].get('text'), 40)}" if mine else "-"
         el = x["wall_clock"] if x.get("wall_clock") is not None else \
             (time.time() - x["launched"] if x["launched"] else 0)
@@ -871,13 +1284,25 @@ def cmd_status(man, _args):
         print("note: the supervisor is not running; states may be stale")
 
 
+def running(x):
+    """A member whose process the supervisor has not reaped, as far as the
+    roster says. "exited" is reaped and only waits to be classified."""
+    return x["state"] not in FINAL and x["state"] != "exited"
+
+
 def cmd_stop(man, args):
-    """Asks the live supervisor to stop members. Signals nothing itself."""
+    """Asks the live supervisor to stop members. Signals nothing itself and
+    changes nothing on disk but its request. Exits non-zero, through Fail,
+    when no supervisor answers or a member is still running at the end."""
     r = load_roster(man)
     if args.label and not any(x["label"] == args.label for x in r["members"]):
         raise Fail(f"no member {args.label!r}")
     if r.get("ended"):
         print("the run has already ended")
+        return
+    asked = [x for x in r["members"] if args.label is None or x["label"] == args.label]
+    if not any(running(x) for x in asked):
+        print("no member to stop: " + ", ".join(f"{x['label']} is {x['state']}" for x in asked))
         return
     nonce = uuid.uuid4().hex
     d = control_dir(man)
@@ -894,25 +1319,34 @@ def cmd_stop(man, args):
             os.remove(req)
         except OSError:
             pass
+        # The roster is left as it is: a supervisor that is slow, stopped
+        # or writing the report may still run, and "ended" tells others it
+        # makes no further a2p2 call.
         r = load_roster(man)
-        for x in r["members"]:
-            if x["state"] not in FINAL:
-                x.update(state="lost", note="the supervisor was not running; nothing was signalled")
-        r["ended"] = time.time()
-        save_roster(man, r)
-        print("the run is not live: no supervisor answered. Nothing was signalled; "
-              "the roster is marked ended. Check for leftover processes yourself.")
-        return
+        live = [x["label"] for x in asked if running(x)]
+        beat = "recent" if supervisor_live(man) else "older than three seconds"
+        raise Fail(f"no supervisor answered within {ACK_WAIT:.0f}s (its heartbeat is {beat}). Nothing was "
+                   f"signalled and the roster is unchanged; it last recorded as running: {', '.join(live) or 'none'}. "
+                   "Check for leftover processes yourself.")
     with open(ack) as f:
         hit = json.load(f)["stopping"]
     os.remove(ack)
-    end = time.monotonic() + KILL_GRACE + 5
-    while time.monotonic() < end:
+    end = time.monotonic() + STOP_WAIT
+    while True:
         r = load_roster(man)
-        if all(x["state"] in FINAL for x in r["members"] if x["label"] in hit):
+        live = [x["label"] for x in r["members"]
+                if (args.label is None or x["label"] == args.label) and running(x)]
+        if not live or time.monotonic() >= end:
             break
         time.sleep(0.1)
-    print(f"stopped {len(hit)} member(s)" + (f": {', '.join(hit)}" if hit else ""))
+    done = [lb for lb in hit if lb not in live]
+    if live:
+        raise Fail(f"still running after {STOP_WAIT:.0f}s: {', '.join(live)}"
+                   + (f"; stopped {len(done)} member(s): {', '.join(done)}" if done else ""))
+    if done:
+        print(f"stopped {len(done)} member(s): {', '.join(done)}")
+    else:
+        print("no member to stop: each had ended, or was already being stopped and has ended since")
 
 
 def cmd_logs(man, args):
@@ -921,13 +1355,34 @@ def cmd_logs(man, args):
     if not x:
         raise Fail(f"no member {args.label!r}")
     for name in ("out", "err"):
-        print(f"==> {x[name]} <==")
+        print(f"==> {escape(x[name])} <==", flush=True)
+        # A log holds a harness's raw output, which can quote what peers
+        # wrote: it is escaped unless --raw asks for the bytes. It is read
+        # line by line, or for -n from its end, never whole.
         try:
-            with open(x[name], errors="replace") as f:
-                lines = f.readlines()
+            with open(x[name], "rb") as f:
+                for ln in (tail_lines(f, args.n) if args.n else f):
+                    out = ln if args.raw else escape(ln.decode("utf-8", "surrogateescape"), lines=True).encode()
+                    sys.stdout.buffer.write(out)
         except OSError:
-            lines = []
-        sys.stdout.writelines(lines[-args.n:] if args.n else lines)
+            pass
+        sys.stdout.buffer.flush()
+
+
+def tail_lines(f, n, block=65536):
+    """The last n lines of the binary file f, each ending with its "\\n"
+    (the last may have none), read from the end in blocks. Only "\\n" ends
+    a line, so a lone carriage return stays in its line and is escaped."""
+    f.seek(0, os.SEEK_END)
+    pos, buf = f.tell(), b""
+    while pos > 0 and buf.count(b"\n") <= n:
+        step = min(block, pos)
+        pos -= step
+        f.seek(pos)
+        buf = f.read(step) + buf
+    parts = buf.split(b"\n")
+    lines = [p + b"\n" for p in parts[:-1]] + ([parts[-1]] if parts[-1] else [])
+    return lines[-n:]
 
 
 # ----------------------------------------------------------------- report
@@ -953,15 +1408,19 @@ def scan_logs(x):
 def build_report(man, ended=None):
     r = load_roster(man)
     r["ended"] = r["ended"] or ended
+    st = status_or_none(man)
+    node = run_node(r, st)
+    person = person_ids(node, st)
     hist = [e for e in history(man, since=r["started"]) if ts(e["created"]) >= r["started"] - 1]
     msgs = [e for e in hist if e.get("kind", "message") == "message"]
     member_ids = {x["id"] for x in r["members"]}
     others = len(member_ids) + 1  # members and the lead; the watcher only posts
     members = []
     for x in r["members"]:
-        mine = [e for e in msgs if e.get("from") == x["id"]]
+        mine = [e for e in msgs if wrote(e, node, x["label"])]
+        own = {x["id"], f"{x['label']}@{node}"}
         multi = [e for e in mine if e.get("parent") and
-                 (len([t for t in (e.get("to") or []) if t != x["id"]]) > 1 or (not e.get("to") and others - 1 > 1))]
+                 (len([t for t in (e.get("to") or []) if t not in own]) > 1 or (not e.get("to") and others - 1 > 1))]
         finals = [e for e in mine if re.match(r"\s*(DONE|BLOCKED):", e.get("text") or "")]
         codes, empty = scan_logs(x)
         members.append({
@@ -972,25 +1431,22 @@ def build_report(man, ended=None):
             "connected_within_s": round(x["connected"] - x["launched"], 1) if x["connected"] else None,
             "messages_sent": len(mine),
             "replies_to_more_than_one_inbox": len(multi),
-            "questions_to_person": len([e for e in mine if any(t.startswith("human@") for t in e.get("to") or [])]),
+            "questions_to_person": len([e for e in mine if to_person(e, person)]),
             "refusals_by_code": codes,
             "empty_inbox_polls_in_logs": empty,
             "final_report": (finals[-1]["text"].strip().split(":", 1)[0] if finals else None),
             "final_answer_file": x["final"] if os.path.exists(x["final"]) else None,
         })
-    try:
-        waiting = sum(rm.get("waiting", 0) for rm in a2p2_json(man, "status").get("rooms", []))
-    except (Fail, ValueError, subprocess.SubprocessError):
-        waiting = None
+    waiting = sum(rm.get("waiting", 0) for rm in st.get("rooms", [])) if st else None
     return {
         "room": r["room"], "kickoff": r["kickoff"], "lead": r["lead"],
         "started": iso(r["started"]), "ended": iso(r["ended"]),
         "wall_clock_s": round((r["ended"] or time.time()) - r["started"], 1),
         "members": members,
         "messages_in_room": len(msgs),
-        "messages_from_person": len([e for e in msgs if (e.get("from") or "").startswith("human@")]),
-        "messages_from_lead": len([e for e in msgs if e.get("from") == r["lead"]]),
-        "watcher_messages": len([e for e in msgs if e.get("from") == r["watcher"]]),
+        "messages_from_person": len([e for e in msgs if wrote(e, node, "human")]),
+        "messages_from_lead": len([e for e in msgs if wrote(e, node, label_of(r["lead"]))]),
+        "watcher_messages": len([e for e in msgs if wrote(e, node, label_of(r["watcher"]))]),
         "person_requests_waiting": waiting,
         "notes": "Refusals and empty inbox polls are counted from the harness logs and are only as "
                  "complete as those logs. Room-wide replies count as reaching more than one inbox "
@@ -1017,11 +1473,9 @@ def markdown(rep):
 
 def write_report(man, ended=None):
     rep = build_report(man, ended)
-    with open(os.path.join(man["state"], "report.json"), "w") as f:
-        json.dump(rep, f, indent=2)
+    replace_file(os.path.join(man["state"], "report.json"), json.dumps(rep, indent=2))
     md = markdown(rep)
-    with open(os.path.join(man["state"], "report.md"), "w") as f:
-        f.write(md)
+    replace_file(os.path.join(man["state"], "report.md"), md)
     return md
 
 
@@ -1047,13 +1501,22 @@ def main(argv=None):
     lg = sub.add_parser("logs", help="print a member's output and error logs")
     lg.add_argument("label")
     lg.add_argument("-n", type=int, default=0, help="only the last N lines of each")
+    lg.add_argument("--raw", action="store_true", help="print the bytes as written, controls included")
     sub.add_parser("report", help="measure the run: report.json and report.md")
-    sub.add_parser("_supervise")
+    sv = sub.add_parser("_supervise")
+    sv.add_argument("state")
     args = ap.parse_args(argv)
     try:
+        if args.cmd == "_supervise":
+            cmd_supervise(args)
+            return 0
         man = load_manifest(args.manifest)
+        if args.cmd != "up":
+            # The run's files are read and written only where no other user
+            # could have replaced them; `up` checks in reserve.
+            require_private_state(man["state"])
         {"up": cmd_up, "status": cmd_status, "stop": cmd_stop, "logs": cmd_logs,
-         "report": cmd_report, "_supervise": cmd_supervise}[args.cmd](man, args)
+         "report": cmd_report}[args.cmd](man, args)
     except Fail as e:
         print(f"team: {e}", file=sys.stderr)
         return 1

@@ -884,6 +884,36 @@ func TestAWantTheAuthorDoesNotAnswerLapsesAndTheReaderIsToldUnavailable(t *testi
 	}
 }
 
+// F10: an edit that keeps a file ends the carry job for the version it
+// was for, and the part an upload left under it goes too: no want is left
+// to count it against the author's share or to finish it.
+// Requirements: L1
+func TestAnEditDropsThePartOfACarryJobForTheVersionItReplaced(t *testing.T) {
+	w := room("A", "S", "R")
+	outboundOnly(w, "A", "R")
+	m, h := sendFile(t, w, "A", "R", "y", "y", "yyy")
+	pull(t, w, "A", "S")
+	must(w.Pull("A", "S", PullOpt{Offer: true}))
+	pull(t, w, "R", "S")
+	shownTo(t, w, "R")
+	if _, err := fetch(w, "R", m, h, "S"); !errors.Is(err, ErrNotYet) {
+		t.Fatalf("%v", err)
+	}
+	f := w.Machine("S").st.files
+	k := pkey{m, h}
+	if !f.wanting(k) {
+		t.Fatal("no carry job")
+	}
+	f.partial[k] = &partHeld{data: "y", size: 3} // one byte of an upload
+	f.disk[partPath(k)] = true
+	n := must(w.ReplaceWithFiles("A", ag("A"), m, "y, edited", "sha256:"+h))
+	must(w.Decide("A", n, true))
+	must(w.Pull("A", "S", PullOpt{Offer: true})) // A dials out; S takes the edit
+	if f.wanting(k) || f.partial[k] != nil {
+		t.Fatalf("after the edit: want %v part %v", f.wanting(k), f.partial[k] != nil)
+	}
+}
+
 // F10: a send whose bytes are not durably stored is not published.
 // Requirements: L1, D9
 func TestACrashBeforeASendsBytesAreStoredPublishesNothing(t *testing.T) {

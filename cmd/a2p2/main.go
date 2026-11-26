@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	neturl "net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -40,10 +41,13 @@ Getting started
                                   --on-stop also checks for messages when a turn ends.
                                   --approve-tools (Codex) lets every a2p2 tool, send included, run without a prompt.
   a2p2 ui [--print]               open the local web page; --print only prints its address
-                                  The address carries the page's access token: do not log or share it.
+                                  The address works once, within 30 seconds: do not log or share it.
+                                  At a terminal only, never in an agent's shell, unless --person is given.
   a2p2 doctor                     check the daemon and harness connections
 
-Talking (as the human, or --as <label> for a script)
+Talking (as the person at a terminal, or --as <label> for a script)
+  In an agent's shell these act as that agent. Away from a terminal, send, ack and
+  inbox act as the person only with --person, which the daemon log records.
   a2p2 send [--room R] [--to AGENT]... [--reply-to ID] [--ask-handled] [--replaces ID] TEXT...
                                   Use --to label@machine, for example human@1a2b3c4d.
                                   Find machine IDs with a2p2 room list ROOM.
@@ -77,7 +81,7 @@ Rooms across machines
   a2p2 room list [ROOM]           members, admins, changes waiting, limits
   a2p2 room admin ROOM MACHINE    ask to make a member an admin (confirm to sign)
   a2p2 room remove ROOM MACHINE   ask to remove a member (confirm to sign)
-  a2p2 room leave ROOM            stop carrying a room on this machine
+  a2p2 room leave ROOM            stop carrying a room and delete its data here (asks at a terminal)
   a2p2 room files ROOM [off|carry|keep]
                                   show or set what this machine does with the room's files:
                                   off: hold only what this machine's agents fetch; carry (default):
@@ -127,13 +131,44 @@ var errUsage = errors.New("usage")
 // address, a name) and no error of a2p2 spans lines.
 func errorText(err error) string { return node.EscapeDisplay(err.Error()) }
 
-// showUI prints the page's address, which carries its access token, and
-// opens it with open unless printOnly. The address goes only to w, never to a log.
-func showUI(w io.Writer, url string, printOnly bool, open func(string)) {
-	fmt.Fprintln(w, url)
-	if !printOnly {
-		open(url)
+// showUI prints the page's address and opens it with open unless
+// printOnly. The address goes only to w, never to a log. It carries a
+// one-time code, which the page trades for a session (internal/web,
+// session.go); note, on stderr so that w holds the address alone, says
+// so. remote: the shell is over SSH, so nothing was opened and the note
+// says how to reach the page. A daemon before 0.2.4 still running after an
+// upgrade gives an address with its long-lived token instead: that is
+// neither opened nor printed, since it works for the daemon's whole run
+// and opening puts it in the arguments of the browser, where other users
+// can read it; the refusal says to restart the daemon. daemonVersion is the
+// running daemon's version. When open fails, the address is printed
+// already and the error says so.
+func showUI(w, note io.Writer, url, daemonVersion string, printOnly, remote bool, open func(string) error) error {
+	if !strings.Contains(url, "/#c=") {
+		return errors.New("the running a2p2 daemon (" + node.EscapeDisplay(daemonVersion) + ") is older than this a2p2 (" + version +
+			") and its address carries its long-lived token, so it was neither opened nor printed. " +
+			"Run a2p2 stop, then a2p2 ui, for an address that works once")
 	}
+	fmt.Fprintln(w, url)
+	fmt.Fprintln(note, "This address opens the page once, within 30 seconds. Run a2p2 ui again for a new one.")
+	if daemonVersion != version {
+		fmt.Fprintln(note, "The running a2p2 daemon is "+node.EscapeDisplay(daemonVersion)+" and this a2p2 is "+version+"; run a2p2 stop to start this one.")
+	}
+	if remote {
+		port := "PORT"
+		if u, err := neturl.Parse(url); err == nil && u.Port() != "" {
+			port = u.Port()
+		}
+		fmt.Fprintln(note, "This shell is over SSH, so no browser was opened on this computer. On your own computer, run "+
+			"ssh -L "+port+":127.0.0.1:"+port+" with this host, then open the address there.")
+	}
+	if printOnly {
+		return nil
+	}
+	if err := open(url); err != nil {
+		return fmt.Errorf("could not open a browser (%v); open the address printed above within 30 seconds", err)
+	}
+	return nil
 }
 
 func usagef(format string, a ...any) error {
@@ -142,24 +177,30 @@ func usagef(format string, a ...any) error {
 
 // cmd bundles what most subcommands need.
 type cmd struct {
-	ctx  context.Context
-	fs   *flag.FlagSet
-	json *bool
-	as   *string
-	home string
-	cl   *localapi.Client
+	ctx    context.Context
+	fs     *flag.FlagSet
+	json   *bool
+	as     *string
+	person *bool
+	home   string
+	cl     *localapi.Client
 }
 
 func newCmd(ctx context.Context, name string) *cmd {
 	c := &cmd{ctx: ctx, fs: flag.NewFlagSet(name, flag.ContinueOnError), home: daemon.Home()}
 	c.json = c.fs.Bool("json", false, "print JSON")
-	c.as = c.fs.String("as", "", "act as this agent label instead of the human")
+	c.as = c.fs.String("as", "", "act as this agent label instead of the person")
+	c.person = c.fs.Bool("person", false, "act as the person without a terminal or in an agent's shell; status counts it")
 	return c
 }
 
 // connectDaemon is daemon.Connect; tests replace it so that no test starts a
 // daemon.
 var connectDaemon = daemon.Connect
+
+// homeWarnings is daemon.HomeWarnings, printed by status and doctor; tests
+// replace it.
+var homeWarnings = daemon.HomeWarnings
 
 func (c *cmd) client() (*localapi.Client, error) {
 	if c.cl != nil {
@@ -168,21 +209,6 @@ func (c *cmd) client() (*localapi.Client, error) {
 	cl, err := connectDaemon(c.ctx, c.home)
 	c.cl = cl
 	return cl, err
-}
-
-// who resolves the acting agent: the human, or a registered script label.
-func (c *cmd) who() (string, error) {
-	cl, err := c.client()
-	if err != nil {
-		return "", err
-	}
-	var a store.Agent
-	req := localapi.RegisterReq{Harness: "human", Label: "human"}
-	if *c.as != "" {
-		req = localapi.RegisterReq{Harness: "cli", Label: *c.as}
-	}
-	err = cl.Call(c.ctx, "register", req, &a)
-	return a.ID, err
 }
 
 // call makes one local API call; with --json it prints the response as
@@ -319,13 +345,13 @@ func run(ctx context.Context, name string, args []string) (err error) {
 		return confirm(c, args)
 	case "alerts":
 		return alerts(c, args)
+	case "ack":
+		return ack(c, args)
+	case "ui":
+		return uiCmd(c, args)
 	}
 
 	// Everything below talks to the daemon.
-	printOnly := new(bool)
-	if name == "ui" {
-		printOnly = c.fs.Bool("print", false, "print the address and open nothing")
-	}
 	if err := c.fs.Parse(permute(c.fs, args)); err != nil {
 		return errUsage
 	}
@@ -333,33 +359,29 @@ func run(ctx context.Context, name string, args []string) (err error) {
 	switch name {
 	case "status":
 		return status(c)
-	case "ui":
-		if *printOnly && *c.json {
-			return usagef("a2p2 ui --print prints the address and nothing else; it does not take --json")
-		}
-		var st localapi.Status
-		if err := c.call("status", nil, &st, nil); err != nil {
-			return err
-		}
-		showUI(os.Stdout, st.UI, *printOnly, openURL) // openURL: tty_unix.go, tty_windows.go
-		return nil
 	case "trace":
 		if len(rest) != 1 {
 			return usagef("a2p2 trace ID")
 		}
 		return trace(c, rest[0])
-	case "ack":
-		if len(rest) != 1 {
-			return usagef("a2p2 ack ID")
-		}
-		me, err := c.who()
-		if err != nil {
-			return err
-		}
-		var r localapi.AckResp
-		return c.call("ack", localapi.AckReq{Agent: me, ID: rest[0]}, &r, func() { fmt.Println(ackText(r)) })
 	}
 	return usagef("unknown command %q; run a2p2 help", name)
+}
+
+// ack reports a message handled, as the acting agent.
+func ack(c *cmd, args []string) error {
+	if err := c.fs.Parse(permute(c.fs, args)); err != nil {
+		return errUsage
+	}
+	if c.fs.NArg() != 1 {
+		return usagef("a2p2 ack ID")
+	}
+	me, err := c.who("ack", true)
+	if err != nil {
+		return err
+	}
+	var r localapi.AckResp
+	return c.call("ack", localapi.AckReq{Agent: me, ID: c.fs.Arg(0)}, &r, func() { fmt.Println(ackText(r)) })
 }
 
 // installArgs reads install and uninstall arguments: the harness name and
@@ -471,17 +493,60 @@ func clock(t string) string {
 	return node.EscapeDisplay(t)
 }
 
+// authorMark says where a message's author is, from from_this_machine,
+// which the daemon sets by the full machine key (D65): any member machine
+// can post as human, so a human on another machine is marked as that
+// machine's person and never as this machine's.
+func authorMark(e localapi.Entry) string { return marks(e.From, e.FromThisMachine, false) }
+
+// marks are the CLI's words after an author written as from: where it is
+// (node.AuthorMark, from the full key) and, with shared, that its short
+// id is another known machine's too, so the full key is written.
+func marks(from string, here, shared bool) string {
+	out := ""
+	if m := node.AuthorMark(from, here); m != "" {
+		out += " [" + m + "]"
+	}
+	if shared {
+		out += " [" + idSharedWords + "]"
+	}
+	return out
+}
+
+// idSharedWords mark an id written with the full key because another
+// machine known here has the same short id (D65).
+const idSharedWords = "id written in full: short id shared"
+
+// machineShown is a machine key as the CLI writes it: the short id, or
+// the full key when another known machine shares the short id.
+func machineShown(n string, shared bool) string {
+	if shared {
+		return node.EscapeDisplay(n) + " [" + idSharedWords + "]"
+	}
+	return short(n)
+}
+
 // printEntry shows one entry. Its text, choices, author and addressees
 // come from other machines, so each is escaped (node.EscapeDisplayText for
 // the text, node.EscapeDisplay for the rest): a terminal escape or a
-// character that hides or reorders text is shown as \u{...}.
+// character that hides or reorders text is shown as \u{...}. The marks
+// after the author and [edited] are the CLI's own words.
 func printEntry(w io.Writer, e localapi.Entry) {
-	head := node.EscapeDisplay(e.From)
+	head := node.EscapeDisplay(e.From) + authorMark(e)
 	if len(e.To) > 0 {
 		head += " → " + escapeAll(e.To, ", ")
 	}
+	if e.IDShared { // the author's or an addressee's id
+		head += " [" + idSharedWords + "]"
+	}
 	if e.Kind != "message" {
 		head += " [" + e.Kind + "]"
+	}
+	if e.Edited {
+		head += " [edited]"
+	}
+	if c := node.ChangedWords(e.ChangedBy, e.FromThisMachine); c != "" {
+		head += " [" + c + "]"
 	}
 	if e.Parent != "" {
 		head += " (reply to " + node.EscapeDisplay(e.Parent)
@@ -609,6 +674,25 @@ func status(c *cmd) error {
 			_ = c.cl.Call(c.ctx, "status", localapi.StatusReq{NoticeShown: true}, nil)
 		}
 	}()
+	if *c.json {
+		// Without the page's address: it carries a code that opens the
+		// page as the person, and agents run status --json into their
+		// transcripts. a2p2 ui
+		// --print gives it to a person who asks.
+		cl, err := c.client()
+		if err != nil {
+			return err
+		}
+		raw, err := cl.CallRaw(c.ctx, "status", localapi.StatusReq{ShowNotice: true}, &st)
+		if err != nil {
+			return err
+		}
+		if raw, err = withoutKey(raw, "ui"); err != nil {
+			return err
+		}
+		_, err = os.Stdout.Write(raw)
+		return err
+	}
 	return c.call("status", localapi.StatusReq{ShowNotice: true}, &st, func() {
 		if st.Notice != "" {
 			fmt.Println("NOTICE   " + st.Notice)
@@ -658,6 +742,12 @@ func status(c *cmd) error {
 			fmt.Printf("         %d unknown files under blobs/ in the state directory, left alone: a2p2 did not write them\n", st.Files.Unknown)
 		}
 		fmt.Println("ui       run a2p2 ui to open the local page")
+		if u := st.Unattended; u != nil {
+			fmt.Println("person   " + personUseText(*u))
+		}
+		for _, w := range homeWarnings(c.home) {
+			fmt.Println("WARNING  " + node.EscapeDisplay(w))
+		}
 		fmt.Println("rooms")
 		// Labels come from the rooms' creators, perhaps on other
 		// machines: escaped, and compared as shown.
@@ -730,7 +820,11 @@ func printTrace(w io.Writer, t localapi.TraceResp) {
 	if !t.Saved {
 		header = "not held on this machine"
 	}
-	fmt.Fprintf(w, "message  %s\nroom     %s\nheader   %s\ntext     %s\n", t.ID, t.Room, header, reason)
+	fmt.Fprintf(w, "message  %s\nroom     %s\n", t.ID, t.Room)
+	if t.From != "" {
+		fmt.Fprintf(w, "from     %s%s\n", node.EscapeDisplay(t.From), marks(t.From, t.FromThisMachine, t.IDShared))
+	}
+	fmt.Fprintf(w, "header   %s\ntext     %s\n", header, reason)
 	if len(t.Copies) == 0 {
 		fmt.Fprintln(w, "copy reports: none yet")
 	} else {
@@ -741,7 +835,7 @@ func printTrace(w io.Writer, t localapi.TraceResp) {
 		if !cp.Member {
 			member = "not a member now"
 		}
-		fmt.Fprintf(w, "  %s (%s), observed %s\n", short(cp.Node), member, clock(cp.At))
+		fmt.Fprintf(w, "  %s (%s), observed %s\n", machineShown(cp.Node, cp.IDShared), member, clock(cp.At))
 	}
 	if len(t.Handled) == 0 {
 		fmt.Fprintln(w, "handled: no report yet")
@@ -749,7 +843,7 @@ func printTrace(w io.Writer, t localapi.TraceResp) {
 		fmt.Fprintln(w, "handled reports (time signed by the agent's machine):")
 	}
 	for _, h := range t.Handled {
-		fmt.Fprintf(w, "  by %s at %s\n", node.EscapeDisplay(h.Agent), clock(h.At))
+		fmt.Fprintf(w, "  by %s%s at %s\n", node.EscapeDisplay(h.Agent), marks(h.Agent, h.FromThisMachine, h.IDShared), clock(h.At))
 	}
 	if len(t.Files) > 0 {
 		fmt.Fprintln(w, "files (what this machine holds; each member's last answer, as this machine observed it):")
@@ -934,9 +1028,7 @@ func room(c *cmd, args []string) error {
 			fmt.Printf("files %s: %s of %s held for this room\n", r.Mode, sizeText(r.Held), sizeText(r.Budget))
 		})
 	case rest[0] == "leave" && len(rest) == 2:
-		return c.call("room/leave", localapi.RoomReq{Room: rest[1]}, &localapi.Empty{}, func() {
-			fmt.Println("left; its data is deleted here. Other members list this machine until an admin removes it.")
-		})
+		return leave(c, rest[1])
 	}
 	return usagef("a2p2 room create LABEL | invite ROOM [--history] [--member|--admin] | admin ROOM MACHINE | remove ROOM MACHINE | " +
 		"files ROOM [off|carry|keep] | leave ROOM | list [ROOM]")
@@ -1159,14 +1251,16 @@ func alerts(c *cmd, args []string) error {
 // printAlert shows one alert with the command that deals with it. The
 // daemon has escaped what other machines wrote in its text; a request's
 // text is shown as confirm shows it (approvalText), and the lines of a
-// question are indented.
+// question's body after its first are indented deeper than the asker's
+// line, so a body cannot draw a line that reads as another asker with a
+// mark (D65).
 func printAlert(w io.Writer, a localapi.Alert) {
 	switch a.Kind {
 	case node.AlertRequest:
 		fmt.Fprintf(w, "Request %s\n  %s\n  Review with a2p2 confirm %s\n", a.ID, approvalText(a.Text, "    "), a.ID)
 	case node.AlertQuestion:
 		fmt.Fprintf(w, "Question %s in room %s\n  %s\n  Answer with a2p2 send --room %s --reply-to %s TEXT\n",
-			a.ID, a.Room, strings.ReplaceAll(a.Text, "\n", "\n  "), a.Room, a.ID)
+			a.ID, a.Room, strings.ReplaceAll(a.Text, "\n", "\n    "), a.Room, a.ID)
 	case node.AlertNetwork:
 		fmt.Fprintf(w, "Networking\n  %s\n  Choose another address with a2p2 net on ADDR, or run a2p2 net off\n", a.Text)
 	case node.AlertRemoved:
@@ -1175,6 +1269,11 @@ func printAlert(w io.Writer, a localapi.Alert) {
 		fmt.Fprintf(w, "%s %s in room %s\n  %s\n", a.Kind, a.ID, a.Room, a.Text)
 	}
 }
+
+// advertisedWarning is said before a2p2 net on: who learns the addresses
+// it advertises. a2p2 status lists them once it listens.
+const advertisedWarning = "Every member of your rooms and every holder of an invite gets the addresses it advertises, " +
+	"which can include VPN and office network addresses. a2p2 status lists them once it listens."
 
 // netCmd is a person's networking decision: shown exactly, asked at a
 // terminal, recorded by the daemon (a decided request of kind network),
@@ -1200,6 +1299,7 @@ func netCmd(c *cmd, args []string) error {
 		return err
 	}
 	req := localapi.NetReq{State: "off"}
+	var advertise []string // config.json's advertise, which replaces the detected addresses
 	switch {
 	case rest[0] == "on" && *outbound:
 		req.State = "outbound"
@@ -1209,6 +1309,7 @@ func netCmd(c *cmd, args []string) error {
 		if err != nil {
 			return err
 		}
+		advertise = cfg.Advertise
 		req.Listen = daemon.DefaultListen
 		if cfg.Listen != "" {
 			req.Listen = cfg.Listen
@@ -1224,11 +1325,41 @@ func netCmd(c *cmd, args []string) error {
 	}[req.State]
 	fmt.Fprintln(os.Stderr, what)
 	if req.State == "on" {
-		fmt.Fprintln(os.Stderr, daemon.FamiliesText(req.Listen))
+		if len(advertise) > 0 {
+			// The daemon gives these instead of the addresses it detects
+			// (less any the listener cannot serve, which status names), so
+			// the detected ones FamiliesText lists would be wrong here.
+			fmt.Fprintln(os.Stderr, "It advertises the addresses set in config.json instead of the ones it detects: "+escapeAll(advertise, ", ")+".")
+		} else {
+			fmt.Fprintln(os.Stderr, daemon.FamiliesText(req.Listen))
+		}
+		fmt.Fprintln(os.Stderr, advertisedWarning)
 	}
 	if *mapPort {
 		req.MapPort = true
 		fmt.Fprintln(os.Stderr, node.MapPortText)
+	}
+	// Port mapping an earlier version recorded is not applied (D68): say
+	// what this decision does with it. Only a running daemon is asked;
+	// none is started before the person says yes.
+	cl, ok := c.cl, c.cl != nil
+	if !ok {
+		cl, ok = daemon.Running(c.ctx, c.home)
+	}
+	if ok {
+		var st localapi.Status
+		if cl.Call(c.ctx, "status", localapi.StatusReq{}, &st) == nil && st.Network.MapPortEarlier {
+			s := "Port mapping was turned on by an earlier version of a2p2 and is off since the upgrade; this decision "
+			switch {
+			case *mapPort:
+				s += "turns it on again."
+			case req.State == "on":
+				s += "keeps it off. Add --map-port to turn it on again."
+			default:
+				s += "keeps it off."
+			}
+			fmt.Fprintln(os.Stderr, s)
+		}
 	}
 	fmt.Fprintln(os.Stderr, "The daemon applies it as soon as it is recorded.")
 	if ask("Apply this? Type yes: ") != "yes" {
@@ -1269,6 +1400,14 @@ func noHarnessHint() string {
 		" (or " + strings.Join(harness.Names[1:], ", ") + "), then a2p2 doctor again."
 }
 
+// personUseText says how often a2p2 acted as the person with --person
+// where no person was seen typing (away from a terminal or in an agent's
+// shell), since the daemon started.
+func personUseText(u localapi.Unattended) string {
+	return fmt.Sprintf("--person used %d time(s) away from a terminal or in an agent's shell since the daemon started, last %s (a2p2 %s)",
+		u.Count, clock(u.Last), node.EscapeDisplay(u.Command))
+}
+
 // quarantineChecks is one failing doctor line per room set aside, with
 // what the person can do about it.
 func quarantineChecks(st localapi.Status) []harness.Check {
@@ -1293,6 +1432,11 @@ func runDoctor(c *cmd, w io.Writer, o harness.Options) error {
 	}
 	homeErr := daemon.PrepareHome(c.home)
 	add("state directory", homeErr, c.home, "fix the permissions shown above")
+	// Warnings pass: the home works, and the person decides.
+	var warns []harness.Check
+	for _, w := range homeWarnings(c.home) {
+		warns = append(warns, harness.Check{Name: "state directory", OK: true, Info: "warning: " + node.EscapeDisplay(w)})
+	}
 	if homeErr != nil {
 		// The daemon cannot be reached through an unsafe directory, so its
 		// line says it was not looked at rather than pointing at a log.
@@ -1304,6 +1448,9 @@ func runDoctor(c *cmd, w io.Writer, o harness.Options) error {
 			var st localapi.Status
 			err = cl.Call(c.ctx, "status", nil, &st)
 			add("local API", err, fmt.Sprintf("machine %s, %d room(s), %d agent(s)", short(st.Node), len(st.Rooms), len(st.Agents)), "")
+			if u := st.Unattended; u != nil {
+				warns = append(warns, harness.Check{Name: "person", OK: true, Info: "warning: " + personUseText(*u)})
+			}
 			if len(st.Listen) == 0 {
 				add("network", nil, "off: this machine only (a2p2 net on to enable)", "")
 			} else {
@@ -1320,6 +1467,7 @@ func runDoctor(c *cmd, w io.Writer, o harness.Options) error {
 		}
 	}
 	hs := harness.Doctor(o)
+	checks = append(checks, warns...)
 	checks = append(checks, hs...)
 	bad := 0
 	for _, ch := range checks {
@@ -1334,8 +1482,11 @@ func runDoctor(c *cmd, w io.Writer, o harness.Options) error {
 	} else {
 		for _, ch := range checks {
 			mark := "ok  "
-			if !ch.OK {
+			switch {
+			case !ch.OK:
 				mark = "FAIL"
+			case strings.HasPrefix(ch.Info, "warning: "):
+				mark = "warn"
 			}
 			fmt.Fprintf(w, "%s  %-28s %s\n", mark, ch.Name, ch.Info)
 			if ch.Fix != "" {
@@ -1389,7 +1540,7 @@ func send(c *cmd, args []string) error {
 	if text == "" && *replaces == "" {
 		return usagef("a2p2 send [flags] TEXT (or text on stdin)")
 	}
-	me, err := c.who()
+	me, err := c.who("send", true)
 	if err != nil {
 		return err
 	}
@@ -1439,7 +1590,7 @@ func fetch(c *cmd, args []string) error {
 	if err := c.fs.Parse(permute(c.fs, args)); err != nil || c.fs.NArg() != 1 {
 		return usagef("a2p2 fetch SHA256 [--room R] [--message ID] [--wait SECONDS]")
 	}
-	me, err := c.who()
+	me, err := c.who("fetch", false)
 	if err != nil {
 		return err
 	}
@@ -1485,7 +1636,10 @@ func inbox(c *cmd, args []string) error {
 	if err := c.fs.Parse(args); err != nil {
 		return errUsage
 	}
-	me, err := c.who()
+	// Reading marks the entries seen, which takes a question from the
+	// person's list; --peek, --thread and --levels mark nothing.
+	marks := *level != "" || !*peek && *thread == "" && !*levels
+	me, err := c.who("inbox", marks)
 	if err != nil {
 		return err
 	}
@@ -1553,7 +1707,7 @@ func history(c *cmd, args []string) error {
 	}
 	// As the acting agent: entries its level kept out are marked, and it
 	// may then report one it was shown handled.
-	me, err := c.who()
+	me, err := c.who("history", false)
 	if err != nil {
 		return err
 	}

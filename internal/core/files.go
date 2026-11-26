@@ -26,6 +26,7 @@ const (
 	MachineFileBudget = 4 << 30   // the same, for the whole machine
 	FileChunk         = 8 << 20   // bytes in one response or upload
 	MaxWants          = 16        // entries of want in one pull answer
+	AuthorWantShare   = 4         // live carry and keep wants for one author's files, each by its whole size: at most this share of the room budget (1/4)
 	WantTries         = 3         // answers to the author's pulls without the bytes, then a want lapses
 	ListTries         = 8         // failed answers for a missing manifest, then it is unavailable
 	FileTransfers     = 8         // transfers at once, in each direction, for the machine

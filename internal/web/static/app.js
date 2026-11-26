@@ -5,11 +5,24 @@ const $ = (id) => document.getElementById(id);
 // the server returns it only once. onscreen: key -> version of every entry as
 // rendered; only that is ever confirmed. qShown: the same for question cards.
 const S = { st: null, unread: [], questions: [], qKeys: new Set(), waiting: 0, alerts: [], requests: [], room: null, msgs: [], older: [], notes: [], more: true, reply: null, sigs: {}, toSig: "", gen: 0, shown: null, toRoom: null, outcome: "", notice: "", risky: new Set(), onscreen: new Map(), qShown: new Map(), notesShown: new Map(), boundary: "", toChosen: "" };
-let token = "";
-try { token = sessionStorage.getItem("a2p2.token") || ""; } catch (e) { /* storage blocked */ }
+// Sign-in (PROTOCOL 7). The address a2p2 ui opens carries a one-time code
+// (#c=...), which works once and for 30 seconds; the page trades it for a
+// session, kept in this tab only. run is a random value the daemon keeps
+// with that session alone and puts in each state the session reads: a
+// state with any other run signs the page out, since after the daemon
+// stops another local user may answer on its port.
+// verified is true only while the last state named that run; any
+// failed or foreign state clears it. A call other than the state is made
+// only while verified, and a POST or a download first asks for a fresh
+// state and goes out only if that state names the run, so what the person
+// types goes to another listener only if it took the port in the moment
+// between that check and the call. signedOut stops every call.
+let token = "", run = "", code = "", signedOut = "", verified = false;
+const NOT_CONNECTED = "Not connected to this machine's a2p2 daemon, so nothing was sent. The page retries on its own.";
+try { token = sessionStorage.getItem("a2p2.session") || ""; run = sessionStorage.getItem("a2p2.run") || ""; } catch (e) { /* storage blocked */ }
 if (location.hash.length > 1) {
-  token = decodeURIComponent(location.hash.slice(1));
-  try { sessionStorage.setItem("a2p2.token", token); } catch (e) { /* ignore */ }
+  const h = decodeURIComponent(location.hash.slice(1));
+  if (h.startsWith("c=")) code = h.slice(2);
 }
 history.replaceState(null, "", location.pathname + location.search);
 
@@ -214,20 +227,74 @@ function ago(t) {
 }
 
 async function api(path, body) {
+  if (signedOut) throw new Error(signedOut);
+  const isState = path === "/api/state";
+  if (!isState) await checkRun(body !== undefined);
   const opt = { headers: { Authorization: "Bearer " + token } };
   if (body !== undefined) {
     opt.method = "POST";
     opt.headers["Content-Type"] = "application/json";
     opt.body = JSON.stringify(body);
   }
-  const r = await fetch(path, opt);
+  try {
+    const r = await fetch(path, opt);
+    let j = null;
+    try { j = await r.json(); } catch (e) { /* non-JSON */ }
+    if (r.status === 401) { showAuthFail(); throw new Error("unauthorized"); }
+    if (!fromRun(r)) throw new Error(signedOut || "request failed (" + r.status + ")");
+    if (!r.ok) throw new Error((j && j.error) || "request failed (" + r.status + ")");
+    if (isState && (!j || j.run !== run)) {
+      showAuthFail("This page belongs to an earlier run of the a2p2 daemon, or something else answers on its port.");
+      throw new Error(signedOut);
+    }
+    if (isState) verified = true;
+    return j;
+  } catch (e) {
+    if (isState) verified = false; // any failed state: unverified until one names the run again
+    throw e;
+  }
+}
+// checkRun throws unless the last state came from this page's daemon
+// process. For a POST or a download (post true) it first asks for a fresh
+// state. Nothing is sent when it throws.
+async function checkRun(post) {
+  if (post) {
+    try { await api("/api/state"); } catch (e) { /* verified is false now */ }
+  }
+  if (signedOut) throw new Error(signedOut);
+  if (!verified) throw new Error(NOT_CONNECTED);
+}
+// fromRun reports whether an answer came from this page's daemon process:
+// the daemon gives every answer to a session the session's run in the
+// A2P2-Run header, which another listener on the port does not know.
+// Nothing in an answer without it is drawn. A success without it, or any
+// answer with another run, signs the page out; a failure without it (a 503
+// between two runs of the daemon) is only a failure.
+function fromRun(r) {
+  const h = r.headers.get("A2P2-Run");
+  if (h && h === run) return true;
+  if (!h && !r.ok) return false;
+  showAuthFail("This page belongs to an earlier run of the a2p2 daemon, or something else answers on its port.");
+  return false;
+}
+// showAuthFail signs the page out: no further call is made, and the tab
+// forgets its session, so a reload does not send it again.
+function showAuthFail(why) {
+  signedOut = "signed out";
+  token = "";
+  try { sessionStorage.removeItem("a2p2.session"); sessionStorage.removeItem("a2p2.run"); } catch (e) { /* storage blocked */ }
+  if (why) $("authwhy").textContent = why;
+  $("connection").hidden = true; $("app").hidden = true; $("authfail").hidden = false;
+}
+// trade swaps the link's code for a session.
+async function trade() {
+  const r = await fetch("/api/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }) });
   let j = null;
   try { j = await r.json(); } catch (e) { /* non-JSON */ }
-  if (r.status === 401) { showAuthFail(); throw new Error("unauthorized"); }
-  if (!r.ok) throw new Error((j && j.error) || "request failed (" + r.status + ")");
-  return j;
+  if (!r.ok || !j || !j.session) { token = ""; showAuthFail((j && j.error) || "This link did not work (" + r.status + ")."); return; }
+  token = j.session; run = j.run || "";
+  try { sessionStorage.setItem("a2p2.session", token); sessionStorage.setItem("a2p2.run", run); } catch (e) { /* ignore */ }
 }
-function showAuthFail() { $("connection").hidden = true; $("app").hidden = true; $("authfail").hidden = false; }
 
 const rooms = () => (S.st && S.st.rooms) || [];
 const room = () => rooms().find((r) => r.id === S.room) || null;
@@ -353,7 +420,7 @@ function renderSide() {
   const levelRoom = (id) => escapeDisplay(((S.st.rooms || []).find((r) => r.id === id) || {}).label || id);
   for (const a of S.st.agents || []) {
     box.append(el("div", "", a.label || a.id, " ", el("span", "sub", a.harness + " · " + ago(a.last_seen))));
-    if (a.id === S.st.human) continue;
+    if (a.label === "human") continue; // the person: its id may be written in full in S.st.human
     const ls = (S.st.levels || []).filter((l) => l.agent === a.id);
     const words = ls.map((l) => levelRoom(l.room) + ": " + l.level);
     box.append(el("div", "sub", "level " + (words.length ? words.join(", ") + "; other rooms: all" : "all in every room")));
@@ -547,7 +614,9 @@ function renderNeeds() {
 // and is never among the questions (node.Surface.Questions).
 function askedBy(m) {
   const whom = (m.to || []).includes(S.st.human) ? ", asked of you" : ", asked of everyone in the room";
-  return [iso(escapeDisplay(m.from)), " on ", iso(machineName(m.from_node, m.room)), " in ", ...roomNode(m.room), whom];
+  const marks = authorMarks(m);
+  return [iso(escapeDisplay(m.from)), marks.length ? " (" + marks.join(", ") + ")" : "", " on ",
+    iso(machineName(m.from_node, m.room)), " in ", ...roomNode(m.room), whom];
 }
 const ASK_NOTE = "A message, not a request: a choice sends that text as your reply, and approves nothing.";
 const HIDDEN_CHOICE = "This choice holds characters that do not show, that change how text reads, or blanks that " +
@@ -576,7 +645,8 @@ async function decide(r, approve, row, notCaughtUpOK) {
   refresh(true);
 }
 // confirmSeen confirms exactly the key and version given and returns the set
-// of keys the server confirmed; a refused entry stays unread.
+// of keys the server confirmed; a refused entry stays unread. Only entries
+// drawn are sent: the daemon keeps a receipt of no other (web.go, drawn).
 async function confirmSeen(entries) {
   const ok = new Set();
   if (!entries.length) return ok;
@@ -593,7 +663,8 @@ async function finishQuestion(m) {
   if (!questionOnScreen(m)) throw new Error("the question changed; read the new version first");
   const ok = await confirmSeen([m]); // handling may be reported only for text confirmed seen
   if (!ok.has(m.key)) throw new Error("could not confirm the question as read; it stays listed");
-  await api("/api/ack", { id: m.id });
+  // version: the text the card drew; the daemon refuses if it changed since
+  await api("/api/ack", { id: m.id, version: m.version });
   S.sigs.n = "";
   refresh(true);
 }
@@ -601,7 +672,7 @@ async function sendAnswer(m, text, error) {
   let sent = false;
   try {
     if (!questionOnScreen(m)) throw new Error("the question changed; read the new version first");
-    await api("/api/send", { room: m.room, text, reply_to: m.id });
+    await api("/api/send", { room: m.room, text, reply_to: m.id, reply_version: m.version });
     sent = true;
     await finishQuestion(m);
   } catch (e) {
@@ -619,8 +690,47 @@ function showQuestionError(m, error, message) {
 }
 
 // ---- stream ----
+// authorMarks are the page's words for where a message's author is, from
+// from_this_machine, which the daemon sets by the full machine key (D65),
+// and whether its text is a replacement (edited, D62). Any member machine
+// can post as human, so a human on another machine is never drawn as
+// this machine's person.
+function authorMarks(m) {
+  const from = String(m.from || "");
+  const label = from.split("@")[0];
+  const person = label.toLowerCase() === "human";
+  const out = [];
+  if (from && person && !m.from_this_machine) out.push("another machine's person, not you");
+  else if (from && person && label === "human") out.push("this machine's person");
+  else if (from && person) out.push("this machine, not its person");
+  else if (from && m.from_this_machine) out.push("this machine");
+  if (m.id_shared) out.push("id written in full: short id shared");
+  if (m.edited) out.push("edited");
+  // changed_by is an agent of the author's machine (node.ChangedWords)
+  if (m.changed_by) {
+    const c = String(m.changed_by).split("@")[0];
+    const who = c.toLowerCase() !== "human" ? "" : !m.from_this_machine ? ", another machine's person, not you"
+      : c === "human" ? ", this machine's person" : ", this machine, not its person";
+    out.push("changed by " + escapeDisplay(m.changed_by) + who);
+  }
+  return out;
+}
+// noteLine draws a notice (a replacement, a withdrawal, an expiry) with
+// the same marks as the message, each in its own element, and a
+// replacement's text in its own body element, so text can never stand
+// where a mark is drawn.
+function noteLine(n) {
+  // from is the message's author; a mark names another agent of its machine that made the change
+  const what = { replaced: ": new text of message ", withdrawn: ": withdrawn, message ", expired: ": the text expired of message " }[n.kind] || " " + n.kind + " ";
+  const line = el("div", "noteline", el("span", "from", escapeDisplay(n.from || "")));
+  for (const k of authorMarks(n)) line.append(" ", el("span", "mark", k));
+  line.append(what + fp(n.id) + " (" + fmt(n.created) + ")");
+  if (n.kind === "replaced" && n.text) line.append(el("div", "body", escapeText(n.text)));
+  return line;
+}
 function entryMeta(m) {
   const meta = el("div", "meta", el("span", "from", escapeDisplay(m.from)), el("span", "", fmt(m.created)));
+  for (const k of authorMarks(m)) meta.append(el("span", "mark", k));
   if (m.to && m.to.length) meta.append(el("span", "", "to " + m.to.map(escapeDisplay).join(", ")));
   if (m.parent) meta.append(el("span", "", "reply to " + fp(m.parent) + (m.parent_state && m.parent_state !== "here" ? " (" + m.parent_state + ")" : "")));
   if (m.author_removed) meta.append(el("span", "mark", "removed machine"));
@@ -669,8 +779,10 @@ async function download(m, f, redraw) {
   again();
   try {
     const q = "room=" + encodeURIComponent(m.room) + "&msg=" + encodeURIComponent(m.id) + "&sha=" + encodeURIComponent(f.sha256);
+    await checkRun(true);
     const r = await fetch("/api/file?" + q, { headers: { Authorization: "Bearer " + token } });
     if (r.status === 401) { showAuthFail(); return; }
+    if (!fromRun(r)) throw new Error(signedOut || "request failed (" + r.status + ")");
     const ct = r.headers.get("Content-Type") || "";
     if (!r.ok || !ct.startsWith("application/octet-stream")) {
       let j = null;
@@ -713,22 +825,19 @@ function renderStream(force) {
     const meta = entryMeta(m);
     meta.append(el("span", "actions", btn("Reply", "link", () => setReply(m)), btn("Thread", "link", () => openThread(m.thread || m.id)),
       btn("Trace", "link", () => openTrace(m.id))));
-    const d = el("div", "msg" + (m.from === S.st.human ? " mine" : ""), meta, el("div", "body", escapeText(m.text)), filesOf(m));
+    const d = el("div", "msg" + (m.from === S.st.human && m.from_this_machine ? " mine" : ""), meta, el("div", "body", escapeText(m.text)), filesOf(m));
     box.append(d);
   }
   // A notice is drawn with what it says: a replacement with its new text,
   // so that confirming it confirms text the person saw.
   S.notesShown = new Map();
   for (const n of notes) {
-    const what = { replaced: " changed message ", withdrawn: " withdrew message ", expired: ": the text expired of message " }[n.kind] || " " + n.kind + " ";
-    const line = el("div", "noteline", escapeDisplay(n.from || "") + what + fp(n.id) + " (" + fmt(n.created) + ")");
-    if (n.kind === "replaced" && n.text) line.append(el("div", "body", escapeText(n.text)));
-    box.append(line);
+    box.append(noteLine(n));
     S.notesShown.set(n.key, n.version);
   }
   $("older").hidden = !S.more || !S.msgs.length;
   $("empty").hidden = !S.room || list.length > 0 || notes.length > 0 || all().length > 0;
-  $("install-tip").hidden = (S.st.agents || []).some((a) => a.id !== S.st.human);
+  $("install-tip").hidden = (S.st.agents || []).some((a) => a.label !== "human");
   if (atBottom) sc.scrollTop = sc.scrollHeight;
 }
 function updateCompose() {
@@ -783,9 +892,11 @@ async function openTrace(id) {
     const t = await api("/api/trace?id=" + encodeURIComponent(id));
     const ct = el("table"), ht = el("table");
     ct.append(el("tr", "", ...["Machine", "Observed", "Member now"].map((h) => el("th", "", h))));
-    for (const c of t.copies || []) ct.append(el("tr", "", el("td", "", fp(c.node)), el("td", "", fmt(c.at)), el("td", "", c.member ? "yes" : "no")));
+    const machine = (c) => c.id_shared ? [escapeDisplay(c.node), " ", el("span", "mark", "id written in full: short id shared")] : [fp(c.node)];
+    for (const c of t.copies || []) ct.append(el("tr", "", el("td", "", ...machine(c)), el("td", "", fmt(c.at)), el("td", "", c.member ? "yes" : "no")));
     ht.append(el("tr", "", ...["Agent", "When"].map((h) => el("th", "", h))));
-    for (const h of t.handled || []) ht.append(el("tr", "", el("td", "", escapeDisplay(h.agent)), el("td", "", fmt(h.at))));
+    const who = (a) => [el("span", "from", escapeDisplay(a.agent || a.from)), ...authorMarks({ ...a, from: a.agent || a.from }).flatMap((k) => [" ", el("span", "mark", k)])];
+    for (const h of t.handled || []) ht.append(el("tr", "", el("td", "", ...who(h)), el("td", "", fmt(h.at))));
     // The same words as a2p2 trace (cmd/a2p2, textWords and copyReportWords).
     const textState = {
       live: "available on this machine", missing: "waiting for a copy",
@@ -793,6 +904,7 @@ async function openTrace(id) {
       withdrawn: "withdrawn by its author", expired: "expired (text is kept 30 days)",
     }[t.reason] || t.reason;
     showDialog(el("h2", "", "Message " + fp(id)),
+      ...(t.from ? [el("p", "", "From ", ...who(t))] : []),
       el("p", "", "Header: " + (t.saved ? "saved on this machine" : "not held on this machine") + ". Text: " + textState + "."),
       el("h2", "", "Copy reports"),
       el("p", "sub", "These are the machines that reported holding the author's messages up to this one, as this machine observed."),
@@ -881,7 +993,7 @@ async function refresh(force) {
     renderNotice(); renderSide(); renderRoomFiles(); renderNeeds(); renderHead(); renderStream(force);
     $("connection").hidden = true;
   } catch (e) {
-    if (e.message !== "unauthorized") {
+    if (e.message !== "unauthorized" && !signedOut) {
       const status = $("connection");
       const message = "Could not load the page data. Retrying. " + e.message;
       if (status.textContent !== message) status.textContent = message;
@@ -920,7 +1032,8 @@ async function submit() {
     return;
   }
   if ($("to").value) body.to = [$("to").value];
-  if (S.reply) body.reply_to = S.reply.id;
+  // reply_version: the text the stream drew; the daemon refuses if it changed since
+  if (S.reply) { body.reply_to = S.reply.id; body.reply_version = S.reply.version || ""; }
   try {
     await api("/api/send", body);
     ta.value = "";
@@ -939,5 +1052,12 @@ const desktop = matchMedia("(min-width: 64.001rem)");
 function setDetailsLayout() { document.querySelector(".machine-details").open = desktop.matches; }
 setDetailsLayout();
 desktop.addEventListener("change", setDetailsLayout);
-if (!token) showAuthFail();
-else { refresh(true); setInterval(refresh, 2000); }
+(async () => {
+  if (code) {
+    busy = true; // a refresh waits for the trade
+    try { await trade(); } catch (e) { token = ""; showAuthFail("This link did not work: " + e.message); } finally { busy = false; }
+  }
+  if (!token) { showAuthFail(); return; }
+  if (signedOut) return;
+  refresh(true); setInterval(refresh, 2000);
+})();

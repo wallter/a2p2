@@ -158,6 +158,12 @@ type FileWant struct {
 	Tries                              int
 	Lapsed                             time.Time // zero while it lives
 	Sent                               time.Time
+	// Capped, when issuing, marks a want no agent of this machine asked
+	// for (a carry job, the setting keep): with the room's other live
+	// wants of the same author, each counted by its whole size (what it
+	// reserves, or its part occupies), it reserves at most
+	// 1/core.AuthorWantShare of the room budget (F10). Not stored.
+	Capped bool
 }
 
 // FileList is what is known of a manifest that is not here.
@@ -589,6 +595,21 @@ func (s *Store) IssueWant(ctx context.Context, w FileWant) (bool, error) {
 				return ErrNoSpace
 			}
 		}
+		if w.Size > 0 && w.Capped {
+			var held int64
+			// each live want by its whole size, as the room's usage counts
+			// it (a part at its declared size): bytes received are checked
+			// only once the file is whole, so they free nothing before it
+			// is held and its want goes
+			if err := tx.QueryRow(`SELECT coalesce(sum(w.size), 0)
+				FROM file_wants w WHERE w.room = ? AND w.author = ? AND w.lapsed_at = 0`,
+				w.Room, w.Author).Scan(&held); err != nil {
+				return err
+			}
+			if br, _ := s.budgets(); held+w.Size > br/core.AuthorWantShare {
+				return ErrNoSpace
+			}
+		}
 		_, err := tx.Exec(`INSERT INTO file_wants (room, msg, version, sha256, author, size, list, at) VALUES (?,?,?,?,?,?,?,?)`,
 			w.Room, w.Msg, w.Version, w.SHA256, w.Author, w.Size, w.List, ms(w.At))
 		issued = err == nil
@@ -606,13 +627,52 @@ func (s *Store) DropWant(ctx context.Context, room, msg, sha string) error {
 }
 
 // LapseWant marks a want lapsed at now (a carry job is then answered
-// "gave up" for GaveUpLife).
+// "gave up" for GaveUpLife), and drops its part (lapseWant).
 func (s *Store) LapseWant(ctx context.Context, room, msg, sha string, now time.Time) error {
-	return s.tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.Exec(`UPDATE file_wants SET lapsed_at = ? WHERE room = ? AND msg = ? AND sha256 = ? AND lapsed_at = 0`,
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.Exec(`UPDATE file_wants SET lapsed_at = ? WHERE room = ? AND msg = ? AND sha256 = ? AND lapsed_at = 0`,
 			ms(now), room, msg, sha)
-		return err
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			return dropLapsedPart(tx, room, msg, sha, now)
+		}
+		return nil
 	})
+	if err == nil {
+		s.RunTrash(ctx)
+	}
+	return err
+}
+
+// dropLapsedPart drops the part of a want that has just lapsed, in the
+// same transaction: an upload takes a chunk only against a live want and
+// a fetch starts from zero, so nothing can finish that part, and it would
+// hold its full size of the room budget for as long as the message lists
+// the file (F10).
+func dropLapsedPart(tx *sql.Tx, room, msg, sha string, now time.Time) error {
+	return dropPartFrom(tx, room, msg, sha, time.Time{}, now)
+}
+
+// dropPartFrom is dropLapsedPart for a part reserved no later than
+// before (zero: any). A want that lapsed at before took no upload after
+// it, so a part reserved later is an agent's fetch in progress and stays;
+// one reserved earlier is what an upload left, as a 0.2.3 binary did when
+// its want lapsed.
+func dropPartFrom(tx *sql.Tx, room, msg, sha string, before, now time.Time) error {
+	q, args := `DELETE FROM file_parts WHERE room = ? AND msg = ? AND sha256 = ?`, []any{room, msg, sha}
+	if !before.IsZero() {
+		q, args = q+` AND at <= ?`, append(args, ms(before))
+	}
+	res, err := tx.Exec(q, args...)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return trash(tx, partRel(room, msg, sha), "part", room, msg, sha, 0, "", now)
+	}
+	return nil
 }
 
 // WantsToSend chooses, in one transaction, the wants for author's
@@ -643,6 +703,9 @@ func (s *Store) WantsToSend(ctx context.Context, room, author string, clock func
 			if tries >= core.WantTries {
 				if _, err := tx.Exec(`UPDATE file_wants SET tries = ?, lapsed_at = ? WHERE room = ? AND msg = ? AND sha256 = ?`,
 					tries, ms(now), room, w.Msg, w.SHA256); err != nil {
+					return err
+				}
+				if err := dropLapsedPart(tx, room, w.Msg, w.SHA256, now); err != nil {
 					return err
 				}
 				continue
@@ -1053,6 +1116,8 @@ func fileSHA256(p string) (string, error) {
 
 // windowsReserved are names Windows will not create, with any extension.
 var windowsReserved = map[string]bool{"CON": true, "PRN": true, "AUX": true, "NUL": true,
+	"COM0": true, "LPT0": true, "CONIN$": true, "CONOUT$": true, "CLOCK$": true,
+	"COM¹": true, "COM²": true, "COM³": true, "LPT¹": true, "LPT²": true, "LPT³": true,
 	"COM1": true, "COM2": true, "COM3": true, "COM4": true, "COM5": true, "COM6": true, "COM7": true, "COM8": true, "COM9": true,
 	"LPT1": true, "LPT2": true, "LPT3": true, "LPT4": true, "LPT5": true, "LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true}
 
@@ -1104,62 +1169,86 @@ type Staged struct {
 	Path   string // as resolved from the opened file
 	Size   int64
 	SHA256 string
+	Links  int // names the file has on disk, when more than one
 }
 
 // ErrNotRegular: the path, once opened, is not a regular file.
 var ErrNotRegular = &FileError{Op: "stat", Code: "not_regular"}
 
-// StageFile opens path once (following links), refuses anything but a
-// regular file from the handle's own information, and copies and hashes
-// from that handle into blobs/.staging/<request>/<n>, synced before it
-// returns. The path it reports is the one the system resolves, checked to
-// be the same file as the handle. Larger than max: ErrNoSpace's sibling,
-// core.MaxFileSize, refused before a byte is written.
+// StageFile is OpenSource and StageSource for one path: what may be
+// staged is the rule of OpenSource (files_source.go). Larger than max:
+// ErrTooLarge, refused before a byte is written.
 func (s *Store) StageFile(req string, n int, path string, max int64) (Staged, error) {
 	if !validReqID(req) || n < 0 || n >= core.MaxFiles || !filepath.IsAbs(path) {
 		return Staged{}, ErrBadPath
 	}
-	if RemoteOrDevice(path) {
-		return Staged{}, ErrRemoteOrDevice
-	}
-	f, err := openSource(path)
-	if err != nil {
-		return Staged{}, fileErr("open", err)
-	}
-	defer f.Close()
-	if stageOpened != nil {
-		stageOpened()
-	}
-	st, err := f.Stat()
-	if err != nil {
-		return Staged{}, fileErr("stat", err)
-	}
-	if !st.Mode().IsRegular() {
-		return Staged{}, ErrNotRegular
-	}
-	if st.Size() > max {
-		return Staged{}, ErrTooLarge
-	}
-	// the path shown is the one the system reports for the open handle
-	resolved, err := handlePath(f)
-	if err != nil {
-		return Staged{}, fileErr("path", err)
-	}
-	staged, err := s.stageCopy(req, n, f, max)
+	src, err := s.OpenSource(path)
 	if err != nil {
 		return Staged{}, err
 	}
-	staged.Path = resolved
+	defer src.Close()
+	return s.StageSource(req, n, src, max)
+}
+
+// StageSource copies and hashes the opened source into
+// blobs/.staging/<request>/<n>, synced before it returns, from the handle
+// OpenSource opened: the bytes staged, shown and sent are the ones read
+// from it. Larger than max: ErrTooLarge, refused before a byte is written.
+func (s *Store) StageSource(req string, n int, src *Source, max int64) (Staged, error) {
+	if !validReqID(req) || n < 0 || n >= core.MaxFiles || src == nil || src.f == nil {
+		return Staged{}, ErrBadPath
+	}
+	if src.Size > max {
+		return Staged{}, ErrTooLarge
+	}
+	staged, err := s.stageCopy(req, n, src.f, max)
+	if err != nil {
+		return Staged{}, err
+	}
+	staged.Path, staged.Links = src.Path, src.Links
 	return staged, nil
+}
+
+// DropStaged removes staging file n of req: a file the send does not list
+// after all (the same bytes as one before it). An error says the file may
+// still be there, so the caller drops the whole staging of req.
+func (s *Store) DropStaged(req string, n int) error {
+	if !validReqID(req) || n < 0 || n >= core.MaxFiles {
+		return ErrBadPath
+	}
+	if err := os.Remove(s.abs(stageRel(req, n))); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fileErr("remove", err)
+	}
+	return nil
+}
+
+// PendingFull reports whether room has max of this machine's own requests
+// waiting: a send with files is refused for that before any path it names
+// is touched (F35).
+func (s *Store) PendingFull(ctx context.Context, room string, max int) (full bool, err error) {
+	err = s.View(ctx, func(rd *Reader) error {
+		switch err := checkOwnPending(rd.tx, room, max); {
+		case errors.Is(err, ErrTooManyPending):
+			full = true
+		case err != nil:
+			return err
+		}
+		return nil
+	})
+	return full, err
 }
 
 // stageOpened, in tests, runs after a source is opened.
 var stageOpened func()
 
-// RemoteOrDevice reports a path that is refused before any I/O: on
-// Windows a UNC path, a \\?\ or \\.\ namespace or a reserved device name
-// [fix-files-b 7]. Callers check it before anything else touches the path.
-func RemoteOrDevice(path string) bool { return remoteOrDevice(path) }
+// RemoteOrDevice reports a path that is refused before any I/O
+// [fix-files-b 7]: on Windows anything but a drive letter, a colon and a
+// separator followed by plain names (no UNC path, no \\?\, \\.\ or \??\
+// namespace, no stream after a colon, no reserved device name); on Unix a
+// path under /dev, /proc, /sys, /net or, on macOS, another automount
+// point. OpenSource checks it on every path it reaches, links followed
+// included, before it touches that path.
+func RemoteOrDevice(path string) bool { return remoteOrDevice(filepath.Clean(path)) }
 
 // FileError is an error of a file operation that names the operation and
 // a code, never a path [fix-files-b 8].

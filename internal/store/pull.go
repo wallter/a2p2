@@ -301,46 +301,208 @@ func (t *Tx) PutRecordPlanned(r *core.VerifiedRecord, gen int64, plan func(*Read
 	return putPlanned(t.tx, r, gen, plan)
 }
 
+// MaxHintedStreams bounds the streams one peer's reports can make this
+// machine keep for one author of a room while none of them is held: a
+// report names any epoch it likes, unsigned (F9). A stream counts against
+// the peer whose report set its known position, also when that peer took
+// it over from another with a higher report.
+const MaxHintedStreams = 32
+
 // NoteKnown records peer's report, at at, of the positions it holds of
 // author's streams in room (epoch to contiguous position): a stream not
 // held yet is created with contig 0; a known position (and its date)
 // rises to a higher report from any peer, and the peer whose report set it
-// can lower it, also by no longer reporting the stream. Known positions
-// are hints.
+// can lower it, also by no longer reporting the stream, which deletes a
+// stream nothing of is held. Known positions are hints. At most
+// MaxHintedStreams streams that hold nothing are kept per author on this
+// peer's word, lowest epochs first: past that, a report neither creates
+// one nor takes over one another peer's report set.
 func (t *Tx) NoteKnown(room, peer, author string, known map[string]int64, at time.Time) error {
-	for epoch, c := range known {
-		if _, err := t.tx.Exec(`INSERT INTO streams (room, author, epoch, contig, known, known_at, known_from)
-			VALUES (?,?,?,0,?,?,?)
-			ON CONFLICT (room, author, epoch) DO UPDATE SET known = excluded.known, known_at = excluded.known_at,
-				known_from = excluded.known_from
-			WHERE excluded.known > streams.known
-				OR excluded.known < streams.known AND streams.known_from = excluded.known_from`,
-			room, author, epoch, c, ms(at), peer); err != nil {
+	type row struct {
+		contig, known int64
+		from          string
+	}
+	have := map[string]row{}
+	rows, err := t.tx.Query(`SELECT epoch, contig, known, known_from FROM streams WHERE room = ? AND author = ?`, room, author)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var e string
+		var r row
+		if err := rows.Scan(&e, &r.contig, &r.known, &r.from); err != nil {
+			rows.Close()
+			return err
+		}
+		have[e] = r
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	hinted := 0 // streams that hold nothing, on this peer's word, that it still reports
+	var gone []string
+	for e, r := range have {
+		if r.from != peer {
+			continue
+		}
+		if _, ok := known[e]; !ok {
+			gone = append(gone, e)
+		} else if r.contig == 0 {
+			hinted++
+		}
+	}
+	sort.Strings(gone)
+	for _, e := range gone {
+		if err := t.lowerKnown(room, peer, author, e, have[e].contig, 0, at, true); err != nil {
 			return err
 		}
 	}
-	rows, err := t.tx.Query(`SELECT epoch FROM streams WHERE room = ? AND author = ? AND known_from = ?`, room, author, peer)
+	epochs := make([]string, 0, len(known))
+	for e := range known {
+		epochs = append(epochs, e)
+	}
+	sort.Strings(epochs)
+	for _, epoch := range epochs {
+		c := known[epoch]
+		r, ok := have[epoch]
+		switch {
+		case !ok:
+			if c <= 0 || hinted >= MaxHintedStreams {
+				continue
+			}
+			if _, err := t.tx.Exec(`INSERT INTO streams (room, author, epoch, contig, known, known_at, known_from)
+				VALUES (?,?,?,0,?,?,?)`, room, author, epoch, c, ms(at), peer); err != nil {
+				return err
+			}
+			hinted++
+			continue
+		case c > r.known && r.from != peer && r.contig == 0:
+			// Taking over a hint another peer set counts against this one.
+			if hinted >= MaxHintedStreams {
+				continue
+			}
+			hinted++
+		case c > r.known, c < r.known && r.from == peer:
+		default:
+			continue
+		}
+		if c < r.known {
+			if err := t.lowerKnown(room, peer, author, epoch, r.contig, c, at, false); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := t.tx.Exec(`UPDATE streams SET known = ?, known_at = ?, known_from = ? WHERE room = ? AND author = ? AND epoch = ?`,
+			c, ms(at), peer, room, author, epoch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// lowerKnown lowers a stream's known position, which peer's report set,
+// to c on peer's word at at, or forgets it (gone: peer no longer names the
+// stream). If another peer's last observed detail reports the stream
+// higher than c, the known position becomes that report instead, with
+// that peer and the time it was observed: one peer's report never erases
+// another's (a peer could otherwise raise a hint another peer set and
+// then drop it). Such a stream counts against the peer whose report it
+// takes, and is not taken while that peer is at MaxHintedStreams. A
+// stream that holds nothing and is lowered to nothing goes.
+func (t *Tx) lowerKnown(room, peer, author, epoch string, contig, c int64, at time.Time, gone bool) error {
+	k, from, kat, err := t.otherKnown(room, peer, author, epoch)
+	if err != nil {
+		return err
+	}
+	if k > c && k > 0 {
+		n := 0
+		if contig == 0 {
+			if err := t.tx.QueryRow(`SELECT count(*) FROM streams WHERE room = ? AND author = ? AND known_from = ? AND contig = 0
+				AND epoch <> ?`, room, author, from, epoch).Scan(&n); err != nil {
+				return err
+			}
+		}
+		if n < MaxHintedStreams {
+			_, err := t.tx.Exec(`UPDATE streams SET known = ?, known_at = ?, known_from = ? WHERE room = ? AND author = ? AND epoch = ?`,
+				k, kat, from, room, author, epoch)
+			return err
+		}
+	}
+	if gone || c <= 0 && contig == 0 {
+		return t.dropKnown(room, author, epoch, contig)
+	}
+	_, err = t.tx.Exec(`UPDATE streams SET known = ?, known_at = ?, known_from = ? WHERE room = ? AND author = ? AND epoch = ?`,
+		c, ms(at), peer, room, author, epoch)
+	return err
+}
+
+// otherKnown is the highest position of stream (author, epoch) of room
+// that a peer other than peer reports in its last observed detail, the
+// latest such report on a tie, with that peer and when it was observed
+// (this machine's clock, in milliseconds); 0 when none reports it.
+func (t *Tx) otherKnown(room, peer, author, epoch string) (known int64, from string, at int64, err error) {
+	rows, err := t.tx.Query(`SELECT peer, detail, at FROM observed WHERE room = ? AND author = ? AND peer <> ?
+		AND detail IS NOT NULL ORDER BY peer`, room, author, peer)
+	if err != nil {
+		return 0, "", 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p, detail string
+		var when int64
+		if err := rows.Scan(&p, &detail, &when); err != nil {
+			return 0, "", 0, err
+		}
+		var ds []StreamDetail
+		if json.Unmarshal([]byte(detail), &ds) != nil {
+			continue
+		}
+		for _, d := range ds {
+			if d.E == epoch && (d.C > known || d.C == known && known > 0 && when > at) {
+				known, from, at = d.C, p, when
+			}
+		}
+	}
+	return known, from, at, rows.Err()
+}
+
+// dropKnown forgets a stream's known position: a stream that holds
+// nothing (contig 0) is deleted, any other keeps its row.
+func (t *Tx) dropKnown(room, author, epoch string, contig int64) error {
+	q := `UPDATE streams SET known = 0, known_from = '' WHERE room = ? AND author = ? AND epoch = ?`
+	if contig == 0 {
+		q = `DELETE FROM streams WHERE room = ? AND author = ? AND epoch = ? AND contig = 0`
+	}
+	_, err := t.tx.Exec(q, room, author, epoch)
+	return err
+}
+
+// dropHints forgets every known position peer's reports set in room for
+// an author not in keep: a whole observation that leaves an author out
+// says the peer reports none of its streams (F9).
+func (t *Tx) dropHints(room, peer string, keep map[string]bool) error {
+	rows, err := t.tx.Query(`SELECT DISTINCT author FROM streams WHERE room = ? AND known_from = ?`, room, peer)
 	if err != nil {
 		return err
 	}
 	var gone []string
 	for rows.Next() {
-		var e string
-		if err := rows.Scan(&e); err != nil {
+		var a string
+		if err := rows.Scan(&a); err != nil {
 			rows.Close()
 			return err
 		}
-		if _, ok := known[e]; !ok {
-			gone = append(gone, e)
+		if !keep[a] {
+			gone = append(gone, a)
 		}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	for _, e := range gone {
-		if _, err := t.tx.Exec(`UPDATE streams SET known = 0, known_from = '' WHERE room = ? AND author = ? AND epoch = ?`,
-			room, author, e); err != nil {
+	for _, a := range gone {
+		if err := t.NoteKnown(room, peer, a, nil, time.Time{}); err != nil {
 			return err
 		}
 	}
@@ -423,7 +585,7 @@ func (t *Tx) observe(room, peer string, at time.Time, obs []Observation, whole b
 			return err
 		}
 	}
-	return nil
+	return t.dropHints(room, peer, keep)
 }
 
 // Refuse adds n to peer's count of reason in room.

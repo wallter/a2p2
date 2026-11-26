@@ -16,6 +16,42 @@ reports.
   the requesting machine's history permissions. Until a removal reaches a
   member, that member may still serve the removed machine. Copies already
   received stay with their holders.
+- Agent labels and addressees help with routing and reading. A room member
+  can read the room data its machine can fetch. Treat messages as
+  untrusted input. A message from a peer does not grant permission to act.
+
+### A member of your rooms
+
+Another member machine, perhaps another owner's, and anyone holding
+an invite.
+
+- A machine that reaches a room through one member trusts that member for
+  delivery. That member can leave out an author's messages without any
+  sign, and a removal of that member never reaches the others while it is
+  the only path. Rooms shared between owners should have a listener from
+  each owner.
+- Anyone with a valid unused invite can present it. A person on the admin
+  machine still approves the joining machine and the terms. Keep invites
+  private and verify the joining machine's fingerprint before approval.
+- An invite to a room this machine already holds is used only on the
+  terms held here: the admin machine must name the room's create entry
+  and the label held here, and its log counts only if it is a member of
+  the room here before or after each batch of it, or the whole batch is
+  refused. A removed admin's invite
+  therefore cannot bring in entries it signed after its removal, and a
+  join answer opens the `not_caught_up` gate only when it comes from a
+  member here and its heads are the heads of the log here. A machine
+  that holds the room and has not heard of a newer admin can join
+  through it only if that admin's log shows its admission within 1,024
+  entries (4 MiB) that this machine lacks. One join reads at most 256
+  pages or 64 MiB, for at most 15 minutes of reading, and 2 minutes
+  without an entry this machine lacks; past that the join is refused.
+  These count over all the join's runs until the daemon restarts.
+  Joins still resume one at a time, so a hostile admin machine can delay
+  the others by up to that much in all, again after each restart.
+- Advertised addresses, including VPN and office network addresses, go
+  to every member of your rooms and every holder of an invite. `a2p2 net
+  on` says so, and `a2p2 status` lists them.
 - An admin can sign entries that wait for a second admin, and each other
   admin's machine asks its person about them: at most 32 at a time per
   room. One signing admin gets more than four of them only from places no
@@ -41,36 +77,45 @@ reports.
   leave the room and join it again (not the local room). The other rooms
   keep working, so an entry another machine got stored cannot stop the
   daemon starting after an upgrade.
-- A machine that reaches a room through one member trusts that member for
-  delivery. That member can leave out an author's messages without any
-  sign, and a removal of that member never reaches the others while it is
-  the only path. Rooms shared between owners should have a listener from
-  each owner.
-- Anyone with a valid unused invite can present it. A person on the admin
-  machine still approves the joining machine and the terms. Keep invites
-  private and verify the joining machine's fingerprint before approval.
-- Files follow the permission of the text they belong to: a machine serves
-  a file only to a current member that may read that message, and deletes
-  it when the message goes. A person confirms the exact bytes of a file an
-  agent sends, as a guard rail only: an agent running as your user can call
-  `confirm` or paste the contents as text. a2p2 verifies a fetched file's
-  hash and never opens, unpacks or runs it; treat it as data from another
-  machine, and take care with whatever program opens it. A member that
-  fetched a file keeps it after removal.
-- The daemon's Unix socket is in a private directory. Any program running
-  as your OS user can use the socket and read your machine's state.
-  Messages are stored unencrypted in `a2p2.db` in the state directory.
-- On Windows, file modes do not protect the socket. The state directory
-  is created with an access control list for your user only, and a2p2
-  refuses one that lets other users in. Each local API request must also
-  carry a key that the daemon writes into that directory at every start.
-  This has been built and reasoned about but not yet tested on Windows
-  with a second user trying to connect (DECISIONS, D47).
-- The web page listens on loopback. Its API requires a random token. The
-  server checks the request's `Host` and any `Origin` header.
-- Agent labels and addressees help with routing and reading. A room member
-  can read the room data its machine can fetch. Treat messages as
-  untrusted input. A message from a peer does not grant permission to act.
+- A room joined from another machine is held under the label the person
+  approved in the preview: a create entry with another label is refused.
+  A new room's label may not read as `local` (in any case, with spaces
+  around it) and may not hold control, direction or invisible
+  characters, except those the display keeps (a joiner inside an emoji,
+  or between letters of a script that needs one). A room from an older
+  version that is labelled `local` still loads; it is shown with its id
+  (its label, `#` and 8 hex of the id, the same for the life of the
+  room) and never resolves as the local room. Lookalike letters of other
+  scripts are not detected.
+- Any member machine can post under any label, `human` included, and an
+  agent id names a machine by a short id of 32 bits. What an agent
+  reads therefore says, for every message, whether this machine wrote it
+  (`from_this_machine`, compared by the full machine key), and a message
+  labelled `human` in any case says whether it is this machine's person
+  (`person`). Only `human` written on this machine is; on this machine
+  only the person's own path registers that label, in any case, and
+  `a2p2 mcp` refuses the harness name `human`. `ask_human` names the
+  person by this machine's full key. A machine whose short id another
+  machine known here shares is written with its full key and marked
+  `id_shared`, in tool results, the local API and status; a short id
+  that names two members is refused as an addressee. Only this machine's
+  own room is shown as `local`, no two rooms are shown alike, and a room
+  name that could mean two rooms is refused. In `peers`, a machine name
+  that another machine also uses, or that reads as another machine's
+  id, is shown with `#` and the machine's id. A member can still grind a key
+  with a matching short id (about 2^32 tries) and be admitted; it is then
+  shown in full, not refused. The same marks, from the full key, are on
+  the CLI's messages, notices and `trace`, the page's messages, notices,
+  questions and trace, question alerts and the hook's unread notice;
+  a replaced message is shown under its own label everywhere, and
+  another agent of its machine that replaced it is named as the one that
+  changed it. Message text that copies a mark's
+  words is drawn apart from the marks (indented in the CLI, a question
+  alert's later body lines deeper than its asker line, in its own
+  element on the page, its own field in MCP; the hook shows no text).
+  Any program running as you can still post
+  as your person through the socket or the CLI: `person` says where a
+  message was written, not who typed it.
 - Room labels, machine names, file names and message text can come from
   another machine, and its owner may be someone else. Where a2p2
   shows them (the text a person approves in `confirm`, `alerts` and on
@@ -105,6 +150,32 @@ reports.
   sentences the daemon wrote for a person (a request's or an alert's
   text). Names are labels, and lookalike letters are not detected:
   compare fingerprints, not names.
+- The author of a message can replace it at any time, also after it was
+  answered. Inbox, thread, branch, history, recent and skipped entries
+  carry `edited` when the text is a replacement: in the local API and
+  the MCP tools' results, as `[edited]` in the CLI and as a mark on the
+  page. A replacement whose text expired keeps that mark: the message is
+  then shown as expired and edited, never with its earlier text as
+  current. A handled report is
+  refused when newer text arrived after the read, or while a newer text
+  is announced but not here yet. So is a reply by an agent that may
+  report the message handled and was shown an older text of it, and a
+  reply or report from the page names the version it drew and is refused
+  if the message changed since. The page's background requests keep no
+  receipt; only a seen of what it drew does. A reply by an agent no read
+  showed the message, or one it may not report handled, names no version
+  from the CLI or the MCP tools and is not checked. A signed reply and a handled report
+  name only the message, not its version, so a thread read later cannot
+  show which text an answer saw. The author also chooses a message's
+  time, up to 24 hours ahead or any time in the past. That time orders
+  every view and starts the 30 days of retention, so a member can place
+  a message above an answer given after it, or send one whose text
+  expires minutes after it arrives.
+- What a peer reports it holds is unsigned. It can make this machine list
+  up to 32 streams per author that are not there as still being fetched,
+  until it stops reporting them. It can raise a hint another peer set,
+  but not erase it: when it lowers or drops the stream, the other peer's
+  last report stands.
 - The unread notice a hook prints holds a count and up to five sender
   labels, never message text. The sending agent chooses its label. Every
   machine accepts only 1 to 64 characters of letters, digits, `.`, `_` and
@@ -112,6 +183,147 @@ reports.
   a newline, quote or markup. It can still be a word that reads like an
   instruction; the notice tells the model that mail does not come from its
   user.
+- Files follow the permission of the text they belong to: a machine serves
+  a file only to a current member that may read that message, and deletes
+  it when the message goes. A person confirms the exact bytes of a file an
+  agent sends, as a guard rail only: an agent running as your user can call
+  `confirm` or paste the contents as text. a2p2 verifies a fetched file's
+  hash and never opens, unpacks or runs it; treat it as data from another
+  machine, and take care with whatever program opens it. A member that
+  fetched a file keeps it after removal.
+- A member that writes a message with files can make your machine hold
+  at most a quarter of its room file budget in files it has not finished
+  sending, each counted at its full size, for a day at a time: a
+  request from the author itself starts no carry job, and a part it left
+  goes when the want lapses or when the author edits the message. The
+  quarter bounds only these automatic reservations: files your agents
+  asked for, and files received in full, are not counted in it. Several
+  machines of one owner can each take a quarter.
+
+### An agent or a program running as you
+
+Agents read text from every member, so a member can try to steer
+them. What runs as your OS user is not kept out; these are guard
+rails against mistakes and steered agents.
+
+- The daemon's Unix socket is in a private directory. Any program running
+  as your OS user can use the socket and read your machine's state.
+  Messages are stored unencrypted in `a2p2.db` in the state directory.
+- Without `--as`, the CLI acts as your person, `human@<machine id>`, the
+  id other members and agents take for you. So it refuses an empty
+  `--as`. In a shell that a harness marks as its agent's (Claude Code,
+  Codex, Gemini CLI, or any shell with `AI_AGENT` set; only the Claude
+  Code variables were seen in a real shell, the others were read from
+  the harnesses' binaries), it acts as that agent: as `<harness>-<directory>`, the id the agent's MCP tools have
+  when they run in the same directory under the default label, or under
+  `A2P2_NAME` when the shell has it. It says on stderr which id it used;
+  if the agent's tools were given another label in the harness's
+  settings, that id is another mailbox, and `--as` picks the right one.
+  Elsewhere `send`, `ack` and an `inbox` that marks messages seen act as
+  you only when stdin or stderr is a terminal (so `echo hi | a2p2 send`
+  at a terminal works). `a2p2 ui`, whose address carries the one-time
+  code that lets the page act as you, is refused in such a shell and
+  away from a terminal, `--print` too, since whoever reads the address
+  can use the code; over SSH, `ssh -t` gives it a terminal, and it then
+  opens nothing on the remote computer and prints the address to open
+  through a forwarded port. `--person` overrides each refusal; when it
+  is used away from a terminal or in such a shell, the daemon log records
+  the command and `status` and `doctor` show how many times since the
+  daemon started, the last time and the command. This stops an agent
+  with a shell, or a script, from answering your questions, taking them
+  off your list or taking the page's address by mistake or because a
+  message told it to. It is not a boundary: any program running as you
+  can pass `--person`, drive a terminal, unset those variables or call
+  the socket, whose `status` call still returns the address. The count
+  starts again when the daemon restarts.
+- A limit to know: an agent whose harness a2p2 does not recognise (none
+  of the variables above is set) is taken for you. It reads your inbox,
+  and if its shell has a terminal, as some harnesses give their agents,
+  it sends, acks and opens the page as you without `--person`. Give such
+  an agent its own name with `--as`, or keep it out of your shell.
+- `room leave` deletes the room's data here and asks at a terminal
+  first, naming the room by its id. `status --json` leaves out the
+  page's address and its code; `ui --print` prints it. `ui` takes no
+  `--json`. With a daemon from before 0.2.4 still running, `ui` neither
+  opens nor prints its address, which carries that daemon's long-lived
+  token, and says to run `a2p2 stop`.
+- What an agent can attach. Text in a room can steer an agent into
+  naming a path for a send. a2p2 refuses a2p2's own files (the machine
+  key, the local key, the database, anything under the home but agents'
+  copies, and a hard link to any of them), and refuses by name, before
+  it touches the path or follows a link to it, device paths and paths
+  that can make the machine connect to another host: on Windows anything
+  but a drive letter and plain names (so no `\\host\share` or `\??\UNC\`
+  path), on Unix `/dev`, `/proc`, `/sys`, `/net` and the macOS automount
+  points, so an honest file under one of them must be copied elsewhere
+  first. Each part of a path is looked up in the directory opened
+  before it. On macOS and Linux each part is opened without following a
+  link and kept only if it is what was looked at, so a link or a
+  directory swapped in on the way is refused before its target is
+  opened. On Windows a swapped link is opened before it is refused, and
+  the Windows code has not been run on Windows. Any other file your user
+  can read can still be staged, and the person sees its full path, size
+  and SHA-256 before it leaves; a file with several names is said to
+  have them. Read the path before you approve. A send is checked whole
+  before any path is opened, and a refusal after the paths are opened
+  and before a byte is copied (unreadable, too large, over the budget)
+  has the same words and takes the same steps, so an agent learns only
+  that a send waits or was refused. It can still learn roughly how
+  large a file is, at the cost of requests you see, and small timing
+  differences remain. A network share you mounted, or a
+  drive letter you mapped, is used as any local path.
+
+### Another user of this computer
+
+- On Windows, file modes do not protect the socket. The state directory
+  is created with an access control list for your user only, and a2p2
+  refuses one that lets other users in. Each local API request must also
+  carry a key that the daemon writes into that directory at every start.
+  This has been built and reasoned about but not yet tested on Windows
+  with a second user trying to connect (DECISIONS, D47).
+- The web page listens on loopback. Its API requires a session, and the
+  server checks the request's `Host` and any `Origin` header. Every OS
+  user of the machine can connect to a loopback port. The address
+  `a2p2 ui` opens or prints carries no long-lived secret, only a code
+  that works once and for 30 seconds; the page trades it for a session
+  kept in that browser tab, which ends when the daemon stops. On Linux the
+  address is in the command line of `xdg-open` and of a browser it
+  starts, which other users can read. On Linux the daemon looks up which
+  user opened the connection, by the connection's two addresses and two
+  ports in `/proc/net/tcp` and `tcp6`, and refuses to trade a code for
+  any user but its own or root, leaving the code good for your browser.
+  This is defence in depth on Linux only. Where it cannot tell (macOS,
+  Windows, a `/proc` it cannot read, or no single matching socket), the
+  code alone decides, so you are never locked out of your page: then a
+  user who reads the code from a process list within its 30 seconds and
+  trades it before your browser does gets a session; your page then says the link was used already, that
+  session is ended and the daemon's log says so. A tab copied with the
+  browser's duplicate command shares the session, as the browser copies
+  the tab's storage. On a shared machine, run `a2p2 ui --print` and paste the address
+  into a browser that is already open. A program running as your user
+  can still get a code from `a2p2 status` and decide on the page (a guard
+  rail, as for the socket). If another user takes the page's port first,
+  the daemon serves on another one and its log says so. A tab left open
+  from an earlier run draws nothing a listener answers unless the answer
+  names the run given with that tab's own session (each answer carries
+  it in a header), signs itself out and forgets the session otherwise,
+  and sends a message, a decision or a download request only right after
+  a state from its own daemon process; a listener that takes the port in
+  the moment between that check and the request still receives it.
+- The a2p2 home and every directory above it should be writable only by
+  you. On Unix a2p2 refuses a home under a directory that another user
+  owns (root aside), that others can write without the sticky bit, or
+  that a group you are not in can write. Under a directory that a group
+  you are in can write (on macOS `staff`, which holds every account), it
+  starts, and the daemon's log, `status` and `doctor` warn: anyone else
+  in that group could replace the home. Your own private group (named as
+  you) gives no warning. A directory other users cannot reach, because a
+  directory of yours or root's above it gives them no search bit (on
+  macOS `~/Documents` is 0700), is neither refused nor warned about; ACLs
+  are not read, so an ACL that lets another user pass is not seen. Links
+  on the way are followed one at a time and each must be yours or root's. On Windows the directories above the
+  home are not checked. A client checks the home when it connects, and
+  does not check which user serves the socket it dials.
 
 ## What `a2p2 install` approves and writes
 
@@ -144,6 +356,35 @@ reports.
   start a Claude Code, Codex or Antigravity member unless the manifest
   says `"approve_a2p2_tools": true`, and its supervisor starts no such
   member whose saved command line was written without it.
+- Another user of the same machine cannot swap the team launcher's state
+  directory or home for their own: `up` refuses a `state_dir` or
+  `a2p2_home` on a path where a directory, symlinks followed, belongs to
+  another user than you or root, or lets group or others write without
+  the sticky bit, and an existing state directory group or others may
+  write; it checks the home's path again after making it. `status`,
+  `stop`, `logs` and `report` refuse such a state directory before they
+  read or write in it. The supervisor checks again before it runs the
+  command lines saved there, and runs from the manifest `up` checked.
+  They can still read each member's prompt with `ps`, since it is an
+  argument on the harness's command line.
+- A manifest is code: `up`, `status` and `report` run the `a2p2` binary
+  it names, and `./team.json` is the default. The `allowed_tools` check
+  refuses common ways to allow every command (`Read,Bash`, a shell, an
+  interpreter, `env`, `git` without a subcommand) but not every program
+  that can run another, nor a rule such as `Bash(go test:*)` that runs
+  code a member could write.
+- `team status` and `team logs` escape controls, format and invisible
+  characters a member wrote or a harness logged by the daemon's rules
+  (D58), so peer text a member copied cannot drive the operator's
+  terminal; `logs --raw` does not.
+- The team launcher tells this machine's members, lead and person by the
+  author's full machine key, and a question to the person by the exact
+  id `a2p2 status` gives, so another machine with the same short id
+  cannot hide a member's activity or pass its person's questions off as
+  this one's. With a 0.2.3 or earlier `a2p2` the person's id is still the
+  short one. `team stop` exits non-zero when no supervisor answers or a
+  member is still running after its wait, and never marks a run ended
+  itself.
 - Pi's skill tells the model to send text only through a heredoc with a
   quoted end word, so bash runs nothing in it. Earlier skills put the text
   in double quotes, where bash runs `$(...)` and backticks: a peer's text
@@ -182,6 +423,11 @@ daemon and the CLI make these connections and no others:
   --invite` make a TCP connection and a TLS handshake from the CLI under
   a throwaway key, whatever the networking state, and send no request.
 - A host name in an address is looked up by your system's resolver.
+- A file an agent names for a send is read through your file systems. A
+  path that names another host or an automount point, or a link on the
+  way that leads to one, is refused before it is looked up. A share you
+  mounted or a drive letter you mapped is read as a local file, so
+  reading it reaches the host you chose.
 - `install.sh` and `install.ps1`, which you run yourself and which are not
   part of the daemon, download one release and its `SHA256SUMS` from
   `github.com/wallter/a2p2/releases`. With `A2P2_VERIFY_ATTESTATION=1`
@@ -237,7 +483,10 @@ still do, by the numbers:
   share no room, and refused connections, are logged at Debug; one Info
   line a minute says connections are being refused. A member's refused
   requests reach Info 5 at once, then one per 10 s per key. At Debug
-  each refusal is a line, and `daemon.log` is not rotated.
+  each refusal is a line. Once `daemon.log` is over 10 MiB (checked
+  every 10 seconds) its last 10 MiB are moved to `daemon.log.1`, so the
+  two files hold about 20 MiB plus what is written between checks; if
+  that copy cannot be made, the log is emptied anyway.
 
 A member of one of your rooms is trusted more. One member key can hold
 16 connections, so 16 member keys together can fill the members' pool.
@@ -254,6 +503,54 @@ for about one round trip, so at 100 ms that is about 80 new connections
 a second; a refused one is retried under the client's back-off. 0.2.3
 had no share per address: it queued connections past 256 in all instead
 of refusing them.
+
+## A device on your local network, with port mapping on
+
+Only after `a2p2 net on --map-port`. The CLI asks the person to confirm
+it at a terminal each time; the daemon takes it only from the local
+API's net call, which no agent tool or hook makes. The router's answers
+carry no authentication, so a device on the same network can answer in
+its place. A `--map-port` decision that 0.2.3 or an earlier version
+recorded is not applied after the upgrade: nothing is mapped, what that
+version left on the router is removed, and `status` and `net on` say so
+until the person decides again. a2p2 asks for a mapping only on a default
+gateway with a private IPv4 address on this machine's network, never a
+loopback one. A PCP answer must carry
+the request's nonce, and NAT-PMP's version answer counts only if no PCP
+answer comes in any of the tries. A lifetime longer than the 2 hours
+asked counts as 2 hours. An external address that is not a public IPv4
+address (private, shared, loopback, link-local, multicast, reserved, or
+any IPv6 address) is not taken, and a2p2 tries to remove what the router
+made. Every request is recorded before it is sent, a run adds at most 8
+to the record (which loads with up to 16), and the record always loads.
+A renewal answered with something that cannot be used stops the address
+being given out until a usable grant; a renewal with no answer does not
+bring it back. On `net off`, on a stop and when the listener stops, a2p2
+tries to remove the mapping and stops giving its address out; a removal
+the router does not confirm stays recorded, is logged, is shown in
+`status` from the start of the next run (so the status `net off` prints
+names it), and is retried. `a2p2 stop` itself does not print it.
+
+Such a device can still:
+
+- Give a wrong public address and port. It goes first in your invites
+  before any member has reached it, so a joiner that dials it shows its
+  own address to whoever holds that address.
+- Relay a public port it mapped for itself to your listener. A member's
+  dial-back then reaches you and the address is advertised to every
+  member, so the device sees which members connect and when, and can
+  stall them. It cannot read or change anything: connections are TLS
+  pinned to each machine's key.
+- Get a wrong address advertised with the help of one member: a member
+  that says it reached the mapped address is believed, so one member
+  that says so falsely puts the device's address in what this machine
+  advertises to every member.
+- Answer NAT-PMP, which has no nonce, and the UPnP search for the router,
+  and so make mapping fail. A forged NAT-PMP refusal makes a2p2 forget a
+  NAT-PMP mapping the router may have made; it lapses with the router's
+  lease.
+- Keep a mapping on the real router after a crash for as long as the
+  router grants, which may be more than 2 hours.
 
 ## Release binaries
 

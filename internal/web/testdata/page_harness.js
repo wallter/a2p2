@@ -120,6 +120,7 @@ const scripts = [];
 if (!scripts.includes("/app.js")) errors.push("index.html has no <script src=\"/app.js\">");
 const posts = [];
 let dropHistory = false;
+const stored = new Map(); // sessionStorage
 const document = {
   activeElement: null,
   body: root.querySelector("body") || new Element("body"),
@@ -135,13 +136,23 @@ const win = {
   document,
   location: { hash: "#" + encodeURIComponent(token), pathname: "/", search: "" },
   history: { replaceState() {} },
-  sessionStorage: { getItem: () => null, setItem() {} },
+  // The tab's storage starts empty, as a new tab's does.
+  sessionStorage: { getItem: (k) => (stored.has(k) ? stored.get(k) : null), setItem: (k, v) => stored.set(k, String(v)), removeItem: (k) => stored.delete(k) },
   matchMedia: () => ({ matches: true, addEventListener() {} }),
   requestAnimationFrame: (f) => setTimeout(f, 0),
   fetch: (p, o) => {
     const path = String(p);
+    // A browser sends the page's Origin with every POST; Node does not.
+    if (o && o.method === "POST") o = { ...o, headers: { ...o.headers, Origin: new URL(base).origin } };
     if (o && o.method === "POST" && path.startsWith("/api/send")) posts.push(JSON.parse(o.body));
-    if (dropHistory && path.startsWith("/api/history")) return Promise.resolve(Response.json({ entries: [] }));
+    // The daemon's own answer, emptied: its headers (the run) are kept.
+    if (dropHistory && path.startsWith("/api/history")) {
+      return fetch(new URL(path, base), o).then((r) => {
+        const h = new Headers(r.headers);
+        h.delete("content-length");
+        return new Response(JSON.stringify({ entries: [] }), { status: r.status, headers: h });
+      });
+    }
     return fetch(new URL(path, base), o);
   },
   setInterval: () => 0, // the script's own polling is not started; the scenario calls refresh
@@ -229,6 +240,9 @@ async function escapeScenario(out) {
     out.connectionHidden = $("connection").hidden;
     out.connection = $("connection").hidden ? "" : $("connection").textContent;
     out.appHidden = $("app").hidden;
+    out.authfailHidden = $("authfail").hidden;
+    out.authwhy = $("authwhy").textContent;
+    if (out.appHidden && !out.authfailHidden) throw new Error("signed out: " + out.authwhy);
     out.roomIds = $("rooms").children.map((li) => li.firstChild.dataset.room);
     out.rooms = $("rooms").children.map((li) => li.textContent);
     out.node = $("node").textContent;
@@ -240,6 +254,9 @@ async function escapeScenario(out) {
     await sleep(50); await idle("opening the room"); await sleep(100);
     out.roomhead = $("roomhead").textContent;
     out.stream = $("msgs").textContent;
+    // Each message and notice drawn: its author, marks and body, each read from its own element.
+    out.drawn = $("msgs").children.map((d) => ({ cls: d.className, from: (d.querySelector("span.from") || { textContent: "" }).textContent,
+      marks: d.querySelectorAll("span.mark").map((x) => x.textContent), body: d.querySelectorAll("div.body").map((b) => b.textContent) }));
     const sel = $("to");
     out.toOptions = sel.options.map((o) => o.value);
     const author = out.toOptions.find((v) => v !== "");
@@ -255,6 +272,7 @@ async function escapeScenario(out) {
       await sleep(300); await idle("the send");
       out.scenario.author = author;
       out.scenario.posts = posts.slice();
+      out.scenario.sendErr = $("err").textContent;
       // A recipient lost some other way: the page must refuse, not send room-wide.
       posts.length = 0;
       sel.value = "";
@@ -264,11 +282,22 @@ async function escapeScenario(out) {
       out.scenario.refusedPosts = posts.slice();
       out.scenario.refusedErr = $("err").textContent;
     }
+    // TRACE_IDS: messages whose trace dialog is opened; the authors and the
+    // marks of each paragraph and cell are written.
+    out.traces = [];
+    for (const id of (process.env.TRACE_IDS || "").split(",").filter(Boolean)) {
+      inPage("openTrace(" + JSON.stringify(id) + ")");
+      await sleep(200);
+      const b = $("tracebody");
+      out.traces.push({ id, from: b.querySelectorAll("span.from").map((x) => x.textContent),
+        marks: b.querySelectorAll("p").concat(b.querySelectorAll("td")).map((x) => x.querySelectorAll("span.mark").map((k) => k.textContent)) });
+    }
     if (probePath) await escapeScenario(out);
   } catch (e) {
     errors.push("harness: " + e.message);
   }
   // Exit only once the output is written: a pipe write is asynchronous,
   // and exiting at once cuts a large output short.
+  out.storedSession = stored.get("a2p2.session") || ""; // what a reload of the tab would send
   process.stdout.write(JSON.stringify(out) + "\n", () => process.exit(0));
 })();

@@ -73,7 +73,8 @@ func openWithRooms(t *testing.T) (*env, *node.Rooms) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.srv = httptest.NewServer(Handler(e.s, tok))
+	e.ss = testSessions()
+	e.srv = httptest.NewServer(Handler(e.s, e.ss))
 	t.Cleanup(e.srv.Close)
 	return e, rooms
 }
@@ -239,7 +240,7 @@ func TestThePageEscapesRemoteTextAndDoesNotDrawAQuestionAsARequest(t *testing.T)
 	if err := os.WriteFile(probePath, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command(nodeBin, "testdata/page_harness.js", "static/index.html", "static/app.js", e.srv.URL, tok, id, probePath).Output()
+	out, err := exec.Command(nodeBin, "testdata/page_harness.js", "static/index.html", "static/app.js", e.srv.URL, "c="+e.ss.Code(), id, probePath).Output()
 	if err != nil {
 		t.Fatalf("node: %v\n%s", err, out)
 	}

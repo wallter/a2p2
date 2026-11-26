@@ -113,9 +113,11 @@ func (s *Surface) SendFiles(ctx context.Context, in SendInput, files []string) (
 }
 
 // CannotAttach is the one refusal of a send whose paths cannot be staged,
-// whatever the reason (missing, unreadable, not a regular file, too large,
-// over a budget, the same bytes twice): an agent that asked learns
-// nothing more about a path than that (DESIGN 12, limits).
+// whatever the reason (missing, unreadable, not a regular file, a remote
+// or device path, one of a2p2's own files, too large, over a budget, the
+// request queue filled while staging): an agent that asked learns nothing
+// more about a path than that (DESIGN 12, limits). A full queue is said
+// before any path is touched; the same bytes twice are listed once (F35).
 const CannotAttach = "cannot attach that path: not a readable regular file within the limits"
 
 // cannotAttachErr turns a refusal of staging into CannotAttach when the
@@ -326,17 +328,25 @@ func (s *Surface) traceFiles(ctx context.Context, room, msg string) ([]TraceFile
 // SendView is a send with files as its person is shown it before deciding
 // (PROTOCOL 10.6, DESIGN 12 item 8). Paths, names and lines are escaped
 // for display (EscapeDisplay).
+//
+// Agent ids are written as entries write them (D65): a short id another
+// known machine shares is written in full, and the marks beside each id
+// (AgentMark, ToMarks, ParentAuthorMark: AuthorMark's words, "" for an
+// agent of another machine) are decided from the full key.
 type SendView struct {
-	Agent        string   // agent id
-	To           []string // agent ids; empty with Everyone
-	Everyone     bool
-	Parent       string // a reply without To goes to the parent's author
-	ParentAuthor string // that author's agent id, when the parent is held
-	Members      int    // the room's members when the agent asked, for a post to everyone
-	Replaces     string
-	Base         string // the version of Replaces the replacement replaces
-	ReplacesLine string // the first line of the replaced message as held now
-	TextLine     string
+	Agent            string   // agent id
+	AgentMark        string   // the asking agent is this machine's
+	To               []string // agent ids; empty with Everyone
+	ToMarks          []string // one per To
+	Everyone         bool
+	Parent           string // a reply without To goes to the parent's author
+	ParentAuthor     string // that author's agent id, when the parent is held
+	ParentAuthorMark string
+	Members          int // the room's members when the agent asked, for a post to everyone
+	Replaces         string
+	Base             string // the version of Replaces the replacement replaces
+	ReplacesLine     string // the first line of the replaced message as held now
+	TextLine         string
 	// Body is the whole text, each line escaped as EscapeDisplay does
 	// and joined by "\n", so that a person reads every line approved.
 	Body  string
@@ -353,6 +363,7 @@ type SendFileView struct {
 	SHA256 string
 	Type   string
 	Kept   bool
+	Links  int // names the file had on disk when staged, when more than one
 }
 
 // describeSend fills v for a send with files.
@@ -364,15 +375,13 @@ func (s *Surface) describeSend(ctx context.Context, q store.Request, v *RequestV
 	// The recipients are the ones the terms bind, as the draft holds them
 	// (for a replacement, the replaced message's addressees): no
 	// addressee is everyone, a reply sent to everyone included [L2].
-	sv := &SendView{Agent: s.agentID(d.Agent, s.m.ID), Everyone: d.Everyone || len(d.To) == 0,
+	sv := &SendView{Everyone: d.Everyone || len(d.To) == 0,
 		Parent: d.Parent, Replaces: d.Replaces, Base: d.Base, TextLine: EscapeDisplay(firstLineOf(d.Text)),
 		Body: EscapeDisplayLines(d.Text), Terms: q.Terms}
-	for _, a := range d.To {
-		sv.To = append(sv.To, AgentID(a))
-	}
 	// The member count the terms were made with, not the live one: the
 	// person approves "everyone" as that set of members.
 	sv.Members = d.Members
+	var parent *core.Addressee // the parent's author, when it is shown
 	_ = s.m.view(ctx, q.Room, func(rv *roomView) error {
 		if d.Replaces != "" {
 			// A replacement keeps its message's parent: show it.
@@ -391,14 +400,37 @@ func (s *Surface) describeSend(ctx context.Context, q store.Request, v *RequestV
 		}
 		if sv.Parent != "" && len(sv.To) == 0 && !sv.Everyone {
 			if p, err := rv.get(sv.Parent); err == nil && p != nil {
-				sv.ParentAuthor = s.agentID(p.f.Agent, p.author)
+				parent = &core.Addressee{Agent: p.f.Agent, Node: p.author}
 			}
 		}
 		return nil
 	})
+	// The ids as entries write them, marked from the full key (D65); if
+	// the memberships cannot be read, short ids, so the card is still
+	// shown.
+	nodes := []string{s.m.ID}
+	for _, a := range d.To {
+		nodes = append(nodes, a.Node)
+	}
+	if parent != nil {
+		nodes = append(nodes, parent.Node)
+	}
+	x, _ := s.ids(ctx, nodes)
+	sv.Agent = x.agent(d.Agent, s.m.ID)
+	sv.AgentMark = AuthorMark(sv.Agent, true)
+	for _, a := range d.To {
+		id := x.agent(a.Agent, a.Node)
+		sv.To = append(sv.To, id)
+		sv.ToMarks = append(sv.ToMarks, AuthorMark(id, a.Node == s.m.ID))
+	}
+	if parent != nil {
+		sv.ParentAuthor = x.agent(parent.Agent, parent.Node)
+		sv.ParentAuthorMark = AuthorMark(sv.ParentAuthor, parent.Node == s.m.ID)
+	}
 	var total int64
 	for _, x := range d.Files {
-		f := SendFileView{Path: EscapeDisplay(x.Path), Name: EscapeDisplay(x.Name), Size: x.Size, SHA256: x.SHA256, Type: x.Type, Kept: x.Kept}
+		f := SendFileView{Path: EscapeDisplay(x.Path), Name: EscapeDisplay(x.Name), Size: x.Size, SHA256: x.SHA256, Type: x.Type, Kept: x.Kept,
+			Links: x.Links}
 		if x.Kept {
 			f.Path = KeptPrefix + x.SHA256
 		}
@@ -419,17 +451,29 @@ func sendText(sv *SendView, label, room string, total int64) string {
 	// The label and agent ids can come from other machines: each is
 	// escaped and isolated, as in requestText.
 	where := "room " + Isolate(EscapeDisplay(label)) + " (" + room + ")"
-	agent := func(id string) string { return Isolate(EscapeDisplay(id)) }
+	// Each id is followed by its mark, decided from the full key, outside
+	// the isolated id, so an id can never write a mark itself (D65).
+	agent := func(id, mark string) string {
+		out := Isolate(EscapeDisplay(id))
+		if mark != "" {
+			out += " (" + mark + ")"
+		}
+		return out
+	}
 	to := "everyone in " + where + " (" + strconv.Itoa(sv.Members) + " members)"
 	switch {
 	case len(sv.To) > 0:
 		ids := make([]string, len(sv.To))
 		for i, a := range sv.To {
-			ids[i] = agent(a)
+			mark := ""
+			if i < len(sv.ToMarks) {
+				mark = sv.ToMarks[i]
+			}
+			ids[i] = agent(a, mark)
 		}
 		to = strings.Join(ids, ", ") + " in " + where
 	case !sv.Everyone && sv.ParentAuthor != "":
-		to = agent(sv.ParentAuthor) + ", the author of message " + sv.Parent + ", in " + where
+		to = agent(sv.ParentAuthor, sv.ParentAuthorMark) + ", the author of message " + sv.Parent + ", in " + where
 	case !sv.Everyone:
 		to = "the author of message " + sv.Parent + " in " + where
 	}
@@ -439,10 +483,23 @@ func sendText(sv *SendView, label, room string, total int64) string {
 			msg += " (version " + sv.Base + ")"
 		}
 		return fmt.Sprintf("replace message %s, which goes to %s, by agent %s, with new text and %s (%d bytes); "+
-			"the replacement has only the files listed", msg, to, agent(sv.Agent), files, total)
+			"the replacement has only the files listed", msg, to, agent(sv.Agent, sv.AgentMark), files, total) + linksNote(sv.Files)
 	}
 	return fmt.Sprintf("send a message by agent %s to %s with %s (%d bytes): the files are the bytes copied when the agent asked",
-		agent(sv.Agent), to, files, total)
+		agent(sv.Agent, sv.AgentMark), to, files, total) + linksNote(sv.Files)
+}
+
+// linksNote says which files had several names on disk: the path shown is
+// the one opened, and a hard link has no other name to show, so the
+// person is told the file may be another one they know (F36).
+func linksNote(fs []SendFileView) string {
+	var b strings.Builder
+	for i, f := range fs {
+		if f.Links > 1 && !f.Kept {
+			fmt.Fprintf(&b, "; file %d has %d names on disk, so it may be a file you know by another path", i+1, f.Links)
+		}
+	}
+	return b.String()
 }
 
 func firstLineOf(text string) string {
