@@ -49,12 +49,17 @@ type recNet struct {
 	// limit, above 0, stalls every request after that many (until its
 	// context ends), so a scheduler that spins cannot spin for ever.
 	limit int
-	// delay, above 0, is each request's round trip: fake time passes
-	// before it reaches the server (or its context ends).
-	delay time.Duration
+	// oneWay, above 0, is each leg's delay: fake time passes before a
+	// request reaches the server and again before its answer reaches the
+	// requester (an answer whose context ends on the way back is lost,
+	// though the server applied its request).
+	oneWay time.Duration
 	// refuse, if set and it returns an error, refuses a request with it
 	// before it reaches the server.
 	refuse func(from, to string, q *PullRequest) error
+	// inflight and peak count, per requester and peer, requests without
+	// wait_ms sent and not yet answered, and the most at once.
+	inflight, peak map[[2]string]int
 }
 
 func (n *recNet) link(from string) PullTransport { return &recLink{n, n.memNet.link(from), from} }
@@ -69,18 +74,38 @@ func (l *recLink) Pull(ctx context.Context, peer string, q *PullRequest) (*PullR
 	l.n.mu.Lock()
 	l.n.log = append(l.n.log, sent{from: l.from, to: peer, room: q.Room, wait: q.WaitMS, offer: len(q.Offer), at: l.n.clock.Now()})
 	over := l.n.limit > 0 && len(l.n.log) > l.n.limit
-	delay, refuse := l.n.delay, l.n.refuse
+	delay, refuse := l.n.oneWay, l.n.refuse
+	k := [2]string{l.from, peer}
+	if q.WaitMS == 0 {
+		if l.n.inflight == nil {
+			l.n.inflight, l.n.peak = map[[2]string]int{}, map[[2]string]int{}
+		}
+		l.n.inflight[k]++
+		l.n.peak[k] = max(l.n.peak[k], l.n.inflight[k])
+		defer func() {
+			l.n.mu.Lock()
+			l.n.inflight[k]--
+			l.n.mu.Unlock()
+		}()
+	}
 	l.n.mu.Unlock()
 	if over {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	if delay > 0 {
+	leg := func() error {
+		if delay <= 0 {
+			return nil
+		}
 		select {
 		case <-time.After(delay):
+			return nil
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return ctx.Err()
 		}
+	}
+	if err := leg(); err != nil {
+		return nil, err
 	}
 	if refuse != nil {
 		if err := refuse(l.from, peer, q); err != nil {
@@ -92,7 +117,11 @@ func (l *recLink) Pull(ctx context.Context, peer string, q *PullRequest) (*PullR
 		l.n.done++
 		l.n.mu.Unlock()
 	}()
-	return l.l.Pull(ctx, peer, q)
+	resp, err := l.l.Pull(ctx, peer, q)
+	if lerr := leg(); lerr != nil {
+		return nil, lerr
+	}
+	return resp, err
 }
 
 func (n *recNet) sent() []sent {
@@ -290,7 +319,9 @@ func TestSchedulerRotatesTheSecondAnchorThroughEveryMemberPastAFailure(t *testin
 		log := from(net.sent(), a.id)
 		probed := map[string]bool{}
 		stable := map[string]int{}
+		tried := map[string]bool{}
 		for _, s := range log {
+			tried[s.to] = true
 			switch s.wait {
 			case SchedProbe.Milliseconds():
 				probed[s.to] = true
@@ -298,12 +329,15 @@ func TestSchedulerRotatesTheSecondAnchorThroughEveryMemberPastAFailure(t *testin
 				stable[s.to]++
 			}
 		}
+		// A first request that gives the peer log entries (it has never
+		// answered, so its log is not known) carries no wait: the
+		// unreachable member is tried, never with a wait.
 		for _, o := range others {
-			if !probed[o.id] && stable[o.id] == 0 {
+			if o != down && !probed[o.id] && stable[o.id] == 0 {
 				t.Errorf("%s was never an anchor", o.name)
 			}
 		}
-		if !probed[down.id] {
+		if !tried[down.id] {
 			t.Error("the unreachable member was never tried")
 		}
 		var downAt []time.Time

@@ -165,11 +165,13 @@ index allows both branches of a fork.
 - Entries are passed on in causal order, evidence after them.
 - **Not modelled: pull before signing.** Since starting, a daemon signs no
   entry for a room until an exchange with a current member has left it
-  holding every log head that member advertised last, and those are
-  exactly the heads of the log here, as for a join (rooms it created, and
+  holding every log head that member advertised (rooms it created, and
   rooms where it is the only member, are exempt; a room it just joined is
   exempt only if the join's last page listed heads, all accepted here,
-  from a machine that is a member here). It narrows
+  from a machine that is a member here). A join's heads must also be
+  exactly the heads of the log here (D64); a pull's need not, since while
+  a fork is unsettled honest members advertise different heads and that
+  rule could keep an honest admin from signing the settlement. It narrows
   the restore problem and cannot detect a restore. If no other member can
   be reached, the request fails with `not_caught_up`; the person may
   approve it again with an explicit, recorded override after a warning
@@ -215,8 +217,12 @@ over pinned mutual TLS. See [Protocol section 4](PROTOCOL.md#4-pull).
   on join), then log entries, then the page [RM1, R4], in one transaction.
   Like the server, it takes the log entries of a peer that is not a member
   here only if they make it one (T4): an answer from a peer removed while
-  it was on the way stores nothing
-  (`TestAPullsAnswerFromAPeerRemovedWhileItWasOnTheWayStoresNothing`).
+  it was on the way stores nothing, not even the addresses or wants it
+  lists (`TestAPullsAnswerFromAPeerRemovedWhileItWasOnTheWayStoresNothing`).
+  A page that removes the peer, with more of its log to come, keeps its
+  entries and asks for the rest, so a later page that admits it again is
+  taken (`TestAPullWhoseLogRemovesThePeerAndAPageLaterAdmitsItAgainTakesTheWholeLog`,
+  `TestAPullWhoseLogRemovesThePeerTakesNothingAfterThePageThatRemovesIt`).
   Each side keeps the other's summary as a dated observation, the only
   source of copy reports [R5].
 
@@ -257,7 +263,7 @@ of a network.
 |---|---|
 | Start or wake | Short pulls of every room from two members |
 | Steady state | A waiting pull per room to each of two *anchors*: the most reliable member, and one that rotates at every end, cancellation or failure of a wait through every eligible member and each of its addresses (N2) |
-| Local write or new records | Re-issue waiting pulls at once, with offers |
+| Local write or new records | Abandon the waiting pulls and issue them again at once, with offers; a request on the way that carries an offer is never abandoned, and what changed meanwhile goes in the next request |
 | A peer holds what we lack | Pull from it at once; repeat while `more` |
 | Failure | Back off 1 s doubling to 5 min with jitter; next member |
 
@@ -265,55 +271,85 @@ A server holds a waiting pull at most 60 s; client and server deadlines
 exceed it by 30 s. A rotating anchor is first probed with a 10 s pull; failure moves on.
 Waiting pulls to one peer share one HTTP/2 connection.
 
-**Pacing (PROTOCOL 4.6).** An exchange that stored nothing here and did
-not wait counts as a failure for back-off, a *spin*, so a peer that
-answers every wait at once gets one exchange per room per 4 to 6 minutes.
-A wait the peer held for at least twice the round trip (at most 1 s) ends
-the count. A local change stops a waiting pull only once it has lasted
-that long, so a request carrying an offer is never abandoned in flight
-again and again, and a stopped wait shows the peer held it.
+**Budget (PROTOCOL 4.6).** Every request this machine sends a peer, for
+every room and both anchors, first takes a token of that peer's bucket:
+15 a second, burst 30 (`internal/node/budget.go`). That is the hard
+bound: at most 30 + 60 × 15 = 930 requests to one peer in any minute, 900
+a minute sustained, a 25 % margin on the listener's per-peer rate and
+burst (20 a second, burst 40, unchanged since 0.2.0), so the requester
+draws no 429 for its rate. At most 3 requests that do not wait are in
+flight to one peer at once, below the listener's 4, so rooms that start
+exchanges together queue instead
+(`TestRoomsStartingTogetherKeepFewerRequestsInFlightThanTheListenerAllows`:
+8 in flight before). Tokens go in the order
+asked, so rooms and anchors sharing a peer take turns, and waiting for one
+ends when the room is left or the daemon stops. One exchange sends at most
+64 requests (a catch-up of about 16,000 log entries or 32,000 records at
+the page limits); a longer one ends and the next goes on from where it
+stopped. Inside an exchange, two continuations running that move nothing
+end the round, so an honest one is not cut short when another member
+delivered the same entries while a page was on the way.
 
-A machine that only connects out (N1) delivers its writes as offers in
-its own pulls, and the peer, having stored them, answers at once. Such an
-exchange is *excused* when it ended clean and its answers show the peer's
-progress: its log heads moved after accepted entries given for the first
-time (after a refusal, name one of them), or its digest or detail of an
-author offered changed. That is the peer's word, not proof, and counts
-once for each request that gave something new. Once it has shown
-progress, the exchange's closing request (the opening answered `same`)
-carries a short wait, as long as a hold must last; a peer that holds it
-has shown it holds waits, and the exchange is not a spin and ends the
-count. A server holds only a `same` answer, so this is the one moment
-when a peer can show that while the room keeps changing. If the peer
-answers it at once: after an earlier held wait, the first such exchange
-is not a spin and the next may follow at once, and each further one
-before the peer holds a wait again starts 1 s (±20 %) after it; with no
-held wait since the last spin, it is a spin. The trigger is any change
-of the room (a write here, records or entries from any member, files,
-pruning), and the bounds hold for all of them. Up to 0.2.3 every offer
-exchange was a spin, so a machine sending more often than about once a
-minute backed itself off from its peer, up to 5 minutes.
+**Batching.** A request that carries an offer or log entries carries no
+wait, so the server answers it at once (it holds only a `same`), and it
+is never abandoned for a newer change: what changes while it is on the
+way, or while it waits for a token, goes in the next request, which
+follows as soon as the answer is back. Only a waiting pull, which carries
+nothing, is abandoned for a local change. Up to 0.2.3 every change
+abandoned the request on the way, offer and all, so on a link slower than
+the gap between writes nothing arrived until the writes stopped.
 
-Inside one exchange, the peer's word keeps a continuation going only
-while this machine gives it something new; a request sent only because
-the peer said `more` or `log.more` must store something here, and log
-entries the peer did not take are no sign of progress. So a peer that
-answers with ever-changing heads or digests ends the exchange after a few
-requests instead of holding it in a loop.
+**Spins.** An exchange that gave the peer nothing new, stored nothing
+here and did not wait (a `same` well before its wait, or a lasting
+difference whose round was not clean) counts as a failure for back-off, so
+a peer that answers every wait at once gets one exchange per room per 4 to
+6 minutes while the room is quiet. An exchange that offered records or
+entries changed since the last one and stored nothing here neither counts
+nor ends the count: those are this machine's to deliver, and the budget
+bounds them while the room changes. Up to 0.2.3 every offer exchange was
+a spin, so a machine sending more often than about once a minute backed
+itself off from its peer, up to 5 minutes.
 
-Measured in tests with a fake clock and 100 ms requests
-(`internal/node/sched_outbound_test.go`): against a peer that stores
-every offer but answers every wait at once, while the room changes every
-1 s, 200 ms or 50 ms, from this machine or from another member, 2 to 14
-requests to it a minute (0.2.3's scheduler: up to 1,168, at 50 ms, as
-each change stopped a wait in flight); against
-one that held waits for a minute first and then answers them at once,
-11 to 104 (one exchange a second while the changes come every 50 ms).
-Messages of an outbound-only machine reach an honest listener within
-the bounds of
-`TestAnOutboundOnlyMachinesMessagesReachTheListenerAtOnceAtAnyPace`: 50 ms
-at any pace with no round trip; with 100 ms requests, 300 ms at human
-pace and 800 ms in a burst faster than an exchange.
+Measured in tests with a fake clock and delays on both legs
+(`internal/node/sched_outbound_test.go`; the bounds are what each test
+asserts): an outbound-only machine's messages reach a listener within
+50 ms at human pace with no delay, 60 ms with 50 ms each way, and two
+token gaps and 50 ms (184 ms) in a burst 5 ms apart once the budget's
+burst is spent; with 1 s, 2 s or
+3 s each way and writes every 200 ms or 2 s for two minutes, every message
+within three legs and a gap (0.2.3 missed that bound in five of the six
+cases, as each write abandoned the offer on the way); a burst of 2,000
+written 1 ms apart within 2 s of the last write, in 40 requests (0.2.3:
+2,004); two machines each writing every 50 ms for a minute, every message
+within 1 s and at most 930 requests each way (0.2.3: a message over 1 s
+late, as each side's offers backed it off). Against a
+peer that answers every wait at once, that held waits and then stops, that
+reports progress in every answer or always says `more`, with the room
+changing every 200 ms or 50 ms from this machine or from another member
+colluding with it: at most 930 requests a minute, each after a token
+(0.2.3: up to 1,200); with the room quiet, at most 10. Over TLS on
+loopback through the real listener, two machines each writing every
+50 ms for a minute draw no 429 and deliver everything
+(`TestOverTLSAnHonestPairWritingEvery50MsForAMinuteDrawsNo429`).
+
+Over two daemons on loopback (`scripts/bench.sh --only M5`, one run),
+messages sent one right after another are sustained writing and go at the
+budget's pace: median 61 ms each from an outbound-only machine and 128 ms
+the other way (about one and two token gaps a message); a burst of 2,000
+arrives with median 46 ms; no 429.
+
+What this leaves: the listener still answers 429 to a requester without
+the budget (0.2.3 and earlier) that writes many times a second, and each
+429 costs it at least 1 s. A peer that answers at once can still take up
+to 930 requests a minute from this machine while the room changes, and a
+write made while a peer is backed off waits for the back-off to end
+(up to 5 min if that peer was the only one). An honest listener that
+answers every wait at once (a want due for the requester, or a lasting
+difference in a three-member room) is backed off like a hostile one. A
+waiting pull takes no slot, as the listener frees it once held; waiting
+pulls of several rooms arriving together while 3 other requests are in
+flight could still draw a 429 `concurrent` (untested). Messages of one author arrive in order; across
+authors no order is promised (D2).
 
 **Inbound connections.** A listener cannot know who connects until the TLS
 handshake proves the client's key, and any key completes one. So it does

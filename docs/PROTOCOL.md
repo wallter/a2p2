@@ -368,15 +368,15 @@ of every author in the sender's `Admitted` it holds anything of), 64 hex.
    admitted without history and holds headers where the other holds text)
    are therefore idle against each other after one round.
 4. A cut page, offer or log batch justifies another request; only something
-   stored, locally or as the other side acknowledges, counts as progress.
-   The server's acknowledgement is inferred from its summaries and counts
-   once for each request that gave something new; a request sent only for
-   the server's `more` or `log.more` advances only if it stored something
-   on the requester's side. A
+   stored, locally or as the other side acknowledges, counts as progress. A
    stream blocked by a refused record does not hold back other streams,
    including the same author's. Held and refused entries the peer cannot
-   list in `extra` are sent at most once in an exchange. A continuation
-   that does not advance ends the exchange quietly and is counted.
+   list in `extra` are sent at most once in an exchange. Two continuations
+   running that do not advance end the round quietly and are counted (one
+   may move nothing because another member delivered the same entries while
+   it was on the way). An exchange sends at most 64 requests and 32 rounds;
+   one that reaches either ends, keeps what it applied, and the next
+   exchange goes on from there.
 5. A cached detail of a peer's author is discarded when that author's digest
    from the peer changes. One author's detail must fit in one request or
    response; otherwise that author is skipped and counted as `too_large`.
@@ -414,15 +414,15 @@ Sizes are measured by `TestPullSizesInASixtyFourMachineRoomAfterThirtyDaysOfDail
 
 Requester on 200: discard if the room's local generation changed since the
 request; otherwise in one transaction apply `log.entries`, then `page`
-(section 2), then store what the response shows the server holds. If the
-server is a member here neither before `log.entries` nor after them (it
-was removed while the response was on the way), nothing of the response
-is stored and the exchange ends; a machine that is not a member here is
-not pulled from (T4, as for a request at step 4). The room counts as caught up (DESIGN 3) after an
-exchange whose last response names log heads all accepted here that are
-exactly this log's heads. Send the
-next request at once while differing authors are not covered, or `more`,
-`log.more` or its own offer was cut.
+(section 2), then store what the response shows the server holds. As at
+step 4, the server's `log.entries` count only if it is a member here before
+them or they make it one; otherwise nothing of the response is stored, not
+even the addresses in `peers` or the wants of 10.4, and the exchange ends.
+If they remove it and `log.more` is set, only the entries are kept and the
+next request asks for the rest of the log, with no offer; a page that
+admits the server again is taken as usual. Send the next request at once
+while differing authors are not covered, or `more`, `log.more` or its own
+offer was cut, each after a token of the requester's budget (4.6).
 
 Requester on any 403 from a peer it believes is a member: forget what it
 had observed of that peer's log; the next attempt sends its accepted log
@@ -456,7 +456,9 @@ Error body: `{"error":"<code>","detail":"<≤ 200 bytes>"}`.
 | Probe of a rotating anchor | 10 s |
 | Back-off | 1 s doubling to 5 min, ±20 % jitter |
 | Per peer | one waiting pull per room (a new one releases the old); 4 other concurrent (a request counts until it enters a hold); 20 per s, burst 40 |
-| Requester pacing | an exchange that stored nothing on the requester's side and did not wait (`same` well before its wait, or a round that was not clean) counts as a failure for back-off (a *spin*); a wait held at least twice the round trip (at most 1 s) and then answered `same` or abandoned for a local change ends the count. An exchange that offered the requester's room changes, ended clean (`same`, or abandoned after a round for a newer change; not capped, stalled or `too_large`), and whose answers show the server's progress (4.3 step 4: its log heads moved after accepted entries given for the first time, or, for the whole log resent after a refusal, name one of them; or its digest or detail of an offered author changed, at most once per request that gave something new) carries, on its later openings, a `wait_ms` as long as such a hold; a server that holds one of them until its wait ends shows it holds waits, and the exchange is not a spin and ends the count. If it answers at once: after an earlier hold, the first such exchange is not a spin, and each further one before another hold waits 1 s (±20 %); with no hold since the last spin it is a spin. A change stops a waiting pull only once it has lasted that hold, so an offer is not abandoned in flight. These are the requester's choices: no field or message is new, and a server since 0.2.0 holds any opening that carries `wait_ms` (step 9) |
+| Requester budget | every request to one peer, of every room and anchor (openings, continuations, closing rounds, waiting pulls), first takes a token of that peer's bucket: 15 a second, burst 30, so at most 30 + 60 × 15 = 930 requests to one peer in any minute and 900 a minute sustained, a 25 % margin on the per-peer rate and burst above. Tokens are handed out in the order asked; waiting for one ends when the room is left or the daemon stops. At most 3 requests without `wait_ms` are in flight to one peer at once, below its 4 concurrent. An exchange sends at most 64 requests |
+| Requester batching | a request that carries an offer or log entries carries no `wait_ms` and is never abandoned; changes made while it is on the way, or while it waits for a token, go in the next request, which follows as soon as the answer is back. A waiting pull carries nothing and is abandoned for a local change |
+| Requester spins | an exchange that gave the server nothing new, stored nothing on the requester's side and did not wait (`same` well before its wait, or a round that was not clean) counts as a failure for back-off. One that offered records or log entries changed since the last exchange and stored nothing on the requester's side neither counts nor ends the count; the budget bounds those while the room changes, the back-off once it is quiet |
 | Inbound connections | 256 of members of a room held here, at most 16 of one key; 32 of other keys ("strangers"); 64 still in the TLS handshake, and 16 more for source groups (IPv4 address or IPv6 /64) that completed a member's handshake in the last 24 h, at most 4 of them for one group |
 | Per source, outside the members' pool | 8 per IPv4 address or IPv6 /64, 16 per /56, 32 per /48, in the shared handshake slots or of strangers; a connection with no slot is closed at once. The 16 kept slots are not counted here; one there that does not prove a member's key is closed and its group is no longer known |
 | Server TLS handshake | 5 s for the handshake and the membership lookup after it; the pool is chosen once the handshake has finished, and a full pool closes the connection |
@@ -469,6 +471,17 @@ strangers' pool, so a waiting pull it starts then lasts 15 s at most.
 None of this changes what is sent: a client that is refused a slot sees
 a failed handshake or a closed connection and retries under its
 back-off.
+
+The requester's budget, batching and spin rule are the requester's own
+choices: no field, message or server step is new. The server's side of the
+pull is unchanged since 0.2.0: it holds any opening that carries `wait_ms`
+while its answer is `same`, and answers one that stored an offer at once. A 0.2.0 to 0.2.3 server therefore
+sees from a requester of this version fewer requests, with changes made
+close together in one offer, and never more than three quarters of its per-peer limit.
+A server of this version sees from a 0.2.0 to 0.2.3 requester what it saw
+before: that requester has no budget, abandons an offer in flight for a
+newer change, and can still be answered 429 when it writes many times a
+second.
 
 ### 4.7 Dial-back and `net check`
 

@@ -153,10 +153,9 @@ func TestARejoinApprovalIsNotGatedOnCatchingUp(t *testing.T) {
 	}
 }
 
-// [D64, after integration] The exact-heads rule costs an honest machine
-// nothing when its log is ahead of the peer it pulls from: the exchange
-// gives the peer the entries it lacks, the peer's last answer names this
-// log's heads, and a restarted machine is caught up after one pull from a
+// A restarted machine whose log is ahead of the peer it pulls from: the
+// exchange gives the peer the entries it lacks, every head the peer names
+// is accepted here, and the machine is caught up after one pull from a
 // member that was behind it.
 //
 // Requirements: T9
@@ -185,39 +184,5 @@ func TestARestartedMachineAheadOfItsPeerIsCaughtUpAfterOnePull(t *testing.T) {
 	}
 	if !b.pulled(room) {
 		t.Fatal("a machine ahead of its peer was not caught up after pulling from it")
-	}
-}
-
-// [D64, after integration] A current member whose last answer names log
-// heads that are older entries this log has gone past (here the create
-// entry, a list of ancestors that could hide newer entries) does not lift
-// the not_caught_up gate, even though every head it names is accepted
-// here; as for a join (TestJoinWhoseHeadsAreOlderEntriesDoesNotCountAsCaughtUp).
-// Its honest heads do.
-//
-// Requirements: T9
-func TestAPullWhoseHeadsAreOlderEntriesDoesNotCountAsCaughtUp(t *testing.T) {
-	a, b, net, room, q := restoredAdmin(t)
-	ws, err := b.r.Offer(room)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := a.r.Receive(context.Background(), room, 0, ws...); err != nil {
-		t.Fatal(err) // a now holds every entry b does, and the gate is still shut
-	}
-	a.r.mu.Lock()
-	createID := a.r.rooms[room].createID
-	a.r.mu.Unlock()
-	net.tamper = func(_, _ string, resp *PullResponse) { resp.Log.Heads = []string{createID} }
-	if _, err := a.pullFrom(room, b, PullOpts{}); err != nil {
-		t.Fatalf("the exchange with older heads: %v", err)
-	}
-	if a.pulled(room) {
-		t.Fatal("an exchange whose heads are older entries opened the not_caught_up gate")
-	}
-	net.tamper = nil
-	a.mustPull(room, b, PullOpts{})
-	if cf := a.confirm(q.ID); cf.State != store.RequestApproved {
-		t.Fatalf("after an exchange with the log's heads: %+v", cf)
 	}
 }

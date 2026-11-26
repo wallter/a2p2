@@ -1174,3 +1174,15 @@ github.com/wallter/a2p2/internal/web	TestThePageTraceMarksTheAuthorAndTheHandler
 github.com/wallter/a2p2/internal/web	TestThePeerOfAPageConnectionIsFoundByItsFullFourTuple	0.02
 github.com/wallter/a2p2/internal/web	TestTheUILinkCarriesAOneTimeCodeThatWorksOnce	0.92
 github.com/wallter/a2p2/internal/web	TestTradingALinkCodeNeedsThePagesExactOrigin	0.55
+github.com/wallter/a2p2/internal/node	TestRoomsSharingAPeerShareItsBudget	75.00
+github.com/wallter/a2p2/internal/node	TestAPeerThatAnswersEveryWaitAtOnceGetsNoMoreThanTheBudget	80.00
+github.com/wallter/a2p2/internal/node	TestAPeerThatHeldWaitsAndThenAnswersThemAtOnceGetsNoMoreThanTheBudget	42.00
+github.com/wallter/a2p2/internal/node	TestAnHonestPairWritingEvery50MsStaysWithinTheBudgetAndDeliversEverything	70.00
+github.com/wallter/a2p2/internal/node	TestOnASlowLinkEveryMessageArrivesWhileWritesContinue	31.00
+github.com/wallter/a2p2/internal/node	TestAPeerThatAlwaysReportsProgressGetsNoMoreThanTheBudget	22.00
+github.com/wallter/a2p2/internal/node	TestABurstOfTwoThousandMessagesArrivesInAFewExchanges	19.00
+github.com/wallter/a2p2/internal/node	TestAPeerThatAlwaysSaysMoreGetsNoMoreThanTheBudget	11.00
+github.com/wallter/a2p2/internal/node	TestAPullWhoseLogRemovesThePeerAndAPageLaterAdmitsItAgainTakesTheWholeLog	9.30
+github.com/wallter/a2p2/internal/node	TestAPullWhoseLogRemovesThePeerTakesNothingAfterThePageThatRemovesIt	8.60
+github.com/wallter/a2p2/internal/node	TestAnOutboundOnlyMachinesMessagesReachTheListenerAtOnceAtAnyPace	9.10
+github.com/wallter/a2p2/internal/peer	TestOverTLSAnHonestPairWritingEvery50MsForAMinuteDrawsNo429	61.40

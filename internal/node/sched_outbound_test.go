@@ -1,16 +1,19 @@
 package node
 
-// Exchanges excused from counting as spins (sched.go, excused): a machine
+// The requester's budget and batching (budget.go, sched.go): a machine
 // that only connects out delivers its own changes as offers in its own
-// pulls, which return at once, and must not be backed off for it; a peer
-// that never holds a wait must still be. In a synctest bubble, as the
-// other scheduler tests; recNet.delay gives requests a round trip.
+// pulls, which return at once, and must not be backed off for it; a
+// request that carries an offer is never abandoned for a newer change;
+// every request to a peer takes a token of its bucket, so no peer, honest
+// or not, gets more than budgetCeiling requests in a minute. In a synctest
+// bubble, as the other scheduler tests; recNet.oneWay delays both legs.
 
 import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -21,12 +24,21 @@ import (
 	"github.com/wallter/a2p2/internal/store"
 )
 
+// budgetCeiling is the most requests one peer can get from this machine
+// in any minute: the burst, then the rate.
+const budgetCeiling = int(PullBudgetBurst + 60*PullBudgetRate)
+
+// tokenGap is how long a request waits at most for its token once the
+// burst is spent.
+var tokenGap = time.Duration(math.Ceil(float64(time.Second) / PullBudgetRate))
+
 // outboundPair is a listening machine a and an outbound-only machine b
-// sharing a room, both scheduled, requests taking rtt; a cannot reach b.
-func outboundPair(t *testing.T, rtt time.Duration) (net *recNet, a, b *snode, room string) {
+// sharing a room, both scheduled, each leg of a request taking oneWay; a
+// cannot reach b.
+func outboundPair(t *testing.T, oneWay time.Duration) (net *recNet, a, b *snode, room string) {
 	t.Helper()
 	net = newRecNet()
-	net.delay = rtt
+	net.oneWay = oneWay
 	a, b = newSNode(t, "a", net), newSNode(t, "b", net)
 	room = sgroup(t, a, b)
 	net.memNet.mu.Lock()
@@ -76,39 +88,177 @@ func requests(log []sent, src, dst string, from, to time.Time) (n, offers int) {
 	return n, offers
 }
 
+// pending is messages sent and not yet seen at their reader.
+type pending struct {
+	id string
+	at time.Time
+}
+
+// arrived removes from ps those r holds, failing if one took longer than
+// bound, and returns the rest and the longest delay seen.
+func arrived(t *testing.T, net *recNet, r *snode, room string, ps []pending, bound time.Duration, worst time.Duration) ([]pending, time.Duration) {
+	t.Helper()
+	now := net.clock.Now()
+	out := ps[:0]
+	for _, p := range ps {
+		took := now.Sub(p.at)
+		if r.holds(room, p.id) {
+			worst = max(worst, took)
+			continue
+		}
+		if took > bound {
+			t.Fatalf("a message sent at %v not at %s after %v", p.at, r.name, took)
+		}
+		out = append(out, p)
+	}
+	return out, worst
+}
+
 // Every message of an outbound-only machine reaches the machine it pulls
-// from at once: in a burst 5 ms apart, at human pace (one every 2 s), past
-// a whole wait, and one after a quiet hour; with no round trip and with
-// 100 ms requests.
+// from at once: at human pace (one every 2 s), past a whole wait, and one
+// after a quiet hour, within 50 ms; with no delay and with 50 ms each way.
+// A write abandons the waiting pull, which carries nothing, and its offer
+// goes at once; one made while an offer is on the way goes in the next
+// request, once that answer is back. In a burst 5 ms apart the budget's
+// burst is spent in the first few writes (each costs the abandoned wait,
+// the offer and the closing request), and then a request waits up to
+// tokenGap for its token: a write waits at most for the closing request
+// of the exchange under way and its own offer, 2·tokenGap and 50 ms.
 //
 // Requirements: D2, N1
 func TestAnOutboundOnlyMachinesMessagesReachTheListenerAtOnceAtAnyPace(t *testing.T) {
 	for _, c := range []struct {
 		name       string
-		rtt        time.Duration
+		oneWay     time.Duration
 		n          int
 		gap, bound time.Duration
 	}{
-		{"burst 5 ms apart", 0, 50, 5 * time.Millisecond, 50 * time.Millisecond},
+		{"burst 5 ms apart", 0, 50, 5 * time.Millisecond, 2*tokenGap + 50*time.Millisecond},
 		{"human pace, every 2 s", 0, 30, 2 * time.Second, 50 * time.Millisecond},
 		{"one every 70 s, past a whole wait", 0, 5, 70 * time.Second, 50 * time.Millisecond},
-		// two requests of the offer exchange; a write during the request
-		// before it waits for that too
-		{"human pace, 100 ms round trip", 100 * time.Millisecond, 30, 2 * time.Second, 300 * time.Millisecond},
-		// writes faster than an exchange: a write waits for the exchange
-		// under way (its offer, then its closing request held 200 ms) and
-		// then the next one's offer
-		{"burst 20 ms apart, 100 ms round trip", 100 * time.Millisecond, 50, 20 * time.Millisecond, 800 * time.Millisecond},
+		// the offer's first leg
+		{"human pace, 50 ms each way", 50 * time.Millisecond, 30, 2 * time.Second, 60 * time.Millisecond},
+		// writes faster than an exchange: at most the round trip of the
+		// request on the way, and the first leg of the next
+		{"burst 20 ms apart, 50 ms each way", 50 * time.Millisecond, 50, 20 * time.Millisecond, 3*50*time.Millisecond + 20*time.Millisecond},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				net, a, b, room := outboundPair(t, c.rtt)
+				net, a, b, room := outboundPair(t, c.oneWay)
 				sendEvery(t, net, a, b, room, c.n, c.gap, c.bound)
 				net.run(t, time.Hour)
 				sendEvery(t, net, a, b, room, 1, 0, c.bound)
 			})
 		})
 	}
+}
+
+// On a slow link, 1 s, 2 s or 3 s each way, with writes every 200 ms or
+// every 2 s for two minutes: every message arrives while the writes go
+// on, within three legs and a gap of its send (the request on the way
+// when it was written, then the first leg of the next, which carries it),
+// and b's requests stay within the budget. A request with an offer is
+// never abandoned for a newer write; before the budget, each write
+// abandoned the offer on the way, and nothing arrived until writes
+// stopped.
+//
+// Requirements: D2, N1
+func TestOnASlowLinkEveryMessageArrivesWhileWritesContinue(t *testing.T) {
+	for _, oneWay := range []time.Duration{time.Second, 2 * time.Second, 3 * time.Second} {
+		for _, gap := range []time.Duration{200 * time.Millisecond, 2 * time.Second} {
+			t.Run(fmt.Sprintf("%v each way, a write every %v", oneWay, gap), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					net, a, b, room := outboundPair(t, oneWay)
+					bound := 3*oneWay + gap + 100*time.Millisecond
+					start := net.clock.Now()
+					var ps []pending
+					var worst time.Duration
+					n := 0
+					for net.clock.Now().Sub(start) < 2*time.Minute {
+						ps = append(ps, pending{b.send(room, "slow"), net.clock.Now()})
+						n++
+						net.run(t, gap)
+						ps, worst = arrived(t, net, a, room, ps, bound, worst)
+					}
+					for len(ps) > 0 {
+						net.run(t, 100*time.Millisecond)
+						ps, worst = arrived(t, net, a, room, ps, bound, worst)
+					}
+					reqs, offers := requests(net.sent(), b.id, a.id, start, net.clock.Now())
+					t.Logf("%d messages, worst %v (bound %v), %d requests, %d with offers", n, worst, bound, reqs, offers)
+					if per := float64(reqs) / net.clock.Now().Sub(start).Minutes(); per > float64(budgetCeiling) {
+						t.Fatalf("%.0f requests a minute, budget %d", per, budgetCeiling)
+					}
+				})
+			})
+		}
+	}
+}
+
+// A burst of 2,000 messages written 1 ms apart by an outbound-only
+// machine, 5 ms each way, arrives within 2 s of the last write in a few
+// dozen requests: writes made while a request is on the way go together in
+// the next (at most 512 records an offer). Before, each write abandoned
+// the request on the way.
+//
+// Requirements: D2, N1
+func TestABurstOfTwoThousandMessagesArrivesInAFewExchanges(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		net, a, b, room := outboundPair(t, 5*time.Millisecond)
+		start := net.clock.Now()
+		ids := make([]string, 0, 2000)
+		for range 2000 {
+			ids = append(ids, b.send(room, "burst"))
+			time.Sleep(time.Millisecond)
+		}
+		last := net.clock.Now()
+		for _, id := range ids {
+			awaitAt(t, net, a, room, id, last, 2*time.Second, "a message of the burst")
+		}
+		reqs, offers := requests(net.sent(), b.id, a.id, start, net.clock.Now())
+		t.Logf("written in %v, all at a %v after the last, %d requests, %d with offers", last.Sub(start), net.clock.Now().Sub(last), reqs, offers)
+		if reqs > 150 {
+			t.Fatalf("%d requests for the burst, want at most 150", reqs)
+		}
+	})
+}
+
+// Two listening machines each writing every 50 ms for a minute, 5 ms each
+// way: every message reaches the other within 1 s, and neither sends the
+// other more than the budget, budgetCeiling requests in the minute (the
+// listener's limit is twice that). Before, about 3,600.
+//
+// Requirements: D2, P5
+func TestAnHonestPairWritingEvery50MsStaysWithinTheBudgetAndDeliversEverything(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		net := newRecNet()
+		net.oneWay = 5 * time.Millisecond
+		a, b := newSNode(t, "a", net), newSNode(t, "b", net)
+		room := sgroup(t, a, b)
+		schedule(t, net, a, b)
+		net.run(t, time.Minute)
+		start := net.clock.Now()
+		var toA, toB []pending
+		var worst time.Duration
+		for net.clock.Now().Sub(start) < time.Minute {
+			toB = append(toB, pending{a.send(room, "from a"), net.clock.Now()})
+			toA = append(toA, pending{b.send(room, "from b"), net.clock.Now()})
+			net.run(t, 50*time.Millisecond)
+			toB, worst = arrived(t, net, b, room, toB, time.Second, worst)
+			toA, worst = arrived(t, net, a, room, toA, time.Second, worst)
+		}
+		for len(toA)+len(toB) > 0 {
+			net.run(t, 10*time.Millisecond)
+			toB, worst = arrived(t, net, b, room, toB, time.Second, worst)
+			toA, worst = arrived(t, net, a, room, toA, time.Second, worst)
+		}
+		ab, _ := requests(net.sent(), a.id, b.id, start, start.Add(time.Minute))
+		ba, _ := requests(net.sent(), b.id, a.id, start, start.Add(time.Minute))
+		t.Logf("worst delay %v; requests in the minute a to b %d, b to a %d", worst, ab, ba)
+		if ab > budgetCeiling || ba > budgetCeiling {
+			t.Fatalf("requests in a minute: a to b %d, b to a %d; budget %d", ab, ba, budgetCeiling)
+		}
+	})
 }
 
 // Two machines that both listen, writing in turn every 2 s as a
@@ -234,8 +384,8 @@ func TestAWriteDuringABackOffGoesWhenItEndsAndTheNextAtOnce(t *testing.T) {
 
 // An outbound-only admin changes the room's membership several times in
 // a minute, and messages follow: every log entry and message reaches the
-// listener at once. Its offer is of log entries, so the peer's progress is
-// inferred from its log heads, not its digests.
+// listener at once. Its offer is of log entries, which the exchange gives
+// as it gives records.
 //
 // Requirements: D2, N1
 func TestAnOutboundOnlyAdminsMembershipChangesReachTheListenerAtOnce(t *testing.T) {
@@ -277,12 +427,191 @@ func TestAnOutboundOnlyAdminsMembershipChangesReachTheListenerAtOnce(t *testing.
 	})
 }
 
+// hostile is a run of honest a against peer h, which answers as mode
+// says, each leg taking 50 ms. With warm, a quiet minute first (with
+// heldFirst h holds waits through it, as an honest peer does, and stops
+// after); then a minute in which the room changes every gap (gap 0: not at
+// all), from a's writes or, with byOther, from those of a member c that a
+// pulls. tamper, if set, rewrites h's answers to a. It returns a's
+// requests to h in that minute, all a's requests to h, and the tokens a
+// took for h.
+type hostile struct {
+	gap                      time.Duration
+	byOther, warm, heldFirst bool
+	tamper                   func(resp *PullResponse)
+}
+
+func (c hostile) run(t *testing.T) (minute, all int, tokens int64) {
+	synctest.Test(t, func(t *testing.T) {
+		net := newRecNet()
+		net.oneWay = 50 * time.Millisecond
+		a, h := newSNode(t, "a", net), newSNode(t, "h", net)
+		ns := []*snode{a}
+		writer := a
+		var room string
+		if c.byOther {
+			o := newSNode(t, "c", net)
+			room = sgroup(t, a, h, o)
+			ns, writer = append(ns, o), o
+		} else {
+			room = sgroup(t, a, h)
+		}
+		var honest atomic.Bool
+		honest.Store(c.heldFirst)
+		h.x.after = func(d time.Duration) <-chan time.Time { // h's waits end at once
+			if honest.Load() {
+				return time.After(d)
+			}
+			ch := make(chan time.Time, 1)
+			ch <- time.Now()
+			return ch
+		}
+		if c.tamper != nil {
+			net.memNet.mu.Lock()
+			net.tamper = func(from, to string, resp *PullResponse) {
+				if from == a.id && to == h.id {
+					c.tamper(resp)
+				}
+			}
+			net.memNet.mu.Unlock()
+		}
+		start := net.clock.Now()
+		schedule(t, net, ns...)
+		if c.warm {
+			net.run(t, time.Minute)
+			honest.Store(false)
+			start = net.clock.Now()
+		}
+		for net.clock.Now().Sub(start) < time.Minute {
+			if c.gap == 0 {
+				net.run(t, time.Minute)
+				break
+			}
+			writer.send(room, "tick")
+			net.run(t, c.gap)
+		}
+		minute, _ = requests(net.sent(), a.id, h.id, start, start.Add(time.Minute))
+		all, _ = requests(net.sent(), a.id, h.id, time.Time{}, net.clock.Now().Add(time.Hour))
+		tokens = a.x.budget.takenBy(h.id)
+	})
+	return minute, all, tokens
+}
+
+// check fails unless the minute stayed within ceiling and no request went
+// to h without a token.
+func (c hostile) check(t *testing.T, ceiling int) {
+	t.Helper()
+	minute, all, tokens := c.run(t)
+	t.Logf("requests to the peer in the minute: %d (ceiling %d); in all %d, tokens %d", minute, ceiling, all, tokens)
+	if minute > ceiling {
+		t.Fatalf("%d requests in a minute, ceiling %d", minute, ceiling)
+	}
+	if int64(all) > tokens {
+		t.Fatalf("%d requests to the peer, %d tokens taken", all, tokens)
+	}
+}
+
+// A peer that answers every wait at once (it stores every offer). While
+// the room changes every 200 ms or 50 ms from this machine's writes, every
+// 50 ms from another member's (colluding with the peer), or every 50 ms
+// after a quiet minute, every exchange carries an offer and the
+// budget bounds them: at most budgetCeiling requests in the minute, every
+// one with a token. With the room quiet, its waits back off as before the
+// budget: at most 10 in the minute. Before, over 1,100 in a minute.
+//
+// Requirements: P5, D6
+func TestAPeerThatAnswersEveryWaitAtOnceGetsNoMoreThanTheBudget(t *testing.T) {
+	for _, c := range []hostile{
+		{gap: 200 * time.Millisecond}, {gap: 50 * time.Millisecond},
+		{gap: 50 * time.Millisecond, byOther: true}, {gap: 50 * time.Millisecond, warm: true},
+	} {
+		who, when := "this machine", "from the start"
+		if c.byOther {
+			who = "another member"
+		}
+		if c.warm {
+			when = "after a quiet minute"
+		}
+		t.Run(fmt.Sprintf("changes every %v from %s, %s", c.gap, who, when), func(t *testing.T) {
+			c.check(t, budgetCeiling)
+		})
+	}
+	t.Run("a quiet room", func(t *testing.T) {
+		hostile{warm: true}.check(t, 10)
+	})
+}
+
+// A peer that held this machine's waits for a minute and then answers
+// every wait at once, while the room changes every 50 ms: its
+// earlier holds earn nothing; the budget bounds it.
+//
+// Requirements: P5, D6
+func TestAPeerThatHeldWaitsAndThenAnswersThemAtOnceGetsNoMoreThanTheBudget(t *testing.T) {
+	for _, gap := range []time.Duration{50 * time.Millisecond} {
+		for _, byOther := range []bool{false, true} {
+			who := "this machine"
+			if byOther {
+				who = "another member"
+			}
+			t.Run(fmt.Sprintf("changes every %v from %s", gap, who), func(t *testing.T) {
+				hostile{gap: gap, byOther: byOther, warm: true, heldFirst: true}.check(t, budgetCeiling)
+			})
+		}
+	}
+}
+
+// A peer whose every answer reports progress: new log heads and log more
+// in each, never same; with the room changing every 50 ms and with it
+// quiet. Each exchange ends at pullMaxRequests at most and the next pays
+// for its requests: at most budgetCeiling in the minute.
+//
+// Requirements: P5
+func TestAPeerThatAlwaysReportsProgressGetsNoMoreThanTheBudget(t *testing.T) {
+	var k atomic.Int64
+	progress := func(resp *PullResponse) {
+		if resp.Same {
+			resp.Same, resp.Authors, resp.Digests = false, []string{"00"}, map[string]string{}
+			resp.Sum = sumOf(resp.Digests)
+		}
+		sum := sha256.Sum256(fmt.Appendf(nil, "head %d", k.Add(1)))
+		resp.Log.Heads, resp.Log.More = []string{hex.EncodeToString(sum[:16])}, true
+	}
+	for _, gap := range []time.Duration{50 * time.Millisecond, 0} {
+		t.Run(fmt.Sprintf("changes every %v", gap), func(t *testing.T) {
+			hostile{gap: gap, warm: true, tamper: progress}.check(t, budgetCeiling)
+		})
+	}
+}
+
+// A peer that always says more: each answer of digests carries a new
+// digest of the author offered and log more, as if it kept storing; with
+// the room changing every 50 ms. At most budgetCeiling in the minute.
+//
+// Requirements: P5
+func TestAPeerThatAlwaysSaysMoreGetsNoMoreThanTheBudget(t *testing.T) {
+	var k atomic.Int64
+	more := func(resp *PullResponse) {
+		if resp.Detail != nil || resp.Page != nil {
+			resp.More = true
+			return
+		}
+		sum := sha256.Sum256(fmt.Appendf(nil, "digest %d", k.Add(1)))
+		resp.Same = false
+		if len(resp.Authors) == 0 {
+			resp.Authors = []string{"00"}
+		}
+		resp.Digests = map[string]string{resp.Authors[0]: hex.EncodeToString(sum[:])}
+		resp.Sum, resp.Log.More = sumOf(resp.Digests), true
+	}
+	hostile{gap: 50 * time.Millisecond, warm: true, tamper: more}.check(t, budgetCeiling)
+}
+
 // After a refusal as not a member, an outbound-only admin's next request
 // sends its whole log, knowing nothing of the peer's (PROTOCOL 4.4): the
-// peer's progress is inferred from its heads naming the new entry.
+// entry is delivered in that exchange, which counts the entries it gave.
 //
 // Requirements: D2
-func TestAfterARefusalAWholeLogResentIsSeenAsDeliveredByTheHeadsItNames(t *testing.T) {
+func TestAfterARefusalAWholeLogResentDeliversTheNewEntry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		net := newRecNet()
 		b, a := newSNode(t, "b", net), newSNode(t, "a", net)
@@ -309,185 +638,16 @@ func TestAfterARefusalAWholeLogResentIsSeenAsDeliveredByTheHeadsItNames(t *testi
 		if ast, _ := a.r.State(room); !slices.Contains(ast.Members, junkNode(1)) {
 			t.Fatal("the entry was not delivered")
 		}
-		if st.Given == 0 || st.Same == 0 {
-			t.Fatalf("delivered, but not seen to be: %+v", st)
-		}
-	})
-}
-
-// hostileRun counts a's requests to h, a peer whose waits end at once,
-// over one minute in which the room changes every gap, each request
-// taking rtt: from a's own writes, or from those of another member c that
-// a pulls. With warm, the minute follows a quiet minute (h has spun by
-// then); without, it starts with the scheduler. It returns requests and
-// those with offers.
-func hostileRun(t *testing.T, rtt, gap time.Duration, byOther, warm bool) (int, int) {
-	return hostileRunHeld(t, rtt, gap, byOther, warm, false)
-}
-
-// hostileRunHeld is hostileRun; with heldFirst, h holds waits as an
-// honest peer does through the quiet minute (warm), and answers them at
-// once from the minute counted on.
-func hostileRunHeld(t *testing.T, rtt, gap time.Duration, byOther, warm, heldFirst bool) (int, int) {
-	var n, offers int
-	synctest.Test(t, func(t *testing.T) {
-		net := newRecNet()
-		net.delay = rtt
-		a, h := newSNode(t, "a", net), newSNode(t, "h", net)
-		ns := []*snode{a}
-		writer := a
-		var room string
-		if byOther {
-			c := newSNode(t, "c", net)
-			room = sgroup(t, a, h, c)
-			ns, writer = append(ns, c), c
-		} else {
-			room = sgroup(t, a, h)
-		}
-		var honest atomic.Bool
-		honest.Store(heldFirst)
-		h.x.after = func(d time.Duration) <-chan time.Time { // h's waits end at once
-			if honest.Load() {
-				return time.After(d)
-			}
-			c := make(chan time.Time, 1)
-			c <- time.Now()
-			return c
-		}
-		start := net.clock.Now()
-		schedule(t, net, ns...)
-		if warm {
-			if heldFirst {
-				// a held wait ended by a change: h has shown it holds
-				net.run(t, 30*time.Second)
-				writer.send(room, "while h holds")
-			}
-			net.run(t, time.Minute)
-			honest.Store(false)
-			start = net.clock.Now()
-		}
-		for net.clock.Now().Sub(start) < time.Minute {
-			writer.send(room, "tick")
-			net.run(t, gap)
-		}
-		n, offers = requests(net.sent(), a.id, h.id, start, start.Add(time.Minute))
-	})
-	return n, offers
-}
-
-// A peer that stores every offer but answers every wait at once is still
-// backed off while the room changes, from this machine's writes or from
-// another member's, every 1 s, 200 ms or 50 ms, with 100 ms requests,
-// from the scheduler's start or after a quiet minute: it never holds a
-// wait, so every excused exchange with it counts as a spin. Ceiling: 20
-// requests to it in the minute, continuations included.
-//
-// Requirements: P5, D6
-func TestAPeerThatStoresEveryOfferButAnswersEveryWaitAtOnceIsStillBackedOff(t *testing.T) {
-	const ceiling = 20
-	for _, c := range []struct {
-		gap           time.Duration
-		byOther, warm bool
-	}{
-		{time.Second, false, false}, {200 * time.Millisecond, false, false}, {50 * time.Millisecond, false, false},
-		{200 * time.Millisecond, true, false}, {50 * time.Millisecond, true, false},
-		{200 * time.Millisecond, false, true}, {50 * time.Millisecond, false, true},
-		{50 * time.Millisecond, true, true},
-	} {
-		who, when := "this machine", "from the start"
-		if c.byOther {
-			who = "another member"
-		}
-		if c.warm {
-			when = "after a quiet minute"
-		}
-		t.Run(fmt.Sprintf("changes every %v from %s, %s", c.gap, who, when), func(t *testing.T) {
-			n, offers := hostileRun(t, 100*time.Millisecond, c.gap, c.byOther, c.warm)
-			t.Logf("requests to the peer in a minute: %d, %d with offers", n, offers)
-			if n > ceiling {
-				t.Fatalf("%d requests in a minute, ceiling %d", n, ceiling)
-			}
-		})
-	}
-}
-
-// A peer that held this machine's waits for a minute and then answers
-// every wait at once, while the room changes every 200 ms or 50 ms with
-// 100 ms requests. Its last hold excuses one exchange; after that, while
-// changes keep coming faster than an exchange, so that no wait can show a
-// hold, one exchange per SchedPace (at least 0.8 s with jitter) of two
-// requests: ceiling 2 × 60 / 0.8 + 10 = 160 requests to it in the minute,
-// continuations included. Once a wait goes without a change pending, it
-// is answered at once and the peer backs off as any other.
-//
-// Requirements: P5, D6
-func TestAPeerThatHeldWaitsAndThenAnswersThemAtOnceIsBackedOff(t *testing.T) {
-	const ceiling = 160
-	for _, gap := range []time.Duration{200 * time.Millisecond, 50 * time.Millisecond} {
-		for _, byOther := range []bool{false, true} {
-			who := "this machine"
-			if byOther {
-				who = "another member"
-			}
-			t.Run(fmt.Sprintf("changes every %v from %s", gap, who), func(t *testing.T) {
-				n, offers := hostileRunHeld(t, 100*time.Millisecond, gap, byOther, true, true)
-				t.Logf("requests to the peer in a minute: %d, %d with offers", n, offers)
-				if n > ceiling {
-					t.Fatalf("%d requests in a minute, ceiling %d", n, ceiling)
-				}
-			})
-		}
-	}
-}
-
-// A listener that stores every offer but stalls the exchange: it marks
-// its answer of digests log more, answers the next opening with the same
-// digests and log more again, and only then same. With 100 ms requests
-// and a write every 50 ms, so that no wait goes without a change pending,
-// the offer exchanges end same but stalled, are not excused, and the
-// outbound-only machine backs off it. And the peer's log more alone does
-// not keep one exchange going while each request carries the records
-// written since (one request every round trip, for as long as the writes
-// went on). Ceiling: 30 requests in the minute (excused, about 100: two
-// requests per SchedPace; with log more alone kept going, 600).
-//
-// Requirements: P5
-func TestAnOfferExchangeThatStallsIsNotExcused(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		net, a, b, room := outboundPair(t, 100*time.Millisecond)
-		var last *PullResponse // the digests answer to replay
-		net.memNet.mu.Lock()
-		net.tamper = func(from, _ string, resp *PullResponse) {
-			if from != b.id || resp.Detail != nil || resp.Page != nil {
-				return
-			}
-			switch {
-			case !resp.Same:
-				resp.Log.More = true
-				c := *resp
-				last = &c
-			case last != nil:
-				resp.Same, resp.Authors, resp.Digests, resp.Sum = false, last.Authors, last.Digests, last.Sum
-				resp.Log.More, last = true, nil
-			}
-		}
-		net.memNet.mu.Unlock()
-		start := net.clock.Now()
-		for net.clock.Now().Sub(start) < time.Minute {
-			b.send(room, "tick")
-			net.run(t, 50*time.Millisecond)
-		}
-		n, offers := requests(net.sent(), b.id, a.id, start, start.Add(time.Minute))
-		t.Logf("requests in a minute: %d, %d with offers", n, offers)
-		if n > 30 {
-			t.Fatalf("%d requests in a minute, ceiling 30", n)
+		if st.Given == 0 {
+			t.Fatalf("delivered, but the exchange counts no entries given: %+v", st)
 		}
 	})
 }
 
 // A peer that keeps answering with log more and new log heads, never
-// taking the entries it is given: the exchange gives each entry once,
-// then ends as stalled instead of resending them for ever.
+// taking the entries it is given: the exchange gives each entry once and
+// ends within pullMaxRequests. Before, 1,000 requests in one exchange (the
+// limit of this test's transport).
 //
 // Requirements: P5
 func TestAPeerThatKeepsAnsweringWithNewHeadsDoesNotHoldAnExchangeInALoop(t *testing.T) {
@@ -524,19 +684,18 @@ func TestAPeerThatKeepsAnsweringWithNewHeadsDoesNotHoldAnExchangeInALoop(t *test
 		st, err := b.x.Pull(ctx, room, a.id, PullOpts{})
 		got := len(net.sent()) - n
 		t.Logf("requests: %d, stats %+v, err %v", got, st, err)
-		if got > 10 {
-			t.Fatalf("%d requests in one exchange", got)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if err == nil && st.Stalled == 0 {
-			t.Fatalf("not ended as stalled: %+v", st)
+		if got > pullMaxRequests {
+			t.Fatalf("%d requests in one exchange, cap %d", got, pullMaxRequests)
 		}
 	})
 }
 
 // A peer that keeps answering an exchange that offered a record with log
 // more and a new digest of the record's author, as if it stored something
-// each time: one request that gives something earns one such answer, so
-// the exchange ends after a few requests instead of looping.
+// each time: the exchange ends within pullMaxRequests.
 //
 // Requirements: P5
 func TestAPeerWhoseDigestsKeepChangingAfterAnOfferDoesNotHoldAnExchangeInALoop(t *testing.T) {
@@ -571,8 +730,84 @@ func TestAPeerWhoseDigestsKeepChangingAfterAnOfferDoesNotHoldAnExchangeInALoop(t
 		if st.Offered == 0 {
 			t.Fatal("nothing offered: the test shows nothing")
 		}
-		if got > 2*pullRoundsPerPull {
-			t.Fatalf("%d requests in one exchange", got)
+		if got > pullMaxRequests {
+			t.Fatalf("%d requests in one exchange, cap %d", got, pullMaxRequests)
+		}
+	})
+}
+
+// Rooms and anchors that share a peer share its bucket: a machine in
+// four rooms with one peer, each room writing every 50 ms, sends that
+// peer at most budgetCeiling requests in the minute, and every room's
+// messages still arrive within 2 s.
+//
+// Requirements: P5
+func TestRoomsSharingAPeerShareItsBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		net := newRecNet()
+		net.oneWay = 5 * time.Millisecond
+		a, b := newSNode(t, "a", net), newSNode(t, "b", net)
+		var rooms []string
+		for range 4 {
+			rooms = append(rooms, sgroup(t, a, b))
+		}
+		schedule(t, net, a, b)
+		net.run(t, time.Minute)
+		start := net.clock.Now()
+		ps := map[string][]pending{}
+		var worst time.Duration
+		for net.clock.Now().Sub(start) < time.Minute {
+			for _, r := range rooms {
+				ps[r] = append(ps[r], pending{a.send(r, "many rooms"), net.clock.Now()})
+			}
+			net.run(t, 50*time.Millisecond)
+			for _, r := range rooms {
+				ps[r], worst = arrived(t, net, b, r, ps[r], 2*time.Second, worst)
+			}
+		}
+		ab, _ := requests(net.sent(), a.id, b.id, start, start.Add(time.Minute))
+		t.Logf("worst delay %v; requests a to b in the minute %d", worst, ab)
+		if ab > budgetCeiling {
+			t.Fatalf("%d requests in a minute, budget %d", ab, budgetCeiling)
+		}
+	})
+}
+
+// Eight rooms with one peer start together and then write every 50 ms,
+// 20 ms each way: at most PullBudgetSlots requests that do not wait are in
+// flight to the peer at once, below the listener's 4, and every message
+// still arrives within 2 s. Before, every room's exchange went at once.
+//
+// Requirements: P5
+func TestRoomsStartingTogetherKeepFewerRequestsInFlightThanTheListenerAllows(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		net := newRecNet()
+		net.oneWay = 20 * time.Millisecond
+		a, b := newSNode(t, "a", net), newSNode(t, "b", net)
+		var rooms []string
+		for range 8 {
+			rooms = append(rooms, sgroup(t, a, b))
+		}
+		schedule(t, net, a, b)
+		net.run(t, time.Minute)
+		start := net.clock.Now()
+		ps := map[string][]pending{}
+		var worst time.Duration
+		for net.clock.Now().Sub(start) < 10*time.Second {
+			for _, r := range rooms {
+				ps[r] = append(ps[r], pending{a.send(r, "together"), net.clock.Now()})
+			}
+			net.run(t, 50*time.Millisecond)
+			for _, r := range rooms {
+				ps[r], worst = arrived(t, net, b, r, ps[r], 2*time.Second, worst)
+			}
+		}
+		net.mu.Lock()
+		peak := net.peak[[2]string{a.id, b.id}]
+		net.mu.Unlock()
+		t.Logf("most requests in flight from a to b at once: %d; worst delay %v", peak, worst)
+		if peak > PullBudgetSlots || peak >= 4 {
+			t.Fatalf("%d requests in flight to one peer, at most %d (the listener allows 4)", peak, PullBudgetSlots)
 		}
 	})
 }

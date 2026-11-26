@@ -2486,26 +2486,20 @@ after D57, which lets a receipt rule land without stopping a start.
   by up to those bounds in all, again after each restart; an honest join of more than 64 MiB, or
   slower than those times, is refused; `Exchange.apply` and `caughtUp`
   in the pull code still take a non-member's entries and stale heads.
-- **After integration with the pull fix.** Both pull gaps are closed.
-  `Exchange.apply` takes a response's log entries only if the peer is a
-  member here before the batch or after it, as `Exchange.serve` and
-  `Rooms.receiveJoin` do; otherwise the commit fails, the room's state in
-  memory rolls back, nothing of the response is stored, and the pull
-  ends with `ErrPeerNotMember`
-  (`TestAPullsAnswerFromAPeerRemovedWhileItWasOnTheWayStoresNothing`).
-  `Rooms.caughtUp` now also requires the peer's last advertised heads to
-  be exactly this log's heads, as this machine would advertise them
-  (`TestAPullWhoseHeadsAreOlderEntriesDoesNotCountAsCaughtUp`). That is no
-  regression for an honest machine catching up: when its log is ahead,
-  the exchange gives the peer the entries it lacks before its last
-  answer, which then names the same heads
-  (`TestARestartedMachineAheadOfItsPeerIsCaughtUpAfterOnePull`). An
-  exchange cut short (capped, or superseded by a change) before the peer
-  took them opens the gate at the next one. A peer that refuses an entry
-  this machine accepted never opens it, as no honest peer does with the
-  same rules. The rule adds little against a hostile member, which can
-  repeat the heads of the request; it makes the pull path agree with the
-  join path. No wire or schema change.
+- **After the pull budget (2026-11-26).** `Exchange.apply` now takes a
+  response's log entries only if the peer is a member here before the
+  batch or after it, as `Exchange.serve` and `Rooms.receiveJoin` do;
+  otherwise nothing of the response is stored, its peer addresses and file
+  wants included, and the pull ends with `ErrPeerNotMember`. A page whose
+  entries remove the peer, with `log.more` set, keeps its entries and asks
+  for the rest of the log, so a later page that admits the peer again is
+  taken (`TestAPullWhoseLogRemovesThePeerAndAPageLaterAdmitsItAgainTakesTheWholeLog`).
+  `caughtUp` on the pull path keeps its rule (every head the peer named
+  is accepted here) and does not take the join's exact-heads rule: while
+  a fork is unsettled honest members advertise different heads, so that
+  rule could keep an honest admin from signing the settlement. The gap
+  it leaves is the one this entry names for joins before it: a member
+  that names older heads unlocks signing on the pull path.
 
 **Revisit if** rooms gain a rename, a second built-in label is reserved,
 or a joiner reports a refused join of a room it holds.

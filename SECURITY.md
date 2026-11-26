@@ -30,14 +30,16 @@ an invite.
   sign, and a removal of that member never reaches the others while it is
   the only path. Rooms shared between owners should have a listener from
   each owner.
-- A pull's answer counts by the same rule: its log entries are kept only
-  if the answering machine is a member here before or after them, so one
-  removed while its answer was on the way stores nothing. An exchange
-  opens the `not_caught_up` gate only if the peer's last answer names
-  exactly the heads of the log here, so an answer that lists older
-  entries (ancestors, which could hide newer ones) opens nothing. It does
-  not stop a hostile member that repeats the heads this machine sent it,
-  which the gate cannot tell from an honest one.
+- A pull's answer counts by the same rule as a request: its log entries
+  are kept only if the answering machine is a member here before or after
+  them, so one removed while its answer was on the way stores nothing. The
+  `not_caught_up` gate opens after a pull in which every head the peer
+  named is accepted here; a member that names older heads, which could
+  hide newer entries, still opens it (a join requires the exact heads).
+- A member can take up to 930 pull requests a minute from this machine by
+  answering every wait at once while the room changes (the requester's
+  budget, PROTOCOL 4.6); with the room quiet it is backed off to one
+  request per room every 4 to 6 minutes.
 - Anyone with a valid unused invite can present it. A person on the admin
   machine still approves the joining machine and the terms. Keep invites
   private and verify the joining machine's fingerprint before approval.
