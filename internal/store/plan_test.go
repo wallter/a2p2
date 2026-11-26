@@ -34,47 +34,63 @@ func queryPlan(t *testing.T, s *Store, q string) []string {
 	return out
 }
 
-// recordsStep matches a plan step over the records table: "SCAN records
-// ..." or "SEARCH records USING [COVERING] INDEX name (room=? AND ...)".
-var recordsStep = regexp.MustCompile(`^(SCAN|SEARCH) records\b.*?(?:\((.*)\))?$`)
+// recordsStep matches a plan step over the records table, under its name
+// or the alias t the withdraw guard uses: "SCAN records ..." or "SEARCH t
+// USING [COVERING] INDEX name (room=? AND ...)".
+var recordsStep = regexp.MustCompile(`^(SCAN|SEARCH) (records|t)\b.*?(?:\((.*)\))?$`)
+
+// step is one expected plan step over records: the table or alias, and the
+// key column its index constraint must name.
+type step struct{ table, key string }
 
 // M7 (perf 2026-11-25): the lookups made for every stored record (its
-// dependants, whether it was withdrawn) and for every message an inbox
-// shows (what refers to it) seek on the column they look up, so their cost
-// is the number of matching records and not the size of the room's
-// history. Before, each read every record of the room: the planner, which
-// has no statistics, took the index of (room) that matched an ORDER BY or
-// a (room, kind) index over the index of the looked-up key.
+// dependants, whether it was withdrawn, what a withdraw drops) and for
+// every message an inbox shows (what refers to it), and the reply and
+// thread views, seek on the column they look up, so their cost is the
+// number of matching records and not the size of the room's history.
+// Before, each read every record of the room: the planner, which has no
+// statistics, took the index of (room) that matched an ORDER BY or a
+// (room, kind) index over the index of the looked-up key. Every step over
+// records, including the withdraw guard's subquery, must be a SEARCH whose
+// constraint names the key.
 func TestPerRecordLookupsSeekOnTheirKeyNotOnTheWholeRoom(t *testing.T) {
 	s, _ := openTest(t)
 	sel := `SELECT ` + heldCols + ` FROM records `
+	pos := `SELECT ` + positionedCols + ` FROM records `
 	for _, c := range []struct {
 		name, q string
-		key     string // the column the step over records must constrain
+		steps   []step
 	}{
-		{"dependants by ref", sel + whereDependantsByRef, "ref"},
-		{"dependants by parent", sel + whereDependantsByParent, "parent"},
-		{"withdraws of a message", sqlWithdrawsOf, "ref"},
-		{"by ref", sel + whereByRef, "ref"},
-		{"by parent", sel + whereByParent, "parent"},
-		{"by thread", sel + whereByThread, "thread"},
-		{"withdraw a message", sqlWithdrawMessage, "id"},
-		{"withdraw its replacements", sqlWithdrawReplaces, "ref"},
+		{"dependants by ref", sel + whereDependantsByRef, []step{{"records", "ref"}}},
+		{"dependants by parent", sel + whereDependantsByParent, []step{{"records", "parent"}}},
+		{"withdraws of a message", sqlWithdrawsOf, []step{{"records", "ref"}}},
+		{"by ref", pos + whereByRef, []step{{"records", "ref"}}},
+		{"by parent", pos + whereByParent, []step{{"records", "parent"}}},
+		{"by thread", pos + whereByThread, []step{{"records", "thread"}}},
+		{"thread root", pos + whereThreadRoot, []step{{"records", "id"}}},
+		{"withdraw a message", sqlWithdrawMessage, []step{{"records", "id"}}},
+		{"withdraw its replacements", sqlWithdrawReplaces, []step{{"records", "ref"}, {"t", "id"}}},
 	} {
 		plan := queryPlan(t, s, c.q)
-		found := false
-		for _, step := range plan {
-			m := recordsStep.FindStringSubmatch(step)
+		var got []step
+		for _, st := range plan {
+			m := recordsStep.FindStringSubmatch(st)
 			if m == nil {
 				continue
 			}
-			found = true
-			if m[1] == "SCAN" || !regexp.MustCompile(`\b`+c.key+`=`).MatchString(m[2]) {
-				t.Errorf("%s: step %q reads the room, not by %s; plan %q", c.name, step, c.key, plan)
+			i := len(got)
+			got = append(got, step{m[2], ""})
+			if i >= len(c.steps) {
+				t.Errorf("%s: unexpected step %q; plan %q", c.name, st, plan)
+				continue
+			}
+			want := c.steps[i]
+			if m[1] == "SCAN" || m[2] != want.table || !regexp.MustCompile(`\b`+want.key+`=`).MatchString(m[3]) {
+				t.Errorf("%s: step %q is not a search of %s by %s; plan %q", c.name, st, want.table, want.key, plan)
 			}
 		}
-		if !found {
-			t.Errorf("%s: no step over records in plan %q", c.name, plan)
+		if len(got) != len(c.steps) {
+			t.Errorf("%s: %d steps over records, want %d; plan %q", c.name, len(got), len(c.steps), plan)
 		}
 	}
 }

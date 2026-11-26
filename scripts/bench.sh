@@ -21,7 +21,8 @@ Measures a2p2 on this computer and prints one table per run:
 
   --quick     a tenth of the counts (about two minutes), for a smoke run
   --runs N    run the load and micro sets N times (default 2)
-  --only RE   only the load tests matching RE (e.g. 'M1|M2'); no micro, no profile
+  --only RE   only the load tests TestM<RE>, e.g. 7 or 'M1|M2' (both forms work);
+              no micro, no profile
   --help      this text
 
 It builds bin/a2p2, and every daemon it starts has its own home made like
@@ -78,7 +79,7 @@ while [ "$i" -le "$runs" ]; do
   echo
   echo "== run $i: load (real daemons from bin/a2p2)"
   A2P2_BENCH_BIN=$BIN A2P2_BENCH_OUT=$out/load-$i.tsv A2P2_BENCH_QUICK=$quick \
-    $GO test -tags bench -count=1 -timeout 90m -run "TestM(${only:-.})" -v ./internal/bench > "$out/load-$i.log" 2>&1 || status=1
+    $GO test -tags bench -count=1 -timeout 90m -run "^TestM?(${only:-M})" -v ./internal/bench > "$out/load-$i.log" 2>&1 || status=1
   grep -E '^(RESULT|NOTE|--- FAIL|FAIL)' "$out/load-$i.log" | sed 's/^RESULT  //; s/^NOTE    /  note: /'
   if [ -z "$only" ]; then
     echo

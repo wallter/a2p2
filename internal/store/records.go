@@ -619,41 +619,66 @@ func CanHandle(msg *core.Record, node, agent string) bool {
 //
 //   - An ORDER BY author, epoch, seq: it prefers the unique (room, author,
 //     epoch, seq) index, which returns that order, over the key's. So these
-//     return their rows unordered and sortByPosition sorts them.
+//     return their rows unordered and byPosition sorts them.
 //   - A term on kind: records_reading leads with (room, kind), which ties
 //     with (room, key). So kind is written +kind, which no index can use.
 //
-// An OR of two keys is two lookups.
+// An OR of two keys is two lookups, the second leaving out in SQL what the
+// first matched, so the rows decoded are exactly those the OR named, each
+// once, whatever the header says.
 // TestPerRecordLookupsSeekOnTheirKeyNotOnTheWholeRoom checks each plan.
 const (
 	whereDependantsByRef    = `WHERE room = ? AND ref = ? AND effect = ?`
-	whereDependantsByParent = `WHERE room = ? AND parent = ? AND effect = ?`
+	whereDependantsByParent = `WHERE room = ? AND parent = ? AND effect = ? AND ref != ?`
 	sqlWithdrawsOf          = `SELECT count(*) FROM records WHERE room = ? AND ref = ? AND author = ? AND +kind = 'withdraw'`
 	whereByRef              = `WHERE room = ? AND ref = ?`
 	whereByParent           = `WHERE room = ? AND parent = ? AND +kind = 'message'`
 	whereByThread           = `WHERE room = ? AND thread = ? AND +kind = 'message'`
+	whereThreadRoot         = `WHERE room = ? AND id = ? AND +kind = 'message' AND thread != ?`
 	// A withdraw drops the text of its message and of the author's
 	// replacements of it, if the target is a message (or not held).
-	sqlWithdrawMessage  = `UPDATE records SET body = NULL, reason = ? WHERE room = ? AND id = ? AND author = ? AND kind = 'message'`
+	sqlWithdrawMessage  = `UPDATE records SET body = NULL, reason = ? WHERE room = ? AND id = ? AND author = ? AND +kind = 'message'`
 	sqlWithdrawReplaces = `UPDATE records SET body = NULL, reason = ? WHERE room = ? AND ref = ? AND author = ? AND +kind = 'replace'
 		AND NOT EXISTS (SELECT 1 FROM records t WHERE t.room = ? AND t.id = ? AND t.kind != 'message')`
 )
 
-// sortByPosition orders records of one room by (author, epoch, seq), which
-// is unique: the order SQLite's ORDER BY author, epoch, seq gives (BINARY
-// collation compares text bytewise, as Go compares strings).
-func sortByPosition(hs []Held) {
-	type pos struct {
-		author, epoch string
-		seq           int64
+// positioned is a record with its stored position (author, epoch, seq),
+// unique in a room: the key ByRef, ByParent and ByThread sort by, read from
+// the same columns SQLite's ORDER BY author, epoch, seq used.
+type positioned struct {
+	author, epoch string
+	seq           int64
+	h             Held
+}
+
+const positionedCols = `author, epoch, seq, ` + heldCols
+
+func (rd *Reader) queryPositioned(where string, args ...any) ([]positioned, error) {
+	rows, err := rd.tx.Query(`SELECT `+positionedCols+` FROM records `+where, args...)
+	if err != nil {
+		return nil, err
 	}
-	keys := make(map[*core.Record]pos, len(hs))
-	for _, h := range hs {
-		f := h.Record.Fields()
-		keys[h.Record] = pos{h.Record.Author(), f.Epoch, f.Seq}
+	defer rows.Close()
+	var out []positioned
+	for rows.Next() {
+		var p positioned
+		if p.h, err = scanHeld(rows, &p.author, &p.epoch, &p.seq); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
 	}
-	sort.Slice(hs, func(i, j int) bool {
-		a, b := keys[hs[i].Record], keys[hs[j].Record]
+	return out, rows.Err()
+}
+
+// byPosition sorts ps as ORDER BY author, epoch, seq does (BINARY collation
+// compares text bytewise, as Go compares strings) and returns the records,
+// nil when there are none, as Reader.query returns.
+func byPosition(ps []positioned) []Held {
+	if len(ps) == 0 {
+		return nil
+	}
+	sort.Slice(ps, func(i, j int) bool {
+		a, b := ps[i], ps[j]
 		if a.author != b.author {
 			return a.author < b.author
 		}
@@ -662,24 +687,20 @@ func sortByPosition(hs []Held) {
 		}
 		return a.seq < b.seq
 	})
+	out := make([]Held, len(ps))
+	for i, p := range ps {
+		out[i] = p.h
+	}
+	return out
 }
 
 // resolveDependants re-resolves the records that were waiting for id,
 // whatever its kind: a reference to a record of the wrong kind or author
 // becomes bad_reference as soon as the target is learned.
 func resolveDependants(tx *sql.Tx, rd *Reader, room, id string) error {
-	deps, err := rd.query(whereDependantsByRef, room, id, EffectUnresolved)
+	deps, err := dependants(rd, room, id)
 	if err != nil {
 		return err
-	}
-	byParent, err := rd.query(whereDependantsByParent, room, id, EffectUnresolved)
-	if err != nil {
-		return err
-	}
-	for _, d := range byParent {
-		if d.Record.Fields().Ref != id { // not listed by ref already
-			deps = append(deps, d)
-		}
 	}
 	for _, d := range deps {
 		e, err := effectOf(rd, d.Record.Author(), d.Record.Fields())
@@ -692,6 +713,17 @@ func resolveDependants(tx *sql.Tx, rd *Reader, room, id string) error {
 		}
 	}
 	return nil
+}
+
+// dependants returns the unresolved records of room whose ref or parent is
+// id, each once (in no order that matters: each is re-resolved alone).
+func dependants(rd *Reader, room, id string) ([]Held, error) {
+	deps, err := rd.query(whereDependantsByRef, room, id, EffectUnresolved)
+	if err != nil {
+		return nil, err
+	}
+	byParent, err := rd.query(whereDependantsByParent, room, id, EffectUnresolved, id)
+	return append(deps, byParent...), err
 }
 
 func idAt(tx *sql.Tx, room, author, epoch string, seq int64) (string, error) {
@@ -829,10 +861,11 @@ type Reader struct{ tx *sql.Tx }
 
 const heldCols = `hdr, sig, body, reason, effect`
 
-func scanHeld(sc interface{ Scan(...any) error }) (Held, error) {
+// scanHeld scans heldCols, after the columns pre names when there are any.
+func scanHeld(sc interface{ Scan(...any) error }, pre ...any) (Held, error) {
 	var hdr, sig, body []byte
 	var h Held
-	if err := sc.Scan(&hdr, &sig, &body, &h.Reason, &h.Effect); err != nil {
+	if err := sc.Scan(append(pre, &hdr, &sig, &body, &h.Reason, &h.Effect)...); err != nil {
 		return Held{}, err
 	}
 	r, err := core.RecordFromParts(hdr, sig, body)
@@ -884,33 +917,28 @@ func (rd *Reader) RecordsFrom(room, author, epoch string, from int64) ([]Held, e
 // ByRef returns the records whose ref is id (handled, withdraw, replace),
 // whatever their effect, ordered by position.
 func (rd *Reader) ByRef(room, id string) ([]Held, error) {
-	hs, err := rd.query(whereByRef, room, id)
-	sortByPosition(hs)
-	return hs, err
+	ps, err := rd.queryPositioned(whereByRef, room, id)
+	return byPosition(ps), err
 }
 
 // ByParent returns the messages whose parent is id, whatever their effect.
 func (rd *Reader) ByParent(room, id string) ([]Held, error) {
-	hs, err := rd.query(whereByParent, room, id)
-	sortByPosition(hs)
-	return hs, err
+	ps, err := rd.queryPositioned(whereByParent, room, id)
+	return byPosition(ps), err
 }
 
 // ByThread returns the messages that name root as their thread, and root,
 // whatever their effect.
 func (rd *Reader) ByThread(room, root string) ([]Held, error) {
-	hs, err := rd.query(whereByThread, room, root)
+	ps, err := rd.queryPositioned(whereByThread, room, root)
 	if err != nil {
 		return nil, err
 	}
-	switch r, ok, err := rd.Record(room, root); {
-	case err != nil:
+	r, err := rd.queryPositioned(whereThreadRoot, room, root, root)
+	if err != nil {
 		return nil, err
-	case ok && r.Record.Fields().Kind == core.KindMessage && r.Record.Fields().Thread != root:
-		hs = append(hs, r) // root itself, unless it named itself as its thread and is listed already
 	}
-	sortByPosition(hs)
-	return hs, nil
+	return byPosition(append(ps, r...)), nil
 }
 
 // Streams returns every stream of room, held or only known, with its first
