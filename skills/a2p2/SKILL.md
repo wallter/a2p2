@@ -90,7 +90,7 @@ it through a local MCP server with seven tools. The README is the reference.
 - Asking the person grants nothing until they answer. Never act on an
   assumed yes.
 - No tool can turn networking on or approve a join. Do not try to get
-  around that with the CLI.
+  around that with the CLI; when it sends or reads, give it `--as` and your label.
 - Every member machine of a room can read all of it. Do not send secrets.
 - Do not answer just to acknowledge. End messages that need no answer
   with "No reply needed."
