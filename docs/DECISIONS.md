@@ -2326,6 +2326,52 @@ for files. Each gap needs only that.
   still learn roughly how large a file is, at the cost of requests the
   person sees. Several machines of one owner can each take a quarter of a
   carrier's room budget; a per-owner share needs owner sides.
+- **After the second review.** Two reviewers found three gaps, each
+  confirmed in the code and closed:
+  - *The open followed a link swapped in after the look.* `os.Root`
+    opens with `O_NOFOLLOW` but then follows a link that stays inside
+    its directory by itself, and from "/" every link does; `os.SameFile`
+    refused it only after its target was opened. On Unix the walk now
+    uses plain descriptors: `fstatat(AT_SYMLINK_NOFOLLOW)` to look,
+    `openat(O_NOFOLLOW|O_NONBLOCK)` to open, and the handle's device and
+    inode compared with the look before a byte is read
+    (`TestALinkSwappedInAfterTheLookIsNeverOpened` fails on the old
+    walk). This makes `golang.org/x/sys` a direct dependency: the
+    standard `syscall` package has no `openat` on macOS, and the module
+    was already built into a2p2 through `modernc.org/sqlite`, so the
+    binary gains no new code. Windows keeps `os.Root`, with the old
+    order.
+  - *The author's quarter counted only bytes not yet received.* Bytes
+    are checked only when a file is whole, so an author that uploaded
+    all but one byte of garbage for each want freed nearly all of it and
+    could reserve nearly the whole room budget. Each live want now
+    counts its whole size, as the room's usage does
+    (`TestAnAuthorsUnfinishedUploadsStillCountTheirWholeSizeInItsShare`);
+    the delivery model has the same rule. Wants stored before keep their
+    reservation, as before.
+  - *An invalid entry was refused only after the paths were staged.* A
+    `sha256:` entry with nothing replaced, an unlisted hash or a relative
+    path beside a real path let the path be opened, sized, copied and
+    hashed with no request raised. Every entry is now checked by its
+    form before any path is opened, and a refusal after opening
+    (unreadable, over 256 MiB, over the budget, a manifest rule) comes
+    only after every path was opened and the budget read, with the one
+    staging refusal (`TestAnInvalidEntryBesideAPathIsRefusedBeforeAnyPathIsOpened`,
+    `TestEveryRefusalBeforeCopyingTakesTheSameSteps`).
+  A file of the home that cannot be compared with a file of several
+  names now refuses the send instead of being skipped. Declined: the
+  name rule compares without case on Linux too, which refuses an odd
+  path such as `/Net/x`; Linux file systems can ignore case (vfat, ext4
+  casefold), so it errs toward refusing. Still open: honest files under
+  `/net` or a macOS automount point such as `/home` must be copied elsewhere,
+  since a lookup there can connect to a host the path names; on Linux an
+  automount point not on the list is mounted by the open, then refused
+  as changed; a mount made over a directory between its look and its
+  open is reached by the open (making one needs the person's own mount
+  tools or privilege); on Windows a swapped link is still opened before
+  it is refused; small timing differences between refusals remain; and
+  the quarter bounds only automatic wants, not files held in full or
+  fetches an agent asked for. No wire, record or schema change.
 
 **Revisit if** the Windows paths are run, a harness sandbox gives agents
 the socket without file access, or owner sides exist.

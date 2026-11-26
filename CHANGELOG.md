@@ -387,23 +387,33 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   plain names, and on Unix refuses `/dev`, `/proc`, `/sys`, `/net` and the
   macOS automount points, checking every link on the way before it is
   followed. Each part of the path is looked up in the directory opened
-  before it, so a directory swapped in after its check is refused. A
-  drive letter mapped to a share still works as in 0.2.3. The Windows
-  part has not been run on Windows.
+  before it. On macOS and Linux each part is opened without following a
+  link and kept only if it is the entry checked, so a link or directory
+  swapped in after its check is refused before its target is opened; on
+  Windows it is refused after the open. A drive letter mapped to a share
+  still works as in 0.2.3. A file under `/net`, `/home` on macOS or
+  another refused point must be copied elsewhere to be attached. The
+  Windows part has not been run on Windows.
 - **Staging tells an agent less about files it cannot read.** Since 0.2.0,
   once 32 requests waited an agent could learn whether two files had the
   same bytes, one bit per call, with no request for the person to see. A
   full queue is now refused before any path is touched, and the same
-  bytes listed twice are listed once. A request now says when a file has
-  several names on disk.
+  bytes listed twice are listed once. Since 0.2.0, a send that named a
+  readable file beside an entry that could never be staged also opened,
+  sized and copied the file before it was refused, with no request
+  raised. The whole send is now checked before any path is opened, and a
+  refusal after opening (unreadable, too large, over the budget) has the
+  same words and steps. A request now says when a file has several names
+  on disk.
 - **A message's author can no longer hold another member's file budget.**
   Since 0.2.0, the author of a message with files could ask a member in
   the default `carry` setting for its own files: the member reserved
   their size for a day while the author never uploaded, and for as long
   as the message lived if the author uploaded one byte of each. Its own
   sends with files were refused as too large. A request from the author
-  now starts no carry job, one author's carry jobs reserve at most a
-  quarter of the room budget, counted by the bytes not yet received, and
+  now starts no carry job, one author's unfinished carry jobs reserve at
+  most a quarter of the room budget, each counted at its full size so
+  that bytes uploaded but not yet checked free nothing, and
   a part an upload left goes when its want lapses or the author edits
   the message, and a part a 0.2.3 binary left under a lapsed want goes
   at the next sweep.

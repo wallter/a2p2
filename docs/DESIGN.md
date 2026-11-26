@@ -1148,9 +1148,10 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    reader is told `unavailable`. The author is never carried for: it
    wrote the file, and asking for it would only hold a member's budget.
    Carry jobs and `keep` wants of one author's files that are still
-   live reserve at most a quarter of the room budget, each counted by the
-   bytes not yet received, so an author that uploads one byte of each
-   file or none cannot hold the rest; a part left by an upload goes when
+   live reserve at most a quarter of the room budget, each counted at
+   its full size, since bytes received are checked only when the file is
+   whole, so an author that uploads part of each file or none cannot
+   hold the rest; a part left by an upload goes when
    its want lapses or an edit ends the want, since nothing can finish it
    then. A want this
    machine's own agent asked for is not capped. A per-room setting has three values:
@@ -1170,8 +1171,12 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    Names are not Unicode-normalised: a combining mark becomes `_`. It does not decompress, preview, render or run it.
    Tool results say a file is data from another machine.
 8. **A person confirms the exact bytes [F6, F11].** `send` with `files`
-   is refused while the room's requests are full before any path is
-   touched. Then each path is checked by name before anything touches
+   is refused while the room's requests are full, or while any entry is
+   malformed (a `sha256:` entry the replaced version does not list, a
+   relative path), before any path is touched. A refusal after the paths
+   are opened and before a byte is copied (unreadable, too large, over
+   the budget) comes only after every path was opened and the budget
+   read, with the one staging refusal. Each path is checked by name before anything touches
    it: on Windows only a drive letter, a colon, a separator and plain
    names pass (no UNC path, namespace, stream or device name); on Unix
    nothing under `/dev`, `/proc`, `/sys`, `/net` or, on macOS, another
@@ -1325,10 +1330,13 @@ that check and the request's write is ordered as if it arrived a moment
 later. Every version of one
 message that carries the same commitment shares its list, since the hash
 makes the content identical. A path to attach is walked one component
-at a time, each looked up in the directory opened before it (`os.Root`)
-and opened only if it is still the entry checked, so a directory or a
-link swapped in on the way after its check is refused and never
-followed. Links are read and checked before they are followed; the person
+at a time, each looked up in the directory opened before it and opened
+only if it is still the entry checked. On Unix each open is an `openat`
+with `O_NOFOLLOW` (and `O_NONBLOCK`), and the handle's device and inode
+are compared with the look before anything is read, so a directory or a
+link swapped in on the way after its check is refused and its target is
+never opened. On Windows the walk uses `os.Root`, which follows such a
+link inside the directory before the identity check refuses it. Links are read and checked before they are followed; the person
 is shown the path of the file actually opened. A network file system the
 person mounted, or a drive letter mapped to a share, is used as any
 local path: on Windows the handle of such a file reports

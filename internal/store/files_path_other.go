@@ -24,3 +24,6 @@ func handlePath(f *os.File) (string, error) {
 
 // automountRoots are automount points refused besides /net: none known.
 var automountRoots []string
+
+// atNoAutomount: no such flag here.
+const atNoAutomount = 0

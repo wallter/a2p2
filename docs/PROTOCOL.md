@@ -1481,8 +1481,8 @@ with body `{"state":"gave_up"}`, and the reader shows `unavailable` with
 reason `not_carried`. With setting `off` it answers 404. A request from
 the message's author is answered 404 and starts nothing. A new carry job,
 or a `keep` want, is not started while the live wants of the same
-author's files in the room, each counted by the bytes not yet received,
-would reserve more than a quarter of the room budget with it; the
+author's files in the room, each counted at its full size (bytes received
+are checked only when the file is whole), would reserve more than a quarter of the room budget with it; the
 request is then answered 404, as over the budget. When a want lapses,
 or goes because an edit made another version the one to keep, the part
 an upload left for it is dropped. Wants stored before this rule keep
@@ -1739,7 +1739,7 @@ directory not yet synced; retried at a start, as on Windows).
 | Swapping the file during confirmation | staged from one open handle; approval checks the staged digest, never the source |
 | An agent told to attach a2p2's own key or database | refused at staging, by a walk through the home and by file identity, a hard link to a nested file included; a request staged by an older binary is refused at approval |
 | A path that makes the machine connect out before approval | refused by name before any I/O, links on the way included (10.8) |
-| An author that never uploads, or uploads one byte of each file, holds a carrier's budget | its own requests start no carry job; one author's live wants, counted by the bytes not yet received, reserve at most a quarter of the room budget; a part goes when its want lapses or an edit ends it (10.5) |
+| An author that never uploads, or uploads part of each file, holds a carrier's budget | its own requests start no carry job; one author's live wants, each counted at its full size, reserve at most a quarter of the room budget; a part goes when its want lapses or an edit ends it (10.5) |
 | A path that hides its end | shown in full, controls and bidi characters escaped |
 | A member lists a hash it may not read in its own message | served only for the message the bytes are held for (F2) |
 | A withdraw after others fetched | every member that learns deletes bytes, parts and copies; active transfers stop (F1, F2) |
@@ -1810,7 +1810,7 @@ with the test that holds it.
 | Every refusal on the file route is the same status and body whatever its reason | `TestEveryNotHeldAnswerIsTheSameBytes` |
 | A response or upload in progress stops when the sender commits a withdraw, replacement, removal, narrower grant or void that ends it | `TestARevocationStopsATransferInProgress` |
 | Staging opens the path once, refuses a non-regular file after opening (a FIFO, a device, a directory), and copies from that handle | `TestStagingCopiesFromTheHandleItOpenedAndRefusesAFifo` |
-| Staging reads and checks each link before following it, and opens only the entry it checked | `TestStagingNeverFollowsALinkAtTheLastComponentWhenItOpens`, `TestADirectorySwappedOnTheWayAfterItsCheckIsRefused`, `TestAPathUnderAnAutomountOrDevicePointIsRefusedBeforeAnyIO`, `TestAFileOnADriveLetterMappedToAShareIsStagedAsALocalFile` (the rule; Windows unverified) |
+| Staging reads and checks each link before following it, and opens only the entry it checked (on Unix without following a link at the open) | `TestStagingNeverFollowsALinkAtTheLastComponentWhenItOpens`, `TestADirectorySwappedOnTheWayAfterItsCheckIsRefused`, `TestALinkSwappedInAfterTheLookIsNeverOpened`, `TestAPathUnderAnAutomountOrDevicePointIsRefusedBeforeAnyIO`, `TestAFileOnADriveLetterMappedToAShareIsStagedAsALocalFile` (the rule; Windows unverified) |
 | The Windows name rule refuses every form but a drive and plain names | `TestAWindowsPathOfAnyFormButADriveAndPlainNamesIsRefusedByNameBeforeAnyIO` (the rule, run on every system; the open is unverified on Windows) |
 | a2p2's own files are never staged, nor sent from a request staged before this rule | `TestASendCannotAttachTheMachineKeyOrDatabaseEvenThroughAHardLink`, `TestAnAgentCannotAttachTheMachineKeyOrTheDatabase`, `TestARequestStagedFromTheMachineKeyBeforeTheFixIsNotPublished` |
 | The approval display shows the resolved path in full with controls and bidirectional characters escaped, and the replaced message | `TestTheRequestEscapesBidiCharactersInThePathAndNamesTheReplacedMessage`, added with the surfaces (10.6) |

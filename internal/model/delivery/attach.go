@@ -65,8 +65,8 @@ import (
 //     receiver takes an upload only from the author against a want it
 //     issued. A lapsed carry is answered "gave up" for WantLife. The
 //     author itself is never carried for (it wrote the file), and one
-//     author's live carry and keep wants reserve, by the bytes not yet
-//     received, at most 1/AuthorWantShare of a set budget. A part left by
+//     author's live carry and keep wants reserve, each by its whole size,
+//     at most 1/AuthorWantShare of a set budget. A part left by
 //     an upload goes when its want lapses or its version is replaced:
 //     nothing can complete it.
 //   - F10 Durable storing and cleanup. Bytes are on disk before the row
@@ -90,8 +90,8 @@ const (
 	WantLife    = Day // a want, or a carry job, lapses after this
 	WantTries   = 3   // answers to the author's pulls without the bytes, then it lapses
 	ListTries   = 8   // failed answers for a missing manifest, then it is unavailable
-	// AuthorWantShare: one author's carry and keep wants reserve, by the
-	// bytes not yet received, at most this share of the budget.
+	// AuthorWantShare: one author's carry and keep wants reserve, each by
+	// its whole size, at most this share of the budget.
 	AuthorWantShare = 4
 )
 
@@ -350,17 +350,13 @@ func (f *fileState) used() int {
 	return n
 }
 
-// reservedFor is what author's live wants reserve by the bytes not yet
-// received: a part of one byte leaves the rest of its size counted.
+// reservedFor is what author's live wants reserve, each by its whole
+// size: bytes received are checked only once the file is whole, so a part
+// frees nothing of the share.
 func (f *fileState) reservedFor(author MachineID) int {
 	n := 0
-	for k, j := range f.want {
-		if j.from != author {
-			continue
-		}
-		if p := f.partial[k]; p != nil {
-			n += max(j.size-len(p.data), 0)
-		} else {
+	for _, j := range f.want {
+		if j.from == author {
 			n += j.size
 		}
 	}
