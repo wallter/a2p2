@@ -1028,6 +1028,7 @@ func waitAny(ctx context.Context, chans []<-chan struct{}, deadline time.Time) b
 
 // Seen confirms what the inbox showed agent: each key with its version.
 // A key is looked up in every room; results come back in the given order.
+// A key of a room set aside is left unconfirmed (SeenNotShown).
 func (s *Surface) Seen(ctx context.Context, agent string, reads []store.Read) ([]SeenResult, error) {
 	label, err := s.label(agent)
 	if err != nil {
@@ -1057,6 +1058,11 @@ func (s *Surface) Seen(ctx context.Context, agent string, reads []store.Read) ([
 		byRoom[room] = append(byRoom[room], i)
 	}
 	for _, room := range order {
+		if s.r != nil && s.r.isQuarantined(room) {
+			// Machine.Seen refuses a room set aside. Its keys keep
+			// SeenNotShown, so the other rooms are still confirmed.
+			continue
+		}
 		idx := byRoom[room]
 		rs := make([]store.Read, len(idx))
 		for k, i := range idx {

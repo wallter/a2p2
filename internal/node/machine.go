@@ -153,10 +153,15 @@ type Machine struct {
 // (roomView.unseeded); without all text readable their text is also
 // undecided (access.go) and missing text of the author does not expire
 // (undecided).
+//
+// The frontier of a room set aside (Rooms.Quarantined) is not known:
+// Unknown is set, and every author's missing text is undecided and every
+// stream without a cursor is held back.
 type readFront struct {
-	From map[string][]string
-	All  bool
-	perm members.Permission // the permission it comes from
+	From    map[string][]string
+	All     bool
+	Unknown bool
+	perm    members.Permission // the permission it comes from
 }
 
 // undecided lists the (room, author) pairs with a head of this machine's
@@ -167,6 +172,16 @@ func (m *Machine) undecided(rd *store.Reader) (map[[2]string]bool, error) {
 	}
 	out := map[[2]string]bool{}
 	for room, f := range m.fronts() {
+		if f.Unknown {
+			ss, err := rd.Streams(room)
+			if err != nil {
+				return nil, err
+			}
+			for _, s := range ss {
+				out[[2]string{room, s.Author}] = true
+			}
+			continue
+		}
 		if f.All {
 			continue
 		}

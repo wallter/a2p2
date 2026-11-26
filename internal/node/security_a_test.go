@@ -88,8 +88,8 @@ func TestHostileAdminFloodingSecondRequestsCannotBlockItsRemoval(t *testing.T) {
 	flood(t, b, room, 0, 40)
 	a.pull(room, b)
 	c.pull(room, b)
-	if na, nc := len(a.requests(room)), len(c.requests(room)); na != MaxRaisedPerSigner || nc != MaxRaisedPerSigner {
-		t.Fatalf("pending after the flood: a=%d c=%d, want %d each", na, nc, MaxRaisedPerSigner)
+	if na, nc := len(a.requests(room)), len(c.requests(room)); na != soloLimit || nc != soloLimit {
+		t.Fatalf("pending after the flood: a=%d c=%d, want %d each", na, nc, soloLimit)
 	}
 
 	// a proposes b's removal with b's requests still waiting.
@@ -129,16 +129,17 @@ func TestHostileAdminFloodingSecondRequestsCannotBlockItsRemoval(t *testing.T) {
 
 // A flooder's waiting entries are raised a few at a time: as c's person
 // declines one, the next is raised at once, and a restart raises none
-// twice. b's entries never take more than MaxRaisedPerSigner places.
+// twice. b's entries never take more than soloLimit places: a keeps the
+// places of its own budget.
 //
 // Requirements: P3; security review F1 (raise retries)
 func TestAFloodersWaitingEntriesAreRaisedAFewAtATimeAsThePersonDecides(t *testing.T) {
 	ctx := context.Background()
 	_, b, c, room := threeAdmins(t)
-	flood(t, b, room, 0, 10)
+	flood(t, b, room, 0, soloLimit+6)
 	c.pull(room, b)
 	first := c.requests(room)
-	if len(first) != MaxRaisedPerSigner {
+	if len(first) != soloLimit {
 		t.Fatalf("pending: %d", len(first))
 	}
 	seen := map[string]bool{}
@@ -149,7 +150,7 @@ func TestAFloodersWaitingEntriesAreRaisedAFewAtATimeAsThePersonDecides(t *testin
 		t.Fatal(err)
 	}
 	next := c.requests(room)
-	if len(next) != MaxRaisedPerSigner {
+	if len(next) != soloLimit {
 		t.Fatalf("pending after one decline: %d", len(next))
 	}
 	fresh := 0
@@ -162,14 +163,14 @@ func TestAFloodersWaitingEntriesAreRaisedAFewAtATimeAsThePersonDecides(t *testin
 		t.Fatalf("entries newly raised after a decline: %d", fresh)
 	}
 	c.restart()
-	if n := len(c.requests(room)); n != MaxRaisedPerSigner {
+	if n := len(c.requests(room)); n != soloLimit {
 		t.Fatalf("pending after a restart: %d", n)
 	}
 	all, err := c.st.Requests(ctx, room, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != MaxRaisedPerSigner+1 {
+	if len(all) != soloLimit+1 {
 		t.Fatalf("requests in all: %d", len(all))
 	}
 }
@@ -182,51 +183,125 @@ func TestAFloodersWaitingEntriesAreRaisedAFewAtATimeAsThePersonDecides(t *testin
 func TestAWaitingEntryLeftUnraisedIsRaisedAtStart(t *testing.T) {
 	ctx := context.Background()
 	_, b, c, room := threeAdmins(t)
-	flood(t, b, room, 0, 6)
+	flood(t, b, room, 0, soloLimit+2)
 	c.pull(room, b)
 	qs := c.requests(room)
-	if len(qs) != MaxRaisedPerSigner {
+	if len(qs) != soloLimit {
 		t.Fatalf("pending: %d", len(qs))
 	}
 	// Decided in the store alone: no raise follows.
 	if err := c.st.DecideRequest(ctx, qs[0].ID, store.RequestDeclined, "", *c.clock); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(c.requests(room)); n != MaxRaisedPerSigner-1 {
+	if n := len(c.requests(room)); n != soloLimit-1 {
 		t.Fatalf("pending after the store decline: %d", n)
 	}
 	c.restart()
-	if n := len(c.requests(room)); n != MaxRaisedPerSigner {
-		t.Fatalf("pending after a restart: %d, want %d", n, MaxRaisedPerSigner)
+	if n := len(c.requests(room)); n != soloLimit {
+		t.Fatalf("pending after a restart: %d, want %d", n, soloLimit)
 	}
 }
 
-// The honest case: one admin's waiting entry is raised on the other
-// admins as before, and an approval seconds it.
+// soloLimit is what one admin's waiting entries can hold on c in
+// threeAdmins when the third admin has none: the room-wide budget less
+// the places kept for the other admin's own budget.
+const soloLimit = MaxRaisedRequests - MaxRaisedPerSigner
+
+// A pending removal of an admin takes no place in the room-wide budget:
+// with 31 ordinary requests and b's removal of a pending on c, a's
+// ordinary entry still gets the last place, and c's approval seconds it.
 //
-// Requirements: M4, P3
-func TestAnHonestAdminsWaitingEntryIsStillRaisedAndSeconded(t *testing.T) {
+// Requirements: T9, P3; security review F1 (removals in their own allowance)
+func TestAPendingRemovalOfAnAdminTakesNoPlaceFromOtherRequests(t *testing.T) {
+	ctx := context.Background()
 	a, b, c, room := threeAdmins(t)
-	d := fakeNode(100)
-	got := b.change(room, Change{Kind: core.EntryAdd, Target: d, Name: "dee"})
-	if got.Effect != EffectApplied {
-		t.Fatalf("add: %+v", got)
-	}
-	up := b.change(room, Change{Kind: core.EntryAdmin, Target: d})
-	if up.Effect != EffectPending {
-		t.Fatalf("admin: %+v", up)
-	}
-	a.pull(room, b)
+	ids := flood(t, b, room, 0, MaxRaisedRequests)
 	c.pull(room, b)
-	qs := c.requests(room)
-	if len(qs) != 1 || qs[0].Seconds != up.Entry || qs[0].Action != ActionPromote {
-		t.Fatalf("c's requests: %+v", qs)
+	// Fill c's queue to one short of the budget, as an older version
+	// could leave it.
+	for i, id := range ids {
+		if len(c.requests(room)) >= MaxRaisedRequests-1 {
+			break
+		}
+		if raisedFor(t, c, room, id) {
+			continue
+		}
+		q := store.Request{ID: fmt.Sprintf("q_%032x", i+1), Kind: string(core.EntryAdmin), Room: room, Node: fakeNode(i),
+			Name: "x", Seconds: id, Action: ActionAdmitAdmin, Role: RoleAdmin, Created: *c.clock, State: store.RequestPending}
+		if err := c.st.CreateRequest(ctx, q); err != nil {
+			t.Fatal(err)
+		}
 	}
-	c.confirm(qs[0].ID)
-	if !slices.Contains(c.state(room).Admins, d) {
-		t.Fatal("d is not an admin on c")
+	if n := len(c.requests(room)); n != MaxRaisedRequests-1 {
+		t.Fatalf("pending on c: %d", n)
 	}
-	_ = a
+	b.tick()
+	q, err := b.r.proposeAny(ctx, room, Change{Kind: core.EntryRemove, Target: a.id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rm := b.confirm(q.ID)
+	c.pull(room, b)
+	if _, ok := pendingFor(c, room, rm.Entry); !ok {
+		t.Fatal("remove(a) not raised on c")
+	}
+	honest := flood(t, a, room, 100, 1)[0]
+	c.pull(room, a)
+	second, ok := pendingFor(c, room, honest)
+	if !ok {
+		t.Fatalf("a's entry not raised: b's pending removal took the last place (%d pending)", len(c.requests(room)))
+	}
+	c.confirm(second.ID)
+	if !slices.Contains(c.state(room).Admins, fakeNode(100)) {
+		t.Fatal("a's entry not seconded on c")
+	}
+}
+
+// An honest admin's fifth waiting entry is raised when the room has
+// spare places, and the approval seconds it.
+//
+// Requirements: M4, P3; security review F1 (own budget binds only under contention)
+func TestAnHonestAdminsFifthEntryIsRaisedWhenTheRoomHasSparePlaces(t *testing.T) {
+	_, b, c, room := threeAdmins(t)
+	ids := flood(t, b, room, 0, MaxRaisedPerSigner+2)
+	c.pull(room, b)
+	for i, id := range ids {
+		if _, ok := pendingFor(c, room, id); !ok {
+			t.Fatalf("entry %d of %d not raised; pending: %d", i+1, len(ids), len(c.requests(room)))
+		}
+	}
+	q, _ := pendingFor(c, room, ids[MaxRaisedPerSigner])
+	if q.Action != ActionAdmitAdmin {
+		t.Fatalf("c's request: %+v", q)
+	}
+	c.confirm(q.ID)
+	if !slices.Contains(c.state(room).Admins, fakeNode(MaxRaisedPerSigner)) {
+		t.Fatal("the fifth entry was not seconded on c")
+	}
+}
+
+// Under contention each admin keeps its own places: b's flood takes the
+// spare places, a's first MaxRaisedPerSigner entries are still raised,
+// and its next one waits for a place.
+//
+// Requirements: T9, P3; security review F1 (own budget under contention)
+func TestUnderContentionEachAdminKeepsThePlacesOfItsOwnBudget(t *testing.T) {
+	a, b, c, room := threeAdmins(t)
+	flood(t, b, room, 0, 40)
+	c.pull(room, b)
+	if n := len(c.requests(room)); n != soloLimit {
+		t.Fatalf("b's entries raised on c: %d, want %d", n, soloLimit)
+	}
+	ids := flood(t, a, room, 100, MaxRaisedPerSigner+1)
+	c.pull(room, a)
+	for i, id := range ids {
+		if _, ok := pendingFor(c, room, id); ok != (i < MaxRaisedPerSigner) {
+			t.Fatalf("a's entry %d raised: %v", i+1, ok)
+		}
+	}
+	if n := len(c.requests(room)); n != MaxRaisedRequests {
+		t.Fatalf("pending on c: %d", n)
+	}
 }
 
 // Requests raised to second another admin's entries do not count against
@@ -520,8 +595,8 @@ func pendingFor(n *lnode, room, entry string) (store.Request, bool) {
 	return store.Request{}, false
 }
 
-// The honest admin's own budget on the other machine is full (four of
-// its entries wait there): its removal of an admin is still raised. A
+// The honest admin's budgets on the other machine are full (soloLimit
+// of its entries wait there): its removal of an admin is still raised. A
 // second removal of the same admin by the same signer is not raised past
 // the budget.
 //
@@ -529,9 +604,9 @@ func pendingFor(n *lnode, room, entry string) (store.Request, bool) {
 func TestARemovalOfAnAdminIsRaisedPastAFullPerSignerBudget(t *testing.T) {
 	ctx := context.Background()
 	a, b, c, room := threeAdmins(t)
-	flood(t, a, room, 0, MaxRaisedPerSigner)
+	flood(t, a, room, 0, soloLimit+1)
 	c.pull(room, a)
-	if n := len(c.requests(room)); n != MaxRaisedPerSigner {
+	if n := len(c.requests(room)); n != soloLimit {
 		t.Fatalf("a's entries raised on c: %d", n)
 	}
 	a.tick()
@@ -600,12 +675,14 @@ func TestTheRoomWideSecondingBudgetHoldsAndARemovalPassesIt(t *testing.T) {
 }
 
 // A pending seconding request whose entry no longer waits (another admin
-// seconded it) is closed as failed, and its place goes to the next entry.
+// seconded it) is closed as failed, and its place is free again. Here
+// the entry made fakeNode(0) an admin, whose own budget keeps the place,
+// so b, past its own budget, gets no more places.
 //
 // Requirements: P3; security review F1 (stale requests)
 func TestASecondingRequestWhoseEntryNoLongerWaitsIsClosed(t *testing.T) {
 	a, b, c, room := threeAdmins(t)
-	ids := flood(t, b, room, 0, MaxRaisedPerSigner+2)
+	ids := flood(t, b, room, 0, soloLimit+2)
 	c.pull(room, b)
 	a.pull(room, b)
 	q, ok := pendingFor(a, room, ids[0])
@@ -617,11 +694,11 @@ func TestASecondingRequestWhoseEntryNoLongerWaitsIsClosed(t *testing.T) {
 	if _, ok := pendingFor(c, room, ids[0]); ok {
 		t.Fatal("c's request for an entry already seconded is still pending")
 	}
-	if n := len(c.requests(room)); n != MaxRaisedPerSigner {
-		t.Fatalf("pending on c: %d, want %d", n, MaxRaisedPerSigner)
+	if n := len(c.requests(room)); n != soloLimit-1 {
+		t.Fatalf("pending on c: %d, want %d", n, soloLimit-1)
 	}
-	if _, ok := pendingFor(c, room, ids[MaxRaisedPerSigner]); !ok {
-		t.Fatal("the next entry was not raised in the place freed")
+	if _, ok := pendingFor(c, room, ids[soloLimit]); ok {
+		t.Fatal("b's next entry took the place the new admin's budget keeps")
 	}
 	all, err := c.st.Requests(context.Background(), room, store.RequestFailed)
 	if err != nil {
@@ -638,11 +715,11 @@ func TestASecondingRequestWhoseEntryNoLongerWaitsIsClosed(t *testing.T) {
 // Requirements: P3; security review F1 (arrival order)
 func TestEntriesOfOneBatchAreRaisedInArrivalOrder(t *testing.T) {
 	_, b, c, room := threeAdmins(t)
-	ids := flood(t, b, room, 0, 12)
+	ids := flood(t, b, room, 0, soloLimit+8)
 	c.pull(room, b) // one batch
-	for _, id := range ids[:MaxRaisedPerSigner] {
-		if _, ok := pendingFor(c, room, id); !ok {
-			t.Fatalf("entry %d of the batch not raised; pending: %+v", slices.Index(ids, id), c.requests(room))
+	for i, id := range ids {
+		if _, ok := pendingFor(c, room, id); ok != (i < soloLimit) {
+			t.Fatalf("entry %d of the batch raised: %v; pending: %d", i, ok, len(c.requests(room)))
 		}
 	}
 }
@@ -655,7 +732,7 @@ func TestEntriesOfOneBatchAreRaisedInArrivalOrder(t *testing.T) {
 func TestAFailedRaiseIsRetriedAtTheNextPull(t *testing.T) {
 	ctx := context.Background()
 	_, b, c, room := threeAdmins(t)
-	flood(t, b, room, 0, MaxRaisedPerSigner+3)
+	flood(t, b, room, 0, soloLimit+3)
 	c.pull(room, b)
 	fail := func(p string) error {
 		if p == "ingest:requests" {
@@ -669,11 +746,11 @@ func TestAFailedRaiseIsRetriedAtTheNextPull(t *testing.T) {
 		t.Fatalf("the decline reports the raise's failure: %v", err)
 	}
 	testHook = nil
-	if n := len(c.requests(room)); n != MaxRaisedPerSigner-1 {
+	if n := len(c.requests(room)); n != soloLimit-1 {
 		t.Fatalf("pending after the failed raise: %d", n)
 	}
 	c.pull(room, b) // nothing new
-	if n := len(c.requests(room)); n != MaxRaisedPerSigner {
+	if n := len(c.requests(room)); n != soloLimit {
 		t.Fatalf("pending after the next pull: %d", n)
 	}
 	// At start: the raise fails and the daemon opens all the same.
@@ -687,7 +764,7 @@ func TestAFailedRaiseIsRetriedAtTheNextPull(t *testing.T) {
 		t.Fatalf("room after a start whose raise failed: %v", err)
 	}
 	c.pull(room, b)
-	if n := len(c.requests(room)); n != MaxRaisedPerSigner {
+	if n := len(c.requests(room)); n != soloLimit {
 		t.Fatalf("pending after a start and a pull: %d", n)
 	}
 }

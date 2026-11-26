@@ -55,10 +55,12 @@ func newerVersion(a, b *FileVersion) bool {
 // MessageFiles reads what the file rules need of message msg of room, as
 // this machine (self) holds it at now.
 func (rd *Reader) MessageFiles(room, msg, self string, now time.Time) (*MessageFiles, error) {
-	return messageFiles(rd.tx, room, msg, self, now)
+	return messageFiles(rd.tx, room, msg, self, now, false)
 }
 
-func messageFiles(tx *sql.Tx, room, msg, self string, now time.Time) (*MessageFiles, error) {
+// messageFiles is MessageFiles; aside leaves out the member cache (a room
+// set aside: its membership is not known), so only the records decide.
+func messageFiles(tx *sql.Tx, room, msg, self string, now time.Time, aside bool) (*MessageFiles, error) {
 	rd := &Reader{tx: tx}
 	mf := &MessageFiles{Msg: msg}
 	h, ok, err := rd.Record(room, msg)
@@ -70,9 +72,11 @@ func messageFiles(tx *sql.Tx, room, msg, self string, now time.Time) (*MessageFi
 		return mf, nil
 	}
 	mf.Author = h.Record.Author()
-	hidden, err := authorHidden(tx, room, mf.Author, self)
-	if err != nil {
-		return nil, err
+	hidden := false
+	if !aside {
+		if hidden, err = authorHidden(tx, room, mf.Author, self); err != nil {
+			return nil, err
+		}
 	}
 	if hidden {
 		mf.Gone = true
@@ -292,9 +296,23 @@ const (
 // to room in one transaction, as this machine (self) at now, then runs the
 // deletion queue. It reports how many rows it dropped.
 func (s *Store) SweepFiles(ctx context.Context, room, self string, now time.Time) (int, error) {
+	return s.sweepFiles(ctx, room, self, now, false)
+}
+
+// SweepRetained is SweepFiles for a room set aside, whose membership and
+// reading frontier are not known: it drops only what retention requires.
+// Files go when their message's text is not kept here (withdrawn, or past
+// retention by this clock), and a staged send goes when its staging life
+// is over. The member cache, wants, and a staged send's other checks
+// (voided, replaced) are left alone.
+func (s *Store) SweepRetained(ctx context.Context, room, self string, now time.Time) (int, error) {
+	return s.sweepFiles(ctx, room, self, now, true)
+}
+
+func (s *Store) sweepFiles(ctx context.Context, room, self string, now time.Time, aside bool) (int, error) {
 	n := 0
 	err := s.tx(ctx, func(tx *sql.Tx) (err error) {
-		n, err = sweepTx(tx, room, self, now)
+		n, err = sweepTx(tx, room, self, now, aside)
 		return err
 	})
 	if err == nil && n > 0 {
@@ -305,14 +323,14 @@ func (s *Store) SweepFiles(ctx context.Context, room, self string, now time.Time
 
 type fkey struct{ msg, sha string }
 
-func sweepTx(tx *sql.Tx, room, self string, now time.Time) (int, error) {
+func sweepTx(tx *sql.Tx, room, self string, now time.Time, aside bool) (int, error) {
 	dropped := 0
 	msgs := map[string]*MessageFiles{}
 	info := func(msg string) (*MessageFiles, error) {
 		if mf := msgs[msg]; mf != nil {
 			return mf, nil
 		}
-		mf, err := messageFiles(tx, room, msg, self, now)
+		mf, err := messageFiles(tx, room, msg, self, now, aside)
 		if err == nil {
 			msgs[msg] = mf
 		}
@@ -457,6 +475,9 @@ func sweepTx(tx *sql.Tx, room, self string, now time.Time) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if aside {
+		ws = nil // nothing is fetched for a room set aside
+	}
 	for _, w := range ws {
 		mf, err := info(w.Msg)
 		if err != nil {
@@ -562,9 +583,11 @@ func sweepTx(tx *sql.Tx, room, self string, now time.Time) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	voided, err := selfVoided(tx, room, self)
-	if err != nil {
-		return 0, err
+	voided := false
+	if !aside {
+		if voided, err = selfVoided(tx, room, self); err != nil {
+			return 0, err
+		}
 	}
 	for _, q := range sends {
 		reason := ""
@@ -575,6 +598,7 @@ func sweepTx(tx *sql.Tx, room, self string, now time.Time) (int, error) {
 			reason = ReasonSendVoided
 		case !now.Before(q.Created.Add(core.StagingLife)):
 			reason = ReasonSendExpired
+		case aside:
 		default:
 			ok, err := StillReplaceable(&Reader{tx: tx}, room, self, d, now)
 			if err != nil {

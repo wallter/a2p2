@@ -17,20 +17,30 @@ reports.
   member, that member may still serve the removed machine. Copies already
   received stay with their holders.
 - An admin can sign entries that wait for a second admin, and each other
-  admin's machine asks its person about them. It asks about at most four
-  per signing admin at a time, so one admin cannot fill another's queue.
-  The requests a person starts have a budget of their own, and a removal
-  of an admin passes it, so a person can always propose removing an
-  admin. On the other admins that removal passes the seconding budgets
-  too, once per proposing admin and target. A hostile admin can still
-  make the other people decline its entries, four at a time.
+  admin's machine asks its person about them: at most 32 at a time per
+  room. One signing admin gets more than four of them only from places no
+  other admin's four need, so in a room of up to 9 admins one admin
+  cannot take another's places. The requests a person starts have a
+  budget of their own, and a removal of an admin passes it, so a person
+  can always propose removing an admin. On the other admins the first
+  such removal per proposing admin and target passes the seconding
+  budgets and takes no place in them. A hostile admin can still make the
+  other people decline its entries, up to 28 at a time in a room of
+  three admins.
 - When the daemon starts, it checks each room's stored log for form and
   signature only, not for receipt rules added since the entries were
-  stored. A room whose stored log does not load is set aside: it is not
-  served or pulled, nothing can be written to it, setting it aside
-  deletes nothing, and `a2p2 status` and `a2p2 doctor` show it. The other
-  rooms keep working, so an entry another machine got stored cannot stop
-  the daemon starting after an upgrade.
+  stored. A batch that drops entries is decided again without them, so
+  entries another machine delivers cannot make a room fail its own
+  replay. A room whose stored log does not load is set aside: it is not
+  served or pulled; sends, Seen and a change of its files setting are
+  refused; setting it aside deletes nothing; and `a2p2 status` and
+  `a2p2 doctor` show it. Its messages can still be read, except streams the
+  reader has no cursor for, which are held back. Text whose
+  readability is undecided stays undecided, and only retention deletes
+  its text and files. To recover, run the version that stored it, or
+  leave the room and join it again (not the local room). The other rooms
+  keep working, so an entry another machine got stored cannot stop the
+  daemon starting after an upgrade.
 - A machine that reaches a room through one member trusts that member for
   delivery. That member can leave out an author's messages without any
   sign, and a removal of that member never reaches the others while it is

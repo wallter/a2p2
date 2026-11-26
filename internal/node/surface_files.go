@@ -227,6 +227,11 @@ func (s *Surface) RoomFiles(ctx context.Context, room, mode string) (RoomFilesVi
 	switch mode {
 	case "":
 	case store.FilesOff, store.FilesCarry, store.FilesKeep:
+		if s.r != nil {
+			if err := s.r.setAsideErr(id); err != nil {
+				return RoomFilesView{}, err
+			}
+		}
 		if err := s.m.st.SetFileMode(ctx, id, mode, s.m.now()); err != nil {
 			return RoomFilesView{}, err
 		}

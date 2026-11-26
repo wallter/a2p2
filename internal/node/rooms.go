@@ -59,13 +59,15 @@ const (
 	// here, so another machine cannot fill this budget [F1].
 	MaxPendingRequests = 32
 	// MaxRaisedPerSigner: requests raised to second one admin's entries
-	// that wait for a person, per room. That admin's further waiting
-	// entries stay in the log and are raised as the person decides the
-	// earlier ones.
+	// that wait for a person, per room, kept for that admin while the
+	// room-wide budget is contended. Past it an admin takes only places
+	// no other admin's own budget needs (Rooms.raise). Its further
+	// waiting entries stay in the log and are raised as the person
+	// decides the earlier ones.
 	MaxRaisedPerSigner = 4
 	// MaxRaisedRequests: requests raised to second entries, from every
-	// admin, that wait for a person, per room. A removal of an admin is
-	// raised past it (still within MaxRaisedPerSigner).
+	// admin, that wait for a person, per room. The first removal of an
+	// admin per signer and target is raised past it and not counted.
 	MaxRaisedRequests = 32
 )
 
@@ -159,7 +161,7 @@ type Quarantine struct {
 
 // QuarantineText is what a person is told about a room set aside.
 const QuarantineText = "set aside: its stored log does not load in this version of a2p2. " +
-	"It is not served or pulled, nothing can be written to it, and nothing of it was deleted"
+	"It is not served or pulled, nothing can be sent to it or marked seen in it, and setting it aside deleted nothing"
 
 // QuarantineFix is what a person can do about room id set aside; local
 // says it is this machine's local room, which cannot be left.
@@ -175,7 +177,7 @@ func (r *Rooms) setAsideErr(room string) error {
 	if !r.isQuarantined(room) {
 		return nil
 	}
-	return codedErr(ErrorNotAllowed, "the room is %s; nothing was sent (a2p2 doctor says what to do)", QuarantineText)
+	return codedErr(ErrorNotAllowed, "the room is %s; nothing was changed (a2p2 doctor says what to do)", QuarantineText)
 }
 
 // loadFault is why a room's stored log cannot be used: the room is set
@@ -232,6 +234,11 @@ func OpenRooms(ctx context.Context, m *Machine) (*Rooms, error) {
 // quarantine sets room aside (Quarantine). The caller holds mu, or is
 // opening the rooms.
 func (r *Rooms) quarantine(room, label, reason string) {
+	// Its reading frontier is not known: reads and Prune hold back what
+	// it might have held back.
+	r.fmu.Lock()
+	r.fronts[room] = readFront{Unknown: true}
+	r.fmu.Unlock()
 	r.smu.Lock()
 	defer r.smu.Unlock()
 	if r.quarantined == nil {
@@ -296,44 +303,9 @@ func (r *Rooms) load(ctx context.Context, lr store.LogRoom) (*roomLog, error) {
 // can still open the database. It uses nothing but memory: it cannot be
 // cancelled.
 func (r *Rooms) replay(rl *roomLog) error {
-	ids := sortedIDs(rl.state)
-	sort.SliceStable(ids, func(i, j int) bool {
-		a, b := rl.state[ids[i]], rl.state[ids[j]]
-		if a.Batch != b.Batch {
-			return a.Batch < b.Batch
-		}
-		return a.Pos < b.Pos
-	})
-	root := rl.ents[rl.createID]
-	if root == nil || rl.state[rl.createID].Batch != 0 {
-		return faultf("log does not start with the pinned create")
-	}
-	mach, err := members.NewMachine(root)
+	mach, final, err := rl.decideKept(nil, nil)
 	if err != nil {
-		return faultf("the pinned create: %v", err)
-	}
-	final := map[string]members.Result{rl.createID: {ID: rl.createID, Disposition: members.Accepted}}
-	var batch []*core.VerifiedEntry
-	flush := func() {
-		for _, x := range mach.Receive(batch...) {
-			final[x.ID] = x
-		}
-		batch = nil
-	}
-	cur := int64(0)
-	for _, id := range ids {
-		row := rl.state[id]
-		if id == rl.createID {
-			continue
-		}
-		if row.Batch != cur && len(batch) > 0 {
-			flush()
-		}
-		cur = row.Batch
-		batch = append(batch, rl.ents[id])
-	}
-	if len(batch) > 0 {
-		flush()
+		return err
 	}
 	reasons := map[string]string{}
 	for id, row := range rl.state {
@@ -356,6 +328,123 @@ func (r *Rooms) replay(rl *roomLog) error {
 	rl.cache = r.memberCache(rl.st, rl.lookup(nil))
 	r.setFrontier(rl)
 	return nil
+}
+
+// decideKept decides rl's kept entries again in a new machine, as a start
+// does: the stored rows in their batches and positions, leaving out the
+// ids in skip, then extra, the entries a batch being stored would keep, as
+// one more batch.
+func (rl *roomLog) decideKept(skip map[string]bool, extra []*core.VerifiedEntry) (*members.Machine, map[string]members.Result, error) {
+	ids := sortedIDs(rl.state)
+	sort.SliceStable(ids, func(i, j int) bool {
+		a, b := rl.state[ids[i]], rl.state[ids[j]]
+		if a.Batch != b.Batch {
+			return a.Batch < b.Batch
+		}
+		return a.Pos < b.Pos
+	})
+	root := rl.ents[rl.createID]
+	if root == nil || rl.state[rl.createID].Batch != 0 {
+		return nil, nil, faultf("log does not start with the pinned create")
+	}
+	mach, err := members.NewMachine(root)
+	if err != nil {
+		return nil, nil, faultf("the pinned create: %v", err)
+	}
+	final := map[string]members.Result{rl.createID: {ID: rl.createID, Disposition: members.Accepted}}
+	var batch []*core.VerifiedEntry
+	flush := func() {
+		for _, x := range mach.Receive(batch...) {
+			final[x.ID] = x
+		}
+		batch = nil
+	}
+	cur := int64(0)
+	for _, id := range ids {
+		row := rl.state[id]
+		if id == rl.createID || skip[id] {
+			continue
+		}
+		if row.Batch != cur && len(batch) > 0 {
+			flush()
+		}
+		cur = row.Batch
+		batch = append(batch, rl.ents[id])
+	}
+	if len(batch) > 0 {
+		flush()
+	}
+	for _, v := range extra {
+		if !skip[v.ID()] {
+			batch = append(batch, v)
+		}
+	}
+	if len(batch) > 0 {
+		flush()
+	}
+	return mach, final, nil
+}
+
+// settleDrops makes a batch that drops entries decide what a start will
+// decide from the rows it leaves. The machine decided the others while
+// the dropped ones were there (a refused entry, released when its fork
+// settled, waits for a parent and is dropped over the held bound while
+// what depends on it stays refused), but a dropped entry leaves the log,
+// so a start would decide them without it and set the room aside. So the
+// room's kept entries and the batch's are decided again in a new machine
+// without the dropped ones, as many times as that drops more, and that
+// machine and its decisions replace the batch's. It returns the results
+// to store: final's ids, every id whose disposition the new machine
+// changes, and the dropped ones. It changes rl.mach; the caller restores
+// rl if the batch is not stored.
+func (r *Rooms) settleDrops(rl *roomLog, batch []*core.VerifiedEntry, final map[string]members.Result) (map[string]members.Result, error) {
+	skip := map[string]bool{}
+	dropped := map[string]members.Result{}
+	for id, x := range final {
+		if x.Disposition == members.Dropped {
+			skip[id], dropped[id] = true, x
+		}
+	}
+	if len(skip) == 0 {
+		return final, nil
+	}
+	for {
+		var extra []*core.VerifiedEntry
+		for _, v := range batch {
+			if x, ok := final[v.ID()]; ok && x.Disposition != members.Dropped {
+				extra = append(extra, v)
+			}
+		}
+		mach, again, err := rl.decideKept(skip, extra)
+		if err != nil {
+			return nil, err
+		}
+		more := false
+		for id, x := range again {
+			if x.Disposition == members.Dropped && !skip[id] {
+				skip[id], dropped[id], more = true, x, true
+			}
+		}
+		if more {
+			continue
+		}
+		out := map[string]members.Result{}
+		for id := range final {
+			if x, ok := again[id]; ok {
+				out[id] = x
+			}
+		}
+		for id, row := range rl.state {
+			if x, ok := again[id]; ok && string(x.Disposition) != row.State {
+				out[id] = x
+			}
+		}
+		for id, x := range dropped {
+			out[id] = x
+		}
+		rl.mach = mach
+		return out, nil
+	}
 }
 
 // setFrontier publishes rl's reading frontier for Machine.fronts.
@@ -620,6 +709,9 @@ func (r *Rooms) leave(ctx context.Context, room string) error {
 		r.smu.Lock()
 		delete(r.quarantined, room)
 		r.smu.Unlock()
+		r.fmu.Lock()
+		delete(r.fronts, room)
+		r.fmu.Unlock()
 		r.m.wakes.touch(room, roomSet)
 		return nil
 	}
@@ -883,6 +975,12 @@ func (r *Rooms) ingestWith(ctx context.Context, rl *roomLog, gen int64, wires []
 				final[x.ID] = x
 			}
 		}
+		settled, err := r.settleDrops(rl, batch, final)
+		if err != nil {
+			r.restore(rl)
+			return nil, err
+		}
+		final = settled
 		for id := range excluded {
 			final[id] = members.Result{ID: id, Disposition: members.Dropped, Reason: ReasonOverLimit}
 		}

@@ -638,10 +638,15 @@ type raising struct {
 // asked about. It looks at every waiting entry, not only a batch's new
 // ones, so an entry left out while a budget was full is raised once
 // there is room [F1]. The budgets count pending requests whose entry
-// still waits: at most MaxRaisedPerSigner per signing admin, and
-// MaxRaisedRequests in all. A removal of an admin passes both budgets,
-// once per signing admin and target, so a person can always be asked to
-// remove an admin. A removal of an admin goes first, then the entries in
+// still waits: MaxRaisedRequests in all, and MaxRaisedPerSigner per
+// signing admin while the room-wide budget is contended. Past its own
+// budget a signer takes only a spare place: one left after every other
+// admin of the room but this machine keeps the places of its own budget
+// it has not used. The first removal of an admin per signing admin and
+// target has an allowance of its own: it passes both budgets and takes
+// no place in them, so a person can always be asked to remove an admin
+// and such removals waiting do not crowd out other requests. A removal
+// of an admin goes first, then the entries in
 // arrival order: kept entries by batch and position, then the batch being
 // stored in its order (fresh gives each one's position). A pending
 // request whose entry no longer waits is closed (stale), except keep, the
@@ -696,11 +701,33 @@ func (r *Rooms) raise(ctx context.Context, rl *roomLog, st members.State, look f
 			}
 			continue
 		}
+		// The first removal of an admin per signer and target has its own
+		// allowance: it takes no place from the budgets.
+		if f := v.Fields(); removesAdmin(f) && !removing[[2]string{v.Author(), f.Target}] {
+			removing[[2]string{v.Author(), f.Target}] = true
+			continue
+		}
 		bySigner[v.Author()]++
 		total++
-		if f := v.Fields(); removesAdmin(f) {
-			removing[[2]string{v.Author(), f.Target}] = true
+	}
+	// free reports whether one more ordinary request for signer fits: the
+	// room-wide budget has a place, and either signer is under its own
+	// budget or the place is spare, left once every other admin that
+	// could sign (not this machine) still has its own budget's places.
+	free := func(signer string) bool {
+		if total >= MaxRaisedRequests {
+			return false
 		}
+		if bySigner[signer] < MaxRaisedPerSigner {
+			return true
+		}
+		reserved := 0
+		for _, a := range st.Admins {
+			if a != signer && a != r.m.ID && bySigner[a] < MaxRaisedPerSigner {
+				reserved += MaxRaisedPerSigner - bySigner[a]
+			}
+		}
+		return total+reserved < MaxRaisedRequests
 	}
 	if len(cands) == 0 {
 		return out, nil
@@ -754,12 +781,13 @@ func (r *Rooms) raise(ctx context.Context, rl *roomLog, st members.State, look f
 		f, signer := v.Fields(), v.Author()
 		if k := [2]string{signer, f.Target}; removesAdmin(f) && !removing[k] {
 			removing[k] = true
-		} else if bySigner[signer] >= MaxRaisedPerSigner || total >= MaxRaisedRequests {
+		} else if !free(signer) {
 			continue
+		} else {
+			bySigner[signer]++
+			total++
 		}
 		asked[id] = true
-		bySigner[signer]++
-		total++
 		q := store.Request{ID: r.newID(), Kind: string(f.Kind), Room: rl.id, Node: f.Target, Name: f.Name,
 			Seconds: id, Action: actionOf(st, string(f.Kind), f.Target), Created: r.m.now(), State: store.RequestPending}
 		if q.Action == ActionAdmitAdmin {
