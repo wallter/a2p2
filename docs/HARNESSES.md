@@ -270,6 +270,46 @@ the server, `install` runs `<cli> mcp remove a2p2` and ignores a failure.
 Codex runs a new hook only after the person approves it with `/hooks` in
 the Codex terminal UI; the installer says so.
 
+### Which tools run without a prompt
+
+Since 2026-11-25 `a2p2 install` approves no a2p2 tool by default. What
+each harness then does with a2p2's tools, and what a2p2 writes:
+
+| Harness | What install writes about approval | What decides a tool call | Source |
+|---|---|---|---|
+| Claude Code | nothing (`claude mcp add` only) | Claude Code asks before an MCP tool the person has not allowed | code; Claude Code's behaviour from the earlier runs |
+| Codex CLI | nothing; with `--approve-tools`, `default_tools_approval_mode = "approve" # added by a2p2 install --approve-tools` under `[mcp_servers.a2p2]` | Codex's own approval mode; `codex exec` refused every a2p2 call without the line (2026-11-22 run) | code; run |
+| Antigravity CLI | nothing (`agy mcp add` only) | headless `agy` denies MCP tools that are not allowed (2026-11-22 run); the interactive default was not checked | code; run |
+| OpenCode | nothing | the default agent runs every tool, `a2p2_send` included, without asking (1.18.30 runs) | code; run |
+| Hermes Agent | nothing | Hermes's own rules; `-z` approves every call (documentation) | code; documentation |
+| Pi | the skill only | Pi runs its bash commands, the skill's `a2p2 send` among them, without asking (inferred from Pi's README; not checked) | code; inferred |
+
+a2p2 0.1.0 to 0.2.3 wrote `default_tools_approval_mode = "approve" # added
+by a2p2 install` on every Codex install, without asking. The next `a2p2
+install codex` removes that line, with or without `--approve-tools`
+(which writes its own), and `a2p2 doctor` fails its `codex tool approval`
+line until then. Doctor also names a server-wide approval the person wrote
+and tools approved one by one (`[mcp_servers.a2p2.tools.NAME]
+approval_mode = "approve"`, or `tools.NAME.approval_mode` in a2p2's table).
+
+Codex 0.171.0 also has a per-tool setting: the strings of its binary name
+a `McpServerToolConfig` with `approval_mode`. A per-tool approval of only
+`whoami`, `peers` and `inbox` would let an interactive session read
+without prompts while `send` still asks. It is not written, because the
+key's exact form has not been run against Codex; a wrong key could stop
+Codex from reading its configuration.
+
+a2p2 reads and edits the `config.toml` in `$CODEX_HOME` when that is
+set, where the Codex documentation says the CLI keeps it (the default is
+`~/.codex`), and keeps `hooks.json` there too. No run with `CODEX_HOME`
+set has checked this. If `[mcp_servers.a2p2]` already has a
+`default_tools_approval_mode` that a2p2 did not write, `--approve-tools`
+leaves it and says so, since a second key would make the file invalid.
+
+`--dry-run` prints the choice: "tool approval: a2p2 approves none" or
+"tool approval: would let every a2p2 tool, send, reply, ack and ask_human
+included, ... run without a prompt".
+
 ## What the hook prints
 
 The hook reads the harness's JSON on stdin, asks the daemon how many
@@ -528,8 +568,21 @@ before it is written, and the write replaces the file atomically. These
 are covered by tests against fake homes
 (`internal/harness/record_test.go`), not by a further real run.
 
+Since 2026-11-25 Pi's skill writes the label out in every command (`--as
+"pi-$(basename "$PWD")"`) instead of a `ME` variable, and sends text only
+on standard input through a heredoc with a quoted end word (`send ...
+--reply-to ID - <<'A2P2_TEXT_END_1a2b3c4d'`, with eight random hex digits
+chosen at install and kept on a reinstall). The runs above used the older
+form, which put the text in double quotes, where bash runs `$(...)` and
+backticks. A test runs the new commands in bash with hostile text, the
+end word without its digits among it, and a fake binary that records its
+arguments and standard input; no model has run the new skill yet. `a2p2
+send` drops newlines at the end of text it reads on standard input.
+Doctor fails a skill that is not the one this a2p2 writes.
+
 ### Not verified
 
+- Pi with the heredoc form of the skill (2026-11-25).
 - Interactive sessions of all three, and any hook or plugin (OpenCode
   plugins, Hermes shell hooks with `pre_llm_call`).
 - Hermes or Pi installed globally by the person (they ran from a scratch

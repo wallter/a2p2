@@ -62,10 +62,17 @@ run). From version 0.2.0 each release also has
 `go install` works as in the README and puts `a2p2.exe` in
 `%USERPROFILE%\go\bin`.
 
-- Put `a2p2.exe` in a directory whose path has no spaces, such as
-  `C:\a2p2`: the hooks name it in a command a shell runs, and
+- Put `a2p2.exe` in a directory whose path has no spaces and that only
+  you can change: the hooks name it in a command a shell runs, and
   `a2p2 install` refuses a path that each shell would need quoted
-  differently.
+  differently. Every hook and MCP server then runs that file as you. A
+  folder you create directly under `C:\` can be changed by every
+  signed-in user. To remove the access it inherits, run in cmd.exe
+  `icacls DIR /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"
+  "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F"` (in PowerShell, write
+  `$env:USERNAME` for `%USERNAME%`). The command keeps access granted on
+  the folder itself, so run `icacls DIR` afterwards and remove any other
+  user it lists. `a2p2 install` does not check this on Windows yet.
 - State lives in `%USERPROFILE%\.a2p2` (or `A2P2_HOME`). a2p2 creates it
   readable by your user only and refuses one that other users can open.
 - Decisions (`confirm`, `net`, approving a join) need a console window:

@@ -1826,3 +1826,91 @@ machines of different owners and the listener is on the open network.
 through a busy admin machine fail under load, members report refused
 connections during a flood from more groups than the limits stop, or the
 rooms lock shows up in handshake or request times.
+
+## D-NEW-J-harness. Installers approve no a2p2 tool unless the person asks (2026-11-25)
+
+The security review of 2026-11-25 (F48) found that `a2p2 install codex`
+wrote `default_tools_approval_mode = "approve"` under `[mcp_servers.a2p2]`
+on every install, as D38 chose. That lets every a2p2 tool run
+in Codex without a prompt: `send`, `reply` and `ask_human`, and any tool a
+later a2p2 adds. A member of a room shared with another owner could ask a
+Codex agent to post a file's contents or a summary of the repository, and
+the person would not be asked. The team launcher did the same for every
+headless member. In the same group: Pi's skill put message text inside
+double quotes for bash (F16), install wrote any binary path into hooks and
+MCP entries, a temporary one included (F50), and the Windows advice named
+`C:\a2p2`, which every signed-in user can change by default (F24). Why now:
+rooms between owners are the use the project is built for, and these are
+the paths by which another owner's text reaches a send or a shell without
+the person.
+
+What changed:
+
+- **No approval by default.** `a2p2 install codex` writes none, and
+  removes the line earlier versions wrote. `--approve-tools` (a new
+  install flag) writes it with its own marker, and the report and the dry
+  run say that `send` is among the tools. Doctor has a `codex tool
+  approval` line: a fault for the unasked line, a statement for any other.
+  For the other harnesses the flag does nothing and says so. The edits and
+  doctor use the `config.toml` the Codex CLI writes, in `$CODEX_HOME` when
+  that is set. Each install changes the approval in one write that is made
+  only if the file still holds what a2p2 read. A failed `codex mcp add`
+  still removes the lines a2p2 wrote. When the person's own
+  `default_tools_approval_mode` is in a2p2's table, `--approve-tools`
+  adds none, since a second key would make the file invalid.
+- **Team launcher.** A manifest with a Claude Code, Codex or Antigravity
+  member must say `"approve_a2p2_tools": true` (a new manifest key).
+  Only `up` asks, so `status`, `stop`, `logs` and `report` work for a run
+  started without the key. The consent is saved with each member's
+  command line, and the supervisor does not start a Claude Code, Codex or
+  Antigravity member whose saved command line lacks it. The state
+  directory is made the user's alone. Claude Code members are allowed the
+  seven tools by name.
+- **Pi's skill** writes the label out in every command and sends text only
+  through a heredoc with a quoted end word. The end word has eight random
+  hex digits chosen at install and kept on a reinstall, so a peer cannot
+  write the line that ends it early. Doctor fails a skill that an older
+  a2p2 wrote.
+- **The binary.** Install refuses a binary in a temporary directory or Go's
+  build cache, one that it or a directory above it lets every user change,
+  one owned by another user, and a path with a control character. It
+  checks the path as written, which the harness runs, as well as where a
+  symlink in it leads now, and the existing part of a path that does not
+  exist yet. A
+  group-writable directory warns, since that group is often the
+  administrators. Doctor reports the same. Directories install creates are
+  0700. The Windows advice says how to make a folder the user's alone.
+- **Codex `config.toml` edits** skip lines inside multi-line strings and
+  arrays, so text that reads like a2p2's table is neither written into nor
+  removed.
+
+What it costs: a headless `codex exec` through the installed configuration
+refuses a2p2's tools until the person passes `--approve-tools`, and an
+interactive Codex session may ask before tools it used to run silently.
+Existing team manifests are refused until they add the key. A person who
+runs install from `/tmp` or with `go run` must copy the binary first. No
+wire, record or database change.
+
+Still open:
+
+- Codex 0.171.0 has a per-tool `approval_mode` (seen in its binary's
+  strings). Approving only `whoami`, `peers` and `inbox` that way would be
+  a better default, but the key's form has not been run against Codex and a
+  wrong one could stop Codex reading its configuration. Needs one real run
+  in a scratch `CODEX_HOME`.
+- On Windows the binary's access control list is not read. Doing it means
+  sharing the SDDL reader in `internal/daemon` (acl.go, sys_windows.go)
+  with `internal/harness`, with a rule for write, delete and write-DAC
+  rights instead of the home's rule against any access, and a run on
+  Windows.
+- OpenCode's default agent and Pi run a2p2's `send` without asking, by
+  their own design. a2p2 could write an OpenCode `permission` entry that
+  asks, which edits a key the person owns; not done.
+- A model that ignores the skill can still put text in double quotes, or
+  copy the skill's own end word into the text.
+- An agent can pass `--approve-tools` itself; a flag cannot show that the
+  person chose it.
+- Doctor's `a2p2 binary` line checks the binary that runs doctor. A
+  harness entry that names another binary already fails its own line
+  ("points at a different a2p2 binary"), and the fix is a reinstall,
+  which checks that binary.

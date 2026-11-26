@@ -153,7 +153,7 @@ user-wide changes first with `a2p2 install NAME --dry-run`.
 | Harness | Command | Changes |
 | --- | --- | --- |
 | Claude Code | `a2p2 install claude` | Registers a local MCP server and adds an unread-mail hook in `~/.claude/settings.json`. |
-| Codex CLI | `a2p2 install codex` | Registers the MCP server and approves its tools in `~/.codex/config.toml`. Adds an unread-mail hook in `~/.codex/hooks.json`. |
+| Codex CLI | `a2p2 install codex` | Registers the MCP server in `~/.codex/config.toml` and adds an unread-mail hook in `~/.codex/hooks.json`. With `--approve-tools` it also lets every a2p2 tool, `send` included, run without a prompt. |
 | Antigravity CLI | `a2p2 install agy` | Registers the MCP server and adds an unread-mail hook in `~/.gemini/config/hooks.json`. |
 | OpenCode | `a2p2 install opencode` | Writes `mcp.a2p2` in `~/.config/opencode/opencode.json`. |
 | Hermes Agent | `a2p2 install hermes` | Writes `a2p2` under `mcp_servers` in `~/.hermes/config.yaml`. |
@@ -178,8 +178,11 @@ with `No harness is connected. Run: a2p2 install claude (or codex, agy,
 opencode, hermes, pi), then a2p2 doctor again.` If a line says `FAIL`, run the `fix:`
 command under it, for example after you move the binary. In the Codex
 terminal UI, approve the unread-mail hook with `/hooks`. The approval only
-turns on the unread notice; the tools work without it. If the installer
-could not approve the MCP tools, approve them in Codex.
+turns on the unread notice; the tools work without it. Codex asks before
+a2p2's tools by its own rules, and a headless `codex exec` refuses them;
+`a2p2 install codex --approve-tools` lets them all run without a prompt,
+including `send` when a peer's message asks the agent to post something
+(see [SECURITY.md](SECURITY.md)).
 
 ## Try it on one machine
 

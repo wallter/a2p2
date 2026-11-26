@@ -300,7 +300,11 @@ Agent get the MCP server only, and Pi, which has no MCP, a skill that
 points its model at the CLI ([harness notes](HARNESSES.md)). Install
 records any entry named `a2p2` it replaces in `$A2P2_HOME/installs/`, and
 uninstall puts it back; without a record uninstall removes nothing
-(D44). Replies carry
+(D44). Install approves no a2p2 tool unless the person passes
+`--approve-tools` (Codex only), so whether `send` waits for the person
+is the harness's own rule; it refuses a binary in a temporary directory
+or one another user could replace, and Pi's skill passes message text to
+bash only through a quoted heredoc ([security](../SECURITY.md)). Replies carry
 `parent_state`. The thread view lists held messages of a thread, or with
 `after` only those that follow a given message of it; the branch view
 follows `parent` down from the message, held or not, and misses replies

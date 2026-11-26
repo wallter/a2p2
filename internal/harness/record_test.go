@@ -139,7 +139,7 @@ func TestUninstallWithoutARecordRemovesNothing(t *testing.T) {
 		if name != "pi" {
 			userEntry(t, name, o)
 		} else {
-			writeFile(t, adapterPath(t, name, o), PiSkill("/opt/a2p2")) // an older a2p2's skill
+			writeFile(t, adapterPath(t, name, o), PiSkill("/opt/a2p2", piTextEnd+"_0123abcd")) // an older a2p2's skill
 		}
 		if _, ok := adapters[name]; !ok {
 			writeFile(t, hookPath(name, o), `{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"/opt/a2p2 hook --harness `+name+` --event UserPromptSubmit"}]}]}}`)
@@ -287,7 +287,7 @@ func TestConfigSymlinksAreFollowedAndDanglingOnesRefused(t *testing.T) {
 		o2.Run = fakeCLI(o2.HomeDir)
 		p2 := strings.Replace(p, o.HomeDir, o2.HomeDir, 1)
 		target := filepath.Join(t.TempDir(), "dotfiles", "conf")
-		body := map[string]string{"hermes": "model:\n  default: x\n", "pi": PiSkill("/old/a2p2")}[name]
+		body := map[string]string{"hermes": "model:\n  default: x\n", "pi": PiSkill("/old/a2p2", piTextEnd+"_0123abcd")}[name]
 		if body == "" {
 			body = `{"theme":"dark"}`
 		}

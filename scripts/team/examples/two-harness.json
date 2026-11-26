@@ -4,6 +4,7 @@
   "a2p2": "a2p2",
   "state_dir": "/tmp/a2p2-team-example/state",
   "max_members": 2,
+  "approve_a2p2_tools": true,
   "lead": "lead",
   "poll_seconds": 5,
   "silence_seconds": 120,

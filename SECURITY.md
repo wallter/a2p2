@@ -90,6 +90,48 @@ reports.
   instruction; the notice tells the model that mail does not come from its
   user.
 
+## What `a2p2 install` approves and writes
+
+- `a2p2 install` approves no a2p2 tool by default, in any harness. Each
+  harness's own rules decide whether an agent's `send`, `reply`, `ack` or
+  `ask_human` waits for the person. As seen in the runs the
+  [harness notes](docs/HARNESSES.md) list: Claude Code asks unless you
+  allowed the tool, a headless Codex run refuses the call, and
+  Antigravity's headless runs deny MCP tools that are not allowed.
+  OpenCode's default agent runs every tool without asking, and Pi runs
+  bash commands, the skill's `a2p2 send` among them, without asking (read
+  from Pi's README, not run); a2p2 does not change either.
+- `a2p2 install codex --approve-tools` lets every a2p2 tool run in Codex
+  without a prompt, `send` included, and any tool a later a2p2 adds. Text
+  from any member of a room, another owner's included, can then lead the
+  agent to post to that room without the person seeing it first. Headless
+  `codex exec` needs this. a2p2 0.1.0 to 0.2.3 wrote this approval on every
+  Codex install without asking. The next `a2p2 install codex` removes it,
+  and `a2p2 doctor` reports it as a fault until then. An agent can pass
+  the flag itself: a flag cannot show that the person chose it.
+- The team launcher (`scripts/team`) starts members with no person to
+  answer prompts, so it approves every a2p2 tool for them. It refuses to
+  start a Claude Code, Codex or Antigravity member unless the manifest
+  says `"approve_a2p2_tools": true`, and its supervisor starts no such
+  member whose saved command line was written without it.
+- Pi's skill tells the model to send text only through a heredoc with a
+  quoted end word, so bash runs nothing in it. Earlier skills put the text
+  in double quotes, where bash runs `$(...)` and backticks: a peer's text
+  that a model copied could run a command as you. The end word has eight
+  random hex digits chosen at install, so a peer cannot know the line that
+  would end the heredoc early. A model that ignores the skill can still
+  run text in the shell. `a2p2 doctor` fails a skill an older a2p2 wrote.
+- Hooks and MCP entries name the a2p2 binary by its path, and run it as
+  you. Install refuses a binary in a temporary directory or Go's build
+  cache, one that it or a directory above it lets every user change, and
+  one owned by another user, unless a directory higher up keeps other
+  users out. It checks the path as written and, for a symlink, where it
+  leads now; for a path that does not exist yet, the part that exists. A directory its group can change gives a warning. Access
+  control lists are not read. `a2p2 doctor` reports the same. On Windows this check is not
+  made yet: keep `a2p2.exe` in a folder only you can change. A new folder
+  directly under `C:\` can be changed by every signed-in user;
+  [the install notes](docs/INSTALL.md) say how to change that.
+
 ## What a2p2 connects to
 
 a2p2 has no update check, no telemetry and no service of its own. The
