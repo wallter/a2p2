@@ -2188,9 +2188,8 @@ ran (F70). Rooms that span owners make the first three real now.
   with 40,001 undecided pairs has one such pair, so the time for many
   pairs to update is not measured.
 - **Still open.** (The CLI, the MCP results and the page show
-  `edited` since the merge of this wave; see D65.) The local API's send, the page's reply, the MCP reply
-  tool and a staged reply with files do not pass `reply_version`, so no
-  client reply is tied to the version it drew yet. A signed reply and a
+  `edited` since the merge of this wave; see D65. Replies are tied to
+  the text shown since the second review, below.) A signed reply and a
   handled report name only the message, not the version answered. F31 is
   deferred: the author's clock still orders every view and starts
   retention. A member can date a message before an answer given after
@@ -2204,6 +2203,39 @@ ran (F70). Rooms that span owners make the first three real now.
   model; that choice is the owner's. Hint rows set by a peer since
   removed stay until another peer reports the stream (at most 32 per
   author and peer).
+- **After the second review.** Two reviews of another model family
+  found three gaps. Replies and handled reports were not tied to the
+  text drawn: no client passed `reply_version`, and the page's state
+  request, which it makes in the background and before every change,
+  kept a receipt of entries it might not draw, so an `ack` passed on
+  text the person never saw. Now the page sends the version it drew with
+  a reply (`reply_version`, also a local API field) and an `ack`
+  (`Machine.HandledShown`), and both are refused as `not_shown` if the
+  message changed since. The state request keeps no receipt
+  (`Surface.InboxPeek`); the page's seen first keeps one for each entry
+  it drew that the inbox or the questions still list at that version. A
+  reply without a version, from the CLI or the MCP reply tool, is held
+  to the `ack` rule when the agent may report the message handled and a
+  read showed it some text of it; the model's `Send` has the same rule.
+  Second, an expired replacement was ignored, so an author could date one
+  to expire minutes after it arrived and every view fell back to the
+  first text, unmarked. An expired replacement now counts in
+  `currentText` (node and model): when it is the newest, every view
+  shows the message as expired with `edited`, and it has no version to
+  check. Third, a peer could raise a hint another peer set and then drop
+  it, deleting the other's hint. `Tx.lowerKnown` now falls back to the
+  highest report in another peer's last observed detail, within that
+  peer's bound of 32; the model's `observe` does the same. No wire,
+  record or schema change. Still open: a reply by an agent no read
+  showed the message, or one it may not report handled, is not checked
+  without a version; a staged reply with files passes none; a history
+  page the page loads and then drops on a room switch still leaves text
+  marks; and an agent that confirmed the first text is told nothing when
+  a replacement expires before its next read. Ordering and expiry under
+  the sender's clock (F31), and a record dated more than 24 hours ahead,
+  which P1 refuses so that its stream stalls at new peers until their
+  clock reaches it, stay as above: each needs a record or schema change
+  or the owner's choice.
 
 **Revisit if** a record format change is due (carry the version a
 reply answers), or a schema change lets records keep their arrival time.

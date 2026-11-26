@@ -659,6 +659,10 @@ type SendInput struct {
 	// every agent that has posted in the thread as this machine holds it
 	// (the reply tool). Without it a reply goes to the parent's author.
 	Thread bool
+
+	// ReplyVersion: the version of ReplyTo's text the caller showed
+	// (Draft.ReplyVersion); empty names none.
+	ReplyVersion string
 }
 
 // Send posts, replies, replaces or withdraws. With reply_to or replaces and
@@ -701,7 +705,8 @@ func (s *Surface) Send(ctx context.Context, in SendInput) (Sent, error) {
 	if strings.TrimSpace(in.Text) == "" {
 		return Sent{}, userErr("text must not be empty")
 	}
-	d := Draft{Room: room, Agent: label, Text: in.Text, Choices: in.Choices, ReplyTo: in.ReplyTo, AskHandled: in.AskHandled}
+	d := Draft{Room: room, Agent: label, Text: in.Text, Choices: in.Choices, ReplyTo: in.ReplyTo, ReplyVersion: in.ReplyVersion,
+		AskHandled: in.AskHandled}
 	omitted := 0
 	if len(in.To) == 1 && in.To[0] == Everyone {
 		d.Everyone = true
@@ -856,6 +861,12 @@ func (s *Surface) addressees(room string, to []string) ([]core.Addressee, error)
 // message, not shown its text yet). A report made before by the same
 // agent is returned with Already set.
 func (s *Surface) Ack(ctx context.Context, agent, id string) (Sent, error) {
+	return s.AckShown(ctx, agent, id, "")
+}
+
+// AckShown is Ack from a surface that names the version of the message's
+// text it showed (Machine.HandledShown).
+func (s *Surface) AckShown(ctx context.Context, agent, id, version string) (Sent, error) {
 	label, err := s.label(agent)
 	if err != nil {
 		return Sent{}, err
@@ -865,7 +876,7 @@ func (s *Surface) Ack(ctx context.Context, agent, id string) (Sent, error) {
 		var h Sent
 		// A second report by the same agent is a success that names the
 		// first (reply reports handling, and agents then call ack too).
-		if h, err = s.m.Handled(ctx, room, label, id); err == nil {
+		if h, err = s.m.HandledShown(ctx, room, label, id, version); err == nil {
 			return h, nil
 		}
 	}

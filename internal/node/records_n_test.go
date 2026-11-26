@@ -109,7 +109,8 @@ func TestAHandledReportOrReplyToAVersionReplacedSinceTheReadIsRefused(t *testing
 }
 
 // The honest case: once the new text is shown, the report and the reply
-// go through; a reply without a version is not checked, as before.
+// go through. (A reply without a version is checked as Handled is since
+// the second review: records_n2_test.go.)
 func TestAHandledReportOrReplyAfterTheNewTextIsShownGoesThrough(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
@@ -119,9 +120,6 @@ func TestAHandledReportOrReplyAfterTheNewTextIsShownGoesThrough(t *testing.T) {
 	v1, err := r.m.Replace(ctx, mRoom, "alice", q, "v1")
 	if err != nil {
 		t.Fatal(err)
-	}
-	if _, err := r.m.Send(ctx, Draft{Room: mRoom, Agent: "bob", Text: "no version", ReplyTo: q}); err != nil {
-		t.Fatalf("reply without a version: %v", err)
 	}
 	es := r.inbox("bob")
 	if len(es) != 1 || es[0].Kind != EntryReplaced || es[0].Version != v1.ID {

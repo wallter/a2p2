@@ -119,7 +119,9 @@ var (
 // whose text expired has none for an agent that confirmed no text of it
 // from its inbox, since only the inbox shows such an agent the replace
 // notice; thread, recent and history show the expired notice alone. It
-// has none either when no live replacement is held.
+// has none either when its newest text expired: no live replacement is
+// held, or the newest replacement's text expired, and every view then
+// shows the message as expired (currentText).
 func currentVersion(v *roomView, agent string, t *rec) (ver string, pending bool, err error) {
 	switch t.reason {
 	case store.ReasonLive:
@@ -137,10 +139,37 @@ func currentVersion(v *roomView, agent string, t *rec) (ver string, pending bool
 		return "", false, err
 	case wait != nil:
 		return "", true, nil
-	case cur.id == t.id && t.reason != store.ReasonLive:
+	case cur.reason != store.ReasonLive:
 		return "", false, nil
 	}
 	return cur.id, false, nil
+}
+
+// sawText says whether a read showed agent some text of message t:
+// confirmed from the inbox, or shown by any read (an inbox listing, a
+// thread, recent or skipped view) [R7].
+func sawText(v *roomView, agent string, t *rec) (bool, error) {
+	_, read, err := v.rd.Read(agent, v.room, t.id)
+	if err != nil || read {
+		return read, err
+	}
+	return v.rd.ShownText(agent, v.room, t.id)
+}
+
+// namedCurrent fails unless version, the version of message t a caller
+// says it showed, is the one currentVersion names: changed when it is an
+// older one, pending when newer text is on its way.
+func namedCurrent(v *roomView, agent string, t *rec, version string, changed, pending error) error {
+	ver, wait, err := currentVersion(v, agent, t)
+	switch {
+	case err != nil:
+		return err
+	case wait:
+		return pending
+	case ver != "" && ver != version:
+		return changed
+	}
+	return nil
 }
 
 // shownCurrent fails unless a read showed agent the version of message t
@@ -375,7 +404,10 @@ type Draft struct {
 	ReplyTo string
 	// ReplyVersion, if set, is the version of ReplyTo's text the writer
 	// was shown (an entry's Version): the reply is refused when a newer
-	// replacement is held, so an answer is not given to text unseen.
+	// replacement is held, so an answer is not given to text unseen. The
+	// page sets it. Without it, a reply to a message the agent may report
+	// handled is held to the same rule as Handled once a read showed the
+	// agent some text of it: the reply tool and the CLI pass no version.
 	ReplyVersion string
 	// AskHandled asks readers of a room-wide post to report handling.
 	AskHandled bool
@@ -421,17 +453,8 @@ func sendDecide(d Draft, to *[]core.Addressee) func(v *roomView, f *core.RecordF
 			if p == nil || p.f.Kind != core.KindMessage {
 				return ErrNotHeld
 			}
-			if d.ReplyVersion != "" {
-				// The same rule as Handled, against the version named.
-				ver, wait, err := currentVersion(v, d.Agent, p)
-				switch {
-				case err != nil:
-					return err
-				case wait:
-					return ErrReplyTextPending
-				case ver != "" && ver != d.ReplyVersion:
-					return ErrReplyTextChanged
-				}
+			if err := replyShown(v, d, p); err != nil {
+				return err
 			}
 			f.Parent, f.Thread = p.id, p.f.Thread
 			if f.Thread == "" {
@@ -454,6 +477,25 @@ func sendDecide(d Draft, to *[]core.Addressee) func(v *roomView, f *core.RecordF
 		*to = slices.Clone(f.To)
 		return nil
 	}
+}
+
+// replyShown fails unless a reply of d to message p answers the version
+// reads show now (currentVersion): the version d names, or, when it names
+// none and the agent may report p handled, the version a read showed it,
+// as Handled requires. A reply by an agent no read showed any text of p
+// is not checked, as before: nothing it was shown can be stale.
+func replyShown(v *roomView, d Draft, p *rec) error {
+	if d.ReplyVersion != "" {
+		return namedCurrent(v, d.Agent, p, d.ReplyVersion, ErrReplyTextChanged, ErrReplyTextPending)
+	}
+	if !store.CanHandle(p.h.Record, v.self, d.Agent) {
+		return nil
+	}
+	saw, err := sawText(v, d.Agent, p)
+	if err != nil || !saw {
+		return err
+	}
+	return shownCurrent(v, d.Agent, p, ErrReplyTextChanged, ErrReplyTextPending)
 }
 
 // Replace gives new text for one of this machine's own messages (any agent
@@ -513,6 +555,14 @@ func (existing) Error() string { return "already reported" }
 // only after a read showed it the message's text [R7]. Reporting twice returns
 // the first report.
 func (m *Machine) Handled(ctx context.Context, room, agent, ref string) (Sent, error) {
+	return m.HandledShown(ctx, room, agent, ref, "")
+}
+
+// HandledShown is Handled from a surface that names the version of ref's
+// text it showed (an entry's Version; "" names none): the report is also
+// refused unless that version is the one reads show now, so a page that
+// drew older text cannot report it handled on a newer read's receipt.
+func (m *Machine) HandledShown(ctx context.Context, room, agent, ref, version string) (Sent, error) {
 	s, err := m.write(ctx, room, agent, func(v *roomView, f *core.RecordFields) error {
 		f.Kind, f.Ref = core.KindHandled, ref
 		t, err := v.get(ref)
@@ -542,17 +592,16 @@ func (m *Machine) Handled(ctx context.Context, room, agent, ref string) (Sent, e
 		}
 		// Shown its text: confirmed from the inbox, or shown by any read
 		// (an inbox listing, a thread, recent or skipped view) [R7].
-		_, read, err := v.rd.Read(agent, room, ref)
+		saw, err := sawText(v, agent, t)
 		if err != nil {
 			return err
 		}
-		if !read {
-			shown, err := v.rd.ShownText(agent, room, ref)
-			if err != nil {
+		if !saw {
+			return ErrAckNotShown
+		}
+		if version != "" {
+			if err := namedCurrent(v, agent, t, version, ErrAckTextChanged, ErrAckTextPending); err != nil {
 				return err
-			}
-			if !shown {
-				return ErrAckNotShown
 			}
 		}
 		// The version shown must be the one reads show now (currentVersion):
