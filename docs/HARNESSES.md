@@ -150,6 +150,39 @@ Observed in that session: Antigravity wrote its own copy of the tool
 schemas under `~/.gemini/antigravity-cli/mcp/a2p2/`. That is the harness's
 behaviour; a2p2 does not ask for it.
 
+### 2026-11-25: agy as a reviewer from `scripts/ask.sh` (Antigravity CLI 1.5.17, macOS)
+
+Eight headless runs in all, each with `--print-timeout` and stdin closed.
+
+Observed:
+
+- `--mode plan`, in a scratch directory: the model quoted a line from a
+  file there. Asked in the same prompt to create a file and to run `touch`,
+  it did neither and said plan mode needs approval for changes; neither
+  file existed afterwards.
+- `--mode plan --sandbox`, asked to read `/etc/hosts`: the run ended with no
+  answer and the notice `a tool required the "read_file" permission that
+  headless mode cannot prompt for, so it was auto-denied`.
+- `--mode plan`, asked to run `curl`: the same notice for the `command`
+  permission. A refusal ends the whole run, so a prompt that asks for
+  something forbidden gets no answer at all, and the exit status is 0.
+- `--mode plan --sandbox` with the deny-only `--settings` that `ask.sh`
+  now passes, run from the repository root with a prompt that only asks
+  for reading: it quoted `AGENTS.md` and `go.mod` correctly.
+- `--disable-slash-commands` with `--mode plan` prints a warning that plan
+  mode has no effect; reads inside the workspace were then denied.
+- Each run wrote under `~/.gemini/antigravity-cli`: a `brain/<id>/` directory
+  with transcripts, `conversations/<id>.db`, `presence/<id>.lock`, a log
+  file and one `implicit/<id>.pb`. The workspace gained no files.
+
+Not verified: that the deny list blocks anything by itself or beats a saved
+allow rule; web tools; `grep` and directory listing tools separately; that
+hooks, plugins and MCP servers from `~/.gemini/config` or a workspace
+`.agents/` are off (by the documentation they are not). Each refusal above
+was seen once. `ask.sh` therefore warns on stderr, refuses a repository
+with `.agents/`, `.gemini/` or `GEMINI.md`, caps the prompt at 100000 bytes,
+and treats a failed run or a very short answer as a failure.
+
 ## Not yet verified
 
 - Interactive (terminal UI) sessions in any harness.
@@ -158,6 +191,9 @@ behaviour; a2p2 does not ask for it.
   any harness. Claude Code's turn-start hook text reached the model only in
   the 2026-11-22 print-mode run, before the rewrite.
 - A real installed configuration in a person's own harness settings.
+- That `agy --mode plan --sandbox` holds a headless run to reading files
+  under the repository in every case (see the 2026-11-25 entry: each
+  refusal was seen once).
 - The exact Antigravity turn-start hook event name (`PreInvocation`) and
   whether it accepts the output shape (`injectSteps`); both come from
   documentation only.

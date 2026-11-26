@@ -15,6 +15,8 @@ works here and live in one place:
   package to own so parallel work does not collide.
 - Use `scripts/ask.sh sol|astra|luna` for independent Codex opinions and
   `scripts/review.sh` for diff reviews. Antigravity (`agy`) has a small quota:
-  use it only for first-hand Antigravity behaviour or a third opinion.
+  use it only for first-hand Antigravity behaviour or a third opinion. It
+  can read the repository; see `scripts/ask.sh` for what was and was not
+  seen of its limits.
 - When testing the MCP shim against a real session, register it with a
   throwaway `A2P2_HOME` so the user's own node is untouched.
