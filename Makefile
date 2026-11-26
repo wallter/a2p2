@@ -73,6 +73,13 @@ fuzz:             ## short fuzz smoke run of the record and entry decoders; FUZZ
 bench:
 	$(GO) test -run '^$$' -bench . -benchmem ./...
 
+# The overhead benchmark (internal/bench, build tag bench): real daemons
+# from bin/a2p2 in throwaway /tmp homes, loopback only; about 30 minutes
+# for two runs. BENCH_ARGS=--quick for a smoke run. Not part of check.
+.PHONY: bench-local
+bench-local:      ## local send, send-to-visible, MCP shim, two daemons, scale, micro parts and a profile [BENCH_ARGS=--quick]
+	GO=$(GO) scripts/bench.sh $(BENCH_ARGS)
+
 # The deep random differential tests at other seeds, one after another
 # (about two minutes a seed). A failure logs its operations; reduce them
 # with A2P2_MODEL_REDUCE=file A2P2_MODEL_MATCH=text go test -run
