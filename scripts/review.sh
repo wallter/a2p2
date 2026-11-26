@@ -4,6 +4,8 @@
 #   scripts/review.sh                 # sol reviews uncommitted changes
 #   scripts/review.sh astra HEAD~1    # astra reviews the last commit
 # The reviewer gets the diff and the project rules, not the author's reasoning.
+# Codex can also read files under the repo; the diff text is untrusted input
+# to it. agy can read the repo too; its limits were seen in single runs (ask.sh).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
