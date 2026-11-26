@@ -281,11 +281,12 @@ func answerToPreview(t *testing.T, a JoinAnswer) Preview {
 	return p
 }
 
-// While the shared budget for polls naming unknown invites is spent, a
-// poll naming an invite is answered before any lookup, known or not.
+// While a source's budget for polls naming unknown invites is spent, a
+// poll naming an invite not held here is told to wait, and a poll naming
+// one held here is still answered: the lookup comes first.
 //
 // Requirements: T3; second review should-fix 7
-func TestJoinUnknownPollBudgetIsCheckedBeforeTheLookup(t *testing.T) {
+func TestJoinUnknownPollBudgetRefusesOnlyInvitesNotHeld(t *testing.T) {
 	clock := lclock()
 	a, b := newLNode(t, "a", clock), newLNode(t, "b", clock)
 	jn := newJoinNet()
@@ -300,9 +301,12 @@ func TestJoinUnknownPollBudgetIsCheckedBeforeTheLookup(t *testing.T) {
 	for i := 0; i < unknownPolls; i++ {
 		s.Handle(ctx, b.id, "x", []byte(fmt.Sprintf(`{"v":2,"op":"poll","invite":"%064x"}`, i+1)))
 	}
+	if rp := s.Handle(ctx, b.id, "x", []byte(fmt.Sprintf(`{"v":2,"op":"poll","invite":"%064x"}`, unknownPolls+1))); rp.Status != http.StatusTooManyRequests {
+		t.Fatalf("a poll naming an unknown invite while the budget is spent: %d", rp.Status)
+	}
 	h := secretHash(mustToken(t, tok).Secret)
-	if rp := s.Handle(ctx, b.id, "x", []byte(`{"v":2,"op":"poll","invite":"`+h+`"}`)); rp.Status != http.StatusTooManyRequests {
-		t.Fatalf("a poll while the budget is spent: %d", rp.Status)
+	if rp := s.Handle(ctx, b.id, "x", []byte(`{"v":2,"op":"poll","invite":"`+h+`"}`)); rp.Status != http.StatusAccepted {
+		t.Fatalf("a poll naming an invite held here while the budget is spent: %d", rp.Status)
 	}
 }
 

@@ -410,7 +410,9 @@ func TestRefusedPeerRequestsDoNotGrowLog(t *testing.T) {
 			raw = append(raw, c)
 		}
 	}
-	if n := kept(raw); len(raw) != 20 || n > maxPerSource {
+	// The member came from this address, so it may also use its group's
+	// share of the slots kept for known member sources.
+	if n := kept(raw); len(raw) != 20 || n > maxPerSource+maxKnownPerGroup {
 		t.Fatalf("of %d connections, %d were kept: the test needs the rest refused", len(raw), n)
 	}
 	if n := logs.count("peer request"); n > int(logBurst)+1 {
@@ -429,8 +431,8 @@ func atClock(l *sourceLimit) *time.Time {
 	return &now
 }
 
-// Addresses of one IPv6 /64 count as one source: many of them spend one
-// budget and cannot fill the table against other joiners.
+// Addresses of one IPv6 /64 together spend one budget of the /64 and
+// cannot fill the table against other joiners.
 //
 // Requirements: T3; PROTOCOL 5.3
 func TestOneIPv6Slash64CannotRefuseOtherJoiners(t *testing.T) {
@@ -442,14 +444,81 @@ func TestOneIPv6Slash64CannotRefuseOtherJoiners(t *testing.T) {
 			admitted++
 		}
 	}
-	if admitted != joinAdmits {
-		t.Errorf("one /64 was admitted %d times, its budget is %d", admitted, joinAdmits)
+	if want := joinGroupShare * joinAdmits; admitted != want {
+		t.Errorf("one /64 was admitted %d times, its budget is %d", admitted, want)
 	}
 	for _, honest := range []string{"198.51.100.9", "2001:db8:1:3::1"} {
 		if ok, _ := l.allow(honest, false); !ok {
 			t.Errorf("an honest joiner at %s was refused", honest)
 		}
 	}
+}
+
+// One address of an IPv6 /64 that spends its own join budget does not
+// spend another's: a second host of the same /64 is admitted as often as
+// one address was in 0.2.3, and both together stay within the /64's.
+//
+// Requirements: T3; PROTOCOL 5.3
+func TestOneAddressOfASharedSlash64KeepsItsOwnJoinBudget(t *testing.T) {
+	l := newSourceLimit()
+	atClock(l)
+	count := func(src string, poll bool, n int) int {
+		ok := 0
+		for range n {
+			if y, _ := l.allow(src, poll); y {
+				ok++
+			}
+		}
+		return ok
+	}
+	if got := count("2001:db8:1:2::1", false, 3*joinAdmits); got != joinAdmits {
+		t.Fatalf("one address was admitted %d opens, its budget is %d", got, joinAdmits)
+	}
+	if got := count("2001:db8:1:2::2", false, joinAdmits); got != joinAdmits {
+		t.Fatalf("a neighbour in the same /64 was admitted %d of %d opens", got, joinAdmits)
+	}
+	if got := count("2001:db8:1:2::2", true, joinPolls); got != joinPolls {
+		t.Fatalf("the neighbour's polls: %d of %d", got, joinPolls)
+	}
+}
+
+// Once a source has spent its reads, the join route answers 429 before it
+// reads a body, whatever the request would have been.
+//
+// Requirements: T3; PROTOCOL 5.3
+func TestJoinRouteReadsNoBodyOnceASourceSpentItsReads(t *testing.T) {
+	route := joinV2Route(&countH{})
+	var read atomic.Int64
+	do := func(op string) int {
+		body := &countReader{r: strings.NewReader(`{"v":2,"op":"` + op + `","secret":"x"}`), n: &read}
+		r := httptest.NewRequest(http.MethodPost, pathJoinV2, body)
+		r.RemoteAddr = "198.51.100.7:4000"
+		w := httptest.NewRecorder()
+		route.ServeHTTP(w, r)
+		return w.Code
+	}
+	for range joinReads {
+		do(node.JoinOpen) // most are refused after their body is read
+	}
+	before := read.Load()
+	if code := do(node.JoinPoll); code != http.StatusTooManyRequests {
+		t.Fatalf("a request past the reads budget: %d", code)
+	}
+	if read.Load() != before {
+		t.Fatal("the body of a request past the reads budget was read")
+	}
+}
+
+// countReader counts the bytes read from r.
+type countReader struct {
+	r io.Reader
+	n *atomic.Int64
+}
+
+func (c *countReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n.Add(int64(n))
+	return n, err
 }
 
 // While the table is full of sources heard from in the last minute, a new
@@ -467,10 +536,10 @@ func TestAFullJoinSourceTableForgetsTheOldestNotTheNewcomer(t *testing.T) {
 	if ok, _ := l.allow("203.0.113.5", false); !ok {
 		t.Fatal("a new source was refused while the table was full")
 	}
-	if l.m.Len() > maxJoinSources {
-		t.Fatalf("the table holds %d sources", l.m.Len())
+	if l.groups.Len() > maxJoinSources {
+		t.Fatalf("the table holds %d sources", l.groups.Len())
 	}
-	if l.m.Get("198.51.100.1") != nil || l.m.Get("198.51.100.4") == nil {
+	if l.groups.Get("198.51.100.1") != nil || l.groups.Get("198.51.100.4") == nil {
 		t.Fatal("the source heard from least recently was not the one forgotten")
 	}
 }

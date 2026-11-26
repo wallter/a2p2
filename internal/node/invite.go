@@ -342,13 +342,13 @@ func (s *JoinServer) allow(source string, now time.Time) (bool, time.Duration) {
 	return true, 0
 }
 
-// takeUnknown charges one poll by hash from group (SourceGroup) to its
-// budget of polls naming an invite not held here, before the invite is
-// looked up, so that requests in flight together cannot pass the budget.
-// It reports false, charging nothing, when the budget of the last minute
-// is spent. Each group has its own budget, so one cannot refuse another;
-// while the table is full, the group charged least recently is forgotten,
-// in constant time.
+// takeUnknown charges one poll by hash from group (SourceGroup) that
+// named an invite not held here. It reports false, charging nothing,
+// when the group's budget of the last minute is spent. Only polls whose
+// invite was not found are charged, after the lookup, so a poll for an
+// invite held here is never refused by it. Each group has its own budget,
+// so one cannot refuse another; while the table is full, the group
+// charged least recently is forgotten, in constant time.
 func (s *JoinServer) takeUnknown(group string, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -361,20 +361,6 @@ func (s *JoinServer) takeUnknown(group string, now time.Time) bool {
 	return true
 }
 
-// refundUnknown gives back the charge taken at now for a poll whose
-// invite is held here after all.
-func (s *JoinServer) refundUnknown(group string, now time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ts := s.unknown.Get(group)
-	if ts == nil {
-		return
-	}
-	if i := slices.Index(*ts, now); i >= 0 {
-		*ts = slices.Delete(*ts, i, i+1)
-	}
-}
-
 // Handle answers one join request. from is the requester's node id as the
 // transport authenticated it (never a field of the request); source is its
 // network address (the peer layer limits requests by its group,
@@ -385,9 +371,10 @@ func (s *JoinServer) refundUnknown(group string, now time.Time) {
 // "invite": the hex SHA-256 of the secret, accepted only from the key the
 // invite is bound to, so a joiner that restarted can resume polling
 // although it never stores the secret; polls naming an unknown invite
-// from one source group share one budget, charged before the lookup. A
-// key that presented a valid secret is limited to 10 requests a minute. Accept needs a
-// preview: it carries terms, the preview's identifier.
+// from one source group share one budget, charged after the lookup, and
+// once it is spent they are answered 429 instead of bad_secret. A key
+// that presented a valid secret is limited to 10 requests a minute.
+// Accept needs a preview: it carries terms, the preview's identifier.
 func (s *JoinServer) Handle(ctx context.Context, from, source string, body []byte) JoinReply {
 	q, bad := decodeJoinRequest(body)
 	if bad != "" {
@@ -397,12 +384,6 @@ func (s *JoinServer) Handle(ctx context.Context, from, source string, body []byt
 		return joinRefusal(CodeBadSecret)
 	}
 	now, group := s.r.m.now(), SourceGroup(source)
-	if q.Invite != "" && !s.takeUnknown(group, now) {
-		// Charged before any lookup: a group's polls by hash share one
-		// budget, and while it is spent no poll by hash from that group
-		// is looked up. A poll whose invite is found is refunded.
-		return limited(http.StatusTooManyRequests, CodeRateLimited, time.Minute)
-	}
 	rp, err := s.serve(ctx, from, group, q, now)
 	if err != nil {
 		return limited(http.StatusServiceUnavailable, CodeUnavailable, JoinRetry)
@@ -427,11 +408,14 @@ func (s *JoinServer) serve(ctx context.Context, from, group string, q JoinReques
 		h = secretHash(secret)
 	}
 	// The credential first: nothing is written for one not held here.
+	// A poll by hash is looked up before its group's budget for unknown
+	// invites is charged, so a joiner resuming a held invite is never
+	// refused by what others in its group spent (the peer layer bounds
+	// the lookups of each source).
 	inv, err := s.getInvite(ctx, h)
-	if q.Invite != "" && err == nil {
-		s.refundUnknown(group, now)
-	}
 	switch {
+	case errors.Is(err, store.ErrNotFound) && q.Invite != "" && !s.takeUnknown(group, now):
+		return limited(http.StatusTooManyRequests, CodeRateLimited, time.Minute), nil
 	case errors.Is(err, store.ErrNotFound):
 		return joinRefusal(CodeBadSecret), nil
 	case err != nil:

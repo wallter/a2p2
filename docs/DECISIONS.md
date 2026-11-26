@@ -1849,32 +1849,49 @@ machines of different owners and the listener is on the open network.
   it checks the client's signature, so a copied certificate would
   otherwise take a member's slot. Outside the members' pool, one IPv4
   address or IPv6 /64 holds at most 8 connections, one /56 16 and one /48
-  32. Source groups that completed a member's handshake in the last
-  24 hours (in memory, at most 1,024) have 16 more handshake slots, which
-  no other source can take. A connection that finds no slot is closed at
-  once, instead of waiting in the operating system's queue. Membership is
+  32. When those are full, an IPv4 address or IPv6 /64 that completed a
+  member's handshake in the last 24 hours (in memory, at most 1,024) may
+  use 16 more handshake slots, at most 4 at once for one, counted in none
+  of the shared groups, so no /56 or /48 count keeps it out. A
+  connection there that does not prove a member's key is closed and its
+  group is forgotten. The membership lookup after the handshake is cut at
+  the same 5 s deadline; lookups running at once are bounded by twice the
+  handshake slots. A connection that finds no slot is closed at once,
+  instead of waiting in the operating system's queue. Membership is
   checked again for every request: a key that became a member moves to
-  the members' pool, and a key no longer a member is served as a stranger
-  and its connection ends within 15 s. Session tickets are off, since a
-  resumed session presents no certificate. Every answer to a stranger
-  carries `Connection: close` (a GOAWAY on HTTP/2), and its connection
-  lasts 15 s at most. Strangers have rate buckets of their own on every
-  route. Refusals of strangers are logged at Debug, a member's at Info 5
-  at once and then one per 10 s per key. The join route counts per IPv4
-  address or IPv6 /64 (`node.SourceGroup`), with separate budgets for
-  opens and accepts (10 a minute) and polls (30 a minute), once the
-  bounded body is read. Polls naming unknown invites are counted per
-  source group, 10 a minute instead of 60 a minute for everyone, charged
-  before the lookup and given back when the invite is held. Both tables
-  hold 4,096 groups and forget the one heard from least recently, in
+  the members' pool, a key no longer a member is served as a stranger and
+  its connection ends within 15 s, and a key added back within those 15 s
+  is a member's again. A listener that fails for good closes the
+  connections it accepted. Session tickets are off, since a resumed
+  session presents no certificate. A stranger's connection serves one
+  request at a time (a second one at once on HTTP/2 is refused 429 before
+  its body is read), every answer to a stranger carries
+  `Connection: close` (a GOAWAY on HTTP/2), and its connection lasts 15 s
+  at most. Strangers have rate buckets of their own on every route.
+  Refusals of strangers are logged at Debug, a member's at Info 5 at once
+  and then one per 10 s per key. The join route counts per source address
+  80 bodies read a minute, before the body is read, then 10 opens and
+  accepts and 30 polls; the addresses of one IPv6 /64 together get 4
+  times each. Polls naming unknown invites are counted per IPv4 address
+  or IPv6 /64 (`node.SourceGroup`), 10 a minute instead of 60 a minute
+  for everyone, charged after the lookup, so a poll for an invite held
+  here is never refused by them. A joiner sends an accept answered 429 or
+  503 again after its `Retry-After` (at most 60 s), three times in all,
+  where it used to report an unexpected answer. The tables hold 4,096
+  addresses or /64s each and forget the one heard from least recently, in
   constant time (`node.Recent`).
 - **Costs.** One `SharesRoom` call, under the rooms lock, per handshake
   and per request. A stranger opens a new connection for each request: a
   joiner already did. A machine admitted by entries in its own request is
   served as a stranger until the log here names it; a waiting pull it
   started then is cut at 15 s, and its next request is a member's.
-  Machines behind one IPv4 address share 8 handshake slots. A join
-  request body (at most 16 KiB) is read before its source is counted.
+  Machines behind one IPv4 address share 8 handshake slots, and 4 kept
+  ones once a member came from there; a handshake holds its slot about
+  one round trip, so about 80 new connections a second at 100 ms. 0.2.3
+  had no share per address and queued connections past 256 instead. A
+  stuck lookup leaves a goroutine until the rooms lock frees. Invite
+  lookups are bounded by the join route's budgets (40 a minute per
+  address, 160 per /64), not by the budget for unknown invites.
 - **Wire and storage.** No message, field or table changed. Old and new
   machines work together; a refused client sees a failed handshake or a
   closed connection and retries under its back-off. The handshake bound
@@ -1884,12 +1901,16 @@ machines of different owners and the listener is on the open network.
   Hosts in 8 groups (8 IPv4 addresses, 4 /56s, 2 /48s) keep the shared
   handshake slots full, so members cannot open new connections, except
   from a source group known from a recent member handshake; existing
-  member connections keep working. The known groups are forgotten when
-  the daemon restarts. Sixteen member keys can fill the members' pool.
-  A host with many /64s can make 10 invite lookups a minute in each, with
-  no total bound but the connection slots; it refuses no one else.
-  Joiners behind one source share its join budget. At Debug each refusal
-  is still a line, and `daemon.log` is still not rotated (another
+  member connections keep working. A host at a member's own IPv4 address
+  or /64 can hold that group's 8 shared and 4 kept slots and so keep that
+  member out. The known groups are forgotten when the daemon restarts.
+  Sixteen member keys can fill the members' pool. A host with many /64s
+  can make 160 invite lookups a minute in each, with no total bound but
+  the connection slots; it refuses no one else. Joiners behind one IPv4
+  address share its join budget, and those of one /64 share 4 times
+  that; a host there that spends it delays them, and an older joiner
+  still reports a 429 to its accept as an unexpected answer. At Debug
+  each refusal is still a line, and `daemon.log` is still not rotated (another
   group's fix). Keys that share no room still update the "connected in"
   record (F25, another group's fix; the pool is known per request, so the
   check is one line in `guard`).

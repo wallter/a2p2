@@ -46,6 +46,11 @@ const (
 	ReasonNotAccepted   = "the accept did not reach the admin machine: preview and accept the invite again"
 )
 
+// acceptTries is how many times JoinAccept sends an accept that the
+// admin machine answers 429 or 503, waiting its Retry-After (at most
+// JoinRetryMax) between them.
+const acceptTries = 3
+
 // joinCodes are the refusal codes of PROTOCOL 5.3: nothing else a
 // server sends is shown.
 var joinCodes = []string{CodeBadSecret, CodeDeclined, CodeRevoked, CodeExpired, CodeRemoved}
@@ -308,7 +313,8 @@ func validJoinRoom(r *JoinRoom) bool {
 // latest preview, or the one an earlier accept recorded, which nothing
 // replaces. It first records the approved preview, then sends the accept
 // carrying its identifier; the admin machine then raises a request for
-// its person. JoinAccept polls for up to wait (PROTOCOL 5.3) and
+// its person. An accept answered 429 or 503 is sent again after the
+// answer's Retry-After, up to acceptTries in all. JoinAccept polls for up to wait (PROTOCOL 5.3) and
 // returns how the join stands; a join still accepted keeps being followed
 // by Resume. If the accept's answer is lost, calling JoinAccept again is
 // safe.
@@ -367,9 +373,25 @@ func (j *Joiner) JoinAccept(ctx context.Context, token, preview string, wait tim
 		}
 		return nil
 	}
-	rp, a, err := j.call(ctx, tok.Addrs, check, JoinRequest{Op: JoinAccept, Secret: tok.SecretText(), Terms: p.ID})
-	if err != nil {
-		return JoinOutcome{}, err // the record stays; JoinAccept again, or Resume, finds out
+	var rp JoinReply
+	var a JoinAnswer
+	for try := 1; ; try++ {
+		rp, a, err = j.call(ctx, tok.Addrs, check, JoinRequest{Op: JoinAccept, Secret: tok.SecretText(), Terms: p.ID})
+		if err != nil {
+			return JoinOutcome{}, err // the record stays; JoinAccept again, or Resume, finds out
+		}
+		if rp.Status != http.StatusTooManyRequests && rp.Status != http.StatusServiceUnavailable {
+			break
+		}
+		// Limited or busy: the accept was not taken. Wait as the admin
+		// machine says, and send it again.
+		if try == acceptTries {
+			return JoinOutcome{}, codedErr(ErrorRateLimited,
+				"the admin machine is limiting joins; accept again in %s", max(rp.RetryAfter, time.Second).Round(time.Second))
+		}
+		if err := j.o.Sleep(ctx, min(max(rp.RetryAfter, time.Second), JoinRetryMax)); err != nil {
+			return JoinOutcome{}, err
+		}
 	}
 	switch {
 	case rp.Status == http.StatusForbidden:

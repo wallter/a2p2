@@ -447,10 +447,10 @@ Error body: `{"error":"<code>","detail":"<≤ 200 bytes>"}`.
 | Back-off | 1 s doubling to 5 min, ±20 % jitter |
 | Per peer | one waiting pull per room (a new one releases the old); 4 other concurrent (a request counts until it enters a hold); 20 per s, burst 40 |
 | Requester pacing | a waiting pull answered `same` well before its wait, with nothing stored either way, counts as a failure for back-off |
-| Inbound connections | 256 of members of a room held here, at most 16 of one key; 32 of other keys ("strangers"); 64 still in the TLS handshake, and 16 more for source groups that completed a member's handshake in the last 24 h |
-| Per source, outside the members' pool | 8 per IPv4 address or IPv6 /64, 16 per /56, 32 per /48, in the handshake or of strangers; a connection with no slot is closed at once |
-| Server TLS handshake | 5 s; the pool is chosen once the handshake has finished, and a full pool closes the connection |
-| Connection of a stranger | closed after each answer (HTTP/1.1 `Connection: close`, HTTP/2 GOAWAY) and after 15 s at most; its rate buckets are separate from members' |
+| Inbound connections | 256 of members of a room held here, at most 16 of one key; 32 of other keys ("strangers"); 64 still in the TLS handshake, and 16 more for source groups (IPv4 address or IPv6 /64) that completed a member's handshake in the last 24 h, at most 4 of them for one group |
+| Per source, outside the members' pool | 8 per IPv4 address or IPv6 /64, 16 per /56, 32 per /48, in the shared handshake slots or of strangers; a connection with no slot is closed at once. The 16 kept slots are not counted here; one there that does not prove a member's key is closed and its group is no longer known |
+| Server TLS handshake | 5 s for the handshake and the membership lookup after it; the pool is chosen once the handshake has finished, and a full pool closes the connection |
+| Connection of a stranger | one request at a time (a second one at once is refused 429 before its body is read); closed after each answer (HTTP/1.1 `Connection: close`, HTTP/2 GOAWAY) and after 15 s at most; its rate buckets are separate from members' |
 
 A key is a member here when a room this machine holds lists it now,
 checked at the handshake and again for every request. A machine whose
@@ -754,11 +754,12 @@ new grant is signed if it is still a member; approval returns the log).
 |---|---|---|
 | 403 | `bad_secret` | unknown secret, or bound to another key |
 | 403 | `declined`, `revoked`, `expired`, `removed` | as above |
-| 429 | `rate_limited`, `Retry-After` | per source (an IPv4 address, or an IPv6 /64), counted once the body (at most 16 KiB) is read: 10 opens and accepts a minute, and separately 30 polls a minute; 10 per minute per key that presented a valid secret; polls by hash share 10 per minute per source, charged before the lookup and given back when the invite is held. While a table of 4,096 sources is full, the one heard from least recently is forgotten |
+| 429 | `rate_limited`, `Retry-After` | per source address, a minute: 80 bodies read, counted before the body (at most 16 KiB) is read; then 10 opens and accepts, and separately 30 polls. The addresses of one IPv6 /64 together get 4 times each. 10 per minute per key that presented a valid secret. Polls by hash naming an invite not held here: 10 per minute per IPv4 address or IPv6 /64, charged after the lookup, so a poll for an invite held here is never refused by it. While a table of 4,096 addresses or /64s is full, the one heard from least recently is forgotten |
 | 503 | `unavailable`, `Retry-After` | the room already has 32 requests this machine started waiting for a person (requests raised to second another admin's entry are not counted) |
 
 The joiner starts polling at an interval of `retry_ms` and doubles it
-up to 60 s. It stops on signed with `more` false, refused or expired,
+up to 60 s. An accept answered 429 or 503 is sent again after its
+`Retry-After` (at most 60 s), three times in all. It stops on signed with `more` false, refused or expired,
 and tells the person the outcome.
 
 ## 6. MCP tools (golden file)
