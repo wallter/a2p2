@@ -154,7 +154,9 @@ daemon and the CLI make these connections and no others:
 - A host name in an address is looked up by your system's resolver.
 - `install.sh` and `install.ps1`, which you run yourself and which are not
   part of the daemon, download one release and its `SHA256SUMS` from
-  `github.com/wallter/a2p2/releases`.
+  `github.com/wallter/a2p2/releases`. With `A2P2_VERIFY_ATTESTATION=1`
+  they also run `gh attestation verify`, which asks GitHub's API for the
+  attestation.
 
 Hooks and the MCP server talk only to the daemon over its Unix socket.
 
@@ -211,10 +213,82 @@ or build cache, with CGO off and with `-trimpath`. Each release carries a
 `SHA256SUMS` file made in the same run; verify a binary against it before
 installing (see the [README](README.md#install)). Releases after 0.2.3 also
 carry a GitHub artifact attestation made by the release workflow. To check
-one, run `gh attestation verify a2p2_<os>_<arch> --repo wallter/a2p2` (needs
-the GitHub CLI). It proves which workflow and commit built the file, not
-that the code is safe. Releases up to 0.2.3 have none. The binaries are not
+one from the release vX.Y.Z, run `gh attestation verify a2p2_<os>_<arch>
+--repo wallter/a2p2 --signer-workflow
+wallter/a2p2/.github/workflows/release.yml --source-ref refs/tags/vX.Y.Z
+--deny-self-hosted-runners` (needs the GitHub CLI). Without `--source-ref`
+an attested build of any other tag passes too. It proves which workflow
+and commit built the file, not that the code is safe. Releases up to 0.2.3 have none. The binaries are not
 code-signed or notarised.
+
+The installer's checksum proves the download is intact, not that it is
+authentic: `SHA256SUMS` comes from the same release page as the binary.
+Someone who can replace release files (a token with `contents: write`,
+or the maintainer's account) can replace a binary and its line together,
+and `install.sh` or `install.ps1` then installs it. Set
+`A2P2_VERIFY_ATTESTATION=1` and the installer also runs `gh attestation
+verify` and installs nothing without a valid attestation from this
+repository's `release.yml`, made from the tag of the release it
+downloads (`--source-ref refs/tags/<tag>`) on a GitHub-hosted runner.
+That attacker cannot make such an attestation without running the
+release workflow, and cannot pass off an attested build of an older tag
+as a newer release. Without `A2P2_VERSION` the installer asks `gh` once
+for the tag of the latest release and downloads and checks that tag.
+Someone who can edit releases can mark an older attested release as the
+latest, so for `latest` the installer cannot rule out getting an older
+release; set `A2P2_VERSION` to rule that out. Without the setting, the
+installer says the checksum does not show who built the file; a release
+up to 0.2.3 is refused with it.
+
+The release workflow pins every action to a full commit SHA, so moving a
+tag of an action does not change what runs. It has two jobs. The build
+job checks out the tag and runs the Go toolchain with a read-only token,
+and its checkout does not keep the token. The publish job holds the
+write, signing and attestation scopes, checks out nothing and runs no
+repository code: it checks the built files against `SHA256SUMS`, attests
+them and creates the release, after checking that the files are exactly
+the six binaries, `SHA256SUMS` and the notes, and that `SHA256SUMS` has
+exactly one line for each binary. `make check` refuses a workflow that
+names an action by tag or branch, keeps the checkout token, grants a
+write scope at the top level, or gives a write scope (quoted or not) to
+a job that checks out code or sets up Go. Its check reads lines, not
+YAML, so it also refuses what it does not follow: a tab in the
+indentation, a quoted key, a flow mapping, an anchor or alias, a `uses:`
+that does not start its line, and a job not at two spaces under `jobs:`.
+It reads every `.yml` and `.yaml` file in `.github/workflows`. Still open: a build
+job that runs a compromised pinned action or toolchain makes a binary
+that the publish job attests, since an attestation says which workflow
+ran, not that its inputs were honest. Whether the repository has
+immutable releases, tag protection or a protected release environment
+is a repository setting, not shown in these files.
+
+Both installers check the install directory and every directory above
+it, and refuse these cases:
+
+- `install.sh`: a directory every user may write without the sticky bit;
+  one a group may write, unless that group is your own group of the same
+  name as your user (on macOS, `staff` is not, so a `g+w` directory is
+  refused); one owned by another user than you or root; and a symbolic
+  link owned by another user. It checks each part of the path as
+  written, and each symbolic link it meets adds the path that link names,
+  checked the same way, so the real directories and those above them are
+  checked too. It makes missing directories with
+  mode 0755 whatever the umask, and checks the whole path again after it
+  made them. It does not check access control lists (ACLs) beyond the
+  mode bits, and it does not refuse a sticky directory every user may
+  write, such as `/tmp`: a directory you made there is still yours.
+- `install.ps1`: a junction or symbolic link anywhere in the path; a
+  directory owned by an account other than you, SYSTEM, Administrators
+  or TrustedInstaller; a directory whose access list it cannot read; and
+  an install directory that any other account may write, delete, change
+  the access list of or take ownership of, including through entries
+  that pass only to new files. A directory above it is refused when
+  another account may delete a child, delete it, change its access list
+  or take ownership. It makes a missing directory with an access list of
+  its own already in place (you, SYSTEM, Administrators; nothing
+  inherited), checks that it is a real folder, still empty and yours, and
+  checks the whole path again before it copies the file. `install.ps1`
+  has not been run on Windows.
 
 See the [design](docs/DESIGN.md), [protocol](docs/PROTOCOL.md)
 and [limits](docs/REQUIREMENTS.md#6-limits-in-plain-words).

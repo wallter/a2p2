@@ -6,6 +6,8 @@
 # Needs curl. Runs the script under sh, and under dash when installed.
 # Usage: scripts/install-test.sh
 set -eu
+# A fixed umask, so the directories made here have known modes.
+umask 022
 cd "$(dirname "$0")/.."
 repo=$(pwd)
 script=$repo/install.sh
@@ -50,10 +52,43 @@ chmod +x "$work/cpstub/cp"
 # A PATH with the tools install.sh needs but no hash tool.
 mkdir "$work/hstub"
 mkdir "$work/nohash"
-for t in curl awk mktemp cp chmod mv rm wc tr cat mkdir; do
+for t in curl awk mktemp cp chmod mv rm wc tr cat mkdir find id dirname; do
   p=$(command -v "$t") || continue
   ln -s "$p" "$work/nohash/$t"
 done
+# The same with a hash tool but without gh.
+mkdir "$work/nogh"
+for t in curl awk mktemp cp chmod mv rm wc tr cat mkdir find id dirname sha256sum shasum; do
+  p=$(command -v "$t") || continue
+  ln -s "$p" "$work/nogh/$t"
+done
+
+# A stub gh. `gh release view --repo wallter/a2p2 ...` prints $GH_LATEST,
+# the tag of the latest release. `gh attestation verify FILE ...` passes
+# only when FILE has the bytes of $GH_GOOD, as if only that file had an
+# attestation, made from the ref $GH_REF: with --source-ref it must name
+# that ref, as the real gh checks. It records its arguments in $GH_ARGS.
+mkdir "$work/ghstub"
+cat > "$work/ghstub/gh" <<'EOF2'
+#!/bin/sh
+printf '%s\n' "$*" > "$GH_ARGS"
+if [ "$1 $2" = "release view" ]; then
+  case "$*" in *"--repo wallter/a2p2 "*) echo "$GH_LATEST"; exit 0 ;; esac
+  exit 2
+fi
+[ "$1 $2" = "attestation verify" ] || exit 2
+cmp -s "$3" "$GH_GOOD" || { echo "no attestation found for $3" >&2; exit 1; }
+prev=""
+for a; do
+  if [ "$prev" = --source-ref ] && [ "$a" != "$GH_REF" ]; then
+    echo "the attestation of $3 is from $GH_REF, not $a" >&2; exit 1
+  fi
+  prev=$a
+done
+exit 0
+EOF2
+chmod +x "$work/ghstub/gh"
+export GH_ARGS="$work/gh.args"
 
 sum() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1" | awk '{print $1}'
@@ -72,6 +107,22 @@ cp "$work/b-latest" "$rel/latest/download/a2p2_linux_amd64"
 printf '%s  a2p2_linux_amd64\n%s  a2p2_darwin_arm64\n' "$h_latest" "$h_latest" > "$rel/latest/download/SHA256SUMS"
 cp "$work/b-pinned" "$rel/download/v0.2.1/a2p2_linux_amd64"
 printf '%s  a2p2_linux_amd64\n%s  a2p2_darwin_arm64\n' "$h_pinned" "$h_pinned" > "$rel/download/v0.2.1/SHA256SUMS"
+# v0.3.0 is the latest release with an attestation (gh names it), and
+# v0.3.1 holds the same attested bytes, made from v0.3.0, under a newer
+# tag: the downgrade someone who can edit releases could make.
+for t in v0.3.0 v0.3.1; do
+  mkdir -p "$rel/download/$t"
+  cp "$work/b-latest" "$rel/download/$t/a2p2_linux_amd64"
+  printf '%s  a2p2_linux_amd64\n' "$h_latest" > "$rel/download/$t/SHA256SUMS"
+done
+export GH_LATEST=v0.3.0 GH_REF=refs/tags/v0.3.0
+
+# A mkdir that makes the directory, then lets every user write it, as if
+# another user changed it between its creation and the install.
+real_mkdir=$(command -v mkdir)
+mkdir "$work/mkstub"
+printf '#!/bin/sh\n"%s" "$@" || exit\nfor last; do :; done\nchmod 0777 "$last"\n' "$real_mkdir" > "$work/mkstub/mkdir"
+chmod +x "$work/mkstub/mkdir"
 
 mkdir "$work/tmp"
 
@@ -237,6 +288,137 @@ runall() {
   unset FAKE_M
   [ "$rc" -ne 0 ]; check "arch: nonzero exit" $?
   empty "$dir"; check "install directory empty" $?
+
+  cur="install directory another user can change"
+  fresh; mkdir -p "$dir"; chmod 0777 "$dir"
+  run "$sh_" "$dir" - -
+  [ "$rc" -ne 0 ]; check "every user may write it: nonzero exit" $?
+  grep -q "can be written by every user" "$work/out"; check "every user may write it: says so" $?
+  empty "$dir"; check "every user may write it: nothing installed" $?
+  fresh; mkdir -p "$work/$sh_.$n/open"; chmod 0777 "$work/$sh_.$n/open"; dir=$work/$sh_.$n/open/sub/bin
+  run "$sh_" "$dir" - -
+  [ "$rc" -ne 0 ]; check "below a directory every user may write: nonzero exit" $?
+  [ ! -e "$work/$sh_.$n/open/sub" ]; check "below a directory every user may write: nothing made" $?
+  fresh; mkdir -p "$dir"; chmod 1777 "$dir"
+  run "$sh_" "$dir" - -
+  check "a sticky directory every user may write: exit 0" "$rc"
+  [ -x "$dir/a2p2" ]; check "a sticky directory every user may write: installed" $?
+  chmod 0755 "$work/$sh_.$n/open" 2>/dev/null || true
+  # A link of this user's into a directory below one every user may write:
+  # the real parents of the link's target are checked too.
+  fresh; t=$work/$sh_.$n
+  mkdir -p "$t/ww/sub/bin" "$t/home"; chmod 0777 "$t/ww"; ln -s "$t/ww/sub" "$t/home/link"
+  dir=$t/home/link/bin
+  run "$sh_" "$dir" - -
+  [ "$rc" -ne 0 ]; check "a link into a directory every user may write: nonzero exit" $?
+  grep -q "/ww can be written by every user" "$work/out"; check "a link into a directory every user may write: names the real directory" $?
+  empty "$t/ww/sub/bin"; check "a link into a directory every user may write: nothing installed" $?
+  dir=$t/home/link/new/bin
+  run "$sh_" "$dir" - -
+  [ "$rc" -ne 0 ]; check "a missing directory below such a link: nonzero exit" $?
+  [ ! -e "$t/ww/sub/new" ]; check "a missing directory below such a link: nothing made" $?
+  chmod 0755 "$t/ww"
+  # A link to a link that sits below a directory every user may write: the
+  # real directory at the end is safe, the second link can be swapped.
+  fresh; t=$work/$sh_.$n
+  mkdir -p "$t/ww/mid" "$t/real/bin" "$t/home"; chmod 0777 "$t/ww"
+  ln -s "$t/real" "$t/ww/mid/l2"; ln -s "$t/ww/mid/l2" "$t/home/l1"
+  dir=$t/home/l1/bin
+  run "$sh_" "$dir" - -
+  [ "$rc" -ne 0 ] && grep -q "/ww can be written by every user" "$work/out"; check "a link to a link below a directory every user may write: refused" $?
+  empty "$t/real/bin"; check "a link to a link below a directory every user may write: nothing installed" $?
+  chmod 0755 "$t/ww"
+  # A directory a group may write: refused unless the group is this user's
+  # own group of the same name.
+  fresh; mkdir -p "$dir"; chmod 0775 "$dir"
+  run "$sh_" "$dir" - -
+  if [ "$(id -un)" = "$(id -gn)" ] && [ -n "$(find "$dir" -prune -group "$(id -g)")" ]; then
+    check "a directory its owner's own group may write: exit 0" "$rc"
+  else
+    [ "$rc" -ne 0 ] && grep -q "can be written by a group" "$work/out"; check "a directory a group may write: refused" $?
+    empty "$dir"; check "a directory a group may write: nothing installed" $?
+  fi
+  # The directories install.sh makes: mode 0755 whatever the umask, and
+  # checked again after they are made.
+  fresh
+  old_umask=$(umask); umask 000
+  run "$sh_" "$dir" - -
+  umask "$old_umask"
+  check "made under umask 000: exit 0" "$rc"
+  [ -z "$(find "$work/$sh_.$n" -perm -0002)" ]; check "made under umask 000: no directory every user may write" $?
+  fresh
+  run "$sh_" "$dir" - "$work/mkstub:$work/stub:$PATH"
+  [ "$rc" -ne 0 ]; check "a made directory changed before the install: nonzero exit" $?
+  grep -q "can be written by every user" "$work/out"; check "a made directory changed before the install: says so" $?
+  [ ! -e "$dir/a2p2" ]; check "a made directory changed before the install: nothing installed" $?
+  chmod 0755 "$work/$sh_.$n/bin" 2>/dev/null || true
+
+  cur="attestation"
+  export GH_GOOD="$work/b-latest"
+  fresh; mkdir "$dir"
+  run "$sh_" "$dir" - -
+  check "not asked for: exit 0" "$rc"
+  grep -q "not who built it" "$work/out"; check "not asked for: says the checksum does not show who built it" $?
+  grep -q "A2P2_VERIFY_ATTESTATION=1" "$work/out"; check "not asked for: names the setting" $?
+  export A2P2_VERIFY_ATTESTATION=1
+  fresh; mkdir "$dir"; rm -f "$GH_ARGS"
+  run "$sh_" "$dir" - "$work/ghstub:$work/stub:$PATH"
+  check "attested: exit 0" "$rc"
+  [ -x "$dir/a2p2" ]; check "attested: installed" $?
+  grep -q "attestation ok" "$work/out"; check "attested: says so" $?
+  grep -q "downloading a2p2_linux_amd64 (v0.3.0)" "$work/out"; check "attested: latest is resolved once, to the tag gh names" $?
+  grep -q -- "--repo wallter/a2p2 --signer-workflow wallter/a2p2/.github/workflows/release.yml --source-ref refs/tags/v0.3.0 --deny-self-hosted-runners" "$GH_ARGS"; check "attested: pinned to the repository, release.yml, the tag and a GitHub runner" $?
+  # An attested build of an older tag put in place under a newer one, with
+  # its SHA256SUMS line: the checksum and the workflow match, the tag not.
+  export A2P2_VERSION=v0.3.1
+  fresh; mkdir "$dir"
+  run "$sh_" "$dir" - "$work/ghstub:$work/stub:$PATH"
+  unset A2P2_VERSION
+  [ "$rc" -ne 0 ]; check "an attested build of another tag: nonzero exit" $?
+  grep -q "no valid attestation" "$work/out"; check "an attested build of another tag: says so" $?
+  empty "$dir"; check "an attested build of another tag: nothing installed" $?
+  # gh names a latest release from before attestations.
+  export GH_LATEST=v0.2.3
+  fresh; mkdir "$dir"
+  run "$sh_" "$dir" - "$work/ghstub:$work/stub:$PATH"
+  export GH_LATEST=v0.3.0
+  [ "$rc" -ne 0 ] && grep -q "has no attestation" "$work/out"; check "a latest release before attestations: refused" $?
+  empty "$dir"; check "a latest release before attestations: nothing installed" $?
+  # A release whose binary and SHA256SUMS were both replaced: the checksum
+  # matches, only the attestation catches it.
+  rm -rf "$work/swap"; mkdir -p "$work/swap/latest/download"
+  printf '#!/bin/sh\necho "a2p2 swapped"\n' > "$work/swap/latest/download/a2p2_linux_amd64"
+  printf '%s  a2p2_linux_amd64\n' "$(sum "$work/swap/latest/download/a2p2_linux_amd64")" > "$work/swap/latest/download/SHA256SUMS"
+  mkdir -p "$work/swap/download"; cp -R "$work/swap/latest/download" "$work/swap/download/v0.3.0"
+  fresh; mkdir "$dir"
+  run "$sh_" "$dir" "file://$work/swap" "$work/ghstub:$work/stub:$PATH"
+  [ "$rc" -ne 0 ]; check "swapped binary and SHA256SUMS: nonzero exit" $?
+  grep -q "checksum ok" "$work/out"; check "swapped binary and SHA256SUMS: the checksum alone passes" $?
+  grep -q "no valid attestation" "$work/out"; check "swapped binary and SHA256SUMS: says so" $?
+  empty "$dir"; check "swapped binary and SHA256SUMS: nothing installed" $?
+  fresh; mkdir "$dir"
+  run "$sh_" "$dir" - "$work/stub:$work/nogh"
+  [ "$rc" -ne 0 ]; check "no gh: nonzero exit" $?
+  grep -q "needs the GitHub CLI" "$work/out"; check "no gh: says so" $?
+  empty "$dir"; check "no gh: nothing installed" $?
+  export A2P2_VERSION=v0.2.1
+  fresh; mkdir "$dir"
+  run "$sh_" "$dir" - "$work/ghstub:$work/stub:$PATH"
+  unset A2P2_VERSION
+  [ "$rc" -ne 0 ]; check "a release before attestations: nonzero exit" $?
+  grep -q "has no attestation" "$work/out"; check "a release before attestations: says so" $?
+  empty "$dir"; check "a release before attestations: nothing installed" $?
+  export A2P2_VERIFY_ATTESTATION=yes
+  fresh; mkdir "$dir"
+  run "$sh_" "$dir" - -
+  [ "$rc" -ne 0 ]; check "a bad setting: nonzero exit" $?
+  empty "$dir"; check "a bad setting: nothing installed" $?
+  unset A2P2_VERIFY_ATTESTATION
+  # Without the setting, a swapped release installs: the documented limit.
+  fresh; mkdir "$dir"
+  run "$sh_" "$dir" "file://$work/swap" -
+  check "swapped release without the setting: installs (the documented limit)" "$rc"
+  rm -rf "$work/swap"
 
   cur="refused base URLs"
   fresh; mkdir "$dir"

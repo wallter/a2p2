@@ -1914,3 +1914,110 @@ Still open:
   harness entry that names another binary already fails its own line
   ("points at a different a2p2 binary"), and the fix is a reinstall,
   which checks that binary.
+
+## D-NEW-K-release-ci. Pinned actions, a write job without repository code, and checks the installer can opt into (2026-11-25)
+
+The 2026-11-25 security review found that the release job ran actions
+named by moving tags while it held `contents: write`, `id-token: write`
+and `attestations: write`, and that its checkout left the token in
+`.git/config` (F15). A moved tag of `actions/setup-go` could change the
+build, and the attest step would then sign the result as this
+repository's. It also found that the installers trust a `SHA256SUMS` from
+the same release page as the binary, and that `verify-release.sh`
+checked only the binary of the machine that runs it (F49), and that no
+test opens a database written by an older release (F73). The Windows
+install advice pointed at `C:\a2p2`, a folder that every local user can
+write when it is made by hand. These are fixed now because the next tag
+would run the workflow, and the fixes need no protocol change.
+
+- **Workflows:** every action is pinned to the full commit SHA of the
+  release its major tag named on 2026-11-25, with that release in a
+  comment: `actions/checkout` v4.4.0, `actions/setup-go` v5.6.0,
+  `actions/attest` v4.2.2. Every checkout sets `persist-credentials:
+  false`. The release workflow is split: `build` (read-only token,
+  checkout, Go, `make release`) hands `dist/` to `publish` as a workflow
+  artifact; `publish` holds the three write scopes, checks out nothing,
+  checks that the files are exactly the six binaries, `SHA256SUMS` and
+  the notes and that `SHA256SUMS` has exactly one well-formed line for
+  each binary, checks them against it, attests them and creates the
+  release. That adds two GitHub-owned actions,
+  `actions/upload-artifact` v7.0.2 and `actions/download-artifact`
+  v8.0.2 (which fails on a digest mismatch), both pinned.
+  `scripts/workflows.sh`, run by `make check` (`make release-test`),
+  reads every `.yml` and `.yaml` workflow and refuses a tag or branch
+  pin, a checkout that keeps its token, a write scope at the top level,
+  and a write job (quoted values included) that checks out code or sets
+  up Go. It reads lines, not YAML, so it also refuses the syntax it does
+  not follow: tabs, quoted keys, flow mappings, anchors and aliases, a
+  `uses:` that does not start its line, a job not at two spaces. It
+  skips the text of block scalars. No new workflow or trigger.
+- **verify-release.sh** downloads each of the seven expected files by
+  name, requires the download to hold exactly those, requires
+  `SHA256SUMS` to be exactly one `<sha256>  <name>` line for each binary
+  and no other line, and checks the checksum and the attestation of each
+  binary with `--source-ref refs/tags/<tag>` and
+  `--deny-self-hosted-runners`, before it runs this machine's binary.
+  `scripts/release-test.sh` runs it against a stub `gh` and a fake
+  release, and runs the publish job's file check, taken out of
+  `release.yml`, on fake `dist/` directories.
+- **Installers:** `A2P2_VERIFY_ATTESTATION=1` (a new setting of both
+  scripts, default off) makes the installer run `gh attestation verify`
+  pinned to this repository, `release.yml`, the tag it downloads
+  (`--source-ref`) and a GitHub-hosted runner, and install nothing
+  unless it passes. Without the tag, someone who can edit releases could
+  put an attested build of an older tag, and its `SHA256SUMS` line, into
+  a newer release. With the setting and no `A2P2_VERSION`, the installer
+  asks `gh` once for the latest tag and downloads from that tag; it
+  cannot rule out an older release marked as latest. The setting is off
+  by default because `gh` must be installed and signed in, and the
+  latest release (0.2.3) has no attestation; a check that falls back to
+  "skipped" on failure would not stop a swapped file. Without it the
+  installer now says the checksum does not show who built the file.
+  `install.sh` refuses an install directory, or one above it, that every
+  user may write without the sticky bit, that a group may write (unless
+  it is the user's own group of the same name), that another user than
+  root owns, or that is a symbolic link another user owns. It walks the
+  path as written, and each link it meets adds the path the link names
+  (`readlink`, or the resolved path from `cd -P` without it), walked the
+  same way. It makes missing levels with mode 0755 and
+  checks the path again after. `install.ps1` refuses a junction or
+  symbolic link in the path, a directory owned by an account other than
+  you, SYSTEM, Administrators or TrustedInstaller, one whose access list
+  it cannot read, and one another account may change. It makes a missing
+  directory with its own access list already in place (you, SYSTEM,
+  Administrators, nothing inherited), checks it is a real folder, still
+  yours and empty, and checks the path again before it copies the file.
+- **Compatibility test:** `scripts/release-db.sh vX.Y.Z` runs
+  `internal/node/testdata/releases/gen_test.go.txt` in a copy of the
+  tag's source (git archive; no daemon) and writes three machines'
+  databases as SQL text with a manifest. A run holds a lock and replaces
+  the committed set only with a complete new one. Databases from v0.2.0
+  to v0.2.3 are committed (about 380 KB of text).
+  `TestDatabasesFromEachReleaseOpenReplayAndKeepWorking` requires all
+  four and opens each with the current code: logs replay, records,
+  members and admins match the manifest, alice's unread messages and
+  bob's read state are kept, and a and b each send to the other. All
+  four were written at schema 14, the current one, so no migration runs
+  yet. A trial rule that refused the label `bee` made it fail, as an
+  F71-type change would.
+- **Costs:** two more actions in the only unattended workflow; a release
+  takes one more job and an artifact kept for a day. Moving an action now
+  means changing a SHA by hand. A step in `make check` of a few seconds.
+  Each release adds a directory of test data. An install into a
+  directory another user can change, which worked before, is refused.
+- **Still open:** a compromised pinned action or Go toolchain in the
+  build job still produces a binary that `publish` attests; an
+  attestation names the workflow, not the honesty of its inputs. No
+  dependabot or other update path for actions and modules: it would open
+  pull requests that run CI, and the owner keeps hosted CI small.
+  Repository settings the files cannot show or set: immutable releases,
+  a protected `release` environment with required reviewers for
+  `publish`, and the tag rule INSTALL.md describes. `install.ps1` has not
+  been run on Windows. `a2p2 install` on Windows still suggests
+  `C:\a2p2` in its own message (internal/harness/windows.go, F24, another
+  group's file). No test runs an old binary against a new one over the
+  network, and the release-db step after a tag is by hand.
+
+**Revisit if** an action is moved to a new major release, GitHub offers
+immutable releases or a required environment here, the attestation check
+can be done without `gh`, or a mixed-version chaos run is added.

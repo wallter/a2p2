@@ -20,12 +20,22 @@ A2P2_VERSION=v0.2.3 sh install.sh
 ```
 
 The checksum the script checks comes from the same release, so this
-catches a corrupted or swapped download, not a compromised release. The
-installer checks SHA-256 only and does not need the GitHub CLI. Releases
-after 0.2.3 also carry an attestation from the release workflow. To check
-a downloaded binary, run `gh attestation verify a2p2_<os>_<arch> --repo
-wallter/a2p2` (needs the GitHub CLI). It proves which workflow and commit
-built the file, not that the code is safe. Releases up to 0.2.3 have none.
+catches a corrupted download, not a compromised release: whoever can
+replace the binary can replace its line in `SHA256SUMS` too. By default
+the installer checks SHA-256 only, does not need the GitHub CLI, and says
+so after the check. Releases after 0.2.3 also carry an attestation from
+the release workflow. With `A2P2_VERIFY_ATTESTATION=1` the installer runs
+`gh attestation verify` on the download and installs nothing unless it
+passes (needs the GitHub CLI, signed in; it refuses a release up to
+0.2.3). The attestation must be from the tag it downloads, so an attested
+build of an older tag is refused. Without `A2P2_VERSION` it asks `gh` for
+the tag of the latest release; someone who can edit releases can mark an
+older release as the latest, so set `A2P2_VERSION` to rule that out. To
+check a downloaded binary of vX.Y.Z by hand, run `gh attestation verify
+a2p2_<os>_<arch> --repo wallter/a2p2 --signer-workflow
+wallter/a2p2/.github/workflows/release.yml --source-ref refs/tags/vX.Y.Z`.
+It proves which workflow and commit built the file, not that the code is
+safe. Releases up to 0.2.3 have none.
 The binaries are not code-signed or notarised.
 
 ## From a release binary
@@ -65,10 +75,14 @@ run). From version 0.2.0 each release also has
 - Put `a2p2.exe` in a directory whose path has no spaces and that only
   you can change: the hooks name it in a command a shell runs, and
   `a2p2 install` refuses a path that each shell would need quoted
-  differently. Every hook and MCP server then runs that file as you. A
-  folder you create directly under `C:\` can be changed by every
-  signed-in user. To remove the access it inherits, run in cmd.exe
-  `icacls DIR /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"
+  differently. Every hook and MCP server then runs that file as you. If
+  your user name has a space, let `install.ps1` make the directory
+  (`$env:A2P2_INSTALL_DIR = 'C:\a2p2'`, a folder that does not exist
+  yet): it gives a directory it creates an access list for you, SYSTEM
+  and Administrators only. A folder made by hand directly under `C:\`
+  lets every signed-in user replace files in it, and `install.ps1`
+  refuses one. To remove the access such a folder inherits, run in
+  cmd.exe `icacls DIR /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"
   "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F"` (in PowerShell, write
   `$env:USERNAME` for `%USERNAME%`). The command keeps access granted on
   the folder itself, so run `icacls DIR` afterwards and remove any other
