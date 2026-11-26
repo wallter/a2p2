@@ -610,8 +610,10 @@ func TestPendingLegacyJoinUnderAnotherLabelIsRefusedAndTheRoomStays(t *testing.T
 	}
 }
 
-// gpt point 6. A signed page that says more follows but holds nothing, or
-// does not move past the last page, ends the join; it does not loop.
+// gpt point 6. A signed page that says more follows but holds nothing
+// (with a next that moves on), or holds entries and does not move past
+// the last page, ends the join; it does not loop. Each mode trips only
+// its own rule.
 func TestJoinPageThatDoesNotMoveOnIsRefused(t *testing.T) {
 	for _, mode := range []string{"empty", "same next"} {
 		clock := lclock()
@@ -628,7 +630,9 @@ func TestJoinPageThatDoesNotMoveOnIsRefused(t *testing.T) {
 				return // a joiner that loops gets an honest end instead
 			}
 			an.More = true
-			if mode == "same next" {
+			if mode == "empty" {
+				an.Entries, an.Next = nil, 1<<40
+			} else {
 				an.Next = 0
 			}
 		})
@@ -647,26 +651,51 @@ func TestJoinPageThatDoesNotMoveOnIsRefused(t *testing.T) {
 	}
 }
 
-// gpt point 6. A page with more entries than a page holds is refused.
+// gpt point 6. A page with more entries than a page holds, or with more
+// bytes of entries (under the entry limit), is refused.
 func TestJoinPageOverTheLimitsIsRefused(t *testing.T) {
-	clock := lclock()
-	a, b := newLNode(t, "a", clock), newLNode(t, "b", clock)
-	jn := newJoinNet()
-	jn.serve(a)
-	room := a.create("team")
-	link := newRewriteLink(jn, b, func(an *JoinAnswer) {
-		if an.State == JoinStateSigned && len(an.Entries) > 0 {
-			for len(an.Entries) <= MaxJoinEntries {
+	for _, limit := range []string{"entries", "bytes"} {
+		clock := lclock()
+		a, b := newLNode(t, "a", clock), newLNode(t, "b", clock)
+		jn := newJoinNet()
+		jn.serve(a)
+		room := a.create("team")
+		size := func(es []json.RawMessage) int {
+			n := 0
+			for _, e := range es {
+				n += len(e) + 1
+			}
+			return n
+		}
+		link := newRewriteLink(jn, b, func(an *JoinAnswer) {
+			if an.State != JoinStateSigned || len(an.Entries) == 0 {
+				return
+			}
+			if limit == "entries" {
+				for len(an.Entries) <= MaxJoinEntries {
+					an.Entries = append(an.Entries, an.Entries[len(an.Entries)-1])
+				}
+				return
+			}
+			for size(an.Entries) <= maxJoinPageBytes {
 				an.Entries = append(an.Entries, an.Entries[len(an.Entries)-1])
 			}
+			if len(an.Entries) > MaxJoinEntries {
+				t.Errorf("%d entries: the bytes case must stay under the entry limit", len(an.Entries))
+			}
+		})
+		if limit == "bytes" {
+			old := maxJoinPageBytes
+			maxJoinPageBytes = 4 << 10 // the server pages within it too
+			t.Cleanup(func() { maxJoinPageBytes = old })
 		}
-	})
-	j := b.linkJoiner(link)
-	tok := a.invite(room, RoleMember, false)
-	b.preview(j, tok)
-	b.accept(j, tok, 0)
-	a.confirm(a.onlyRequest(room).ID)
-	wantOutcome(t, b.resume(j, time.Minute), JoinStateRefused, ReasonJoinBadPage)
+		j := b.linkJoiner(link)
+		tok := a.invite(room, RoleMember, false)
+		b.preview(j, tok)
+		b.accept(j, tok, 0)
+		a.confirm(a.onlyRequest(room).ID)
+		wantOutcome(t, b.resume(j, time.Minute), JoinStateRefused, ReasonJoinBadPage)
+	}
 }
 
 // gpt point 6. A removed admin machine pages a long log of its own

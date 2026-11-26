@@ -2358,7 +2358,7 @@ after D57, which lets a receipt rule land without stopping a start.
   not move past the last `next`, ends the join (`ReasonJoinBadPage`), so
   a hostile admin machine cannot keep a resume polling at once forever. A join lifts the gate only
   when its last page lists heads, all accepted here, and the admin
-  machine is a member here, as `caughtUp` does. For a new room, the
+  machine is a member here (and, since the second review, the heads are the log's heads). For a new room, the
   create entry's label must equal the preview's, may not read as `local`
   (`LabelKey`, so any case and surrounding blanks) and may hold no
   character the display would escape (`DisplayHidden`: controls,
@@ -2373,8 +2373,8 @@ after D57, which lets a receipt rule land without stopping a start.
   the room stays. The preview reads the room and its generation in one
   step, so a pin cannot slip between them. A stored room labelled
   `local` that is not this machine's local room is shown with its id
-  (`Rooms.ShownLabel`, which since D65 asks `ShownLabels`, so it reads
-  `local#` and the first 8 hex of the id, as agents see it) in room
+  (`Rooms.ShownLabel`: `local#` and the first 8 hex of the id, as agents
+  see it) in room
   info, quarantine, inbox labels, unread
   counts, levels, request texts (both where they are shown and where an
   approval compares them) and `ResolveRoom`, so `local` resolves only to
@@ -2405,11 +2405,41 @@ after D57, which lets a receipt rule land without stopping a start.
   results belong to the surface's wording (group G). The server's own
   preview still sends the label it holds raw; the joiner checks it. A
   pull's answer still writes a non-member's log entries before it checks
-  membership (`Exchange.apply`); the fix belongs with the pull code. A
-  hostile admin machine can still send pages that move on without end;
-  only the room's own bounds limit them. Joins between this version and
+  membership (`Exchange.apply`); the fix belongs with the pull code.
+  Joins between this version and
   0.2.0 to 0.2.3 machines, and 0.2.3 reopening a database this version
   wrote, are argued from the unchanged formats, not run in a test.
+- **After the second review.** Two reviewers found the whole join
+  unbounded, the caught-up gate open to stale heads and the shown label
+  unstable. Now a join ends refused with
+  `ReasonJoinTooLong` past 256 signed pages, 64 MiB of answers, 15
+  minutes of paging, or 2 minutes without a page that brings an entry
+  this machine lacks; earlier pages' entries stay. The bounds, the
+  cursor and the kept entries live on the `Joiner` in memory by invite
+  (`runs`) and carry from one run of `follow` to the next, so a run cut
+  short by an error or a 202 does not start them again; they go when
+  the join ends or the daemon restarts, with no schema change. Time
+  counts only while a run reads the answer. A log read again from the
+  start after a restart counts pages of held entries as moving on, up
+  to as many entries as the room holds here. Pages marked `more`
+  still pass `wait`, which a daemon's resume sets to zero. While the
+  admin machine is not a member here, kept entries are deduplicated and
+  given to `receiveJoin` again only once 64 more are kept, on the last
+  page, or before a limit ends the join; a page that brings nothing new
+  is not tried, so one entry per page no longer checks all of them again
+  under the rooms lock. The gate opens only if the last page's heads are
+  exactly the heads of the log here (`acceptedHeads`); a log here ahead
+  of the admin machine's waits for a pull, and the join is still signed.
+  `Rooms.ShownLabel` shows a stored room labelled `local` as its label,
+  `#` and the first 8 hex of its id, from that room alone, so a waiting
+  request's text no longer changes when another room arrives; if
+  another room's label reads as that form, agents see a longer one
+  (`ShownLabels`) and the request text still names the room by id. A
+  refused older join names such a room in that form. Still open: joins
+  resume one at a time, so a hostile admin machine can delay the others
+  by up to those bounds in all, again after each restart; an honest join of more than 64 MiB, or
+  slower than those times, is refused; `Exchange.apply` and `caughtUp`
+  in the pull code still take a non-member's entries and stale heads.
 
 **Revisit if** rooms gain a rename, a second built-in label is reserved,
 or a joiner reports a refused join of a room it holds.
