@@ -1284,12 +1284,8 @@ func (s *Store) CreateSendRequest(ctx context.Context, q Request, staged []Stage
 		if err := checkGen(tx, q.Room, 0); err != nil {
 			return err
 		}
-		var n int
-		if err := tx.QueryRow(`SELECT count(*) FROM requests WHERE room = ? AND state = ?`, q.Room, RequestPending).Scan(&n); err != nil {
+		if err := checkOwnPending(tx, q.Room, pendingMax); err != nil {
 			return err
-		}
-		if pendingMax > 0 && n >= pendingMax {
-			return ErrTooManyPending
 		}
 		// this request's own staging reservation is replaced by its draft
 		s.resMu.Lock()

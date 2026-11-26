@@ -132,24 +132,41 @@ func ParseEntry(wire []byte) (*Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	e, err := entryFromParts(h, s)
+	e, err := entryFromParts(h, s, false)
 	if err != nil {
 		return nil, err
 	}
 	return e, nil
 }
 
-// EntryFromParts runs the same checks (from S3) on stored header and
-// signature bytes. It copies its inputs.
+// EntryFromParts runs the same checks (from S3) on header and signature
+// bytes. It copies its inputs.
 func EntryFromParts(header, sig []byte) (*Entry, error) {
-	e, err := entryFromParts(bytes.Clone(header), bytes.Clone(sig))
+	e, err := entryFromParts(bytes.Clone(header), bytes.Clone(sig), false)
 	if err != nil {
 		return nil, err
 	}
 	return e, nil
 }
 
-func entryFromParts(h, s []byte) (*Entry, *Refusal) {
+// StoredEntryFromParts decodes an entry this machine stored after it
+// passed the checks on receipt. It runs the checks of form only: sizes,
+// field types, the fields each kind needs, and V1. The rules on what a
+// room label or a machine name may contain are not run, so that a rule
+// added to receipt later does not stop a log stored under the older rule
+// from loading (DESIGN section 5). A new content rule goes in the
+// receipt checks only, never here. It copies its inputs.
+func StoredEntryFromParts(header, sig []byte) (*Entry, error) {
+	e, err := entryFromParts(bytes.Clone(header), bytes.Clone(sig), true)
+	if err != nil {
+		return nil, err
+	}
+	return e, nil
+}
+
+// entryFromParts decodes h and s; stored skips the content rules
+// (StoredEntryFromParts).
+func entryFromParts(h, s []byte, stored bool) (*Entry, *Refusal) {
 	switch {
 	case len(s) != sigSize:
 		return nil, refuse("S3", "signature")
@@ -160,7 +177,7 @@ func entryFromParts(h, s []byte) (*Entry, *Refusal) {
 	if err != nil {
 		return nil, err
 	}
-	e, err := entryFields(top)
+	e, err := entryFields(top, stored)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +189,14 @@ func entryFromParts(h, s []byte) (*Entry, *Refusal) {
 	return e, nil
 }
 
-func entryFields(top jvalue) (*Entry, *Refusal) {
+func entryFields(top jvalue, stored bool) (*Entry, *Refusal) {
+	// Content rules on text fields: receipt only (StoredEntryFromParts).
+	labelOK := func(s string) bool { return len(s) <= maxRoomLabel }
+	nameOK := ValidLabel
+	if stored {
+		labelOK = func(string) bool { return true }
+		nameOK = func(string) bool { return true }
+	}
 	e := &Entry{}
 	f := &e.f
 	has := map[string]bool{}
@@ -205,9 +229,9 @@ func entryFields(top jvalue) (*Entry, *Refusal) {
 		case "target":
 			f.Target, ok = strOf(v, isNode)
 		case "label":
-			f.Label, ok = strOf(v, func(s string) bool { return len(s) <= maxRoomLabel })
+			f.Label, ok = strOf(v, labelOK)
 		case "name":
-			f.Name, ok = strOf(v, ValidLabel)
+			f.Name, ok = strOf(v, nameOK)
 		case "history":
 			f.History, ok = v.kind == jTrue, v.kind == jTrue
 		case "from":

@@ -47,6 +47,35 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   unchanged, and the database schema is not touched, so 0.2.0 to 0.2.3
   can still open the database.
 
+### Security
+
+- **One admin can no longer block its own removal by flooding requests.**
+  Since 0.1.0, an admin of a room (for example the admin of another owner
+  in a shared room) could sign many entries that wait for a second admin.
+  They filled the 32-request queue of the other admins, so a removal of
+  that admin could not be proposed, and an entry that arrived while the
+  queue was full was never raised, even after a restart. Now a machine
+  asks its person about at most 4 waiting entries per signing admin at a
+  time, the person's own requests have a separate budget, a removal of an
+  admin passes both budgets once per signer and target, a request whose
+  entry no longer waits is closed, and an entry skipped while a budget
+  was full is raised once there is a place and at start.
+- **One room's stored log can no longer stop the daemon starting.** Since
+  0.1.0, a start failed for every room if one room's stored log did not
+  parse or replayed with a different reason text, so a stricter receipt
+  rule in a later release, or an entry a hostile member got stored, could
+  stop the daemon after an upgrade. Stored entries are now checked for
+  form and signature only, the replay compares dispositions only, and a
+  room whose log still does not load is set aside: not served or pulled,
+  writes to it refused, nothing deleted, shown by `a2p2 status` and
+  `a2p2 doctor` with what to do. It may be left, except the local room,
+  for which the fix is the older version. The other rooms work as before.
+- **Leaving a room with many files no longer stalls the other rooms.**
+  Since 0.2.0 the file deletions of a left room ran while the rooms lock
+  was held, about 4 ms per file, so pulls and approvals of every room
+  waited. They now run after the lock is released. Other file work still
+  waits for them.
+
 ## [0.2.3] - 2026-11-25
 
 The local web page loads. It did not in any earlier release: `a2p2 ui`

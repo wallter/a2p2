@@ -16,6 +16,26 @@ reports.
   the requesting machine's history permissions. Until a removal reaches a
   member, that member may still serve the removed machine. Copies already
   received stay with their holders.
+- An admin can sign entries that wait for a second admin, and each other
+  admin's machine asks its person about them. It asks about at most four
+  per signing admin at a time, so one admin cannot fill another's queue.
+  The requests a person starts have a budget of their own, and a removal
+  of an admin passes it, so a person can always propose removing an
+  admin. On the other admins that removal passes the seconding budgets
+  too, once per proposing admin and target. A hostile admin can still
+  make the other people decline its entries, four at a time.
+- When the daemon starts, it checks each room's stored log for form and
+  signature only, not for receipt rules added since the entries were
+  stored. A room whose stored log does not load is set aside: it is not
+  served or pulled, nothing can be written to it, setting it aside
+  deletes nothing, and `a2p2 status` and `a2p2 doctor` show it. The other
+  rooms keep working, so an entry another machine got stored cannot stop
+  the daemon starting after an upgrade.
+- A machine that reaches a room through one member trusts that member for
+  delivery. That member can leave out an author's messages without any
+  sign, and a removal of that member never reaches the others while it is
+  the only path. Rooms shared between owners should have a listener from
+  each owner.
 - Anyone with a valid unused invite can present it. A person on the admin
   machine still approves the joining machine and the terms. Keep invites
   private and verify the joining machine's fingerprint before approval.

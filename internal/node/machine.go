@@ -137,6 +137,9 @@ type Machine struct {
 	// frontier published meanwhile, so that Prune reads the frontier and
 	// writes expiry as one decision.
 	locked func(fn func() error) error
+	// setAside, set by OpenRooms, refuses a write to a room set aside
+	// (Rooms.Quarantined): its record would be signed and never served.
+	setAside func(room string) error
 
 	// wakes is touched for a room after each write that can change its
 	// summary or log (wake.go).
@@ -490,6 +493,11 @@ func (m *Machine) writeWith(ctx context.Context, room, agent string, decide func
 // epochFn. The caller holds mu.
 func (m *Machine) buildRecord(rd *store.Reader, room, agent string, now time.Time, decide func(*roomView, *core.RecordFields) error,
 	epochFn func() string) (*core.VerifiedRecord, string, error) {
+	if m.setAside != nil {
+		if err := m.setAside(room); err != nil {
+			return nil, "", err
+		}
+	}
 	v := m.newView(rd, room, now)
 	if err := v.load(); err != nil {
 		return nil, "", err

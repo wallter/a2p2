@@ -744,7 +744,7 @@ new grant is signed if it is still a member; approval returns the log).
 | 403 | `bad_secret` | unknown secret, or bound to another key |
 | 403 | `declined`, `revoked`, `expired`, `removed` | as above |
 | 429 | `rate_limited`, `Retry-After` | 10 requests per minute per source IP address, counted before the body is read; 10 per minute per key that presented a valid secret; polls naming an unknown invite share 60 per minute, counted before any lookup |
-| 503 | `unavailable`, `Retry-After` | the room already has 32 requests waiting for a person |
+| 503 | `unavailable`, `Retry-After` | the room already has 32 requests this machine started waiting for a person (requests raised to second another admin's entry are not counted) |
 
 The joiner starts polling at an interval of `retry_ms` and doubles it
 up to 60 s. It stops on signed with `more` false, refused or expired,
@@ -1040,7 +1040,7 @@ the code is `node.ErrorCodes`):
 |---|---|---|
 | `invalid_request` | no | malformed, or names something that cannot be (the default) |
 | `not_found` | no | no such room, message, member or request here |
-| `not_allowed` | no | the caller may not do this (not addressed, its own message, not an admin, the local room) |
+| `not_allowed` | no | the caller may not do this (not addressed, its own message, not an admin, the local room, a room set aside) |
 | `not_shown` | no | a handled report before the agent was shown the text; reading it first makes the call succeed |
 | `already_done` | no | done before (a request already decided, an invite already used) |
 | `not_registered` | yes | the agent is not registered here; registering again (the MCP shim does) makes it succeed |
@@ -1077,7 +1077,7 @@ Linux the daemon writes no key and ignores the header (D47).
 | `requests` (new) | `{}` | `{"requests":[{"id","kind","action","room","room_label","node","fingerprint","name","role","history","seconding","created","deadline","text"}]}`; `kind` `network` is a recorded decision about networking |
 | `confirm` (new) | `{"id","approve":bool,"not_caught_up_ok"?:true}` | `{"id","state":"approved"\|"declined"\|"failed","reason"?,"entries"?,"effect"?}`; `reason` `not_caught_up` means this machine has not checked the room's log with another member since it started (DESIGN 3); the surface shows the warning and may repeat with `not_caught_up_ok`, which is recorded |
 | `net` (changed) | `{"state":"off"\|"outbound"\|"on","listen"?}` | `{"state","listen","request","text","applies"}`; a person's decision with the same authority as `confirm`, recorded as a decided request. The daemon applies it at once, without a restart; `applies` is `"now: the daemon applies it at once"` |
-| `status` (changed) | `{"show_notice"?,"notice_shown"?}`; `show_notice`: a person will be shown this status, so the one-time notice is returned while it has not been recorded as shown (returning it records nothing); `notice_shown`: the caller printed or drew the notice, which is recorded as shown before the status is read | machine, version, `network {state, listen, request, applied?, reason?}`, rooms (as in `room/list`, each also with `agents`: `[{"agent","last_seen"}]`, the agents of members seen writing there, newest first), agents, `levels` (`[{"agent","room","level"}]`, every local agent's level that is not `all`), `waiting` (requests for a person), and `notice` until it is recorded as shown. `network` is the latest decision; `applied` and `reason` appear only when what runs differs from it: while a decision is being applied (`applied` is the state still running, `reason` `being applied`), or when `on` cannot listen (`applied` `outbound`, `reason` the listener's error) |
+| `status` (changed) | `{"show_notice"?,"notice_shown"?}`; `show_notice`: a person will be shown this status, so the one-time notice is returned while it has not been recorded as shown (returning it records nothing); `notice_shown`: the caller printed or drew the notice, which is recorded as shown before the status is read | machine, version, `network {state, listen, request, applied?, reason?}`, rooms (as in `room/list`, each also with `agents`: `[{"agent","last_seen"}]`, the agents of members seen writing there, newest first), agents, `levels` (`[{"agent","room","level"}]`, every local agent's level that is not `all`), `waiting` (requests for a person), and `notice` until it is recorded as shown. `network` is the latest decision; `applied` and `reason` appear only when what runs differs from it: while a decision is being applied (`applied` is the state still running, `reason` `being applied`), or when `on` cannot listen (`applied` `outbound`, `reason` the listener's error). `quarantined`: `[{"id","label","reason"}]`, the rooms set aside because their stored log does not load in this version (DESIGN section 5), absent when there are none; such a room is not in `rooms`, and a write to it is refused with `not_allowed` |
 | `room/invite` (changed) | `{"room","history"?,"role"?}` | `{"token","expires","room"}`; refused while networking is off |
 | `room/join` (changed) | `{"token"}` | the previewed answer of 5.3 plus `preview`, the preview's identifier; refused while networking is off |
 | `room/join/accept` (new) | `{"token","preview","wait_ms"?}` | `{"state":"accepted"\|"signed"\|"refused"\|"expired"\|"removed","room"?,"reason"?,"role"?,"history"?,"note"?}`; `role` and `history` are what the joiner's own log shows, `note` says if they differ from the preview |
@@ -1180,8 +1180,14 @@ levels, U1 to U3); leaving a room deletes its rows. Migration 12 adds
 `shown` and replaces the index `records_history` with `records_reading`
 (D-reading); leaving a room deletes its `shown` rows. While `v02_removed` is set and `v02_dropped_notice` is
 not, `status` with `show_notice` and the page return the notice (section
-7). Per room at most 32 requests wait, and 256 refused dependants and 256
-invalid entries are kept.
+7). Per room at most 32 requests this machine started wait (proposals,
+invite accepts, sends with files; a removal of an admin passes it once
+per target), and requests raised to second another admin's entry wait at
+most 4 per signing admin and 32 in all, a removal of an admin past both
+once per signer and target (DESIGN section 7). 256 refused dependants and
+256 invalid entries are kept. A `log` row's `reason` is explanation only:
+a replay compares `state`, and a room whose stored log does not replay to
+the same states is set aside, not opened (DESIGN section 5).
 
 `gen` increases on leave and on join. `batch` and `batch_pos` record
 arrival order for replaying `members.Machine`; accepted offers are applied

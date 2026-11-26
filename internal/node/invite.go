@@ -622,6 +622,9 @@ func (s *JoinServer) accept(ctx context.Context, h, from string, q JoinRequest, 
 	}
 	err = st.AcceptInvite(ctx, h, from, q.Name, q.Addrs, terms, req, r.m.now)
 	switch {
+	case errors.Is(err, store.ErrTooManyPending):
+		// Filled meanwhile, by a send with files (prepared's budget).
+		return limited(http.StatusServiceUnavailable, CodeUnavailable, queueFullRetry), nil
 	case errors.Is(err, store.ErrInviteExpired):
 		return joinRefusal(CodeExpired), nil
 	case errors.Is(err, store.ErrInviteTerms):

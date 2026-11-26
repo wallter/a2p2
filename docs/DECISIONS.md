@@ -1624,3 +1624,69 @@ withdraw drops.
 **Revisit if** a SQLite upgrade changes a plan (the test fails), the store
 starts running `ANALYZE`, or the pull summary or the unread walk shows up
 in a measurement.
+
+## D-NEW-A-requests-replay. Separate request budgets, and a stored log that does not load sets one room aside (2026-11-25)
+
+A security review showed two things. One hostile admin could fill the
+32-request queue of the other admins with entries that wait for a second
+admin, so a removal of that admin could not be proposed and was never
+raised (F1). And any stricter receipt rule, or a reworded reason, would
+stop the daemon starting after an upgrade, because a start failed when
+one room's stored log did not parse or replay with the same reason text
+(F71). The other fixes of the review add receipt rules, so this has to
+ship first.
+
+- **What changed.** The person's own requests (proposals, invite accepts,
+  sends with files) keep a budget of 32 per room, checked again in the
+  transaction that stores each one; a proposal to remove an admin passes
+  it once per target. Requests raised to second another admin's entry
+  have their own: at most 4 per signing admin and 32 in all, counting
+  only those whose entry still waits; a removal of an admin passes both,
+  once per signer and target. A pending one whose entry stopped waiting
+  is closed as failed (`ReasonNotWaiting`), and raised again if the entry
+  waits again. Every waiting entry without a request is raised once there
+  is a place: after each batch, after a decline or failure, and at start,
+  removals of admins first, then in arrival order. A raise that fails
+  after a decision or at start is retried at the room's next batch or
+  pull and does not stop the start. Stored entries are decoded for form
+  and signature only (`core.StoredEntryFromParts`). The replay compares
+  dispositions, not reason text, keeps the new reason in memory and
+  leaves the stored text as it is. A room whose stored log does not
+  parse, verify or replay is set aside: not served or pulled, every write
+  to it refused (`not_allowed`), nothing deleted by setting it aside,
+  listed in `status` (`quarantined`) and `a2p2 doctor` with a fix, and it
+  may be left unless it is the local room. Its messages can still be
+  read, and expiry and the file rules still run on it. Leaving a room
+  runs its file deletions after the rooms lock is released (F68).
+- **No wire, entry or schema change.** Old and new machines see the same
+  entries. Requests are local rows. By reading the code, a database
+  written by 0.2.0 to 0.2.3 opens, and they can still open one this
+  version wrote, because no stored reason is rewritten at start. The
+  tests edit a database this version made; none opens one a tagged
+  release made (F73). `status` gains one optional field.
+- **Why not reason codes on disk.** Storing codes in `log.reason` would
+  need a migration, and 0.2.x compares the text it wrote, so a downgrade
+  would stop at start. Comparing dispositions alone removes the text from
+  the check without that.
+- **Costs.** Each batch where this machine is an admin reads the room's
+  pending seconding requests (an index lookup) and looks at every entry
+  that waits for a second admin, not only the new ones. While one waits,
+  it also reads the id, entry and state of every seconding request the
+  room ever had (no drafts), under the rooms lock. That is bounded by the
+  log, which has no cap of its own. A flooding admin still costs the other people one decline per
+  entry, four at a time. A room set aside is unusable until the person
+  runs the version that stored it or leaves it and joins again.
+- **Still open.** A "decline all from this machine" action and showing
+  which admin signed each waiting entry need new UI and wording. A change
+  of disposition under a new rule (a per-signer cap in `members`) sets
+  rooms aside rather than adopting the new decision; adopting it needs a
+  versioned re-decide (a rules version in `meta`). A stored record that
+  fails a later record rule still breaks reading that room (audit r2-4
+  item 2). No test opens databases made by tagged releases (F73). The
+  warning that a removal targets the only member this machine reaches
+  (F21) is not built and is deferred out of this change; it needs pull
+  state the scheduler owns. A quarantined local room cannot be left; the
+  fix is to run the older version.
+
+**Revisit if** a release adds a receipt rule or changes `members`
+decisions, or a person reports a room set aside.
