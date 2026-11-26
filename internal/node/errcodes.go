@@ -12,7 +12,7 @@ const (
 	// ErrorNotFound: no such room, message, member or request here.
 	ErrorNotFound = "not_found"
 	// ErrorNotAllowed: the caller may not do this (not addressed, its own
-	// message, not an admin, the local room).
+	// message, not an admin, the local room, a room set aside).
 	ErrorNotAllowed = "not_allowed"
 	// ErrorNotShown: a handled report for a message whose text the agent
 	// has not been shown yet; reading it first makes the same call succeed.

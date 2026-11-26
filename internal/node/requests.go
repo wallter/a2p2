@@ -12,7 +12,9 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"math"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/wallter/a2p2/internal/core"
@@ -162,9 +164,13 @@ func (r *Rooms) propose(ctx context.Context, room string, c Change, admit bool) 
 	if err != nil {
 		return store.Request{}, err
 	}
-	if err := r.m.st.CreateRequest(ctx, q); err != nil {
+	switch err := r.m.st.CreateRequest(ctx, q); {
+	case errors.Is(err, store.ErrTooManyPending):
+		return store.Request{}, &UserError{ReasonTooMany, ErrorNotAllowed}
+	case err != nil:
 		return store.Request{}, err
 	}
+	q.Cap = 0
 	return q, nil
 }
 
@@ -221,7 +227,23 @@ func (r *Rooms) prepared(ctx context.Context, rl *roomLog, q store.Request, hist
 	if err != nil {
 		return store.Request{}, err
 	}
-	if len(pending) >= MaxPendingRequests {
+	// Only the requests this machine started count: requests raised to
+	// second another admin's entries have their own budgets (raise) [F1].
+	// A removal of an admin passes it, once per target, so that agents'
+	// sends with files or invite accepts never stop the person proposing
+	// one. The store checks the budget again when it inserts (Cap).
+	own, removing := 0, false
+	for _, p := range pending {
+		if p.Seconds == "" {
+			own++
+			removing = removing || p.Kind == string(core.EntryRemove) && p.Node == q.Node
+		}
+	}
+	q.Cap = MaxPendingRequests
+	if q.Kind == string(core.EntryRemove) && slices.Contains(rl.st.Admins, q.Node) && !removing {
+		q.Cap = 0
+	}
+	if q.Cap > 0 && own >= q.Cap {
 		return store.Request{}, &UserError{ReasonTooMany, ErrorNotAllowed}
 	}
 	q.ID = r.newID()
@@ -317,16 +339,27 @@ func (r *Rooms) ConfirmWith(ctx context.Context, id string, approve bool, o Conf
 		return Confirmation{}, &UserError{errNotPendingText, ErrorAlreadyDone}
 	}
 	now := r.m.now()
+	// A decision frees a place in the room's budgets: an entry that waited
+	// for one is raised now. The decision is committed already, so a
+	// failure here is left to the room's next batch or pull to retry
+	// (raiseWaiting).
+	raiseNext := func() {
+		if rl := r.rooms[q.Room]; rl != nil {
+			_ = r.raiseWaiting(ctx, rl)
+		}
+	}
 	if !approve {
 		if err := r.m.st.DecideRequest(ctx, id, store.RequestDeclined, "", now); err != nil {
 			return Confirmation{}, err
 		}
+		raiseNext()
 		return Confirmation{ID: id, State: store.RequestDeclined}, nil
 	}
 	fail := func(reason string) (Confirmation, error) {
 		if err := r.m.st.DecideRequest(ctx, id, store.RequestFailed, reason, now); err != nil {
 			return Confirmation{}, err
 		}
+		raiseNext()
 		return Confirmation{ID: id, State: store.RequestFailed, Reason: reason}, nil
 	}
 	invited, expired, err := r.inviteOf(ctx, q, now)
@@ -569,61 +602,169 @@ func (r *Rooms) heads(ctx context.Context, room string) (map[string][]string, er
 	return out, err
 }
 
-// raise returns the requests a batch raises: for each entry newly
-// accepted that waits for a second admin, signed by another admin, that
-// this machine could second as an admin, and has not been asked about,
-// while the room has fewer than MaxPendingRequests waiting. Each records
-// the action the entry would have here and its history setting.
+// raising is what raise decides for a room: the requests to create, and
+// the pending requests to close as failed (ReasonNotWaiting) because the
+// entry they would second no longer waits.
+type raising struct {
+	reqs  []store.Request
+	stale []string
+}
+
+// raise decides the requests the room's state st raises: one for each
+// accepted entry still waiting for a second admin, signed by another
+// admin, that this machine could second as an admin and has not been
+// asked about. It looks at every waiting entry, not only a batch's new
+// ones, so an entry left out while a budget was full is raised once
+// there is room [F1]. The budgets count pending requests whose entry
+// still waits: at most MaxRaisedPerSigner per signing admin, and
+// MaxRaisedRequests in all. A removal of an admin passes both budgets,
+// once per signing admin and target, so a person can always be asked to
+// remove an admin. A removal of an admin goes first, then the entries in
+// arrival order: kept entries by batch and position, then the batch being
+// stored in its order (fresh gives each one's position). A pending
+// request whose entry no longer waits is closed (stale), except keep, the
+// request this batch approves; if its entry waits again, it is raised
+// again. Each request records the action the entry would have here and
+// its history setting.
 func (r *Rooms) raise(ctx context.Context, rl *roomLog, st members.State, look func(string) *core.VerifiedEntry,
-	final map[string]members.Result) ([]store.Request, error) {
+	fresh map[string]int, keep string) (raising, error) {
+	var out raising
 	if !slices.Contains(st.Admins, r.m.ID) {
-		return nil, nil
+		return out, nil
 	}
-	var asked map[string]bool
-	pending := 0
-	var out []store.Request
-	for _, id := range sortedIDs(final) {
+	waiting := func(id string) *core.VerifiedEntry {
+		if eff, ok := st.Effects[id]; !ok || eff.Applied || eff.Reason != members.ReasonNeedsSecond {
+			return nil
+		}
+		return look(id)
+	}
+	removesAdmin := func(f core.EntryFields) bool {
+		return f.Kind == core.EntryRemove && slices.Contains(st.Admins, f.Target)
+	}
+	var cands []string
+	for id := range st.Effects {
+		v := waiting(id)
+		if v == nil || v.Author() == r.m.ID {
+			continue
+		}
+		if f := v.Fields(); f.Kind != core.EntryAdmin && f.Kind != core.EntryRemove || f.Target == r.m.ID {
+			continue
+		}
+		cands = append(cands, id)
+	}
+	if err := hookAt("ingest:requests"); err != nil {
+		return out, err
+	}
+	// The pending ones only (an index lookup): every batch, so that a
+	// request whose entry stopped waiting is closed and frees its place.
+	pending, err := r.m.st.SecondingRequests(ctx, rl.id, true)
+	if err != nil {
+		return out, err
+	}
+	asked := map[string]bool{}
+	bySigner := map[string]int{}
+	removing := map[[2]string]bool{} // signer, target of a pending removal of an admin
+	total := 0
+	for _, q := range pending {
+		asked[q.Seconds] = true
+		v := waiting(q.Seconds)
+		if v == nil {
+			if q.ID != keep {
+				out.stale = append(out.stale, q.ID)
+			}
+			continue
+		}
+		bySigner[v.Author()]++
+		total++
+		if f := v.Fields(); removesAdmin(f) {
+			removing[[2]string{v.Author(), f.Target}] = true
+		}
+	}
+	if len(cands) == 0 {
+		return out, nil
+	}
+	all, err := r.m.st.SecondingRequests(ctx, rl.id, false)
+	if err != nil {
+		return out, err
+	}
+	for _, q := range all {
+		// One closed because its entry stopped waiting is not an answer.
+		if q.State != store.RequestFailed || q.Reason != ReasonNotWaiting {
+			asked[q.Seconds] = true
+		}
+	}
+	type order struct {
+		removal bool
+		batch   int64
+		pos     int
+		id      string
+	}
+	orderOf := func(id string) order {
+		o := order{removal: removesAdmin(look(id).Fields()), batch: math.MaxInt64, pos: math.MaxInt, id: id}
+		if row, ok := rl.state[id]; ok {
+			o.batch, o.pos = row.Batch, row.Pos
+		} else if p, ok := fresh[id]; ok {
+			o.pos = p
+		}
+		return o
+	}
+	keys := make(map[string]order, len(cands))
+	for _, id := range cands {
+		keys[id] = orderOf(id)
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		a, b := keys[cands[i]], keys[cands[j]]
+		switch {
+		case a.removal != b.removal:
+			return a.removal
+		case a.batch != b.batch:
+			return a.batch < b.batch
+		case a.pos != b.pos:
+			return a.pos < b.pos
+		}
+		return a.id < b.id
+	})
+	for _, id := range cands {
+		if asked[id] {
+			continue
+		}
 		v := look(id)
-		if final[id].Disposition != members.Accepted || v == nil || v.Author() == r.m.ID {
-			continue
-		}
-		f := v.Fields()
-		if f.Kind != core.EntryAdmin && f.Kind != core.EntryRemove || f.Target == r.m.ID {
-			continue
-		}
-		if eff := st.Effects[id]; eff.Applied || eff.Reason != members.ReasonNeedsSecond {
-			continue
-		}
-		if asked == nil {
-			if err := hookAt("ingest:requests"); err != nil {
-				return nil, err
-			}
-			qs, err := r.m.st.Requests(ctx, rl.id, "")
-			if err != nil {
-				return nil, err
-			}
-			asked = map[string]bool{}
-			for _, q := range qs {
-				asked[q.Seconds] = true
-				if q.State == store.RequestPending {
-					pending++
-				}
-			}
-		}
-		if asked[id] || pending >= MaxPendingRequests {
+		f, signer := v.Fields(), v.Author()
+		if k := [2]string{signer, f.Target}; removesAdmin(f) && !removing[k] {
+			removing[k] = true
+		} else if bySigner[signer] >= MaxRaisedPerSigner || total >= MaxRaisedRequests {
 			continue
 		}
 		asked[id] = true
-		pending++
+		bySigner[signer]++
+		total++
 		q := store.Request{ID: r.newID(), Kind: string(f.Kind), Room: rl.id, Node: f.Target, Name: f.Name,
 			Seconds: id, Action: actionOf(st, string(f.Kind), f.Target), Created: r.m.now(), State: store.RequestPending}
 		if q.Action == ActionAdmitAdmin {
 			q.History = f.History
 		}
 		q.Role = roleOf(q.Action)
-		out = append(out, q)
+		out.reqs = append(out.reqs, q)
 	}
 	return out, nil
+}
+
+// raiseWaiting stores, in one transaction, what rl's current state raises
+// (raise): at a start, after a decision frees a place in a budget, and
+// after a failed attempt, at the room's next batch or unchanged pull. A
+// failure marks the room so the next one retries. The caller holds mu, or
+// is opening the rooms.
+func (r *Rooms) raiseWaiting(ctx context.Context, rl *roomLog) error {
+	x, err := r.raise(ctx, rl, rl.st, rl.lookup(nil), nil, "")
+	if err == nil && (len(x.reqs) > 0 || len(x.stale) > 0) {
+		_, err = r.m.st.ApplyLog(ctx, store.LogBatch{Room: rl.id, Gen: rl.gen, Now: r.m.now(), Requests: x.reqs,
+			Fail: x.stale, FailReason: ReasonNotWaiting})
+		if err == nil {
+			r.m.wakes.touch(rl.id)
+		}
+	}
+	rl.raiseDue = err != nil
+	return err
 }
 
 func (r *Rooms) newID() string {

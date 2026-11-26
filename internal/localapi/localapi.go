@@ -603,6 +603,16 @@ type (
 		// Files is what attachments take on this machine (each room's is
 		// in its files).
 		Files FilesUsage `json:"files"`
+		// Quarantined are the rooms set aside because their stored log
+		// does not load in this version: not served or pulled, nothing
+		// deleted. Absent when there are none.
+		Quarantined []Quarantined `json:"quarantined,omitempty"`
+	}
+	// Quarantined is one room set aside (node.Quarantine).
+	Quarantined struct {
+		ID     string `json:"id"`
+		Label  string `json:"label"`
+		Reason string `json:"reason"`
 	}
 	Empty struct{}
 )
@@ -824,6 +834,9 @@ func StatusOf(st node.StatusView, listen []string, info Info) Status {
 		out.Levels = []store.AgentLevel{}
 	}
 	out.Files = FilesUsage{Held: st.Files.Held, Budget: st.Files.Budget, Unknown: st.Files.Unknown}
+	for _, q := range st.Quarantined {
+		out.Quarantined = append(out.Quarantined, Quarantined{ID: q.Room, Label: q.Label, Reason: q.Reason})
+	}
 	for i := range out.Rooms {
 		for _, w := range st.Writers[out.Rooms[i].ID] {
 			out.Rooms[i].Agents = append(out.Rooms[i].Agents, Writer{Agent: w.Agent, LastSeen: Time(w.Last)})

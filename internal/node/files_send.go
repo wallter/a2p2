@@ -92,6 +92,9 @@ func (f *Files) RequestSend(ctx context.Context, s FileSend) (FileSendResult, er
 	if len(s.Choices) > 0 {
 		return res, userErr("a send with files carries no choices")
 	}
+	if err := f.r.setAsideErr(s.Room); err != nil {
+		return res, err
+	}
 	if _, err := f.r.State(s.Room); err != nil {
 		return res, err
 	}

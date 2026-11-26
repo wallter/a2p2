@@ -238,7 +238,21 @@ the machine keeps signed headers and read state for the room's life.
 Each send, response application, request log and offer application, Seen,
 log entry signing and pruning pass takes one transaction. On startup the
 daemon rebuilds `members.Machine` by replaying `log` in arrival batches.
-The result is deterministic. It prunes hourly and before every read, page
+The result is deterministic. A stored entry is checked for its form and
+signature only, not for the content rules a received entry meets (such as
+what a room label or a name may contain), so a rule added to receipt later
+does not reject a log stored before it. The replay compares each entry's
+disposition with the stored one, not its reason: a reason is an
+explanation whose wording may change, and the stored text is left as it
+is, so the version that wrote it can still open the database. A room
+whose stored log does not parse, does not verify, or replays to another
+disposition is set aside: it is not served or pulled, a send, replace,
+withdraw, handled report or send with files to it is refused, and setting
+it aside deletes nothing. Its stored messages can still be read here, and
+text expiry and the file rules still apply to what it holds. `status` and
+`a2p2 doctor` show it with the reason and what to do: run the version that
+stored it, or leave it (not the local room, which cannot be left). The
+other rooms open as usual. It prunes hourly and before every read, page
 and offer. Text past expiry becomes `expired` permanently. The daemon
 deletes withdrawn text when it stores the withdraw [R6].
 
@@ -432,6 +446,25 @@ set on bypassing it can; an OS-separated approver may come later.
 `a2p2 room admin` replaces a lost admin (T9); the other admin sees the
 first entry as a request [M4].
 
+**Request budgets.** Requests this machine started (proposals, invite
+accepts and sends with files) wait at most 32 per room, checked again in
+the transaction that stores one. A proposal to remove an admin passes
+that budget, once per target. Requests raised to second another admin's
+entry have their own budgets: at most 4 per signing admin and 32 in all
+per room, counting only requests whose entry still waits. A removal of an
+admin passes both, once per signing admin and target. So one admin that
+signs many waiting entries takes at most 4 places (and one per admin it
+proposes to remove) on each other admin, and cannot stop a removal of
+itself from being proposed or raised. A pending request whose entry no
+longer waits (another admin seconded it, or a later entry changed its
+effect) is closed as
+failed; if the entry waits again it is raised again. The flooder's
+further entries stay in the log; each waiting entry without a request is
+raised when a decision frees a place, after each batch, and at the next
+start, a removal of an admin first, then in arrival order. If raising
+fails after a decision or at start, the room's next batch or pull tries
+again, and the start goes on.
+
 **First three admins (T9 default).** The second machine gets one `admin`
 entry; the third an `add` (it joins at once) plus `admin` entries from both
 admins, confirmed on both and on the joiner. The model test
@@ -442,7 +475,10 @@ covers the daemon's code. A daemon never co-signs alone.
 **Leaving.** A vote on one's own removal does not count [M5], so `a2p2 room
 leave` (otherwise a machine cannot stop carrying a room) is local: the
 room's data is deleted and its generation changes, so no late response
-applies. Rejoining needs a new invite; an admin removes it from the list.
+applies. Its files are deleted after the rooms lock is released, so
+leaving a room with many files does not stall the other rooms' pulls and
+approvals (other file work still waits for the deletions). Rejoining
+needs a new invite; an admin removes it from the list.
 
 ## 8. Failure handling
 

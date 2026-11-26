@@ -627,6 +627,11 @@ func status(c *cmd) error {
 				fmt.Println("    " + node.MaybeRemovedText)
 			}
 		}
+		for _, q := range st.Quarantined {
+			fmt.Printf("  %-20s %s\n", node.EscapeDisplay(q.Label)+" ("+q.ID+")", node.QuarantineText)
+			fmt.Println("    why: " + node.EscapeDisplay(q.Reason))
+			fmt.Println("    fix: " + node.QuarantineFix(q.ID, q.ID == st.Local))
+		}
 		fmt.Println("agents on this machine")
 		if len(st.Agents) == 0 {
 			fmt.Println("  none registered")
@@ -1177,6 +1182,18 @@ func noHarnessHint() string {
 		" (or " + strings.Join(harness.Names[1:], ", ") + "), then a2p2 doctor again."
 }
 
+// quarantineChecks is one failing doctor line per room set aside, with
+// what the person can do about it.
+func quarantineChecks(st localapi.Status) []harness.Check {
+	var out []harness.Check
+	for _, q := range st.Quarantined {
+		out = append(out, harness.Check{Name: "room " + node.EscapeDisplay(q.Label) + " (" + short(q.ID) + ")",
+			Info: node.QuarantineText + " (" + node.EscapeDisplay(q.Reason) + ")",
+			Fix:  node.QuarantineFix(q.ID, q.ID == st.Local)})
+	}
+	return out
+}
+
 // runDoctor writes the checks to w. o says how to look for harnesses.
 func runDoctor(c *cmd, w io.Writer, o harness.Options) error {
 	checks := []harness.Check{}
@@ -1205,6 +1222,7 @@ func runDoctor(c *cmd, w io.Writer, o harness.Options) error {
 			} else {
 				add("network", nil, "reachable at "+strings.Join(st.Listen, ", "), "")
 			}
+			checks = append(checks, quarantineChecks(st)...)
 			for _, p := range st.Peers {
 				info := "heard from at " + clock(p.LastHeard)
 				if p.LastHeard == "" {

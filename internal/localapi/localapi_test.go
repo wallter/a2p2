@@ -334,3 +334,31 @@ func TestConfirmBeforeCatchingUpAnswersNotCaughtUpAndSignsOnlyWithTheOverride(t 
 		t.Fatalf("the override was not recorded: %+v %v", q, err)
 	}
 }
+
+// status carries the rooms set aside as quarantined, and leaves the field
+// out when there are none, so older clients see the status they knew.
+//
+// Requirements: security review F71 (visible in status)
+func TestStatusJSONListsTheRoomsSetAside(t *testing.T) {
+	room := strings.Repeat("c", 64)
+	b, err := json.Marshal(StatusOf(node.StatusView{Quarantined: []node.Quarantine{{Room: room, Label: "team", Reason: "why"}}}, nil, Info{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Quarantined []map[string]string `json:"quarantined"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Quarantined) != 1 || got.Quarantined[0]["id"] != room || got.Quarantined[0]["label"] != "team" || got.Quarantined[0]["reason"] != "why" {
+		t.Fatalf("quarantined: %s", b)
+	}
+	b, err = json.Marshal(StatusOf(node.StatusView{}, nil, Info{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "quarantined") {
+		t.Fatalf("an empty list is sent: %s", b)
+	}
+}

@@ -130,11 +130,14 @@ func OpenSurface(ctx context.Context, m *Machine, r *Rooms, o SurfaceOpts) (*Sur
 	if s.addrs == nil {
 		s.addrs = func() []string { return nil }
 	}
-	if _, err := r.Gen(s.local); errors.Is(err, ErrNoRoom) {
+	switch _, err := r.Gen(s.local); {
+	case errors.Is(err, ErrNoRoom) && r.isQuarantined(s.local):
+		// A local room set aside stays as it is (Quarantined).
+	case errors.Is(err, ErrNoRoom):
 		if err := s.createLocal(ctx); err != nil {
 			return nil, err
 		}
-	} else if err != nil {
+	case err != nil:
 		return nil, err
 	}
 	if _, err := s.Register(ctx, HumanLabel, HumanLabel, ""); err != nil {
@@ -1436,6 +1439,9 @@ type StatusView struct {
 	// setting and use, by room id.
 	Files     FilesUsage
 	RoomFiles map[string]RoomFilesView
+	// Quarantined are the rooms set aside because their stored log does
+	// not load in this version (Rooms.Quarantined).
+	Quarantined []Quarantine
 }
 
 // WriterView is an agent seen writing in a room.
@@ -1514,7 +1520,8 @@ func (s *Surface) Status(ctx context.Context, show bool) (StatusView, error) {
 	}
 	return StatusView{Node: s.m.ID, Name: s.name, Human: s.HumanID(), Local: s.local, Rooms: rooms, Agents: agents,
 		Peers: peers, Waiting: waiting, Network: s.net, Decided: decided, Fault: s.fault(), Notice: notice, Writers: writers,
-		Levels: levels, Reach: s.ReachNow(), Mapping: s.MappingNow(), Files: files, RoomFiles: roomFiles}, nil
+		Levels: levels, Reach: s.ReachNow(), Mapping: s.MappingNow(), Files: files, RoomFiles: roomFiles,
+		Quarantined: s.r.Quarantined()}, nil
 }
 
 // mayBeRemoved: every other member of r has refused this machine as not a
