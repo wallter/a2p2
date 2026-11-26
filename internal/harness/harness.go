@@ -331,14 +331,19 @@ func (h *hookFile) realPath() string {
 	return h.path
 }
 
-// write saves atomically, recording the original first (see bakSuffix).
-// Existing permission bits are kept.
+// write saves atomically, recording the original first (see bakSuffix),
+// and only while the file still holds what loadHooks read (see
+// writeGuarded). Existing permission bits are kept.
 func (h *hookFile) write(record bool) error {
 	b, err := h.encode()
 	if err != nil {
 		return err
 	}
-	return saveRecorded(h.realPath(), h.existed, h.orig, b, record)
+	if err := saveRecorded(h.realPath(), h.existed, h.orig, b, record); err != nil {
+		return err
+	}
+	h.orig, h.existed = b, true
+	return nil
 }
 
 func hookEvents(sp spec) []string { return []string{sp.first, "Stop"} }
@@ -575,7 +580,7 @@ func (h *hookFile) restore(dry bool) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return restoreRecorded(h.realPath(), cur, len(h.doc) == 0, same, dry)
+	return restoreRecorded(h.realPath(), cur, h.orig, h.existed, len(h.doc) == 0, same, dry)
 }
 
 func prefixed(dry bool, s string) string {

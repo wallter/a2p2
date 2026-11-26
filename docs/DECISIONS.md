@@ -1858,8 +1858,20 @@ What changed:
   that is set. Each install changes the approval in one write that is made
   only if the file still holds what a2p2 read. A failed `codex mcp add`
   still removes the lines a2p2 wrote. When the person's own
-  `default_tools_approval_mode` is in a2p2's table, `--approve-tools`
-  adds none, since a second key would make the file invalid.
+  `default_tools_approval_mode` is in a2p2's table, in any spelling TOML
+  allows (quoted, literal, escaped, spaced dots, an escaped header),
+  `--approve-tools` adds none, since a second key would make the file
+  invalid. When a line that could set something in a2p2's server is one
+  a2p2 does not read in full (an inline table, or a key or header it
+  cannot decode), it adds nothing, names the line and gives the line to
+  add by hand, and doctor's line fails saying it cannot tell.
+- **Guarded writes.** Every write to a file a harness or the person also
+  edits (hook files, the three adapters' files, a harness CLI's file when
+  an entry is put back, uninstall's restores and removals) reads the file
+  again just before the rename and refuses, naming the file, if it
+  changed; a backup made for that write is taken back. The Codex approval
+  edit reads and edits again, up to three times. The instant between that
+  read and the rename remains: no harness takes a lock a2p2 could share.
 - **Team launcher.** A manifest with a Claude Code, Codex or Antigravity
   member must say `"approve_a2p2_tools": true` (a new manifest key).
   Only `up` asks, so `status`, `stop`, `logs` and `report` work for a run

@@ -150,6 +150,7 @@ func (a fileAdapter) uninstall(name string, o Options) (string, error) {
 		return "", err
 	}
 	var rep []string
+	disk, onDisk := cur, existed // what the file holds now, for the guarded writes
 	if existed {
 		b, had, err := a.del(cur)
 		if err != nil {
@@ -167,13 +168,15 @@ func (a fileAdapter) uninstall(name string, o Options) (string, error) {
 		switch {
 		case o.DryRun || bytes.Equal(b, cur):
 		case len(b) == 0: // nothing is left: no empty file stays behind
-			if err := os.Remove(path); err != nil {
+			if err := removeGuarded(path, cur); err != nil {
 				return "", err
 			}
+			onDisk = false
 		default:
-			if err := writeKeepingMode(path, b); err != nil {
+			if err := writeGuarded(path, b, cur, true); err != nil {
 				return "", err
 			}
+			disk = b
 		}
 		cur = b
 	}
@@ -183,7 +186,7 @@ func (a fileAdapter) uninstall(name string, o Options) (string, error) {
 	if len(rep) == 0 {
 		rep = append(rep, "no "+a.what+" found in "+path)
 	}
-	more, err := restoreRecorded(path, cur, existed && a.empty(cur), a.same, o.DryRun)
+	more, err := restoreRecorded(path, cur, disk, onDisk, existed && a.empty(cur), a.same, o.DryRun)
 	if err != nil {
 		return "", err
 	}
@@ -221,15 +224,17 @@ func (a fileAdapter) doctor(name string, o Options) Check {
 	return c
 }
 
-// saveRecorded writes b to path atomically. When record is set and a2p2 has
-// not changed this file before, it first keeps the original (bakSuffix) or
-// notes that a2p2 created the file and which directories (newSuffix).
+// saveRecorded writes b to path in a guarded write (see writeGuarded): only
+// if the file still holds orig, or is still missing when existed is false.
+// When record is set and a2p2 has not changed this file before, it first
+// keeps the original (bakSuffix) or notes that a2p2 created the file and
+// which directories (newSuffix); a refused write takes those back.
 func saveRecorded(path string, existed bool, orig, b []byte, record bool) error {
 	_, bakErr := os.Stat(path + bakSuffix)
 	_, newErr := os.Stat(path + newSuffix)
 	first := record && errors.Is(bakErr, os.ErrNotExist) && errors.Is(newErr, os.ErrNotExist)
+	var made []string // directories this write creates, deepest first
 	if first && !existed {
-		var made []string // directories this write creates, deepest first
 		for d := filepath.Dir(path); ; d = filepath.Dir(d) {
 			if _, err := os.Stat(d); err == nil || d == filepath.Dir(d) {
 				break
@@ -251,15 +256,24 @@ func saveRecorded(path string, existed bool, orig, b []byte, record bool) error 
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return writeKeepingMode(path, b)
+	err := writeGuarded(path, b, orig, existed)
+	if errors.Is(err, errChanged) && first {
+		_ = os.Remove(path + bakSuffix)
+		_ = os.Remove(path + newSuffix)
+		for _, d := range made {
+			_ = os.Remove(d) // only if empty
+		}
+	}
+	return err
 }
 
 // restoreRecorded finishes an uninstall once a2p2's entries are gone from
 // path, whose content is now cur: it writes back the original bytes and
 // deletes the backup when nothing else changed, keeps the backup when the
 // file changed since in other ways, and deletes the file a2p2 created when
-// empty says nothing else is in it. It returns report lines.
-func restoreRecorded(path string, cur []byte, empty bool, eq func(a, b []byte) bool, dry bool) ([]string, error) {
+// empty says nothing else is in it. disk is what the file holds, when
+// onDisk, for the guarded writes. It returns report lines.
+func restoreRecorded(path string, cur, disk []byte, onDisk, empty bool, eq func(a, b []byte) bool, dry bool) ([]string, error) {
 	var rep []string
 	orig, err := os.ReadFile(path + bakSuffix)
 	switch {
@@ -272,9 +286,10 @@ func restoreRecorded(path string, cur []byte, empty bool, eq func(a, b []byte) b
 		}
 		rep = append(rep, prefixed(dry, "restore "+path+" from "+path+bakSuffix))
 		if !dry {
-			if err := writeKeepingMode(path, orig); err != nil {
+			if err := writeGuarded(path, orig, disk, onDisk); err != nil {
 				return nil, err
 			}
+			disk, onDisk = orig, true
 		}
 		rep = append(rep, prefixed(dry, "remove "+path+bakSuffix))
 		if !dry {
@@ -296,8 +311,10 @@ func restoreRecorded(path string, cur []byte, empty bool, eq func(a, b []byte) b
 		if empty {
 			rep = append(rep, prefixed(dry, "remove "+path+", which a2p2 created"))
 			if !dry {
-				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return nil, err
+				if onDisk {
+					if err := removeGuarded(path, disk); err != nil && !errors.Is(err, os.ErrNotExist) {
+						return nil, err
+					}
 				}
 				// Deepest first; a directory that holds anything else stays.
 				for _, d := range strings.Split(string(made), "\n") {

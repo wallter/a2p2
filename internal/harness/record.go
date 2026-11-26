@@ -71,7 +71,7 @@ func saveRecord(r *record, o Options) error {
 		return err
 	}
 	b, _ := json.MarshalIndent(r, "", "  ")
-	return writeKeepingMode(p, append(b, '\n'))
+	return writeOwn(p, append(b, '\n'))
 }
 
 func dropRecord(name string, o Options) error {
@@ -150,7 +150,7 @@ func codexTables(s string) (rest, table string) {
 }
 
 // putBackCLIEntry writes the recorded entry back after the harness CLI
-// removed a2p2's own one.
+// removed a2p2's own one, in a guarded write (see writeGuarded).
 func putBackCLIEntry(name string, r *record) error {
 	b, ok, err := readMaybe(r.File)
 	if err != nil {
@@ -162,7 +162,7 @@ func putBackCLIEntry(name string, r *record) error {
 		if rest = strings.TrimRight(rest, "\n"); rest != "" {
 			rest += "\n\n"
 		}
-		return writeKeepingMode(r.File, []byte(rest+r.Prior))
+		return writeGuarded(r.File, []byte(rest+r.Prior), b, ok)
 	}
 	doc := map[string]json.RawMessage{}
 	if ok && len(bytes.TrimSpace(b)) > 0 {
@@ -179,7 +179,7 @@ func putBackCLIEntry(name string, r *record) error {
 			return err
 		}
 	}
-	return writeKeepingMode(r.File, encodeJSON(doc))
+	return writeGuarded(r.File, encodeJSON(doc), b, ok)
 }
 
 // --- symlinks ---

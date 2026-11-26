@@ -300,7 +300,8 @@ Agent get the MCP server only, and Pi, which has no MCP, a skill that
 points its model at the CLI ([harness notes](HARNESSES.md)). Install
 records any entry named `a2p2` it replaces in `$A2P2_HOME/installs/`, and
 uninstall puts it back; without a record uninstall removes nothing
-(D44). Install approves no a2p2 tool unless the person passes
+(D44). Install and uninstall write a harness file only if it still holds
+what they read (D60). Install approves no a2p2 tool unless the person passes
 `--approve-tools` (Codex only), so whether `send` waits for the person
 is the harness's own rule; it refuses a binary in a temporary directory
 or one another user could replace, and Pi's skill passes message text to

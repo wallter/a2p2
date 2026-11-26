@@ -199,8 +199,13 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 - Codex `config.toml` edits now skip multi-line strings and arrays and
   touch only a2p2's tables, so text that reads like a2p2's table is not
   written into or removed. `--approve-tools` adds no second
-  `default_tools_approval_mode` to a table that has one, and a change is
-  written only if the file still holds what a2p2 read.
+  `default_tools_approval_mode` to a table that has one, in any spelling
+  TOML allows, and adds nothing, telling you the line to add, when a line
+  that could set it is one a2p2 does not read in full.
+- Install and uninstall now write a hook or configuration file only if it
+  still holds what they read, checked just before the rename; otherwise
+  they leave it and say which file changed. Before, only Codex's
+  `config.toml` was checked.
 - **The release workflow pins its actions and keeps write scopes away
   from the build.** Since v0.1.0 the release job ran actions named by
   moving tags (`actions/checkout@v4`, `actions/setup-go@v5`) while it held
