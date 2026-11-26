@@ -329,17 +329,23 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   handled report was accepted for a version replaced since the read.
   Message entries in the local API now say `edited` when their text is a
   replacement, MCP inbox messages carry `edited`, the CLI prints
-  `[edited]` and the page marks the message edited. A handled report is refused as `not_shown` until a read shows the
-  newest text held, and while newer text is announced but not here. A
-  signed reply or handled report still names only the message, not the
-  version answered.
+  `[edited]` and the page marks the message edited. A replacement whose
+  text expired keeps the mark, and the message is shown as expired rather
+  than with its first text. A handled report is refused as `not_shown` until a read shows the
+  newest text held, and while newer text is announced but not here. So
+  is a reply by an addressee shown an older text, from any client. The
+  page sends the version it drew with a reply and a handled report
+  (local API `reply_version` on send), and its background requests keep
+  no receipt. A signed reply or handled report still names only the
+  message, not the version answered.
 - **A peer's report can no longer add stream rows without limit.** Since
   0.1.0, any member could name made-up epochs of other authors in an
   unsigned pull report, and each became a stream row here, kept for the
   life of the room and listed as still being fetched. Now at most 32 such
   rows per author are kept on one peer's word, also when it takes them
   over from another peer, and they are deleted when it stops naming them
-  or leaves the author out of a whole report.
+  or leaves the author out of a whole report. A peer that raises another
+  peer's hint and then drops it leaves that peer's last report in place.
 - Pruning no longer fails in a room with more than about 32,000 authors
   whose readability is undecided, and an inbox read writes no receipts
   for a room left, or left and joined again, while it ran (both since

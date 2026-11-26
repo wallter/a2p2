@@ -58,6 +58,10 @@ type (
 		// Thread, with reply_to and no to: also address every agent that
 		// has posted in the thread (the reply tool).
 		Thread bool `json:"thread,omitempty"`
+		// ReplyVersion: the version of reply_to's text the caller showed
+		// (an entry's version). The reply is refused if the message has
+		// newer text since. Older daemons ignore it.
+		ReplyVersion string `json:"reply_version,omitempty"`
 		// Files (1 to 8): absolute paths, or "sha256:<hex>" for a file of
 		// the version replaced, kept by listing it again. With files
 		// nothing is written: a request waits for this machine's person
@@ -925,7 +929,7 @@ func Handler(s *node.Surface, info Info) http.Handler {
 	})
 	handle(mux, "send", func(ctx context.Context, r SendReq) (any, error) {
 		in := node.SendInput{Agent: r.Agent, Room: r.Room, Text: r.Text, To: r.To, ReplyTo: r.ReplyTo,
-			AskHandled: r.AskHandled, Replaces: r.Replaces, Choices: r.Choices, Thread: r.Thread}
+			AskHandled: r.AskHandled, Replaces: r.Replaces, Choices: r.Choices, Thread: r.Thread, ReplyVersion: r.ReplyVersion}
 		if len(r.Files) > 0 {
 			f, err := s.SendFiles(ctx, in, r.Files)
 			return SendFilesOf(f), err

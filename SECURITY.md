@@ -139,9 +139,17 @@ an invite.
   answered. Inbox, thread, branch, history, recent and skipped entries
   carry `edited` when the text is a replacement: in the local API and
   the MCP tools' results, as `[edited]` in the CLI and as a mark on the
-  page. A handled report is
+  page. A replacement whose text expired keeps that mark: the message is
+  then shown as expired and edited, never with its earlier text as
+  current. A handled report is
   refused when newer text arrived after the read, or while a newer text
-  is announced but not here yet. A signed reply and a handled report
+  is announced but not here yet. So is a reply by an agent that may
+  report the message handled and was shown an older text of it, and a
+  reply or report from the page names the version it drew and is refused
+  if the message changed since. The page's background requests keep no
+  receipt; only a seen of what it drew does. A reply by an agent no read
+  showed the message, or one it may not report handled, names no version
+  from the CLI or the MCP tools and is not checked. A signed reply and a handled report
   name only the message, not its version, so a thread read later cannot
   show which text an answer saw. The author also chooses a message's
   time, up to 24 hours ahead or any time in the past. That time orders
@@ -150,7 +158,9 @@ an invite.
   expires minutes after it arrives.
 - What a peer reports it holds is unsigned. It can make this machine list
   up to 32 streams per author that are not there as still being fetched,
-  until it stops reporting them.
+  until it stops reporting them. It can raise a hint another peer set,
+  but not erase it: when it lowers or drops the stream, the other peer's
+  last report stands.
 - The unread notice a hook prints holds a count and up to five sender
   labels, never message text. The sending agent chooses its label. Every
   machine accepts only 1 to 64 characters of letters, digits, `.`, `_` and

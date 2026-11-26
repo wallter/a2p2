@@ -107,7 +107,9 @@ func (m *Machine) newer(a, b *Record) bool {
 
 // currentText is a message's text with the newest replacement applied. wait
 // names a replacement whose text is missing here, so the text shown could
-// be stale.
+// be stale. A replacement whose text expired still counts: when it is the
+// newest, ver is it (and text is empty), and views show the message as
+// expired, never an earlier text as current (newestExpired).
 func (m *Machine) currentText(h *held) (text string, ver RecordID, wait *Pos) {
 	text, ver = h.body, h.rec.ID
 	var best *Record
@@ -120,14 +122,24 @@ func (m *Machine) currentText(h *held) (text string, ver RecordID, wait *Pos) {
 			p := r.rec.Pos()
 			wait = &p
 		}
-		if r.dropped == Live && (best == nil || m.newer(r.rec, best)) {
+		if (r.dropped == Live || r.dropped == Expired) && (best == nil || m.newer(r.rec, best)) {
 			best, text = r.rec, r.body
 		}
 	}
 	if best != nil {
 		ver = best.ID
+		if m.get(ver).dropped != Live {
+			text = ""
+		}
 	}
 	return text, ver, wait
+}
+
+// newestExpired says whether ver, a version currentText named, has no
+// text left here: the message's newest replacement expired.
+func (m *Machine) newestExpired(ver RecordID) bool {
+	x := m.get(ver)
+	return x != nil && x.dropped != Live
 }
 
 func (m *Machine) parentState(p RecordID) ParentState {
@@ -200,6 +212,10 @@ func (m *Machine) decide(g *agentState, agent string, h *held, heads map[Machine
 			text, ver, wait := m.currentText(h)
 			if wait != nil {
 				return nil, wait
+			}
+			if m.newestExpired(ver) {
+				e = m.entry(h, ExpiredNotice, "x:"+string(r.ID))
+				break
 			}
 			e = m.entry(h, Shown, string(r.ID))
 			e.Text, e.Version = text, ver
@@ -551,6 +567,9 @@ func (m *Machine) threadEntry(h *held) *Entry {
 	case Expired:
 		return m.entry(h, ExpiredNotice, "x:"+string(h.rec.ID))
 	case Live:
+		if _, ver, _ := m.currentText(h); m.newestExpired(ver) {
+			return m.entry(h, ExpiredNotice, "x:"+string(h.rec.ID))
+		}
 		e := m.entry(h, Shown, string(h.rec.ID))
 		e.Text, e.Version, _ = m.currentText(h)
 		e.Files, e.FilesPending = m.filesOf(e.Version)

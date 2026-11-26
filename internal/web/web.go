@@ -196,15 +196,17 @@ func entries(es []node.Entry, err error) (any, error) {
 
 // state is everything the page shows at once. The human's unread entries
 // and the questions waiting for the person are read without marking
-// anything seen; the page confirms what it showed. A one-time notice comes
-// back until the page reports it drew it (notice-shown).
+// anything seen, and without keeping a receipt: the page polls this in
+// the background and before each change, and may not draw what it gets
+// (seen keeps the receipts of what it drew). A one-time notice comes back
+// until the page reports it drew it (notice-shown).
 func (sv *server) state(r *http.Request) (any, error) {
 	ctx := r.Context()
 	st, err := sv.s.Status(ctx, true)
 	if err != nil {
 		return nil, err
 	}
-	in, err := sv.s.Inbox(ctx, sv.s.HumanID(), "", node.MaxInboxLimit, 0)
+	in, err := sv.s.InboxPeek(ctx, sv.s.HumanID(), node.MaxInboxLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -217,9 +219,6 @@ func (sv *server) state(r *http.Request) (any, error) {
 		return nil, err
 	}
 	questions, err := sv.s.Questions(ctx)
-	if err == nil { // shown to the person: the page may confirm them
-		err = sv.s.Listed(ctx, sv.s.HumanID(), questions)
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -273,11 +272,15 @@ func (sv *server) send(r *http.Request) (any, error) {
 		Text    string   `json:"text"`
 		To      []string `json:"to"`
 		ReplyTo string   `json:"reply_to"`
+		// ReplyVersion: the version of reply_to's text the page drew; a
+		// reply is refused if the message has newer text since.
+		ReplyVersion string `json:"reply_version"`
 	}
 	if err := decode(r, &in); err != nil {
 		return nil, err
 	}
-	m, err := sv.s.Send(r.Context(), node.SendInput{Agent: sv.s.HumanID(), Room: in.Room, Text: in.Text, To: in.To, ReplyTo: in.ReplyTo})
+	m, err := sv.s.Send(r.Context(), node.SendInput{Agent: sv.s.HumanID(), Room: in.Room, Text: in.Text, To: in.To, ReplyTo: in.ReplyTo,
+		ReplyVersion: in.ReplyVersion})
 	return localapi.SendResp{ID: m.ID, Room: m.Room, Created: localapi.Time(m.Created)}, err
 }
 
@@ -295,6 +298,9 @@ func (sv *server) seen(r *http.Request) (any, error) {
 	for _, e := range in.Entries {
 		reads = append(reads, store.Read{Key: e.Key, Version: e.Version})
 	}
+	if err := sv.drawn(r.Context(), reads); err != nil {
+		return nil, err
+	}
 	res, err := sv.s.Seen(r.Context(), sv.s.HumanID(), reads)
 	out := []localapi.SeenResult{}
 	for _, x := range res {
@@ -303,14 +309,45 @@ func (sv *server) seen(r *http.Request) (any, error) {
 	return map[string]any{"results": out}, err
 }
 
+// drawn keeps a receipt of each entry the page says it drew, with the
+// key and version it drew, that the person's inbox or questions list so
+// now: the only receipts the page leaves, so that Seen, and a handled
+// report after it, rest on text the page drew (state keeps none).
+func (sv *server) drawn(ctx context.Context, reads []store.Read) error {
+	want := map[string]string{}
+	for _, rd := range reads {
+		want[rd.Key] = rd.Version
+	}
+	in, err := sv.s.InboxPeek(ctx, sv.s.HumanID(), node.MaxInboxLimit)
+	if err != nil {
+		return err
+	}
+	qs, err := sv.s.Questions(ctx)
+	if err != nil {
+		return err
+	}
+	var es []node.Entry
+	kept := map[string]bool{}
+	for _, e := range append(in.Entries, qs...) {
+		if v, ok := want[e.Key]; ok && v == e.Version && e.Kind != node.EntryRequest && !kept[e.Key] {
+			kept[e.Key] = true
+			es = append(es, e)
+		}
+	}
+	return sv.s.Listed(ctx, sv.s.HumanID(), es)
+}
+
 func (sv *server) ack(r *http.Request) (any, error) {
 	var in struct {
 		ID string `json:"id"`
+		// Version: the version of the message's text the page drew; the
+		// report is refused if the message has newer text since.
+		Version string `json:"version"`
 	}
 	if err := decode(r, &in); err != nil {
 		return nil, err
 	}
-	h, err := sv.s.Ack(r.Context(), sv.s.HumanID(), in.ID)
+	h, err := sv.s.AckShown(r.Context(), sv.s.HumanID(), in.ID, in.Version)
 	return localapi.AckResp{Handled: h.ID}, err
 }
 

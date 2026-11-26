@@ -50,7 +50,9 @@ type Entry struct {
 	// replace); empty for notices without text.
 	Version string
 	// Edited, in a message entry: the text shown is its author's
-	// replacement, not the text first sent (Version is not ID).
+	// replacement, not the text first sent (Version is not ID). In an
+	// expired entry: the message was replaced, and the newest text held
+	// expired here, so no earlier text is shown as current.
 	Edited bool
 	Kind   string
 	// ID is the message concerned; Record is the record at this position
@@ -289,6 +291,25 @@ func (m *Machine) Showed(ctx context.Context, room, agent string, es []Entry, in
 		}
 	}
 	return m.st.ShowAt(ctx, agent, room, gen, rows)
+}
+
+// InboxPeek is agent's inbox as Inbox lists it now, at most limit entries
+// (0: MaxInboxLimit), without waiting, and it keeps no receipt: for a
+// surface that polls in the background and keeps receipts only of what it
+// then drew (the page, with Listed before Seen).
+func (s *Surface) InboxPeek(ctx context.Context, agent string, limit int) (InboxView, error) {
+	label, err := s.label(agent)
+	if err != nil {
+		return InboxView{}, err
+	}
+	if limit <= 0 || limit > MaxInboxLimit {
+		limit = MaxInboxLimit
+	}
+	v, err := s.inbox(ctx, label, "")
+	if len(v.Entries) > limit {
+		v.Entries = v.Entries[:limit]
+	}
+	return v, err
 }
 
 // mayHandle is store.CanHandle over an entry: agent is an addressee, or
@@ -918,7 +939,12 @@ func newer(a, b *rec) bool {
 }
 
 // currentText is a message's text with the newest replacement held applied.
-// wait names a replacement whose text is missing here.
+// wait names a replacement whose text is missing here. A replacement whose
+// text expired still counts: when it is the newest, ver is it and its
+// reason is expired, and the views show the message as expired and
+// edited, never an earlier text as current (an author could otherwise date
+// a replacement to expire minutes after it arrives and so erase the
+// edited mark). The delivery model's currentText has the same rule.
 func (v *roomView) currentText(h *rec) (text *rec, ver *rec, wait *rec, err error) {
 	text, ver = h, h
 	var best *rec
@@ -930,7 +956,7 @@ func (v *roomView) currentText(h *rec) (text *rec, ver *rec, wait *rec, err erro
 		if r.reason == store.ReasonMissing {
 			wait = r
 		}
-		if r.reason == store.ReasonLive && (best == nil || newer(r, best)) {
+		if (r.reason == store.ReasonLive || r.reason == store.ReasonExpired) && (best == nil || newer(r, best)) {
 			best = r
 		}
 	}
@@ -1039,13 +1065,19 @@ func (v *roomView) decide(g *agentState, agent string, h *rec, heads map[string]
 		case store.ReasonMissing:
 			return nil, h, nil
 		case store.ReasonExpired:
-			if e, err = v.entry(h, EntryExpired, "x:"+h.id); err != nil {
+			if e, err = v.expiredEntry(h); err != nil {
 				return nil, nil, err
 			}
 		default:
 			text, ver, wait, err := v.currentText(h)
 			if err != nil || wait != nil {
 				return nil, wait, err
+			}
+			if ver.reason != store.ReasonLive { // its newest text expired
+				if e, err = v.expiredEntry(h); err != nil {
+					return nil, nil, err
+				}
+				break
 			}
 			if e, err = v.entry(h, EntryMessage, h.id); err != nil {
 				return nil, nil, err
@@ -1259,17 +1291,35 @@ func (v *roomView) voided(g *agentState) ([]Entry, error) {
 	return out, nil
 }
 
+// expiredEntry is the expired notice of message h, whose text, or whose
+// newest replacement's text, expired here: Edited when it was replaced.
+func (v *roomView) expiredEntry(h *rec) (*Entry, error) {
+	e, err := v.entry(h, EntryExpired, "x:"+h.id)
+	if err != nil {
+		return nil, err
+	}
+	_, ver, _, err := v.currentText(h)
+	if err != nil {
+		return nil, err
+	}
+	e.Edited = ver.id != h.id
+	return e, nil
+}
+
 // threadEntry is a message as the thread and branch views show it, or nil
 // when there is nothing to show: its text is not here, or (as for Inbox) a
 // newer replacement's text is on its way.
 func (v *roomView) threadEntry(h *rec) (*Entry, error) {
 	switch h.reason {
 	case store.ReasonExpired:
-		return v.entry(h, EntryExpired, "x:"+h.id)
+		return v.expiredEntry(h)
 	case store.ReasonLive:
 		text, ver, wait, err := v.currentText(h)
 		if err != nil || wait != nil {
 			return nil, err
+		}
+		if ver.reason != store.ReasonLive { // its newest text expired
+			return v.expiredEntry(h)
 		}
 		e, err := v.entry(h, EntryMessage, h.id)
 		if err != nil {

@@ -532,9 +532,11 @@ func (m *Machine) accept(w *World, it wire) (stored, fork bool) {
 // report from any peer raises it, and the peer whose report set it lowers
 // it by reporting less, or nothing, of a stream; a peer reports only the
 // authors it takes, so one it does not take drops its hints too
-// (store.Tx.NoteKnown). The implementation also bounds the hints one peer
-// can set for streams that hold nothing (store.MaxHintedStreams); honest
-// machines here never reach that bound.
+// (store.Tx.NoteKnown). What it lowers or drops falls back to the highest
+// report another peer's last observation holds, so no peer erases
+// another's hint (store.Tx.lowerKnown). The implementation also bounds
+// the hints one peer can set for streams that hold nothing
+// (store.MaxHintedStreams); honest machines here never reach that bound.
 func (m *Machine) observe(peer MachineID, s Summary, authors map[MachineID]bool, now Time, tick int) {
 	m.st.obs[peer] = observation{At: now, Tick: tick, Have: s, Authors: authors}
 	takes := func(a MachineID) bool { return authors == nil || authors[a] }
@@ -542,15 +544,46 @@ func (m *Machine) observe(peer MachineID, s Summary, authors map[MachineID]bool,
 		if !takes(sid.Author) {
 			continue
 		}
-		if k := m.st.known[sid]; h.Contig > k.Seq || k.From == peer && h.Contig < k.Seq {
+		switch k := m.st.known[sid]; {
+		case h.Contig > k.Seq:
 			m.st.known[sid] = known{Seq: h.Contig, At: now, From: peer}
+		case k.From == peer && h.Contig < k.Seq:
+			if o, ok := m.otherKnown(sid, peer); ok && o.Seq > h.Contig {
+				m.st.known[sid] = o
+			} else {
+				m.st.known[sid] = known{Seq: h.Contig, At: now, From: peer}
+			}
 		}
 	}
 	for sid, k := range m.st.known {
 		if _, ok := s[sid]; k.From == peer && (!ok || !takes(sid.Author)) {
-			delete(m.st.known, sid)
+			if o, ok := m.otherKnown(sid, peer); ok {
+				m.st.known[sid] = o
+			} else {
+				delete(m.st.known, sid)
+			}
 		}
 	}
+}
+
+// otherKnown is the highest position of stream sid that a peer other than
+// peer reports in its last observation, the latest such report on a tie;
+// false when none reports it above 0.
+func (m *Machine) otherKnown(sid StreamID, peer MachineID) (known, bool) {
+	var best known
+	for q, o := range m.st.obs {
+		if q == peer || o.Authors != nil && !o.Authors[sid.Author] {
+			continue
+		}
+		h, ok := o.Have[sid]
+		if !ok || h.Contig <= 0 {
+			continue
+		}
+		if h.Contig > best.Seq || h.Contig == best.Seq && (o.At > best.At || o.At == best.At && q < best.From) {
+			best = known{Seq: h.Contig, At: o.At, From: q}
+		}
+	}
+	return best, best.Seq > 0
 }
 
 // page is what server sends puller. First, text for positions the puller

@@ -628,7 +628,8 @@ async function decide(r, approve, row, notCaughtUpOK) {
   refresh(true);
 }
 // confirmSeen confirms exactly the key and version given and returns the set
-// of keys the server confirmed; a refused entry stays unread.
+// of keys the server confirmed; a refused entry stays unread. Only entries
+// drawn are sent: the daemon keeps a receipt of no other (web.go, drawn).
 async function confirmSeen(entries) {
   const ok = new Set();
   if (!entries.length) return ok;
@@ -645,7 +646,8 @@ async function finishQuestion(m) {
   if (!questionOnScreen(m)) throw new Error("the question changed; read the new version first");
   const ok = await confirmSeen([m]); // handling may be reported only for text confirmed seen
   if (!ok.has(m.key)) throw new Error("could not confirm the question as read; it stays listed");
-  await api("/api/ack", { id: m.id });
+  // version: the text the card drew; the daemon refuses if it changed since
+  await api("/api/ack", { id: m.id, version: m.version });
   S.sigs.n = "";
   refresh(true);
 }
@@ -653,7 +655,7 @@ async function sendAnswer(m, text, error) {
   let sent = false;
   try {
     if (!questionOnScreen(m)) throw new Error("the question changed; read the new version first");
-    await api("/api/send", { room: m.room, text, reply_to: m.id });
+    await api("/api/send", { room: m.room, text, reply_to: m.id, reply_version: m.version });
     sent = true;
     await finishQuestion(m);
   } catch (e) {
@@ -991,7 +993,8 @@ async function submit() {
     return;
   }
   if ($("to").value) body.to = [$("to").value];
-  if (S.reply) body.reply_to = S.reply.id;
+  // reply_version: the text the stream drew; the daemon refuses if it changed since
+  if (S.reply) { body.reply_to = S.reply.id; body.reply_version = S.reply.version || ""; }
   try {
     await api("/api/send", body);
     ta.value = "";

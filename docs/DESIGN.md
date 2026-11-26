@@ -432,13 +432,22 @@ until a read shows it, and so is a replacement whose text is not here
 yet, which the inbox and thread also wait for. An expired message with
 no live replacement is not checked, and neither is an expired message
 the agent confirmed no text of: only the inbox's replace notice, shown
-after a confirmed read, shows such an agent the replacement. `Draft.ReplyVersion` applies the
-same rule to a reply that names the version answered; the local API,
-the page and the MCP reply tool do not pass one yet. A message entry
+after a confirmed read, shows such an agent the replacement. A message
+whose newest replacement's text expired has no version to check.
+`Draft.ReplyVersion` (local API `reply_version`) applies the same rule
+to a reply that names the version answered, and the page sends the
+version it drew with a reply and an `ack`. A reply that names none,
+from the CLI or the MCP reply tool, is held to the `ack` rule when the
+agent may report the message handled and a read showed it some text of
+it; otherwise it is not checked. The page's state request keeps no
+receipt; its seen keeps one for each entry it drew that the inbox still
+lists at that version. A message entry
 whose text is its author's replacement says `edited` (node `Entry` and
 local API), in the inbox, thread, branch, history, `recent` and
 `skipped` views; MCP inbox messages carry it too, the CLI prints
-`[edited]` and the page draws an `edited` mark. The CLI and the page
+`[edited]` and the page draws an `edited` mark. A replacement whose
+text expired still counts: when it is the newest, every view shows the
+message as expired with `edited`, never an earlier text. The CLI and the page
 also mark beside the author a message this machine wrote and one from
 `human` on another machine ("another machine's person, not you"), from
 `from_this_machine`. The reply and ack

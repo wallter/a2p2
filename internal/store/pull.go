@@ -354,7 +354,7 @@ func (t *Tx) NoteKnown(room, peer, author string, known map[string]int64, at tim
 	}
 	sort.Strings(gone)
 	for _, e := range gone {
-		if err := t.dropKnown(room, author, e, have[e].contig); err != nil {
+		if err := t.lowerKnown(room, peer, author, e, have[e].contig, 0, at, true); err != nil {
 			return err
 		}
 	}
@@ -387,9 +387,8 @@ func (t *Tx) NoteKnown(room, peer, author string, known map[string]int64, at tim
 		default:
 			continue
 		}
-		if c <= 0 && r.contig == 0 {
-			// Lowered to nothing: a stream that holds nothing goes.
-			if err := t.dropKnown(room, author, epoch, 0); err != nil {
+		if c < r.known {
+			if err := t.lowerKnown(room, peer, author, epoch, r.contig, c, at, false); err != nil {
 				return err
 			}
 			continue
@@ -400,6 +399,72 @@ func (t *Tx) NoteKnown(room, peer, author string, known map[string]int64, at tim
 		}
 	}
 	return nil
+}
+
+// lowerKnown lowers a stream's known position, which peer's report set,
+// to c on peer's word at at, or forgets it (gone: peer no longer names the
+// stream). If another peer's last observed detail reports the stream
+// higher than c, the known position becomes that report instead, with
+// that peer and the time it was observed: one peer's report never erases
+// another's (a peer could otherwise raise a hint another peer set and
+// then drop it). Such a stream counts against the peer whose report it
+// takes, and is not taken while that peer is at MaxHintedStreams. A
+// stream that holds nothing and is lowered to nothing goes.
+func (t *Tx) lowerKnown(room, peer, author, epoch string, contig, c int64, at time.Time, gone bool) error {
+	k, from, kat, err := t.otherKnown(room, peer, author, epoch)
+	if err != nil {
+		return err
+	}
+	if k > c && k > 0 {
+		n := 0
+		if contig == 0 {
+			if err := t.tx.QueryRow(`SELECT count(*) FROM streams WHERE room = ? AND author = ? AND known_from = ? AND contig = 0
+				AND epoch <> ?`, room, author, from, epoch).Scan(&n); err != nil {
+				return err
+			}
+		}
+		if n < MaxHintedStreams {
+			_, err := t.tx.Exec(`UPDATE streams SET known = ?, known_at = ?, known_from = ? WHERE room = ? AND author = ? AND epoch = ?`,
+				k, kat, from, room, author, epoch)
+			return err
+		}
+	}
+	if gone || c <= 0 && contig == 0 {
+		return t.dropKnown(room, author, epoch, contig)
+	}
+	_, err = t.tx.Exec(`UPDATE streams SET known = ?, known_at = ?, known_from = ? WHERE room = ? AND author = ? AND epoch = ?`,
+		c, ms(at), peer, room, author, epoch)
+	return err
+}
+
+// otherKnown is the highest position of stream (author, epoch) of room
+// that a peer other than peer reports in its last observed detail, the
+// latest such report on a tie, with that peer and when it was observed
+// (this machine's clock, in milliseconds); 0 when none reports it.
+func (t *Tx) otherKnown(room, peer, author, epoch string) (known int64, from string, at int64, err error) {
+	rows, err := t.tx.Query(`SELECT peer, detail, at FROM observed WHERE room = ? AND author = ? AND peer <> ?
+		AND detail IS NOT NULL ORDER BY peer`, room, author, peer)
+	if err != nil {
+		return 0, "", 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p, detail string
+		var when int64
+		if err := rows.Scan(&p, &detail, &when); err != nil {
+			return 0, "", 0, err
+		}
+		var ds []StreamDetail
+		if json.Unmarshal([]byte(detail), &ds) != nil {
+			continue
+		}
+		for _, d := range ds {
+			if d.E == epoch && (d.C > known || d.C == known && known > 0 && when > at) {
+				known, from, at = d.C, p, when
+			}
+		}
+	}
+	return known, from, at, rows.Err()
 }
 
 // dropKnown forgets a stream's known position: a stream that holds
