@@ -268,10 +268,14 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   Administrators only, and refuses a junction or symbolic link in the
   path, a directory owned by another account, and one another account
   may change (not yet run on Windows). `install.sh` refuses a directory
-  that every user may write without the sticky bit, one a group may write
-  (other than your own group of your name), one owned by another user, a
-  symbolic link owned by another user, and the same above it, along the
-  path as written and the real path a link leads to. It makes missing
+  that every user may write without the sticky bit, one a group with
+  another member than you and root may write, one owned by another user,
+  a symbolic link owned by another user, and the same above it, along the
+  path as written (trailing slashes taken off) and the real path a link
+  leads to. A group of only you and root, such as `admin` for a Homebrew
+  prefix on a Mac with one person, is accepted; a macOS group that holds
+  accounts it does not list, such as `everyone`, is refused; a group
+  whose members it cannot list gets a note, not a refusal. It makes missing
   directories with mode 0755 and checks again after. The exact cases are
   in [SECURITY.md](SECURITY.md#release-binaries).
 - A test now opens databases written by each release from v0.2.0 to

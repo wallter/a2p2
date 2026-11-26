@@ -60,7 +60,10 @@ jobs:
           name: release
           path: dist/
           if-no-files-found: error
-          retention-days: 1
+          # Kept a week, so a failed publish job can be re-run on its own.
+          retention-days: 7
+          # A re-run of all jobs replaces an earlier attempt's artifact.
+          overwrite: true
   publish:
     needs: build
     runs-on: ubuntu-latest

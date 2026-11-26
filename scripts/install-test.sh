@@ -52,16 +52,59 @@ chmod +x "$work/cpstub/cp"
 # A PATH with the tools install.sh needs but no hash tool.
 mkdir "$work/hstub"
 mkdir "$work/nohash"
-for t in curl awk mktemp cp chmod mv rm wc tr cat mkdir find id dirname; do
+for t in curl awk mktemp cp chmod mv rm wc tr cat mkdir find id dirname ls readlink; do
   p=$(command -v "$t") || continue
   ln -s "$p" "$work/nohash/$t"
 done
-# The same with a hash tool but without gh.
+# The same with a hash tool but without gh, and without getent, dscl and
+# dscacheutil, so install.sh cannot list who is in a group.
 mkdir "$work/nogh"
-for t in curl awk mktemp cp chmod mv rm wc tr cat mkdir find id dirname sha256sum shasum; do
+for t in curl awk mktemp cp chmod mv rm wc tr cat mkdir find id dirname ls readlink sha256sum shasum; do
   p=$(command -v "$t") || continue
   ln -s "$p" "$work/nogh/$t"
 done
+
+# A stub getent: `getent group GID` prints $FAKE_GROUP:x:GID:$FAKE_MEMBERS
+# (comma-separated), and `getent passwd` prints $FAKE_PASSWD, as if those
+# were the system's lists.
+mkdir "$work/getent"
+cat > "$work/getent/getent" <<'EOF'
+#!/bin/sh
+case "$1" in
+  group) printf '%s:x:%s:%s\n' "$FAKE_GROUP" "$2" "${FAKE_MEMBERS:-}" ;;
+  passwd) [ -z "${FAKE_PASSWD:-}" ] || printf '%s\n' "$FAKE_PASSWD" ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$work/getent/getent"
+# Stub dscacheutil and dscl, as on macOS, for a PATH without getent.
+mkdir "$work/dsc"
+cat > "$work/dsc/dscacheutil" <<'EOF'
+#!/bin/sh
+[ "$1 $2 $3 $4" = "-q group -a gid" ] || exit 2
+printf 'name: %s\npassword: *\ngid: %s\nusers: %s\n\n' "$FAKE_GROUP" "$5" "${FAKE_MEMBERS:-}"
+EOF
+cat > "$work/dsc/dscl" <<'EOF'
+#!/bin/sh
+[ "$*" = ". -list /Users PrimaryGroupID" ] || exit 2
+[ -z "${FAKE_PASSWD:-}" ] || printf '%s\n' "$FAKE_PASSWD"
+EOF
+chmod +x "$work/dsc/dscacheutil" "$work/dsc/dscl"
+# A stub dsmemberutil: the account nobody is a member of every group when
+# FAKE_IMPLIED is 1, as for the macOS groups everyone and localaccounts.
+mkdir "$work/dsm"
+cat > "$work/dsm/dsmemberutil" <<'EOF'
+#!/bin/sh
+[ "$1 $2 $3 $4" = "checkmembership -U nobody -g" ] || exit 2
+if [ "${FAKE_IMPLIED:-0}" = 1 ]; then
+  echo "user is a member of the group"
+else
+  echo "user is not a member of the group"
+fi
+EOF
+chmod +x "$work/dsm/dsmemberutil"
+me=$(id -un)
+mygid=$(id -g)
 
 # A stub gh. `gh release view --repo wallter/a2p2 ...` prints $GH_LATEST,
 # the tag of the latest release. `gh attestation verify FILE ...` passes
@@ -328,16 +371,143 @@ runall() {
   [ "$rc" -ne 0 ] && grep -q "/ww can be written by every user" "$work/out"; check "a link to a link below a directory every user may write: refused" $?
   empty "$t/real/bin"; check "a link to a link below a directory every user may write: nothing installed" $?
   chmod 0755 "$t/ww"
-  # A directory a group may write: refused unless the group is this user's
-  # own group of the same name.
+  # The same paths written with a trailing slash: "link/" names the
+  # directory the link leads to, so the link and the real parents must
+  # still be checked.
+  fresh; t=$work/$sh_.$n
+  mkdir -p "$t/ww/sub" "$t/home" "$t/mid"; chmod 0777 "$t/ww"
+  ln -s "$t/ww/sub" "$t/home/link"
+  run "$sh_" "$t/home/link/" - -
+  [ "$rc" -ne 0 ] && grep -q "/ww can be written by every user" "$work/out"; check "trailing slash on a link into a directory every user may write: refused" $?
+  empty "$t/ww/sub"; check "trailing slash on a link into a directory every user may write: nothing installed" $?
+  run "$sh_" "$t/home/link//" - -
+  [ "$rc" -ne 0 ] && grep -q "/ww can be written by every user" "$work/out"; check "two trailing slashes on such a link: refused" $?
+  # A link in a parent whose target ends in a slash and is itself a link.
+  ln -s "$t/ww/sub/" "$t/mid/l2"; ln -s "$t/mid/l2/" "$t/home/l1"; mkdir "$t/ww/sub/bin"
+  run "$sh_" "$t/home/l1/bin" - -
+  [ "$rc" -ne 0 ] && grep -q "/ww can be written by every user" "$work/out"; check "a link in a parent to a link, both with a trailing slash: refused" $?
+  empty "$t/ww/sub/bin"; check "a link in a parent to a link, both with a trailing slash: nothing installed" $?
+  chmod 0755 "$t/ww"
+  # The honest cases with a trailing slash install.
+  fresh; d0=$dir; mkdir -p "$d0"
+  run "$sh_" "$d0/" - -
+  check "an install directory with a trailing slash: exit 0" "$rc"
+  [ -x "$d0/a2p2" ]; check "an install directory with a trailing slash: installed" $?
+  grep -q "^installed $d0/a2p2\$" "$work/out"; check "an install directory with a trailing slash: named without it" $?
+  fresh; t=$work/$sh_.$n
+  mkdir -p "$t/real" "$t/home"; ln -s "$t/real/" "$t/home/ok"
+  run "$sh_" "$t/home/ok/" - -
+  check "a link to a directory only you can change, with trailing slashes: exit 0" "$rc"
+  [ -x "$t/real/a2p2" ]; check "a link to a directory only you can change, with trailing slashes: installed there" $?
+  # A home directory that is a symbolic link, and the default directory
+  # under it ($HOME/.local/bin, made by install.sh).
+  fresh; t=$work/$sh_.$n
+  mkdir -p "$t/realhome"; ln -s "$t/realhome" "$t/homelink"
+  old_home=$HOME; HOME=$t/homelink
+  if [ "$HOME" = "$t/homelink" ]; then
+    run "$sh_" "" - -
+    check "a symlinked home, the default directory: exit 0" "$rc"
+    [ -x "$t/realhome/.local/bin/a2p2" ]; check "a symlinked home, the default directory: installed" $?
+  else
+    check "a symlinked home: HOME could not be set" 1
+  fi
+  HOME=$old_home
+
+  # A directory a group may write (mode bits). Refused when the group has
+  # a member other than this user and root; installed, with a note when
+  # the group is not this user's own group of the same name, when it has
+  # none; installed with a note when its members cannot be listed.
+  # getent and the macOS tools are stubs, so the group's members are known.
+  ge="$work/getent:$work/stub:$PATH"
+  fresh; mkdir -p "$dir"; chmod 0775 "$dir"
+  export FAKE_GROUP=devs FAKE_MEMBERS="$me,mallory" FAKE_PASSWD=""
+  run "$sh_" "$dir" - "$ge"
+  [ "$rc" -ne 0 ] && grep -q "can be written by the group devs, which has other members (mallory)" "$work/out"; check "a group with another member may write it: refused" $?
+  empty "$dir"; check "a group with another member may write it: nothing installed" $?
+  export FAKE_MEMBERS="" FAKE_PASSWD="eve:x:1234:$(ls -ldn "$dir" | awk '{print $4}'):eve:/home/eve:/bin/sh"
+  run "$sh_" "$dir" - "$ge"
+  [ "$rc" -ne 0 ] && grep -q "which has other members (eve)" "$work/out"; check "a group that is another user's primary group may write it: refused" $?
+  empty "$dir"; check "a group that is another user's primary group may write it: nothing installed" $?
+  export FAKE_GROUP=admin FAKE_MEMBERS="root,$me" FAKE_PASSWD="$me:x:1:$mygid:me:/h:/bin/sh"
+  run "$sh_" "$dir" - "$ge"
+  check "a group of only you and root may write it: exit 0" "$rc"
+  [ -x "$dir/a2p2" ]; check "a group of only you and root may write it: installed" $?
+  [ "$(grep -c "note: $dir can be written by the group admin; the system's user lists show only you and root in it" "$work/out")" = 1 ]; check "a group of only you and root may write it: one note" $?
+  # This user's own group of the same name (on Linux, the usual private
+  # group; umask 002 makes ~/.local/bin 0775): installed without a note.
+  fresh; mkdir -p "$dir"; chmod 0775 "$dir"
+  if [ "$(ls -ldn "$dir" | awk '{print $4}')" = "$mygid" ]; then
+    export FAKE_GROUP=$me FAKE_MEMBERS="" FAKE_PASSWD="$me:x:1:$mygid:me:/h:/bin/sh"
+    run "$sh_" "$dir" - "$ge"
+    check "your own group of your name may write it: exit 0" "$rc"
+    ! grep -q "install.sh: note:" "$work/out"; check "your own group of your name may write it: no note" $?
+  fi
+  # A group-writable directory above it, as a Homebrew prefix on macOS
+  # (group admin may write it).
+  fresh; t=$work/$sh_.$n
+  mkdir -p "$t/prefix/bin"; chmod 0775 "$t/prefix" "$t/prefix/bin"
+  export FAKE_GROUP=admin FAKE_MEMBERS="root,$me" FAKE_PASSWD=""
+  run "$sh_" "$t/prefix/bin" - "$ge"
+  check "a prefix that a group of only you and root may write: exit 0" "$rc"
+  [ -x "$t/prefix/bin/a2p2" ]; check "a prefix that a group of only you and root may write: installed" $?
+  rm -f "$t/prefix/bin/a2p2"; chmod 0755 "$t/prefix/bin"
+  export FAKE_MEMBERS="root,$me,other"
+  run "$sh_" "$t/prefix/bin" - "$ge"
+  [ "$rc" -ne 0 ] && grep -q "/prefix can be written by the group admin, which has other members (other)" "$work/out"; check "a prefix that a group with another member may write: refused" $?
+  # The macOS route: dscacheutil and dscl, no getent.
+  fresh; mkdir -p "$dir"; chmod 0775 "$dir"
+  export FAKE_GROUP=staff FAKE_MEMBERS="root" FAKE_PASSWD="$me $mygid
+eve $(ls -ldn "$dir" | awk '{print $4}')"
+  run "$sh_" "$dir" - "$work/dsc:$work/stub:$work/nogh"
+  [ "$rc" -ne 0 ] && grep -q "which has other members (eve)" "$work/out"; check "dscl lists another user in the group: refused" $?
+  export FAKE_PASSWD="$me $mygid"
+  run "$sh_" "$dir" - "$work/dsc:$work/stub:$work/nogh"
+  check "dscl lists only you in the group: exit 0" "$rc"
+  [ -x "$dir/a2p2" ]; check "dscl lists only you in the group: installed" $?
+  # A group whose members macOS implies rather than lists (everyone,
+  # localaccounts): the lists show only you, but dsmemberutil says the
+  # account nobody is in it. Refused, without the "only you and root" note.
+  fresh; mkdir -p "$dir"; chmod 0775 "$dir"
+  export FAKE_GROUP=everyone FAKE_MEMBERS="" FAKE_PASSWD="$me $mygid" FAKE_IMPLIED=1
+  run "$sh_" "$dir" - "$work/dsm:$work/dsc:$work/stub:$work/nogh"
+  [ "$rc" -ne 0 ] && grep -q "can be written by the group everyone, which holds accounts the system's lists do not name (the account nobody is a member)" "$work/out"; check "a group of implied members may write it: refused" $?
+  empty "$dir"; check "a group of implied members may write it: nothing installed" $?
+  ! grep -q "only you and root" "$work/out"; check "a group of implied members may write it: no only-you note" $?
+  export FAKE_IMPLIED=0
+  run "$sh_" "$dir" - "$work/dsm:$work/dsc:$work/stub:$work/nogh"
+  check "nobody is not in the group: exit 0" "$rc"
+  [ -x "$dir/a2p2" ]; check "nobody is not in the group: installed" $?
+  unset FAKE_GROUP FAKE_MEMBERS FAKE_PASSWD FAKE_IMPLIED
+  # The real macOS groups everyone (12) and localaccounts (61), which any
+  # user may chgrp to: refused with the system's own tools, and refused by
+  # gid when dsmemberutil does not report nobody as a member.
+  if command -v dsmemberutil >/dev/null 2>&1; then
+    for g in everyone localaccounts; do
+      fresh; mkdir -p "$dir"
+      chgrp "$g" "$dir" 2>/dev/null || continue
+      chmod 0775 "$dir"
+      run "$sh_" "$dir" - -
+      [ "$rc" -ne 0 ] && grep -q "can be written by the group $g, which holds accounts" "$work/out"; check "the macOS group $g may write it: refused" $?
+      empty "$dir"; check "the macOS group $g may write it: nothing installed" $?
+      ! grep -q "only you and root" "$work/out"; check "the macOS group $g may write it: no only-you note" $?
+      export FAKE_IMPLIED=0
+      run "$sh_" "$dir" - "$work/dsm:$work/stub:$PATH"
+      [ "$rc" -ne 0 ] && grep -q "can be written by the group $g, which holds accounts the system's lists do not name (every local or network account is in it)" "$work/out"; check "the macOS group $g by its gid: refused" $?
+      unset FAKE_IMPLIED
+    done
+  fi
+  # No tool lists the group: a note, and the install goes on.
+  fresh; mkdir -p "$dir"; chmod 0775 "$dir"
+  run "$sh_" "$dir" - "$work/stub:$work/nogh"
+  check "a group whose members cannot be listed: exit 0" "$rc"
+  [ -x "$dir/a2p2" ]; check "a group whose members cannot be listed: installed" $?
+  if [ "$me" != "$(id -gn)" ]; then
+    grep -q "cannot list who is in it" "$work/out"; check "a group whose members cannot be listed: says so" $?
+  fi
+  # With the system's own lists: installed, or refused naming other members.
   fresh; mkdir -p "$dir"; chmod 0775 "$dir"
   run "$sh_" "$dir" - -
-  if [ "$(id -un)" = "$(id -gn)" ] && [ -n "$(find "$dir" -prune -group "$(id -g)")" ]; then
-    check "a directory its owner's own group may write: exit 0" "$rc"
-  else
-    [ "$rc" -ne 0 ] && grep -q "can be written by a group" "$work/out"; check "a directory a group may write: refused" $?
-    empty "$dir"; check "a directory a group may write: nothing installed" $?
-  fi
+  [ "$rc" -eq 0 ] || grep -q "which has other members" "$work/out"; check "a group-writable directory, the system's lists: installed or refused for a named reason" $?
   # The directories install.sh makes: mode 0755 whatever the umask, and
   # checked again after they are made.
   fresh

@@ -11,10 +11,12 @@
 # GitHub-hosted runner (needs the GitHub CLI, signed in). Then "latest" is
 # asked of gh once, and that tag is what is downloaded and checked.
 # It refuses an install directory that another user could change: one that
-# every user may write without the sticky bit, one a group may write
-# (other than this user's own group of the same name), one owned by
-# another user than root, a symbolic link owned by another user, or any of
-# these above it, along the path as written and the path each link names.
+# every user may write without the sticky bit, one a group with another
+# member than this user and root may write, one owned by another user
+# than root, a symbolic link owned by another user, or any of these above
+# it, along the path as written and the path each link names. A group
+# whose members it cannot list gets a note, not a refusal. It reads mode
+# bits, owners and group lists, not access control lists (ACLs).
 # It makes missing directories with mode 0755 and checks again after.
 # What it never does: use sudo, edit a shell profile or PATH, configure a
 # harness, start a daemon, or install a file whose checksum did not match.
@@ -57,6 +59,7 @@ TMP=""
 STAGE=""
 SECURE=1
 HASH=""
+# shellcheck disable=SC2317 # run by the EXIT trap
 cleanup() {
   [ -z "$STAGE" ] || rm -f "$STAGE"
   [ -z "$TMP" ] || rm -rf "$TMP"
@@ -88,24 +91,137 @@ sha256_of() { # sha256_of FILE: sets HASH to 64 lower-case hex characters
 REPO=wallter/a2p2
 SIGNER=$REPO/.github/workflows/release.yml
 
+# trim_p: takes the trailing slashes off $p; "/" (or "//") becomes "/".
+trim_p() {
+  while :; do
+    case "$p" in
+      / | "") break ;;
+      */) p=${p%/} ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$p" ] || p=/
+}
+
+# note MSG: a warning on stderr that does not stop the install. unsafe_dir
+# runs twice; the second run is quiet, so each note is printed once.
+note() {
+  [ "$quiet" = 1 ] || echo "install.sh: note: $*" >&2
+}
+
+# group_others GID: sets gname to the name of group GID, and others to the
+# users in it other than this user and root: its listed members and the
+# users whose primary group it is, as getent (or, on macOS, dscacheutil
+# and dscl) lists them. Returns 1 when it cannot list them. Accounts of a
+# network directory that the system does not list are not seen.
+group_others() {
+  gname=""
+  others=""
+  if command -v getent >/dev/null 2>&1; then
+    gl=$(getent group "$1" 2>/dev/null) || return 1
+    gname=${gl%%:*}
+    mem=${gl##*:}
+    prim=$(getent passwd 2>/dev/null | awk -F: -v g="$1" '$4 == g { print $1 }') || return 1
+  elif command -v dscacheutil >/dev/null 2>&1 && command -v dscl >/dev/null 2>&1; then
+    gl=$(dscacheutil -q group -a gid "$1" 2>/dev/null) || return 1
+    gname=$(printf '%s\n' "$gl" | awk '$1 == "name:" { print $2; exit }')
+    mem=$(printf '%s\n' "$gl" | awk '$1 == "users:" { $1 = ""; print }')
+    prim=$(dscl . -list /Users PrimaryGroupID 2>/dev/null | awk -v g="$1" '$2 == g { print $1 }') || return 1
+  else
+    return 1
+  fi
+  [ -n "$gname" ] || return 1
+  set -f
+  for m in $(printf '%s\n%s\n' "$mem" "$prim" | tr ',' ' '); do
+    if [ "$m" = "$un" ] || [ "$m" = root ]; then continue; fi
+    case " $others " in
+      *" $m "*) ;;
+      *) others="${others:+$others }$m" ;;
+    esac
+  done
+  set +f
+  return 0
+}
+
+# group_implied GID: returns 0, with why set, when macOS counts accounts in
+# group GID that its lists do not name. The groups everyone (12),
+# localaccounts (61) and netaccounts (62) hold every local or network
+# account without listing them, and so may nested groups. The account
+# nobody is never really added to a group, so when dsmemberutil says it is
+# a member, membership is implied. dscacheutil or dsmemberutil on PATH is
+# taken to mean macOS.
+group_implied() {
+  why=""
+  if command -v dsmemberutil >/dev/null 2>&1; then
+    case $(dsmemberutil checkmembership -U nobody -g "$1" 2>/dev/null) in
+      "user is a member of the group"*)
+        why="the account nobody is a member"
+        return 0
+        ;;
+    esac
+  fi
+  if command -v dsmemberutil >/dev/null 2>&1 || command -v dscacheutil >/dev/null 2>&1; then
+    case "$1" in
+      12 | 61 | 62)
+        why="every local or network account is in it"
+        return 0
+        ;;
+    esac
+  fi
+  return 1
+}
+
+# group_unsafe P: P may be written by its group (mode bits). Prints why
+# and returns 0 when that group has a member other than this user and
+# root, or members that are implied rather than listed (group_implied).
+# Otherwise returns 1, with a note when it cannot list the members,
+# or when the group is not this user's own group of the same name.
+group_unsafe() {
+  # ls -n is the POSIX way to read a file's numeric group; find and stat
+  # differ between systems. Only the fourth field is used.
+  # shellcheck disable=SC2012
+  pg=$(ls -ldn "$1" 2>/dev/null | awk 'NR == 1 { print $4 }')
+  case "$pg" in
+    "" | *[!0-9]*)
+      note "$1 can be written by its group, and install.sh could not read which group; check that only you are in it"
+      return 1
+      ;;
+  esac
+  listed=0
+  group_others "$pg" && listed=1
+  if group_implied "$pg"; then
+    echo "$1 can be written by the group ${gname:-$pg}, which holds accounts the system's lists do not name ($why)"
+    return 0
+  fi
+  if [ "$listed" = 1 ]; then
+    if [ -n "$others" ]; then
+      echo "$1 can be written by the group $gname, which has other members ($others)"
+      return 0
+    fi
+    if [ "$pg" != "$gid" ] || [ "$gname" != "$un" ]; then
+      note "$1 can be written by the group $gname; the system's user lists show only you and root in it"
+    fi
+    return 1
+  fi
+  [ "$pg" = "$gid" ] && [ "$upg" = 1 ] && return 1
+  note "$1 can be written by the group $pg, and install.sh cannot list who is in it; check that only you are"
+  return 1
+}
+
 # check_one P: prints why another user could change P itself and returns
 # 0; returns 1 when P is safe. A symbolic link is judged as the link (find
 # without -H or -L does not follow one, as POSIX says): its owner counts,
 # its mode does not. A directory is unsafe when every user may write it
-# without the sticky bit, when a group may write it (unless that group is
-# this user's own group of the same name), or when it is owned by another
-# user than this one or root.
+# without the sticky bit, when it is owned by another user than this one
+# or root, or when a group with another member than this user and root
+# may write it without the sticky bit (group_unsafe).
 check_one() {
   o=$(find "$1" -prune ! -user "$uid" ! -user 0 2>/dev/null) || { echo "cannot check $1 (find failed)"; return 0; }
   [ -z "$o" ] || { echo "$1 is owned by another user"; return 0; }
   w=$(find "$1" -prune ! -type l -perm -0002 ! -perm -1000 2>/dev/null) || { echo "cannot check $1 (find failed)"; return 0; }
   [ -z "$w" ] || { echo "$1 can be written by every user"; return 0; }
-  if [ "$upg" = 1 ]; then
-    g=$(find "$1" -prune ! -type l -perm -0020 ! -perm -1000 ! -group "$gid" 2>/dev/null) || { echo "cannot check $1 (find failed)"; return 0; }
-  else
-    g=$(find "$1" -prune ! -type l -perm -0020 ! -perm -1000 2>/dev/null) || { echo "cannot check $1 (find failed)"; return 0; }
-  fi
-  [ -z "$g" ] || { echo "$1 can be written by a group"; return 0; }
+  g=$(find "$1" -prune ! -type l -perm -0020 ! -perm -1000 2>/dev/null) || { echo "cannot check $1 (find failed)"; return 0; }
+  if [ -n "$g" ] && group_unsafe "$1"; then return 0; fi
   return 1
 }
 
@@ -116,8 +232,12 @@ check_one() {
 # meets adds the path the link names, walked the same way, so the real
 # directories and their parents are checked too (readlink; without it,
 # the fully resolved directory, cd -P). A missing part is skipped:
-# install.sh makes it later, as this user, and checks again.
+# install.sh makes it later, as this user, and checks again. Trailing
+# slashes are taken off each path first: "link/" names the directory the
+# link leads to, not the link. A second argument "quiet" drops the notes.
 unsafe_dir() {
+  quiet=0
+  [ "${2:-}" != quiet ] || quiet=1
   case "$1" in
     /*) p=$1 ;;
     *) p=$(pwd)/$1 ;;
@@ -135,6 +255,7 @@ unsafe_dir() {
   while [ -n "$todo" ]; do
     p=${todo%%"$nl"*}
     if [ "$p" = "$todo" ]; then todo=""; else todo=${todo#*"$nl"}; fi
+    trim_p
     while :; do
       if [ -e "$p" ] || [ -L "$p" ]; then
         check_one "$p" && return 0
@@ -153,7 +274,7 @@ unsafe_dir() {
           todo=$t${todo:+$nl$todo}
         fi
       fi
-      [ "$p" != / ] && [ "$p" != . ] || break
+      if [ "$p" = / ] || [ "$p" = . ]; then break; fi
       p=$(dirname "$p")
     done
   done
@@ -231,6 +352,9 @@ main() {
     [ -n "${HOME:-}" ] || die "set HOME or A2P2_INSTALL_DIR"
     dir=$HOME/.local/bin
   fi
+  p=$dir
+  trim_p
+  dir=$p
   target="$dir/a2p2"
 
   attest=${A2P2_VERIFY_ATTESTATION:-0}
@@ -320,7 +444,7 @@ main() {
   if [ ! -d "$dir" ]; then
     make_dirs "$dir" || die "cannot create $dir (no sudo is used). Set A2P2_INSTALL_DIR to a directory you can write"
   fi
-  if why=$(unsafe_dir "$dir"); then
+  if why=$(unsafe_dir "$dir" quiet); then
     die "$why, so another user could replace a2p2 there; nothing was installed. Set A2P2_INSTALL_DIR to a directory only you can change"
   fi
   [ -w "$dir" ] || die "cannot write to $dir (no sudo is used). Set A2P2_INSTALL_DIR to a directory you can write"

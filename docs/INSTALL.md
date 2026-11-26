@@ -38,6 +38,40 @@ It proves which workflow and commit built the file, not that the code is
 safe. Releases up to 0.2.3 have none.
 The binaries are not code-signed or notarised.
 
+## Which install directories `install.sh` refuses
+
+Every hook and MCP server runs the installed `a2p2` as you, so the
+installer refuses a directory where it can see that another user could
+replace it. It checks the install directory and each one above it, and
+the real path behind each symbolic link, with trailing slashes taken
+off. It refuses:
+
+- a directory every user may write, unless it has the sticky bit (as
+  `/tmp` has);
+- a directory owned by a user other than you or root, and a symbolic
+  link owned by another user;
+- a directory a group may write (its mode bits, without the sticky bit)
+  when that group has a member other than you and root. The members are
+  the group's listed members and the users whose primary group it is,
+  as `getent` lists them, or `dscacheutil` and `dscl` on macOS;
+- on macOS, a directory a group may write when the group holds accounts
+  it does not list: `everyone`, `localaccounts` and `netaccounts`, and
+  any group that `dsmemberutil` says the account `nobody` is in.
+
+A group of only you and root is accepted with a note: on a Mac used by
+one person, Homebrew's `/opt/homebrew/bin` may be written by the group
+`admin`, whose members are you and root. A directory in your own group
+of your name is accepted without a note. When no tool can list the
+group, the installer prints a note and installs: check the group
+yourself. The default, `~/.local/bin`, is made with mode 0755 when it is
+missing.
+
+It does not read access control lists (ACLs), nested groups, or accounts
+of a network directory that the system does not list, so an ACL can let
+another user write a directory that passes, and a group can have members
+it does not see. On macOS, `ls -le DIR` shows a directory's ACL; on
+Linux, `getfacl DIR`.
+
 ## From a release binary
 
 Releases start at v0.1.0. Each

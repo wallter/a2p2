@@ -315,17 +315,24 @@ Both installers check the install directory and every directory above
 it, and refuse these cases:
 
 - `install.sh`: a directory every user may write without the sticky bit;
-  one a group may write, unless that group is your own group of the same
-  name as your user (on macOS, `staff` is not, so a `g+w` directory is
-  refused); one owned by another user than you or root; and a symbolic
-  link owned by another user. It checks each part of the path as
-  written, and each symbolic link it meets adds the path that link names,
-  checked the same way, so the real directories and those above them are
-  checked too. It makes missing directories with
-  mode 0755 whatever the umask, and checks the whole path again after it
-  made them. It does not check access control lists (ACLs) beyond the
-  mode bits, and it does not refuse a sticky directory every user may
-  write, such as `/tmp`: a directory you made there is still yours.
+  one owned by another user than you or root; a symbolic link owned by
+  another user; and one a group may write (by its mode bits) when that
+  group has a member other than you and root. The members are the
+  group's listed members and the users whose primary group it is, as
+  `getent` lists them (on macOS, `dscacheutil` and `dscl`). On macOS it
+  also refuses a group whose members are implied rather than listed:
+  `everyone` (12), `localaccounts` (61), `netaccounts` (62), and any
+  group `dsmemberutil` says the account `nobody` is in. When it cannot
+  list a group's members it prints a note and installs. It checks each part of
+  the path as written, with trailing slashes taken off, and each symbolic
+  link it meets adds the path that link names, checked the same way, so
+  the real directories and those above them are checked too. It makes
+  missing directories with mode 0755 whatever the umask, and checks the
+  whole path again after it made them. It does not read access control
+  lists (ACLs), nested groups, or accounts of a network directory that
+  the system does not list, and it does not refuse a sticky directory
+  every user may write, such as `/tmp`: a directory you made there is
+  still yours.
 - `install.ps1`: a junction or symbolic link anywhere in the path; a
   directory owned by an account other than you, SYSTEM, Administrators
   or TrustedInstaller; a directory whose access list it cannot read; and
