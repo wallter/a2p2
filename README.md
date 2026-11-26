@@ -108,7 +108,11 @@ runs `a2p2 version`. It does not use `sudo`, edit your shell profile or
 `PATH`, configure a harness or start a daemon; it tells you what to do
 next. `A2P2_VERSION=v0.2.3` picks a release (to fix the script to a release too, see [docs/INSTALL.md](docs/INSTALL.md#the-installer-at-a-fixed-version)). `--dry-run` shows what it
 would do. The checksum comes from the same release, so it catches a
-corrupted or swapped download, not a compromised release.
+corrupted download, not a compromised release. `A2P2_VERIFY_ATTESTATION=1`
+also checks the release workflow's attestation with `gh` and installs
+nothing without it (releases after 0.2.3). The script refuses an install
+directory that another user can change in the ways
+[SECURITY.md](SECURITY.md#release-binaries) lists.
 
 To read it first, download it, read it, then run it:
 

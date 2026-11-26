@@ -538,8 +538,10 @@ exists, from the CLI process under a throwaway key (PROTOCOL 4.7).
 and an invite's addresses at a join), only while networking is on or
 outbound only; the local router after `net on --map-port`; the address a
 person names to `net check HOST:PORT` or `--invite`, from the CLI and
-whatever the networking state; and, for `install.sh`, GitHub's release
-page, run by a person and not the daemon. No other code opens a
+whatever the networking state; and, for `install.sh` and `install.ps1`,
+GitHub's release page (and GitHub's API through `gh` when
+`A2P2_VERIFY_ATTESTATION=1` asks for the attestation check), run by a
+person and not the daemon. No other code opens a
 connection: no update check, no telemetry, no lookup of its own (D11, with
 its 2026-11-25 note; [SECURITY](../SECURITY.md#what-a2p2-connects-to)).
 

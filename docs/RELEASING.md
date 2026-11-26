@@ -47,7 +47,7 @@ Most testing is local, on purpose: it keeps the hosted CI small.
 | `make prerelease` | locally, before every tag | `make check`, `make lint`, `make vuln`, the same tests on Linux in a container (`make check-linux`), and one `make chaos` run at its default length (real daemons killed and partitioned in containers; a shorter run is reported inconclusive), all at the same time, each to its own log in `.prerelease/`. When every step passed on a clean tree it writes `.prerelease/stamp` with the commit and the time |
 | `make e2e-local`, `make e2e HARNESS=...` | locally, by hand, before a minor release | real harnesses; these spend model tokens or need local models |
 | CI on GitHub | pull requests that touch code, and on request | one Linux job: `make check` (two shards on the two-core runner) and `make lint`. A run by hand chooses with `what`: `linux` (the default), `windows` or `all`; the Windows job runs `go build`, `go vet` and `go test` on `windows-latest` without the deep `internal/node` schedules, with full output only for a failing package and every skipped test listed |
-| Release workflow on GitHub | a pushed `v*` tag | `go vet`, the changelog section exists, build, the binary reports the tag, publish. It does not repeat the tests: they ran in `make prerelease` on the same commit, and `make tag` refuses a commit without that stamp |
+| Release workflow on GitHub | a pushed `v*` tag | A build job with a read-only token: `go vet`, the changelog section exists, build, the binary reports the tag. Then a publish job that holds the write scopes and runs no repository code: the files match `SHA256SUMS`, attest, publish. It does not repeat the tests: they ran in `make prerelease` on the same commit, and `make tag` refuses a commit without that stamp |
 
 Nothing runs on GitHub for a push to `main`. macOS is covered by local
 development and `make prerelease`; Linux by the container run and
@@ -74,12 +74,20 @@ publish that commit untested. Do not tag by hand.
    `origin`. Then it makes the annotated tag and pushes it.
 5. `make verify-release VERSION=vX.Y.Z` (needs `gh`, signed in). It waits
    for the release workflow, checks that the release has exactly the six
-   binaries and `SHA256SUMS`, downloads the binary for this machine and
-   `SHA256SUMS` into a temporary directory, checks the checksum, runs
-   `gh attestation verify` on the binary (pinned to this repository's
-   `release.yml`; it fails if there is none), checks that `version` reports
-   the tag, and prints the asset list and the first
-   lines of the notes. Read the notes once.
+   binaries and `SHA256SUMS`, downloads each of them by name into a
+   temporary directory, checks that `SHA256SUMS` has exactly one line for
+   each binary and no other line, checks every binary's checksum, runs
+   `gh attestation verify` on every binary (pinned to this repository's
+   `release.yml`, the tag with `--source-ref` and a GitHub-hosted runner;
+   it fails if there is none), then checks that this machine's binary
+   reports the tag, and prints the asset list and the first lines of the
+   notes. Read the notes once.
+   Then write that release's databases for the compatibility test with
+   `scripts/release-db.sh vX.Y.Z` and commit
+   `internal/node/testdata/releases/vX.Y.Z/`, and add the tag to
+   `compatReleases` in `internal/node/release_compat_test.go`. It runs a
+   generator with the tag's own code, in a copy of its source, and starts
+   no daemon. It replaces the directory only with a complete new set.
 6. For a release candidate (wire protocol or database changes only), do
    steps 3 to 5 with `vX.Y.Z-rc.N`, try the binaries, then tag the final
    version on the same commit: its stamp still holds.
@@ -94,7 +102,13 @@ and `-trimpath`, and `SHA256SUMS`. From the next version after 0.2.3,
 the release workflow also makes a GitHub artifact attestation (SLSA build
 provenance) for the binaries before it publishes. It is signed through the
 public Sigstore instance, so each release adds a public log entry that
-names the repository, the commit and the workflow. The binaries are not
+names the repository, the commit and the workflow. Every action in the
+workflows is pinned to a full commit SHA with its release tag in a
+comment; `make check` refuses a tag or branch name
+(`scripts/workflows.sh`). To move an action to a new release, look up the
+commit of its exact release tag (`gh api
+repos/<owner>/<repo>/git/ref/tags/<tag>`, and for an annotated tag the
+commit it names) and change the SHA and the comment together. The binaries are not
 code-signed or notarised for macOS or Windows. Before a
 release that changes Windows code, run the ci workflow by hand once with
 `what` set to `windows` and read its log.

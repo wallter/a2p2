@@ -8,12 +8,57 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Security
+
+- **The release workflow pins its actions and keeps write scopes away
+  from the build.** Since v0.1.0 the release job ran actions named by
+  moving tags (`actions/checkout@v4`, `actions/setup-go@v5`) while it held
+  `contents: write`, and its checkout kept the token for later steps;
+  after 0.2.3 it also held the signing scopes for attestations. Anyone who
+  could move one of those tags could change a published binary. Now every
+  action is pinned to a commit, no checkout keeps its token, and the
+  write, signing and attestation scopes sit in a publish job that checks
+  out nothing and runs no repository code. That job publishes only the six
+  binaries, with exactly one `SHA256SUMS` line each. `make check` refuses
+  a workflow that undoes this, and workflow syntax its line-based check
+  does not follow. The new form runs for the first time at the next tag.
+- **The installers can require the build attestation.** Since v0.2.2
+  `install.sh` and `install.ps1` check the binary against a `SHA256SUMS`
+  from the same release, which does not stop someone who can replace
+  both. With `A2P2_VERIFY_ATTESTATION=1` they also run `gh attestation
+  verify` and install nothing without a valid attestation from this
+  repository's release workflow for the tag they download (releases after
+  0.2.3), so an attested build of an older tag is refused too. For
+  `latest` they ask `gh` for the tag once. Without the setting they now
+  say the checksum does not show who built the file.
+  `make verify-release` now checks every binary of a release against the
+  tag, not only the one for the machine that runs it.
+- **The installers refuse more directories another user can change.**
+  Since v0.2.3 the Windows notes suggested `C:\a2p2`, which every local
+  user can write when it is made by hand, so another user could replace
+  `a2p2.exe` and run code as you through a hook. `install.ps1` now makes
+  a missing directory with an access list for you, SYSTEM and
+  Administrators only, and refuses a junction or symbolic link in the
+  path, a directory owned by another account, and one another account
+  may change (not yet run on Windows). `install.sh` refuses a directory
+  that every user may write without the sticky bit, one a group may write
+  (other than your own group of your name), one owned by another user, a
+  symbolic link owned by another user, and the same above it, along the
+  path as written and the real path a link leads to. It makes missing
+  directories with mode 0755 and checks again after. The exact cases are
+  in [SECURITY.md](SECURITY.md#release-binaries).
+- A test now opens databases written by each release from v0.2.0 to
+  v0.2.3 with the current code, so a rule that would refuse old data
+  fails it.
+
 ### Added
 
 - Release binaries carry a GitHub artifact attestation (build provenance)
   made by the release workflow, checked by `make verify-release`. Check one
-  with `gh attestation verify a2p2_<os>_<arch> --repo wallter/a2p2`. Releases
-  up to 0.2.3 have none, and the binaries are still not code-signed.
+  with `gh attestation verify a2p2_<os>_<arch> --repo wallter/a2p2
+  --signer-workflow wallter/a2p2/.github/workflows/release.yml
+  --source-ref refs/tags/<tag>`. Releases up to 0.2.3 have none, and the
+  binaries are still not code-signed.
 
 ### Changed
 

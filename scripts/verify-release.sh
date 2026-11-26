@@ -4,13 +4,17 @@
 #   scripts/verify-release.sh v1.2.3        (make verify-release VERSION=v1.2.3)
 #
 # Waits for the release workflow run of the tag, then: the release has
-# exactly the six binaries and SHA256SUMS; the binary for this machine and
-# SHA256SUMS download into a temporary directory; the checksum matches; the
-# binary's `version` reports the tag; the binary has a GitHub artifact
-# attestation (`gh attestation verify`) made by this repository's
-# release.yml. The attestation is required: releases up to v0.2.3 have none,
-# and this script is only run for new tags. Prints the asset list and the first
-# lines of the notes. Exits non-zero on any mismatch. Needs gh, signed in.
+# exactly the six binaries and SHA256SUMS; each of those seven is
+# downloaded by name into a temporary directory, which then holds those
+# seven and nothing else; SHA256SUMS is exactly six lines `<sha256>  <name>`,
+# one for each binary (no blank, repeated or other line); every binary
+# matches its line and has a GitHub artifact attestation (`gh attestation
+# verify`) made by this repository's release.yml from this tag
+# (--source-ref refs/tags/<tag>) on a GitHub-hosted runner; only then is
+# the binary for this machine run, and its `version` must report the tag. The
+# attestation is required: releases up to v0.2.3 have none, and this script
+# is only run for new tags. Prints the asset list and the first lines of the
+# notes. Exits non-zero on any mismatch. Needs gh, signed in.
 #
 # Environment: REPO (default: the repository of the current directory, from
 # `gh repo view`),
@@ -51,16 +55,30 @@ asset=a2p2_${os}_${arch}${ext}
 
 dir=$(mktemp -d "${TMPDIR:-/tmp}/a2p2rel.XXXXXX")
 trap 'rm -rf "$dir"' EXIT
-gh release download ${REPO:+--repo "$REPO"} "$v" -p "$asset" -p SHA256SUMS -D "$dir"
-line=$(grep -E "^[0-9a-f]{64}  $asset\$" "$dir/SHA256SUMS" || true)
-[ -n "$line" ] || no "SHA256SUMS has no line for $asset"
-if command -v sha256sum > /dev/null; then sum=$(sha256sum "$dir/$asset"); else sum=$(shasum -a 256 "$dir/$asset"); fi
-[ "${sum%% *}" = "${line%% *}" ] || no "the checksum of $asset does not match SHA256SUMS"
-echo "verify-release: $asset matches SHA256SUMS"
+# Each expected file by name, so an asset added after the listing is never
+# fetched; then the directory must hold exactly those files.
+for f in $want; do
+  gh release download ${REPO:+--repo "$REPO"} "$v" -p "$f" -D "$dir" || no "cannot download $f"
+done
+[ "$(ls -A "$dir" | LC_ALL=C sort)" = "$want" ] || no "the downloaded files are not exactly the six binaries and SHA256SUMS"
 repo=${REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)} || no "cannot work out the repository"
-gh attestation verify "$dir/$asset" --repo "$repo" --signer-workflow "$repo/.github/workflows/release.yml" > /dev/null \
-  || no "$asset has no valid attestation from $repo/.github/workflows/release.yml"
-echo "verify-release: $asset attestation verified (built by $repo release.yml)"
+bins=$(printf '%s\n' "$want" | grep -v '^SHA256SUMS$')
+# SHA256SUMS, one to one: every line is `<64 hex>  <name>` (so no blank
+# line), and the names, sorted, are the six binaries, each once.
+[ "$(grep -Evc '^[0-9a-f]{64}  a2p2_[a-z0-9_]+(\.exe)?$' "$dir/SHA256SUMS")" = 0 ] || no "SHA256SUMS has a line that is not '<sha256>  <binary>'"
+[ "$(sed 's/^[0-9a-f]*  //' "$dir/SHA256SUMS" | LC_ALL=C sort)" = "$bins" ] || no "SHA256SUMS does not have exactly one line for each of the six binaries"
+# Every binary, not only this machine's: a user on another system installs
+# one of the others. A swapped file with a matching SHA256SUMS line has no
+# attestation, and an attested build of another tag has none from this tag.
+for b in $bins; do
+  line=$(grep -E "^[0-9a-f]{64}  $b\$" "$dir/SHA256SUMS")
+  if command -v sha256sum > /dev/null; then sum=$(sha256sum "$dir/$b"); else sum=$(shasum -a 256 "$dir/$b"); fi
+  [ "${sum%% *}" = "${line%% *}" ] || no "the checksum of $b does not match SHA256SUMS"
+  gh attestation verify "$dir/$b" --repo "$repo" --signer-workflow "$repo/.github/workflows/release.yml" \
+    --source-ref "refs/tags/$v" --deny-self-hosted-runners > /dev/null \
+    || no "$b has no valid attestation from $repo/.github/workflows/release.yml for $v"
+  echo "verify-release: $b matches SHA256SUMS and its attestation (built by $repo release.yml from $v)"
+done
 chmod +x "$dir/$asset"
 out=$("$dir/$asset" version) || no "$asset version failed"
 [ "$out" = "a2p2 $v" ] || no "$asset reports '$out', not 'a2p2 $v'"

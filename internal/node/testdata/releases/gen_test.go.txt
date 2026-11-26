@@ -1,0 +1,286 @@
+package node
+
+// The generator of internal/node/testdata/releases/<tag>/. It is not part
+// of the tree's tests: scripts/release-db.sh copies it into a copy of a
+// tagged release's source and runs it there, so the databases are written
+// by that release's own code. It uses only test helpers and API that
+// every release from v0.2.0 has. The output is one SQL text file per
+// machine (schema, rows and user_version) and manifest.json, which
+// TestDatabasesFromEachReleaseOpenReplayAndKeepWorking compares with what
+// the current code reads back.
+
+import (
+	"context"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/wallter/a2p2/internal/core"
+	"github.com/wallter/a2p2/internal/store"
+)
+
+type genRoom struct {
+	Label   string   `json:"label"`
+	Records int      `json:"records"`
+	Members []string `json:"members"`
+	Admins  []string `json:"admins"`
+}
+
+type genMachine struct {
+	ID     string                 `json:"id"`
+	Agents []string               `json:"agents"`
+	Rooms  map[string]genRoom `json:"rooms"`
+}
+
+func TestWriteReleaseDatabases(t *testing.T) {
+	out := os.Getenv("A2P2_RELEASE_DB_OUT")
+	if out == "" {
+		t.Skip("A2P2_RELEASE_DB_OUT not set")
+	}
+	ctx := context.Background()
+	clock := lclock()
+	net := newMemNet()
+	a := newPNode(t, net, "a", newLNode(t, "a", clock))
+	b := newPNode(t, net, "b", newLNode(t, "b", clock))
+	c := newPNode(t, net, "c", newLNode(t, "c", clock))
+
+	// A room of three: b with history, c without; c leaves by removal
+	// after it wrote.
+	room := a.create("team")
+	a.change(room, Change{Kind: core.EntryAdd, Target: b.id, Name: "bee", History: true})
+	a.change(room, Change{Kind: core.EntryAdd, Target: c.id, Name: "cee", History: false})
+	for _, p := range []*pnode{b, c} {
+		p.pin(room, a.lnode)
+		p.pull(room, a.lnode)
+	}
+	a.register("alice")
+	b.register("bob")
+	c.register("carol")
+	hello := a.send(room, "alice", "hello from a")
+	b.mustPull(room, a, PullOpts{})
+	a.tick()
+	if _, err := b.m.Send(ctx, Draft{Room: room, Agent: "bob", Text: "a reply", ReplyTo: hello}); err != nil {
+		t.Fatal(err)
+	}
+	a.tick()
+	ask, err := a.m.Send(ctx, Draft{Room: room, Agent: "alice", Text: "pick one", Choices: []string{"yes", "no"}, AskHandled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.tick()
+	edited := a.send(room, "alice", "first text")
+	a.tick()
+	if _, err := a.m.Replace(ctx, room, "alice", edited, "second text"); err != nil {
+		t.Fatal(err)
+	}
+	a.tick()
+	gone := a.send(room, "alice", "withdrawn later")
+	a.tick()
+	if _, err := a.m.Withdraw(ctx, room, "alice", gone); err != nil {
+		t.Fatal(err)
+	}
+	c.send(room, "carol", "from c")
+	for i := 0; i < 3; i++ {
+		b.mustPull(room, a, PullOpts{})
+		c.mustPull(room, a, PullOpts{})
+		a.mustPull(room, b, PullOpts{})
+		a.mustPull(room, c, PullOpts{})
+	}
+	a.tick()
+	if _, err := a.m.Send(ctx, Draft{Room: room, Agent: "alice", Text: "to bob", To: []core.Addressee{{Node: b.id, Agent: "bob"}}}); err != nil {
+		t.Fatal(err)
+	}
+	a.change(room, Change{Kind: core.EntryRemove, Target: c.id})
+	for i := 0; i < 3; i++ {
+		b.mustPull(room, a, PullOpts{})
+		a.mustPull(room, b, PullOpts{})
+	}
+	// bob reads his inbox and confirms what it showed.
+	iv, err := b.m.Inbox(ctx, room, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.m.Showed(ctx, room, "bob", iv.Entries, true); err != nil {
+		t.Fatal(err)
+	}
+	var reads []store.Read
+	for _, e := range iv.Entries {
+		reads = append(reads, store.Read{Key: e.Key, Version: e.Version})
+	}
+	if _, err := b.m.Seen(ctx, room, "bob", reads); err != nil {
+		t.Fatal(err)
+	}
+	// and reports the question handled.
+	a.tick()
+	if _, err := b.m.Handled(ctx, room, "bob", ask.ID); err != nil {
+		t.Fatal(err)
+	}
+	a.mustPull(room, b, PullOpts{})
+	// A second room that only a holds.
+	solo := a.create("solo")
+	a.send(solo, "alice", "a note to self")
+
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := map[string]genMachine{}
+	for _, p := range []*pnode{a, b, c} {
+		m := genMachine{ID: p.id, Rooms: map[string]genRoom{}}
+		for _, r := range []string{room, solo} {
+			if _, ok := p.r.rooms[r]; !ok {
+				continue
+			}
+			st := p.state(r)
+			label := "team"
+			if r == solo {
+				label = "solo"
+			}
+			m.Rooms[r] = genRoom{Label: label, Records: len(p.records(r)),
+				Members: genSorted(st.Members), Admins: genSorted(st.Admins)}
+		}
+		switch p.name {
+		case "a":
+			m.Agents = []string{"alice"}
+		case "b":
+			m.Agents = []string{"bob"}
+		case "c":
+			m.Agents = []string{"carol"}
+		}
+		manifest[p.name] = m
+		if err := p.st.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := genDump(p.path, filepath.Join(out, p.name+".sql")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	j, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, "manifest.json"), append(j, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func genSorted(xs []string) []string {
+	ys := slices.Clone(xs)
+	slices.Sort(ys)
+	if ys == nil {
+		ys = []string{}
+	}
+	return ys
+}
+
+// dumpDatabase writes the schema and every row of the database at path as
+// SQL text, ending with its user_version.
+func genDump(path, to string) error {
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	var b strings.Builder
+	b.WriteString("-- Written by internal/node/testdata/releases/gen_test.go.txt (scripts/release-db.sh).\n")
+	type obj struct{ typ, name, sql string }
+	var objs []obj
+	rows, err := db.Query(`SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, name`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var o obj
+		if err := rows.Scan(&o.typ, &o.name, &o.sql); err != nil {
+			rows.Close()
+			return err
+		}
+		objs = append(objs, o)
+	}
+	rows.Close()
+	tables := []string{}
+	for _, o := range objs {
+		if o.typ == "table" {
+			b.WriteString(o.sql + ";\n")
+			tables = append(tables, o.name)
+		}
+	}
+	var hasSeq int
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name = 'sqlite_sequence'`).Scan(&hasSeq); err != nil {
+		return err
+	}
+	if hasSeq == 1 {
+		tables = append(tables, "sqlite_sequence")
+	}
+	for _, tn := range tables {
+		if err := genRows(db, &b, tn); err != nil {
+			return fmt.Errorf("%s: %w", tn, err)
+		}
+	}
+	for _, o := range objs {
+		if o.typ != "table" {
+			b.WriteString(o.sql + ";\n")
+		}
+	}
+	var v int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return err
+	}
+	fmt.Fprintf(&b, "PRAGMA user_version = %d;\n", v)
+	return os.WriteFile(to, []byte(b.String()), 0o644)
+}
+
+func genRows(db *sql.DB, b *strings.Builder, table string) error {
+	rows, err := db.Query(`SELECT * FROM "` + table + `" ORDER BY rowid`)
+	if err != nil {
+		// A table without a rowid.
+		if rows, err = db.Query(`SELECT * FROM "` + table + `"`); err != nil {
+			return err
+		}
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return err
+		}
+		parts := make([]string, len(vals))
+		for i, v := range vals {
+			switch x := v.(type) {
+			case nil:
+				parts[i] = "NULL"
+			case int64:
+				parts[i] = fmt.Sprint(x)
+			case float64:
+				parts[i] = fmt.Sprint(x)
+			case bool:
+				if x {
+					parts[i] = "1"
+				} else {
+					parts[i] = "0"
+				}
+			case []byte:
+				parts[i] = "X'" + hex.EncodeToString(x) + "'"
+			case string:
+				parts[i] = "'" + strings.ReplaceAll(x, "'", "''") + "'"
+			default:
+				return fmt.Errorf("column %s: unexpected %T", cols[i], v)
+			}
+		}
+		fmt.Fprintf(b, "INSERT INTO \"%s\" VALUES(%s);\n", table, strings.Join(parts, ","))
+	}
+	return rows.Err()
+}

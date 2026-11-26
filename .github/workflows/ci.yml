@@ -5,7 +5,9 @@ name: ci
 # code, and on request. Nothing runs on a push to main; macOS is covered
 # by local development and the release checklist. A run by hand (Actions,
 # ci, Run workflow) chooses what to run with `what`: linux (the default),
-# windows, or all.
+# windows, or all. Every action is pinned to a full commit SHA with its
+# release tag in the comment (scripts/workflows.sh checks it), and no
+# checkout keeps the token in .git/config.
 on:
   pull_request:
     paths:
@@ -38,8 +40,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       # fmt, vet, the Windows build gate, the licence check, the requirement
@@ -64,8 +68,10 @@ jobs:
     env:
       DEEP: 'AgreesWithTheDeliveryModelOn(EveryShortSchedule|RandomSchedules)$'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: the system

@@ -296,6 +296,13 @@ Rows marked "model" include tests of the rules in `internal/members` or
 | The page's download raced with an in-place change after the open or after the check; a FIFO or a link put in place of the copy | Changed after the open: 404; after the check: the verified bytes; a FIFO or link: 404 without blocking; no snapshot left | `TestADownloadRacedWithAChangeServesOnlyVerifiedBytes`, `TestADownloadWithAFIFOOrALinkInPlaceOfTheCopyIsRefusedWithoutBlocking`, `TestTheFileRouteServesAHereFileAsAnAttachmentWithItsExactBytes` |
 | A page download, then a crash that leaves a download's snapshot | The snapshot is under the home with a temporary file's name, never in the system's temporary directory; the download removes it when it ends; one left by a crash is gone after the next start and not counted as unknown | `TestADownloadSnapshotLeftByACrashIsGoneAfterAStart` |
 | On a reader's machine, a file shown only by history or the skipped view | Fetched; before any view, refused | `TestOnAReadersMachineAFileShownInHistoryOrSkippedMayBeFetched` |
+| A release whose binary and `SHA256SUMS` line were both replaced, installed with `A2P2_VERIFY_ATTESTATION=1`; an attested build of an older tag put into a newer release | The checksum passes; `gh attestation verify` (with `--source-ref` the tag downloaded) fails and nothing is installed. For `latest` the tag is asked of `gh` once and both files come from it. Without the setting it installs, and the installer says the checksum does not show who built the file. Without `gh`, for a release up to v0.2.3 (named or latest) or with a bad value: refused before any download | `scripts/install-test.sh` cases `attestation` (`make install-test`), with a stub `gh` |
+| `install.sh` into a directory every user may write, or below one; one a group may write; a link of yours into a directory below one every user may write, or to a link below one; directories it makes under umask 000, or that change after it made them | Refused, nothing made or installed; the message names the real directory; made directories are 0755 and checked again; a sticky directory is accepted | `scripts/install-test.sh` case `install directory another user can change` (owned by another user, or a link owned by another user: not run, needs a second account) |
+| `install.ps1` into a folder made by hand under `C:\`, a junction, a folder owned by another account, or a new one | Refused when any other account may change it, when it or a folder above is a junction or link, or when its owner is not you, SYSTEM, Administrators or TrustedInstaller; a new folder is made with an access list for you, SYSTEM and Administrators only | none: `install.ps1` has not been run on Windows |
+| A release binary for another system swapped with its `SHA256SUMS` line, or replaced by an attested build of another tag; an extra, missing, repeated or blank line; another asset | `make verify-release` fails, naming the file without an attestation for the tag, or the line | `scripts/release-test.sh` (`make release-test`), with a stub `gh` |
+| The publish job's `dist/` with a repeated `SHA256SUMS` line in place of another, a blank line, another file or a changed binary | The step fails before anything is attested | `scripts/release-test.sh` runs that step's script, taken out of `release.yml` |
+| A workflow that names an action by tag or branch, keeps the checkout token, grants a write scope at the top level, or gives one (quoted or not) to a job that checks out code or sets up Go; a `.yaml` file; a quoted key, flow mapping, alias or a job not at two spaces | `make check` fails, naming the file and line; the text of a `run: \|` block is not read as structure | `scripts/workflows.sh`, its cases in `scripts/release-test.sh` |
+| A database written by each tagged release from v0.2.0 to v0.2.3, opened by the current code | All four must be present. The schema version is not lower than the release wrote (all four wrote 14, the current one, so no migration runs yet), every room log replays, every record is held, membership is what that release worked out, alice's unread messages and bob's read state are kept, and a and b each send to the other and pull. A new entry rule that refuses old data fails it. An old binary and a new one talking over the network: not tested | `TestDatabasesFromEachReleaseOpenReplayAndKeepWorking` |
 
 Tests skipped on Windows, each with its reason in the skip message:
 `TestLoadIdentity` after its first checks (file modes), `TestHookCmdShellSafe`
@@ -451,12 +458,16 @@ runs on macOS.
 `make check` runs there with `SHARDS=2` for the runner's two cores.
 
 The [release workflow](../.github/workflows/release.yml) runs when a tag
-starting with `v` is pushed. On Linux, without a module or build cache, it
-runs `go vet ./...`, checks that CHANGELOG.md has a section for the tag,
-runs `make release VERSION=<tag>`, checks that the Linux binary reports
-the tag, and publishes the binaries and `SHA256SUMS` as a GitHub release
-with that section as its notes (a prerelease when the tag contains a
-hyphen). It does not run the tests: they ran in `make prerelease` on the
+starting with `v` is pushed. A build job on Linux, with a read-only token
+and without a module or build cache, runs `go vet ./...`, checks that
+CHANGELOG.md has a section for the tag, runs `make release VERSION=<tag>`
+and checks that the Linux binary reports the tag. A publish job, which
+holds the write scopes and runs no repository code, checks the files
+against `SHA256SUMS`, attests them and publishes the binaries and
+`SHA256SUMS` as a GitHub release with that section as its notes (a
+prerelease when the tag contains a hyphen). Every action is pinned to a
+commit; `scripts/workflows.sh` in `make check` checks it. The two-job
+form has not run yet: it waits for the next tag. It does not run the tests: they ran in `make prerelease` on the
 same commit, which `make tag` checks (DECISIONS, D-cycle).
 
 Before a tag, a maintainer runs `make prerelease` on their own machine:
