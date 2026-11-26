@@ -80,8 +80,12 @@ Hooks and the MCP server talk only to the daemon over its Unix socket.
 Release binaries are built by GitHub Actions from the tag, with no module
 or build cache, with CGO off and with `-trimpath`. Each release carries a
 `SHA256SUMS` file made in the same run; verify a binary against it before
-installing (see the [README](README.md#install)). The binaries are not
-signed yet.
+installing (see the [README](README.md#install)). Releases after 0.2.3 also
+carry a GitHub artifact attestation made by the release workflow. To check
+one, run `gh attestation verify a2p2_<os>_<arch> --repo wallter/a2p2` (needs
+the GitHub CLI). It proves which workflow and commit built the file, not
+that the code is safe. Releases up to 0.2.3 have none. The binaries are not
+code-signed or notarised.
 
 See the [design](docs/DESIGN.md), [protocol](docs/PROTOCOL.md)
 and [limits](docs/REQUIREMENTS.md#6-limits-in-plain-words).

@@ -1494,3 +1494,27 @@ dependency, protocol message, command or table.
   logs.
 
 **Revisit if** the page grows enough script to want a browser test.
+
+## D55. Release binaries carry a build attestation (2026-11-25)
+
+The checksums are on the same release page as the binaries, so they do
+not show that a binary came from this repository's workflow. Added now: the release job gains two permissions, `id-token:
+write` and `attestations: write`, and one first-party step, `actions/attest@v4`,
+which runs before the release is published. `scripts/verify-release.sh`
+requires the attestation. A user checks a file with `gh attestation verify
+a2p2_<os>_<arch> --repo wallter/a2p2`. No new dependency in the code, no
+protocol message, command or table. `install.sh` is unchanged: it checks
+SHA-256 only and does not need `gh`.
+
+- **Adds:** two job permissions on the only unattended workflow; one
+  GitHub-owned action; a public Sigstore transparency log entry for each
+  release, naming the repository, commit and workflow (no personal data).
+- **Does not give:** code signing, macOS or Windows notarisation, or a
+  proof that the build is reproducible. It shows which workflow and commit
+  built a file, not that the source is safe. Releases up to 0.2.3 have no
+  attestation.
+- **Left out on purpose:** requiring `gh` in the installer; the
+  `artifact-metadata` permission, which a trial run did not need.
+
+**Revisit if** the action changes its permissions or format, a user wants
+checking without `gh`, or macOS or Windows signing is added.

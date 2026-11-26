@@ -3,7 +3,10 @@ name: release
 # for linux and darwin, and a2p2_windows_<arch>.exe, on amd64 and arm64 with
 # `make release`, writes
 # SHA256SUMS, and attaches them to a GitHub release made with the gh CLI,
-# with that version's section of CHANGELOG.md as the notes. This is the only
+# with that version's section of CHANGELOG.md as the notes. Before it
+# publishes, it attests the binaries (SLSA build provenance, signed through
+# Sigstore's public instance, so each release adds a public log entry naming
+# this repository, the commit and this workflow). This is the only
 # workflow that runs without a person asking; see docs/RELEASING.md.
 #
 # The tests are not run here: `make prerelease` ran check, lint, vuln, the
@@ -24,7 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write # create the release and upload its files; nothing else
+      contents: write # create the release and upload its files
+      id-token: write # lets the attest step get a signing identity for this run
+      attestations: write # lets the attest step store the attestation
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -40,6 +45,10 @@ jobs:
       - run: make release VERSION="$GITHUB_REF_NAME"
       - name: the binary reports the tag
         run: test "$(dist/a2p2_linux_amd64 version)" = "a2p2 $GITHUB_REF_NAME"
+      # Before publish, so a release never goes out without its attestation.
+      - uses: actions/attest@v4
+        with:
+          subject-path: dist/a2p2_*
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}

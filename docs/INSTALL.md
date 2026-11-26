@@ -21,7 +21,12 @@ A2P2_VERSION=v0.2.3 sh install.sh
 
 The checksum the script checks comes from the same release, so this
 catches a corrupted or swapped download, not a compromised release. The
-binaries are not signed.
+installer checks SHA-256 only and does not need the GitHub CLI. Releases
+after 0.2.3 also carry an attestation from the release workflow. To check
+a downloaded binary, run `gh attestation verify a2p2_<os>_<arch> --repo
+wallter/a2p2` (needs the GitHub CLI). It proves which workflow and commit
+built the file, not that the code is safe. Releases up to 0.2.3 have none.
+The binaries are not code-signed or notarised.
 
 ## From a release binary
 
