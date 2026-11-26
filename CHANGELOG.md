@@ -17,6 +17,11 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Changed
 
+- **Docs: the durability limit on macOS is stated.** `send` survives a crash
+  of a2p2 or of the operating system, but on macOS a sudden power loss can
+  lose the last few sent messages, because the database's sync does not
+  flush the drive's cache there. REQUIREMENTS D1 and section 6 now say so.
+  Nothing in the program changed.
 - **The MCP tool descriptions are clearer, and the server sends short
   instructions.** The seven descriptions now say that messages reach other
   agents and people, that `whoami` comes first, what `inbox` also does

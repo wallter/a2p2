@@ -166,7 +166,7 @@ Rows marked "model" include tests of the rules in `internal/members` or
 | Page request with wrong `Origin` or `Host`, or no token | Refused | `TestAuthHostOrigin`, `TestPageDecisionNeedsTheExactOriginAndShowsTheFullFingerprint` |
 | Message text that looks like instructions | Shown as labelled peer data | `TestHostileStringsAreInert`, `TestInboxForgedHeadersStayInert` |
 | Database write fails partway | The store rolls back the write or log batch | `TestFailureBetweenStatementsLeavesNoHalfAppliedWrite`, `TestLogBatchThatFailsLeavesNothingApplied` |
-| Power loss | Open test gap | None |
+| Power loss | Open test gap. On macOS the store's commit does not flush the drive's cache (REQUIREMENTS section 6), so the last sends may be lost; this cannot be tested without cutting power | None |
 | Clock set back or ahead | Expired text stays expired. Replacement order follows the author's history. A record dated over a day ahead waits. | `TestTextThatExpiredBeforeItWasShownIsAnExpiredNoticeEvenAfterTheClockGoesBack`, `TestAFutureRecordLeavesNoSeenAndIsTakenOnceTheClockAllows`, model `TestNewestReplacementIsByTheAuthorsHistoryNotItsClock` |
 | Agent at level `addressed` | Shown what names it, replies in its threads and posts whose text begins with `@everyone`; other room-wide posts are skipped; another agent on the machine is unaffected | `TestAgentAtAddressedSeesWhatIsAddressedToItAndRepliesInItsThreadsButNotRoomWidePosts`, model `TestAddressedLevelShowsWhatIsAddressedAndPostsMarkedForEveryone` |
 | Agent at level `none` | Nothing reaches its inbox; it reads what it skipped when it asks, and asking marks nothing | `TestAgentAtNoneIsShownNothingUntilItAsks`, model `TestNoneLevelShowsNothingUntilTheAgentAsks` |
