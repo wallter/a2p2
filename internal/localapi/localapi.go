@@ -507,6 +507,9 @@ type (
 		Listen  string `json:"listen,omitempty"`
 		Request string `json:"request,omitempty"`
 		MapPort bool   `json:"map_port,omitempty"`
+		// MapPortEarlier: port mapping an earlier version recorded, not
+		// applied until a person decides again (D68).
+		MapPortEarlier bool `json:"map_port_earlier,omitempty"`
 		// IPv4Only: a decision from before IPv6 (DESIGN 11): IPv4 only until decided again.
 		IPv4Only bool   `json:"ipv4_only,omitempty"`
 		Applied  string `json:"applied,omitempty"`
@@ -892,7 +895,8 @@ func RequestOf(q node.RequestView) Request {
 
 // NetworkOf renders a networking state.
 func NetworkOf(n node.Network) Network {
-	return Network{State: n.State, Listen: n.Listen, Request: n.Request, MapPort: n.MapPort, IPv4Only: n.IPv4Only}
+	return Network{State: n.State, Listen: n.Listen, Request: n.Request, MapPort: n.MapPort,
+		MapPortEarlier: n.MapPortEarlier, IPv4Only: n.IPv4Only}
 }
 
 // AlertOf renders an alert.

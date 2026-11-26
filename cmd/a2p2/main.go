@@ -1339,6 +1339,28 @@ func netCmd(c *cmd, args []string) error {
 		req.MapPort = true
 		fmt.Fprintln(os.Stderr, node.MapPortText)
 	}
+	// Port mapping an earlier version recorded is not applied (D68): say
+	// what this decision does with it. Only a running daemon is asked;
+	// none is started before the person says yes.
+	cl, ok := c.cl, c.cl != nil
+	if !ok {
+		cl, ok = daemon.Running(c.ctx, c.home)
+	}
+	if ok {
+		var st localapi.Status
+		if cl.Call(c.ctx, "status", localapi.StatusReq{}, &st) == nil && st.Network.MapPortEarlier {
+			s := "Port mapping was turned on by an earlier version of a2p2 and is off since the upgrade; this decision "
+			switch {
+			case *mapPort:
+				s += "turns it on again."
+			case req.State == "on":
+				s += "keeps it off. Add --map-port to turn it on again."
+			default:
+				s += "keeps it off."
+			}
+			fmt.Fprintln(os.Stderr, s)
+		}
+	}
 	fmt.Fprintln(os.Stderr, "The daemon applies it as soon as it is recorded.")
 	if ask("Apply this? Type yes: ") != "yes" {
 		return errors.New("nothing changed")

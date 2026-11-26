@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/netip"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/wallter/a2p2/internal/daemon/portmap"
@@ -35,15 +36,26 @@ func (r *run) keeper(netw node.Network, ln net.Listener, changed func()) (*portm
 		return nil, portmap.UnusableText(err)
 	}
 	want := netw.MapPort && ln != nil
-	if !want && len(left) == 0 {
-		return nil, ""
+	why := ""
+	if netw.MapPortEarlier {
+		// Asked for under an earlier version: not mapped until a person
+		// decides again; what that version left is still removed.
+		why = node.MapPortEarlierText
 	}
-	gwf := gatewayLocal
+	if !want && len(left) == 0 {
+		return nil, why
+	}
+	gwf, test := gatewayLocal, false
 	if r.o.Gateway != nil {
-		gwf = r.o.Gateway
+		gwf, test = r.o.Gateway, true
 	}
 	gw, local, err := gwf()
 	if err != nil {
+		if len(left) > 0 {
+			// Nothing can be removed without the router: say what may
+			// still be there.
+			return nil, err.Error() + "; " + leftText(left) + " may still be on the router, removal is tried at the next start"
+		}
 		return nil, err.Error()
 	}
 	rec := &portmap.File{Path: path, Gateway: gw}
@@ -55,11 +67,13 @@ func (r *run) keeper(netw node.Network, ln net.Listener, changed func()) (*portm
 		m = r.o.Mapper(gw, local)
 	}
 	port := uint16(0)
-	why := ""
-	if want && askable(gw) != nil {
-		// Not asked for a mapping, but what an earlier run recorded on
-		// this same gateway is still removed.
-		why, want = askable(gw).Error(), false
+	if want {
+		// The fake routers of tests are on loopback; no real one is.
+		if err := askable(gw); err != nil && !(test && gw.IsLoopback()) {
+			// Not asked for a mapping, but what an earlier run recorded on
+			// this same gateway is still removed.
+			why, want = err.Error(), false
+		}
 	}
 	if want {
 		tcp := ln.Addr().(*net.TCPAddr)
@@ -97,7 +111,20 @@ func (r *run) keeper(netw node.Network, ln net.Listener, changed func()) (*portm
 			changed()
 		}
 	})
+	// What an earlier run left shows in status from now on, not only once
+	// the first removal has been tried: a2p2 net off and a restart show it
+	// at once.
+	k.Pending(left, "an earlier run could not remove it; trying again")
 	return k, why
+}
+
+// leftText names the mappings of a record for a person.
+func leftText(left []portmap.Mapping) string {
+	s := make([]string, len(left))
+	for i, m := range left {
+		s[i] = m.String()
+	}
+	return strings.Join(s, "; ")
 }
 
 // mappedAddr is the mapped external address, to verify by a dial-back
@@ -209,7 +236,7 @@ func netipPrefix(ipn *net.IPNet) (netip.Prefix, bool) {
 // deletions of what an earlier run recorded on it, since a record names
 // its gateway and is used only on that same one.
 func askable(gw netip.Addr) error {
-	if gw.Is4() && (gw.IsPrivate() || gw.IsLoopback()) {
+	if gw.Is4() && gw.IsPrivate() {
 		return nil
 	}
 	return fmt.Errorf("not mapped: the default gateway %s does not have a private address, so it is not asked to map a port", gw)
