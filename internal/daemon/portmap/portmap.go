@@ -137,6 +137,48 @@ func (c *Client) http() *http.Client {
 		CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("portmap: redirects are not followed") }}
 }
 
+// notPublic is the IPv4 ranges a router's external address may not be
+// in, beyond what netip names: shared address space (RFC 6598), "this
+// network", and the reserved range with the limited broadcast address.
+var notPublic = []netip.Prefix{netip.MustParsePrefix("100.64.0.0/10"), netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("240.0.0.0/4")}
+
+// Public says whether a may be a router's external address, as given to
+// members and in invites: a global unicast IPv4 address that is not
+// private, shared, loopback, link-local, multicast or reserved. The
+// answers it is checked on carry no authentication (DESIGN 11). Every
+// request a2p2 sends is IPv4 (an IPv4 gateway, an IPv4 suggestion in PCP,
+// NAT-PMP), so an honest answer is IPv4, written in PCP as an
+// IPv4-mapped address; any other IPv6 address is refused, since IPv6 can
+// encode a private IPv4 address in many ways (IPv4-compatible, NAT64,
+// 6to4). Documentation ranges pass: nobody holds them, so they cost a
+// dial a timeout only.
+func Public(a netip.Addr) bool {
+	a = a.Unmap()
+	if !a.Is4() || !a.IsGlobalUnicast() || a.IsPrivate() {
+		return false
+	}
+	for _, p := range notPublic {
+		if p.Contains(a) {
+			return false
+		}
+	}
+	return true
+}
+
+// Usable says why a mapping a router granted cannot be used, or nil: it
+// must be Valid, as a record needs, with a Public external address and a
+// port.
+func (m Mapping) Usable() error {
+	if !Public(m.External.Addr()) || m.External.Port() == 0 {
+		return fmt.Errorf("%w: the external address %s is not a public address", errUnsure, m.External)
+	}
+	if err := m.Valid(); err != nil {
+		return fmt.Errorf("%w: %v", errUnsure, err)
+	}
+	return nil
+}
+
 // errNoAnswer: nothing answered on the PCP and NAT-PMP port in time.
 var errNoAnswer = errors.New("no answer")
 
@@ -192,7 +234,13 @@ func (c *Client) Unmap(ctx context.Context, m Mapping) error {
 	}
 	switch m.Protocol {
 	case PCP:
+		// A router that speaks only NAT-PMP holds no PCP mapping. Its
+		// version answer counts only if no PCP answer came in any of the
+		// tries, each of which resends the deletion.
 		_, err := c.pcp(ctx, m.Internal, 0, &m)
+		if errors.As(err, new(*oldVersion)) {
+			return nil
+		}
 		return err
 	case NATPMP:
 		_, err := c.natpmp(ctx, m.Internal, 0, 0)

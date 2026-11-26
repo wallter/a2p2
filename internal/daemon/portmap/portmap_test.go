@@ -787,9 +787,19 @@ func TestMalformedRouterAnswersAreNotTakenForAMapping(t *testing.T) {
 		k := NewKeeper(client(gw), 7423, rec, nil)
 		stop := runKeeper(k)
 		waitFor(t, tc.name, func() bool { return k.State().Err != "" })
-		if st := k.State(); st.Mapping != nil || !strings.Contains(st.Err, "cannot be used") || len(get(t, rec)) != 1 {
-			t.Fatalf("%s: %+v, record %v (kept, to be removed)", tc.name, st, get(t, rec))
+		if st := k.State(); st.Mapping != nil || !strings.Contains(st.Err, "cannot be used") {
+			t.Fatalf("%s: %+v", tc.name, st)
 		}
+		// Kept to be removed, and removed after the failed attempt: a
+		// deletion (lifetime 0) by the request's nonce.
+		waitFor(t, tc.name+" removed", func() bool {
+			for _, q := range gw.requests() {
+				if len(q) >= 60 && binary.BigEndian.Uint32(q[4:]) == 0 && string(q[24:36]) == string(gw.requests()[0][24:36]) {
+					return len(get(t, rec)) == 0
+				}
+			}
+			return false
+		})
 		stop()
 	}
 	junk := newFakeUDP(t, func(q []byte) []byte { return []byte{0, 0x99, 0, 0, 0, 0, 0, 0} })

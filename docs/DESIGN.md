@@ -911,14 +911,24 @@ widen who can be reached, none of them a service run by anyone else.
   another uplink's router is never made. On Windows mapping reports itself
   unavailable. This machine's address on that network is the source
   address the system selects for the gateway (a route lookup that sends
-  nothing), not the first address in the gateway's subnet. A mapping is
+  nothing), not the first address in the gateway's subnet. Only a gateway
+  with a private IPv4 address is asked for a mapping; what an earlier
+  run recorded on another gateway of this network is still removed
+  there. A mapping is
   made only for a listener bound to the wildcard address or to that
   address,
   so the router never forwards to another service that holds the port on
   another address, and it ends with that listener, however the listener
   ends. Answers are checked before they count: the UDP source must be the
-  gateway's port, a PCP answer must carry the request's nonce, a grant
-  must have a lifetime, an external port and an address, an SSDP answer
+  gateway's port, a PCP answer must carry the request's nonce (NAT-PMP's
+  version refusal, which holds nothing of the request, counts only if no
+  PCP answer comes in any of the tries, and the PCP request stays
+  recorded to be removed; a new PCP request with no answer at all is
+  sent one deletion, not waited for, before it is let go, and a renewal
+  with no answer is not), a grant must have
+  a lifetime, an external port and a public IPv4 address (not private,
+  shared, loopback, link-local, multicast or reserved, and not IPv6,
+  which no request asks for; one that is not is removed at once), an SSDP answer
   must be a 200 for a gateway device, a SOAP answer must be a complete
   response, and a SOAP fault counts as a refusal (one that moves to the
   next port, asks for a permanent lease or counts a removal as done) only
@@ -926,8 +936,13 @@ widen who can be reached, none of them a service run by anyone else.
   control URL is followed only if its host is the gateway. NAT-PMP and SSDP carry no authentication, so a machine on
   the same network that spoofs the gateway's address can still answer
   first; what it can obtain is a wrong mapping shown in `status`, not a
-  connection to anything but this machine's listener. The mapping asks for
-  two hours, is renewed at half of what was granted, however short, and a
+  connection to anything but this machine's listener. A host on the
+  local network can also relay a mapped port and see who connects and
+  when, one member that says it reached a wrong address gets it
+  advertised, and an invite with an unconfirmed mapped address shows the
+  joiner's address to that address's owner (SECURITY.md). The mapping
+  asks for two hours, takes a longer grant as two hours, is renewed at
+  half of that, however short, and a
   permanent UPnP lease is asked for only when the router refuses finite
   ones. The external address the router reports is the only candidate for
   advertising: it is advertised after a member reaches it, while a member
@@ -966,13 +981,23 @@ widen who can be reached, none of them a service run by anyone else.
   file, synced, renamed, the directory synced), and it stays there while
   it may exist:
   after a failed renewal, after a NAT-PMP or UPnP grant whose external
-  address could then not be read, after an answer that cannot be used. It
-  is removed when the listener stops, on `net off`, on a decision without
-  `--map-port` and on a clean stop, and at every start, whatever the
-  decision, for what an earlier run left. A removal that fails is shown in
+  address could then not be read, after an answer that cannot be used.
+  Its removal is tried when the listener stops, on `net off`, on a
+  decision without `--map-port` and on a clean stop, and at every start,
+  whatever the decision, for what an earlier run left. From the end of
+  the run the mapped address is no longer given out to invites or the
+  reacher, whether or not the router confirmed the removal; a renewal
+  answered with an address that cannot be used withdraws it too, while
+  the mapping is still renewed, every five minutes, and removed. After a
+  failed attempt, what it may have made is removed at once, but not the
+  mapping held. A keeper adds at most 8 mappings to remove (the record loads with up to 16); a
+  request past that is not sent, and a request the record could not load
+  (a UPnP port past 65535 is never asked for) is not sent either, so the
+  record always loads at the next start. A removal that fails is shown in
   `status` and `net check` and retried every five minutes, at stop and at
-  the next start. What a crash leaves: a finite mapping until its lease
-  ends (at most two hours), and a permanent UPnP rule, if the router
+  the next start. What a crash leaves: a finite mapping until the lease
+  the router granted ends (two hours asked; a router may keep it
+  longer), and a permanent UPnP rule, if the router
   granted only that, until a2p2 next starts on that network and removes it,
   or until a person deletes the rule described `a2p2` on the router's own
   page. The record is used whole or not at all: a field out of range or
@@ -986,7 +1011,8 @@ widen who can be reached, none of them a service run by anyone else.
   does not is left alone.
 
 Interfaces and gateways are read through `internal/daemon` (build-tagged
-per system); the mapping protocols are `internal/daemon/portmap` and every
+per system); the mapping protocols are `internal/daemon/portmap`, the
+daemon's use of them is `internal/daemon/mapport.go`, and every
 test of them runs against fake PCP, NAT-PMP and UPnP responders on
 loopback. No test or check sends anything to a real router.
 

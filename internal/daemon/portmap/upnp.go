@@ -304,7 +304,9 @@ func (c *Client) mapUPnP(ctx context.Context, internal uint16, lifetime time.Dur
 		lease = 0
 		err = add(ext, lease)
 	}
-	for i := 1; errors.As(err, &ue) && ue.code == "718" && i <= 3; i++ { // the port is taken: the next ones
+	// The port is taken: the next ones, never past 65535 (a wrap to 0
+	// would be a handle the record cannot load).
+	for i := 1; errors.As(err, &ue) && ue.code == "718" && i <= 3 && int(internal)+i <= 65535; i++ {
 		ext = internal + uint16(i)
 		err = add(ext, lease)
 	}

@@ -3,6 +3,7 @@ package portmap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -96,11 +97,18 @@ func (k *Keeper) leftLocked() []string {
 	return out
 }
 
+// maxHeld limits adding: no request for a new handle is sent while a
+// keeper holds this many to remove. It is well under what a record loads
+// (maxRecorded), so the next start can always read it; a record an older
+// run left may hold more, up to maxRecorded, and is still loaded whole.
+const maxHeld = maxRecorded / 2
+
 // note records h before a request (asking) or forgets it after a
 // definite answer that nothing was made. The record is written before the
 // request goes out; a failure to write stops the request. A renewal of the
 // mapping granted changes nothing: it exists until removed or expired,
-// whatever the renewal's answer.
+// whatever the renewal's answer. A handle the record could not load, or
+// one past maxHeld, stops the request.
 func (k *Keeper) note(h Mapping, asking bool) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -108,6 +116,14 @@ func (k *Keeper) note(h Mapping, asking bool) error {
 		return nil
 	}
 	i := slices.IndexFunc(k.held, func(x Mapping) bool { return x.Key() == h.Key() })
+	if asking {
+		if err := h.Valid(); err != nil {
+			return fmt.Errorf("not asked: the record could not hold the request (%v)", err)
+		}
+		if i < 0 && len(k.held) >= maxHeld {
+			return fmt.Errorf("not asked: %d mappings may still be on the router and are not removed yet", len(k.held))
+		}
+	}
 	switch {
 	case asking && i < 0:
 		k.held = append(k.held, h)
@@ -198,7 +214,7 @@ func (k *Keeper) Run(ctx context.Context) {
 		k.mu.Unlock()
 	}
 	k.remove("") // what earlier runs left: removed before anything is asked
-	defer k.remove("")
+	defer k.end()
 	if k.internal == 0 {
 		// Only cleaning up: what could not be removed is tried again every
 		// retryAfter, and at the end (the deferred remove).
@@ -218,6 +234,17 @@ func (k *Keeper) Run(ctx context.Context) {
 	var cur *Mapping
 	for {
 		m, err := k.m.Map(ctx, k.internal, Lifetime, cur, k.note)
+		answered := err == nil
+		if err == nil {
+			// The answer carries no authentication: an address that is
+			// not public is not taken, and the request's handle stays
+			// held to be removed. A lifetime longer than asked is taken
+			// as asked, so renewal goes on.
+			err = m.Usable()
+			if m.Lifetime > Lifetime {
+				m.Lifetime, m.Expires = Lifetime, time.Now().Add(Lifetime)
+			}
+		}
 		if ctx.Err() != nil {
 			if err == nil {
 				k.granted(m) // granted as we stopped: still removed
@@ -230,11 +257,18 @@ func (k *Keeper) Run(ctx context.Context) {
 			st.Err = err.Error()
 			// A failed renewal leaves the mapping in place until it
 			// expires: it stays held (to be removed) and is renewed again
-			// before then.
+			// before then. A renewal the router answered waits retryAfter:
+			// a router that answers at once is not asked every minWait
+			// once the mapping held has expired.
 			wait = retryAfter
 			if cur != nil {
-				st.Mapping = cur
-				if cur.Lifetime > 0 {
+				// A renewal the router answered with an address that
+				// cannot be used says the one held is no longer right: it
+				// is no longer given out, but still renewed and removed.
+				if !answered {
+					st.Mapping = cur
+				}
+				if !answered && cur.Lifetime > 0 {
 					wait = min(wait, max(time.Until(cur.Expires)/2, minWait))
 				}
 			}
@@ -251,11 +285,34 @@ func (k *Keeper) Run(ctx context.Context) {
 			}
 		}
 		k.publish(st)
+		if err != nil {
+			// What a failed attempt may have made, but not the mapping
+			// held now: removed at once, so failures do not pile up.
+			k.mu.Lock()
+			live := k.live
+			k.mu.Unlock()
+			k.remove(live)
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(wait):
 		}
+	}
+}
+
+// end removes every mapping held, as the run ends, and withdraws the one
+// given out: whether or not its removal was confirmed, it forwards to a
+// listener that is gone.
+func (k *Keeper) end() {
+	k.remove("")
+	k.mu.Lock()
+	had := k.st.Mapping != nil
+	st := k.st
+	k.mu.Unlock()
+	if had {
+		st.Mapping = nil
+		k.publish(st)
 	}
 }
 

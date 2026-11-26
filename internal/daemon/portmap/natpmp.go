@@ -70,7 +70,7 @@ func (c *Client) natpmp(ctx context.Context, internal, suggest uint16, lifetime 
 		if r := binary.BigEndian.Uint16(b[2:]); r != 0 {
 			return true, fmt.Errorf("refused: %s", pmpText(r))
 		}
-		granted := time.Duration(binary.BigEndian.Uint32(b[12:])) * time.Second
+		granted := grantedFor(binary.BigEndian.Uint32(b[12:]), lifetime)
 		port := binary.BigEndian.Uint16(b[10:])
 		out = Mapping{Protocol: NATPMP, Gateway: c.Gateway, Local: c.Local, Internal: internal, Lifetime: granted,
 			Expires: c.now().Add(granted), External: netip.AddrPortFrom(netip.Addr{}, port)}

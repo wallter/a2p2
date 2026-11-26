@@ -129,6 +129,8 @@ type machine struct {
 	// local, if valid, is this machine's address on the fake router's
 	// network; otherwise 127.0.0.1, where the test listener is.
 	local netip.Addr
+	// gw, if valid, is the fake router's address; otherwise 127.0.0.1.
+	gw netip.Addr
 }
 
 func (m *machine) gateway() (gw, local netip.Addr, err error) {
@@ -141,7 +143,11 @@ func (m *machine) gateway() (gw, local netip.Addr, err error) {
 	if m.local.IsValid() {
 		local = m.local
 	}
-	return netip.MustParseAddr("127.0.0.1"), local, nil
+	gw = netip.MustParseAddr("127.0.0.1")
+	if m.gw.IsValid() {
+		gw = m.gw
+	}
+	return gw, local, nil
 }
 
 func (m *machine) mapper(netip.Addr, netip.Addr) portmap.Mapper {
