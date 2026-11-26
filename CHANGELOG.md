@@ -474,7 +474,20 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   which give a Claude Code member unscoped shell access. These are
   refused now, also in other case or with a control character, and so is
   a model or prompt that starts with `-`. A kickoff that starts with `-`
-  is now posted as text.
+  is now posted as text. `dangerous` is refused in a tool's name only, so
+  a rule such as `Read(./notes/dangerous-ideas.md)` is accepted again.
+- **The team launcher tells members and the person apart by full key.**
+  Since 0.1.0 its watcher, `team status` and `team report` matched
+  messages by the 8-character short id and counted a message to any
+  `human@` as a question to the person. Another machine with the same
+  short id could hide a member's activity or have its person's
+  questions reported as this one's. They now use `from_node` and the
+  exact id `a2p2 status` gives the person.
+- **`team stop` tells the truth.** Since 0.1.0 it said "stopped" after
+  its wait even with a member still running, and when no supervisor
+  answered it marked the run ended, though a busy supervisor might still
+  run. It now exits non-zero in both cases and leaves the roster as it
+  was, and says when there is no member to stop.
 - **`team status` and `team logs` escape terminal controls.** Since 0.1.0
   they printed C1 controls (such as CSI, U+009B) and bidi overrides that a
   member wrote or a harness logged. They are written as `\u{...}` now, by

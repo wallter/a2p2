@@ -311,6 +311,14 @@ rails against mistakes and steered agents.
   characters a member wrote or a harness logged by the daemon's rules
   (D58), so peer text a member copied cannot drive the operator's
   terminal; `logs --raw` does not.
+- The team launcher tells this machine's members, lead and person by the
+  author's full machine key, and a question to the person by the exact
+  id `a2p2 status` gives, so another machine with the same short id
+  cannot hide a member's activity or pass its person's questions off as
+  this one's. With a 0.2.3 or earlier `a2p2` the person's id is still the
+  short one. `team stop` exits non-zero when no supervisor answers or a
+  member is still running after its wait, and never marks a run ended
+  itself.
 - Pi's skill tells the model to send text only through a heredoc with a
   quoted end word, so bash runs nothing in it. Earlier skills put the text
   in double quotes, where bash runs `$(...)` and backticks: a peer's text
