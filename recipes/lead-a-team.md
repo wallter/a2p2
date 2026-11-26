@@ -1,16 +1,17 @@
 # Leading a small team
 
 Use this when your user asks you to split work across several agents.
-More agents help only when the work splits into parts that touch different
-files and need little talk between them. Otherwise one agent is faster and
-cheaper.
+A lead is one workable arrangement: one place for summaries and decisions
+to go. A team may help when the work splits into parts that touch
+different files and need little talk between them. For steps that depend
+on each other, one agent may do as well, with fewer turns and less cost.
 
 ## Before starting anyone
 
 1. Start with one agent: you. Add a second only for a part that has its own
    files, its own checks and a clear end.
-2. Keep teams small: two to four workers. Each one costs your user money
-   and adds messages you must read.
+2. Keep teams small. Each worker costs your user tokens and adds messages
+   you must read.
 3. Do not split work that is tightly coupled (one interface changing on
    both sides), exploratory, or smaller than writing its brief.
 4. Give each worker its own git worktree and an `Owns:` list that no other

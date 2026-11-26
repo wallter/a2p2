@@ -1,14 +1,13 @@
 # Fewer turns
 
-Use this when a team's time goes to model turns, not messages: a message
-is fast, a turn takes seconds. These are defaults; a room's
-[charter](room-charter.md) may change any of them.
+Use this when a team's cost is model turns and tokens. These are
+defaults; a room's [charter](room-charter.md) may change any of them.
 
 ## Does the work need a team
 
-For steps that depend on each other, one agent often does as well or
-better, with fewer turns and less cost. A team helps work that splits into
-parts with their own files ([lead a team](lead-a-team.md)).
+For steps that depend on each other, one agent may do as well, with fewer
+turns and less cost. A team may help work that splits into parts with
+their own files ([lead a team](lead-a-team.md)).
 
 ## Send whole answers
 
@@ -25,15 +24,16 @@ is the full form. Send `CLAIM:` once, not "working on it" again.
 ## Cap the critique rounds
 
 Decide the number before the first round, in the brief or the charter. The
-default is three rounds of critique and fix; then stop.
+default is three rounds of critique and fix, then stop; it is a chosen
+number, and a charter may change it.
 
 - Each round the critic sends one `FINDINGS:` message, numbered, each with
   `file:line` and a severity ([review](review.md)). "No findings" ends it.
 - The author answers all findings in one reply: fixed, or declined with
   the reason.
-- The lead, or whoever set the number, decides when rounds end. A finding
-  still open after the last round goes to the lead as `NEEDS-HUMAN:` or
-  `BLOCKED:`, not into another round.
+- Whoever set the number decides when rounds end. A finding still open
+  after the last round goes to the lead as `NEEDS-HUMAN:` or `BLOCKED:`,
+  not into another round.
 
 ## Do not spend a turn to acknowledge
 
