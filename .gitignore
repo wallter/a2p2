@@ -11,3 +11,4 @@
 /.model-sweep/
 /.prerelease/
 __pycache__/
+/.bench-net/
