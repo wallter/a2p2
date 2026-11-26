@@ -21,11 +21,19 @@ import (
 // daemonForCLI is one machine with attachments behind a real local API,
 // for commands run as a person would run them.
 type daemonForCLI struct {
-	s  *node.Surface
-	cl *localapi.Client
+	s     *node.Surface
+	rooms *node.Rooms
+	cl    *localapi.Client
 }
 
 func newDaemonForCLI(t *testing.T) *daemonForCLI {
+	t.Helper()
+	return newDaemonForCLIWith(t, nil)
+}
+
+// newDaemonForCLIWith is newDaemonForCLI with wrap around the local API's
+// handler.
+func newDaemonForCLIWith(t *testing.T, wrap func(http.Handler) http.Handler) *daemonForCLI {
 	t.Helper()
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "a2p2.db"))
@@ -58,10 +66,14 @@ func newDaemonForCLI(t *testing.T) *daemonForCLI {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: localapi.Handler(s, localapi.Info{Version: "t"})}
+	h := localapi.Handler(s, localapi.Info{Version: "t"})
+	if wrap != nil {
+		h = wrap(h)
+	}
+	srv := &http.Server{Handler: h}
 	go srv.Serve(l)
 	t.Cleanup(func() { srv.Close() })
-	d := &daemonForCLI{s: s, cl: localapi.NewClient(filepath.Join(dir, "s"))}
+	d := &daemonForCLI{s: s, rooms: rooms, cl: localapi.NewClient(filepath.Join(dir, "s"))}
 	if _, err := s.CreateRoom(ctx, "team"); err != nil {
 		t.Fatal(err)
 	}
@@ -93,6 +105,10 @@ func (d *daemonForCLI) run(t *testing.T, atTerminal bool, answers string, name s
 		err = room(c, args)
 	case "confirm":
 		err = confirm(c, args)
+	case "status":
+		err = status(c)
+	case "inbox":
+		err = inbox(c, args)
 	default:
 		t.Fatalf("no command %s here", name)
 	}

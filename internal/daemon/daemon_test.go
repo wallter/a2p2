@@ -765,7 +765,7 @@ func TestPageDecisionNeedsTheExactOriginAndShowsTheFullFingerprint(t *testing.T)
 	q := state.Requests[0]
 	fp := node.Fingerprint(b.node)
 	if q.Node != b.node || q.Fingerprint != fp || q.Action != node.ActionAdmitAdmin || !q.History || q.RoomLabel != "team" ||
-		q.Text != "add machine "+fp+" (beta) to room team ("+room+") as an admin, with earlier history" {
+		q.Text != "add machine "+fp+" ("+node.Isolate("beta")+") to room "+node.Isolate("team")+" ("+room+") as an admin, with earlier history" {
 		t.Fatalf("request as the page shows it: %+v", q)
 	}
 	// Without the page's Origin, or with another, nothing is decided.

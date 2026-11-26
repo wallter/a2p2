@@ -100,9 +100,10 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   paragraph separators and every other Unicode control, format or
   default ignorable character are now written `\u{...}` too, in requests
   and on the page. The helper moved to `internal/node/escape.go` with one
-  rule for one-line text and one for message text. The message rule keeps
-  a joiner or selector only inside an emoji sequence or between letters
-  of a script that needs joiners, such as Arabic or Devanagari.
+  rule for message text, used without line breaks for one line. It keeps
+  a joiner or selector inside an emoji sequence or between letters of a
+  script that needs joiners, such as Arabic or Devanagari, and the few
+  other marks listed below.
 - **The page escapes what other machines wrote.** Exposed since 0.2.3,
   the first release whose page loads: a person using the page in a room
   with another owner's machines. Room labels in the sidebar, headings and
@@ -123,8 +124,28 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   name the room records and other members with the name shown. An
   approval from the page is refused if that text changed before the
   decision; reload and decide again.
-- Still open: the CLI's printing of messages, question alerts and room
-  lists, and the MCP tools' text, do not escape yet.
+- **Honest text is shown as written, and the CLI and MCP tools escape
+  too.** The first escaping wrote emoji with a selector or joiner and
+  Persian or Indic joiners in room labels, file names and approval text
+  as `\u{...}`, and in message text right-to-left marks, Thai word
+  breaks, the flags of England, Scotland and Wales, Japanese variation
+  sequences and a CR before each line end. These now show as written
+  where they change no order. A typed `\u{202e}` is shown as
+  `\u{5c}u{202e}`, apart from an escaped character. In the text a
+  person approves, the room label and names are isolated so
+  right-to-left text cannot reorder the words around them; `confirm`
+  puts such a label on its own line. The CLI's messages, alerts, room
+  list, status, doctor and `net check`, the question alert, and the text
+  of MCP tool results now escape what other machines wrote. In
+  `net check` that covers members' addresses, which another member can
+  set to any text, the probe details that quote them, what members saw,
+  their errors and the router's answers. Status, `confirm`, `join`,
+  `fetch`, doctor and error lines escape the remote strings they show
+  too. Two room labels that differ only in a no-break, ideographic or
+  other Unicode space now get their ids on the page and in status.
+  `--json` prints the stored strings. `a2p2 confirm` sends the text it showed,
+  and the daemon decides nothing if the request changed since (the
+  local API's `confirm` takes an optional `text`).
 - **One host that reaches a listening machine can no longer lock its
   members out.** Exposed: every machine with networking `on`, since
   0.1.0, to any host that can reach its peer port (the local network,

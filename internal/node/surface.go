@@ -1625,7 +1625,7 @@ func (s *Surface) Alerts(ctx context.Context, wait time.Duration) ([]Alert, erro
 		if rs, err := s.RoomList(ctx, ""); err == nil {
 			for _, r := range rs {
 				if r.MayBeRemoved {
-					as = append(as, Alert{Kind: AlertRemoved, Room: r.ID, Text: "room " + EscapeDisplay(r.Label) + ": " + MaybeRemovedText})
+					as = append(as, Alert{Kind: AlertRemoved, Room: r.ID, Text: "room " + Isolate(EscapeDisplay(r.Label)) + ": " + MaybeRemovedText})
 				}
 			}
 		} else {
@@ -1639,7 +1639,7 @@ func (s *Surface) Alerts(ctx context.Context, wait time.Duration) ([]Alert, erro
 			return nil, err
 		}
 		for _, q := range qs {
-			as = append(as, Alert{Kind: AlertQuestion, ID: q.ID, Room: q.Room, Since: q.Created, Text: q.From + " asks: " + q.Text})
+			as = append(as, Alert{Kind: AlertQuestion, ID: q.ID, Room: q.Room, Since: q.Created, Text: EscapeDisplay(q.From) + " asks: " + EscapeDisplayText(q.Text)})
 		}
 		if len(as) > 0 || wait == 0 {
 			return as, err

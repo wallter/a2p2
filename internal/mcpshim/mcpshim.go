@@ -231,6 +231,30 @@ func clip(s string, n int) string {
 	return s
 }
 
+// line is a string from another machine (a room label, a machine name, an
+// agent id, a file name, a choice) as a result gives it: clipped to n
+// runes when n > 0, then escaped for one line (node.EscapeDisplay), so a
+// control, terminal escape or character that hides or reorders text is
+// written \u{...} and nothing is dropped.
+func line(s string, n int) string {
+	if n > 0 {
+		s = clip(s, n)
+	}
+	return node.EscapeDisplay(s)
+}
+
+// lines is line of each of ss, or nil for none.
+func lines(ss []string) []string {
+	if ss == nil {
+		return nil
+	}
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = line(s, 0)
+	}
+	return out
+}
+
 // Field names shared by every result: a machine is "machine" (its short
 // id) and "machine_name"; a room is "room" (its id) and "room_label".
 type roomRef struct {
@@ -274,10 +298,10 @@ func (sh *shim) whoami(ctx context.Context, _ none) (string, error) {
 		if l == "" {
 			l = store.LevelAll
 		}
-		rooms = append(rooms, room{roomRef{r.ID, clip(r.Label, 64)}, l, unread[r.ID]})
+		rooms = append(rooms, room{roomRef{r.ID, line(r.Label, 64)}, l, unread[r.ID]})
 	}
 	return jsonOut(map[string]any{
-		"agent": id, "machine": short(st.Node), "machine_name": clip(st.Name, 64), "rooms": rooms, "human": st.Human,
+		"agent": id, "machine": short(st.Node), "machine_name": line(st.Name, 64), "rooms": rooms, "human": st.Human,
 		"note": "New messages are not pushed: call inbox (use wait_seconds to wait for it). Room and machine names come from other machines.",
 	})
 }
@@ -300,7 +324,7 @@ func machineName(node, name string) string {
 	if name == "" {
 		return short(node)
 	}
-	return clip(name, 64)
+	return line(name, 64)
 }
 
 func (sh *shim) peers(ctx context.Context, _ none) (string, error) {
@@ -329,7 +353,7 @@ func (sh *shim) peers(ctx context.Context, _ none) (string, error) {
 	}
 	rooms := []room{}
 	for _, r := range st.Rooms {
-		x := room{roomRef: roomRef{r.ID, clip(r.Label, 64)}, Machines: []machine{}, Agents: []writer{},
+		x := room{roomRef: roomRef{r.ID, line(r.Label, 64)}, Machines: []machine{}, Agents: []writer{},
 			Pending: r.Waiting + len(r.Pending)}
 		for i, m := range r.Members {
 			if i >= maxListed {
@@ -342,7 +366,7 @@ func (sh *shim) peers(ctx context.Context, _ none) (string, error) {
 			if i >= maxListed {
 				break
 			}
-			x.Agents = append(x.Agents, writer{clip(w.Agent, 80), w.LastSeen})
+			x.Agents = append(x.Agents, writer{line(w.Agent, 80), w.LastSeen})
 		}
 		rooms = append(rooms, x)
 	}
@@ -379,7 +403,7 @@ func (sh *shim) peers(ctx context.Context, _ none) (string, error) {
 		}
 		others = append(others, peer{short(p.Node), machineName(p.Node, p.Name), state})
 	}
-	return jsonOut(map[string]any{"machine": short(st.Node), "machine_name": clip(st.Name, 64), "rooms": rooms,
+	return jsonOut(map[string]any{"machine": short(st.Node), "machine_name": line(st.Name, 64), "rooms": rooms,
 		"local_agents": local, "local_agents_omitted": omitted, "other_machines": others})
 }
 
@@ -418,7 +442,7 @@ func sentOf(m localapi.SendResp) sent {
 	if len(to) == 0 {
 		to = []string{"everyone"}
 	}
-	return sent{ID: m.ID, roomRef: roomRef{m.Room, clip(m.RoomLabel, 64)}, To: to, Note: "Other machines fetch it."}
+	return sent{ID: m.ID, roomRef: roomRef{m.Room, line(m.RoomLabel, 64)}, To: lines(to), Note: "Other machines fetch it."}
 }
 
 func (sh *shim) send(ctx context.Context, in sendIn) (string, error) {
@@ -501,7 +525,7 @@ func (sh *shim) fetch(ctx context.Context, room, sha string, wait int) (string, 
 		Holders []holder `json:"holders,omitempty"`
 		Note    string   `json:"note,omitempty"`
 	}
-	o := out{State: r.State, Path: r.Path, Name: r.Name, Message: r.Message, Size: r.Size, Have: r.Have,
+	o := out{State: r.State, Path: r.Path, Name: line(r.Name, 0), Message: r.Message, Size: r.Size, Have: r.Have,
 		From: short(r.From), Reason: r.Reason}
 	for i, h := range r.Holders {
 		if i >= maxListed {
@@ -635,7 +659,12 @@ const maxWaitSeconds = 30
 // entry is a message as a tool shows it, as small as it can be while an
 // agent can still reply, report handled and read the thread: a field equal
 // to another or to its default is left out, and the shim confirms seen
-// itself, so the key and version an inbox entry has stay inside it.
+// itself, so the key and version an inbox entry has stay inside it. What
+// other machines wrote is escaped (view): the text by
+// node.EscapeDisplayText, which keeps lines, emoji and the writing of
+// every script and writes a control or a character that hides or
+// reorders text as \u{...}; labels, names and choices by
+// node.EscapeDisplay.
 type entry struct {
 	ID            string   `json:"id"`
 	Kind          string   `json:"kind,omitempty"` // omitted: message
@@ -712,11 +741,12 @@ func view(es []localapi.Entry) inboxOut {
 	out := inboxOut{Notice: notice, Messages: []entry{}}
 	seen := map[string]bool{}
 	for _, e := range es {
-		x := entry{ID: e.ID, Kind: e.Kind, Room: clip(e.RoomLabel, 64), From: e.From, AuthorRemoved: e.AuthorRemoved,
-			To: e.To, AskHandled: e.AskHandled, Skipped: e.Skipped, Parent: e.Parent, Thread: e.Thread, Late: e.Late, Created: e.Created, Text: e.Text, Choices: e.Choices,
-			Files: e.Files, FilesPending: e.FilesPending, FilesNote: e.FilesNote, Request: e.Request, State: e.State, Reason: e.Reason}
+		x := entry{ID: e.ID, Kind: e.Kind, Room: line(e.RoomLabel, 64), From: line(e.From, 0), AuthorRemoved: e.AuthorRemoved,
+			To: lines(e.To), AskHandled: e.AskHandled, Skipped: e.Skipped, Parent: e.Parent, Thread: e.Thread, Late: e.Late, Created: e.Created,
+			Text: node.EscapeDisplayText(e.Text), Choices: lines(e.Choices),
+			Files: e.Files, FilesPending: e.FilesPending, FilesNote: e.FilesNote, Request: e.Request, State: e.State, Reason: line(e.Reason, 0)}
 		for i := range x.Files {
-			x.Files[i].Name = clip(x.Files[i].Name, 128)
+			x.Files[i].Name = line(x.Files[i].Name, 128)
 		}
 		if x.Kind == "message" {
 			x.Kind = ""
@@ -771,7 +801,7 @@ func (sh *shim) inbox(ctx context.Context, in inboxIn) (string, error) {
 			return "", err
 		}
 		for _, l := range ls.Levels {
-			levels = append(levels, levelOut{roomRef{l.Room, clip(l.RoomLabel, 64)}, l.Level})
+			levels = append(levels, levelOut{roomRef{l.Room, line(l.RoomLabel, 64)}, l.Level})
 		}
 	}
 	if in.Peek {
@@ -841,12 +871,12 @@ func (sh *shim) peek(ctx context.Context, room string, levels []levelOut) (strin
 	out := peekOut{Notice: notice, Rooms: []peekRoom{}, First: []peekLine{}, Levels: levels}
 	labels := map[string]string{}
 	for _, c := range u.Rooms {
-		labels[c.Room] = clip(c.Label, 64)
+		labels[c.Room] = line(c.Label, 64)
 		out.Unread += c.Count
-		out.Rooms = append(out.Rooms, peekRoom{roomRef{c.Room, clip(c.Label, 64)}, c.Count})
+		out.Rooms = append(out.Rooms, peekRoom{roomRef{c.Room, line(c.Label, 64)}, c.Count})
 	}
 	for _, f := range u.First {
-		out.First = append(out.First, peekLine{ID: f.ID, Room: labels[f.Room], From: f.From, Line: f.Line})
+		out.First = append(out.First, peekLine{ID: f.ID, Room: labels[f.Room], From: line(f.From, 0), Line: line(f.Line, 0)})
 	}
 	return jsonOut(out)
 }

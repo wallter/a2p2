@@ -416,13 +416,20 @@ func sendText(sv *SendView, label, room string, total int64) string {
 	if len(sv.Files) == 1 {
 		files = "1 file"
 	}
-	where := "room " + EscapeDisplay(label) + " (" + room + ")"
+	// The label and agent ids can come from other machines: each is
+	// escaped and isolated, as in requestText.
+	where := "room " + Isolate(EscapeDisplay(label)) + " (" + room + ")"
+	agent := func(id string) string { return Isolate(EscapeDisplay(id)) }
 	to := "everyone in " + where + " (" + strconv.Itoa(sv.Members) + " members)"
 	switch {
 	case len(sv.To) > 0:
-		to = strings.Join(sv.To, ", ") + " in " + where
+		ids := make([]string, len(sv.To))
+		for i, a := range sv.To {
+			ids[i] = agent(a)
+		}
+		to = strings.Join(ids, ", ") + " in " + where
 	case !sv.Everyone && sv.ParentAuthor != "":
-		to = sv.ParentAuthor + ", the author of message " + sv.Parent + ", in " + where
+		to = agent(sv.ParentAuthor) + ", the author of message " + sv.Parent + ", in " + where
 	case !sv.Everyone:
 		to = "the author of message " + sv.Parent + " in " + where
 	}
@@ -432,10 +439,10 @@ func sendText(sv *SendView, label, room string, total int64) string {
 			msg += " (version " + sv.Base + ")"
 		}
 		return fmt.Sprintf("replace message %s, which goes to %s, by agent %s, with new text and %s (%d bytes); "+
-			"the replacement has only the files listed", msg, to, sv.Agent, files, total)
+			"the replacement has only the files listed", msg, to, agent(sv.Agent), files, total)
 	}
 	return fmt.Sprintf("send a message by agent %s to %s with %s (%d bytes): the files are the bytes copied when the agent asked",
-		sv.Agent, to, files, total)
+		agent(sv.Agent), to, files, total)
 }
 
 func firstLineOf(text string) string {

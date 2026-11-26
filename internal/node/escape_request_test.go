@@ -96,7 +96,7 @@ func TestAMembershipRequestShowsAnOrdinaryRoomLabelAsItIs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := requestText(q, label, info.Members); !strings.Contains(got, "room "+label+" ("+room+")") {
+	if got := requestText(q, label, info.Members); !strings.Contains(got, "room "+Isolate(label)+" ("+room+")") {
 		t.Errorf("request text %q does not name room %q", got, label)
 	}
 }
@@ -117,8 +117,8 @@ func TestASecondingRequestSaysTheOtherAdminChoseTheNameAndShowsTheRoomsName(t *t
 		t.Fatal(err)
 	}
 	text := requestText(q, "ops", info.Members)
-	if !strings.Contains(text, `named "alice-laptop" by the admin who signed the first entry`) ||
-		!strings.Contains(text, `recorded in the room as "helper"`) {
+	if !strings.Contains(text, `named "`+Isolate("alice-laptop")+`" by the admin who signed the first entry`) ||
+		!strings.Contains(text, `recorded in the room as "`+Isolate("helper")+`"`) {
 		t.Errorf("request text %q does not say who named the machine and what the room records", text)
 	}
 	s := &Surface{m: victim.m, r: victim.r}
@@ -141,7 +141,7 @@ func TestASecondingRequestWithoutANameShowsTheRoomsName(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := requestText(q, "ops", info.Members)
-	if !strings.Contains(text, `(recorded in the room as "helper")`) || strings.Contains(text, "named") {
+	if !strings.Contains(text, `(recorded in the room as "`+Isolate("helper")+`")`) || strings.Contains(text, "named") {
 		t.Errorf("request text %q", text)
 	}
 	v, err := (&Surface{m: victim.m, r: victim.r}).Describe(ctx, q)
@@ -193,7 +193,7 @@ func TestARoomThatMayHaveRemovedThisMachineIsAlertedWithItsLabelEscaped(t *testi
 				t.Errorf("removed alert carries a raw %q: %q", c, a.Text)
 			}
 		}
-		if !strings.Contains(a.Text, "room "+EscapeDisplay(hostile)+": ") {
+		if !strings.Contains(a.Text, "room "+Isolate(EscapeDisplay(hostile))+": ") {
 			t.Errorf("removed alert %q does not name the room escaped", a.Text)
 		}
 	}
@@ -252,7 +252,7 @@ func TestTheSameNameNoteIsBoundedAndCoversTheRecordedName(t *testing.T) {
 	}
 	q := store.Request{Kind: "admin", Action: "promote", Room: "r_x", Node: target, Seconds: "e_1", Role: "admin"}
 	text := requestText(q, "ops", members)
-	if len(text) > 1024 || !strings.Contains(text, `recorded in the room as "helper"`) ||
+	if len(text) > 1024 || !strings.Contains(text, `recorded in the room as "`+Isolate("helper")+`"`) ||
 		!strings.Contains(text, " and 4997 more in the room have this name too") {
 		t.Errorf("request text, %d bytes: %q", len(text), text)
 	}

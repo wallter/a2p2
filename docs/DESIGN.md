@@ -481,26 +481,33 @@ set on bypassing it can; an OS-separated approver may come later.
 
 A request's text is built from local facts and escapes every string that
 can come from another machine (`EscapeDisplay`, PROTOCOL 10.8): the room
-label a remote creator chose and the names in entries. Its line cannot be
+label a remote creator chose and the names in entries, each also isolated
+(`Isolate`: U+2068 and U+2069; a `bdi` element on the page, its own line
+in the terminal when it holds right-to-left text). Its line cannot be
 cleared, reordered or split by them. A seconding request says the name
 it carries was written by the admin who signed the first entry, shows
 the name the room records for the machine, and names other members with
 the name shown, compared without case, up to three by fingerprint and
 the rest counted; the page and `confirm` no longer say the machine chose
 it. Because the text depends on the room's members, the page's approval
-carries the text it showed and the daemon compares it again under the
-decision lock; `a2p2 confirm` decides by id. The stored label and entries
-are not checked or changed: logs signed before keep loading. The
-alert that this machine may have been removed from a room, and the CLI's
-join preview, escape the room's label the same way.
+and `a2p2 confirm` carry the text they showed; the daemon refuses a
+decision when it changed and compares it again under the decision lock.
+The stored label and entries are not checked or changed: logs signed
+before keep loading. The alert that this machine may have been removed
+from a room, and the CLI's join preview, escape and isolate the room's
+label the same way.
 
 On the page, room labels, machine names, agent ids, message text,
 notices, thread entries, reply previews and choices are escaped when
 drawn (`escapeDisplay`, `escapeText`, `escapeChoice` in `app.js`, the
-same tables as the daemon's). Two rooms whose labels are drawn the same
-(escaped, and without case) are shown with their ids. A message that
-asks the person (choices, or addressed to `human`) is drawn under its
-own heading, apart from requests, with who asked, from which machine as
+same tables as the daemon's). Two rooms whose labels may be drawn the
+same (escaped, in Unicode normal form C, with each run of Unicode white
+space or blank braille as one space, without the invisible characters
+the rules keep, and without case) are shown with their ids; `status`
+does the same without NFC (`node.LabelKey`). The CLI's output and the text of MCP tool results
+escape what other machines wrote the same way; `--json` prints the
+stored strings. A message that asks the person (choices, or addressed
+to `human`) is drawn under its own heading, apart from requests, with who asked, from which machine as
 that room records it, and whether it was asked of the person or of
 everyone; it says it approves nothing, and its choices are plain buttons.
 A choice whose button would not show it exactly as it is sent (a hidden
