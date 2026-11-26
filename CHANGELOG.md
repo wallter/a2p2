@@ -170,7 +170,7 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   install approves nothing unless you pass `--approve-tools`, and the
   dry run says which you chose. Reinstall to remove the old line;
   `a2p2 doctor` fails a `codex tool approval` line until you do. A headless
-  `codex exec` needs `--approve-tools` (D-NEW-J-harness). The edits and
+  `codex exec` needs `--approve-tools` (D60). The edits and
   doctor follow `CODEX_HOME`, as the Codex CLI does.
 - **The team launcher asks before it approves a2p2's tools for members.**
   Since 0.1.0 `scripts/team` approved every a2p2 tool for each Claude Code,

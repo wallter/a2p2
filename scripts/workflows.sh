@@ -1,6 +1,6 @@
 #!/bin/sh
 # Check the GitHub Actions workflows (make check runs it; DECISIONS,
-# D-NEW-K-release-ci).
+# D61).
 #
 #   scripts/workflows.sh [FILE|DIR ...]
 #

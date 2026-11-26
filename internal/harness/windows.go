@@ -51,8 +51,9 @@ func forOS(name string, o *Options) error {
 		// SYSTEM and Administrators. It keeps grants made on the folder
 		// itself, so the advice says to look at the list afterwards.
 		return fmt.Errorf("on Windows a2p2 is named by its path in a command a shell runs, so the path may hold only "+
-			"letters, digits and / . _ - : (no spaces); %s does not. Copy a2p2.exe to a directory with such a path "+
-			"that only you can change, and run that copy's install. A folder you create directly under C:\\ can be "+
+			"letters, digits and / . _ - : (no spaces); %s does not. Put a2p2.exe in a directory with such a path "+
+			"that only you can change, and run that copy's install: install.ps1 with A2P2_INSTALL_DIR set to a "+
+			"directory that does not exist yet makes it so (docs/INSTALL.md). A folder you create directly under C:\\ can be "+
 			"changed by every user of this computer until you run, in cmd.exe: icacls DIR /inheritance:r /grant:r "+
 			"\"%%USERNAME%%:(OI)(CI)F\" \"SYSTEM:(OI)(CI)F\" \"Administrators:(OI)(CI)F\" (in PowerShell write "+
 			"$env:USERNAME for %%USERNAME%%). Then icacls DIR should list no other user; remove any it does", o.Binary)

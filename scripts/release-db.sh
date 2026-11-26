@@ -1,6 +1,6 @@
 #!/bin/sh
 # Write the databases of one tagged release for the compatibility test
-# (docs/RELEASING.md; DECISIONS, D-NEW-K-release-ci).
+# (docs/RELEASING.md; DECISIONS, D61).
 #
 #   scripts/release-db.sh v0.2.3
 #

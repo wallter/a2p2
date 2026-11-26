@@ -187,6 +187,11 @@ func TestDatabasesFromEachReleaseOpenReplayAndKeepWorking(t *testing.T) {
 				if n.id != want.ID {
 					t.Fatalf("%s: key %s, the manifest says %s", name, n.id, want.ID)
 				}
+				// A room whose log no longer loads is set aside rather than
+				// failing the open (D57): here that is a failure.
+				if q := n.r.Quarantined(); len(q) != 0 {
+					t.Fatalf("%s: rooms set aside: %+v", name, q)
+				}
 				var held []string
 				for r := range n.r.rooms {
 					held = append(held, r)

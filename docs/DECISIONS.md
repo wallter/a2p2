@@ -1625,7 +1625,7 @@ withdraw drops.
 starts running `ANALYZE`, or the pull summary or the unread walk shows up
 in a measurement.
 
-## D-NEW-A-requests-replay. Separate request budgets, and a stored log that does not load sets one room aside (2026-11-25)
+## D57. Separate request budgets, and a stored log that does not load sets one room aside (2026-11-25)
 
 A security review showed two things. One hostile admin could fill the
 32-request queue of the other admins with entries that wait for a second
@@ -1662,8 +1662,10 @@ ship first.
   entries. Requests are local rows. By reading the code, a database
   written by 0.2.0 to 0.2.3 opens, and they can still open one this
   version wrote, because no stored reason is rewritten at start. The
-  tests edit a database this version made; none opens one a tagged
-  release made (F73). `status` gains one optional field.
+  tests edit a database this version made, and
+  `TestDatabasesFromEachReleaseOpenReplayAndKeepWorking` (D61) opens the
+  databases releases 0.2.0 to 0.2.3 wrote and checks that no room is set
+  aside (F73). `status` gains one optional field.
 - **Why not reason codes on disk.** Storing codes in `log.reason` would
   need a migration, and 0.2.x compares the text it wrote, so a downgrade
   would stop at start. Comparing dispositions alone removes the text from
@@ -1682,7 +1684,7 @@ ship first.
   rooms aside rather than adopting the new decision; adopting it needs a
   versioned re-decide (a rules version in `meta`). A stored record that
   fails a later record rule still breaks reading that room (audit r2-4
-  item 2). No test opens databases made by tagged releases (F73). The
+  item 2). The
   warning that a removal targets the only member this machine reaches
   (F21) is not built and is deferred out of this change; it needs pull
   state the scheduler owns. A quarantined local room cannot be left; the
@@ -1691,7 +1693,7 @@ ship first.
 **Revisit if** a release adds a receipt rule or changes `members`
 decisions, or a person reports a room set aside.
 
-## D-NEW-E-escaping-page. Text from other machines is escaped where it is shown (2026-11-25)
+## D58. Text from other machines is escaped where it is shown (2026-11-25)
 
 A security review showed that a room label chosen by a hostile room
 creator went raw into the text a person approves for a membership
@@ -1755,7 +1757,7 @@ and MCP work that will use the same helper.
 a Go upgrade), a script needs a character the table escapes, or receipt
 rules for labels land.
 
-## D-NEW-C-peer-transport. Inbound slots by pool and join limits by source group (2026-11-25)
+## D59. Inbound slots by pool and join limits by source group (2026-11-25)
 
 A security review showed that any host that reaches the peer port could
 hold all 256 inbound connections, with raw TCP or with TLS under keys it
@@ -1827,7 +1829,7 @@ through a busy admin machine fail under load, members report refused
 connections during a flood from more groups than the limits stop, or the
 rooms lock shows up in handshake or request times.
 
-## D-NEW-J-harness. Installers approve no a2p2 tool unless the person asks (2026-11-25)
+## D60. Installers approve no a2p2 tool unless the person asks (2026-11-25)
 
 The security review of 2026-11-25 (F48) found that `a2p2 install codex`
 wrote `default_tools_approval_mode = "approve"` under `[mcp_servers.a2p2]`
@@ -1915,7 +1917,7 @@ Still open:
   ("points at a different a2p2 binary"), and the fix is a reinstall,
   which checks that binary.
 
-## D-NEW-K-release-ci. Pinned actions, a write job without repository code, and checks the installer can opt into (2026-11-25)
+## D61. Pinned actions, a write job without repository code, and checks the installer can opt into (2026-11-25)
 
 The 2026-11-25 security review found that the release job ran actions
 named by moving tags while it held `contents: write`, `id-token: write`
@@ -2013,9 +2015,7 @@ would run the workflow, and the fixes need no protocol change.
   Repository settings the files cannot show or set: immutable releases,
   a protected `release` environment with required reviewers for
   `publish`, and the tag rule INSTALL.md describes. `install.ps1` has not
-  been run on Windows. `a2p2 install` on Windows still suggests
-  `C:\a2p2` in its own message (internal/harness/windows.go, F24, another
-  group's file). No test runs an old binary against a new one over the
+  been run on Windows. No test runs an old binary against a new one over the
   network, and the release-db step after a tag is by hand.
 
 **Revisit if** an action is moved to a new major release, GitHub offers
