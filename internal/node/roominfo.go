@@ -318,7 +318,8 @@ func (r *Rooms) wantedText(ctx context.Context, m store.MissingRecord) (bool, er
 // requestText says exactly what approving q does, naming the machine by
 // its full fingerprint and room by its label and id. The label and names
 // can come from other machines, so each is escaped for one line
-// (EscapeDisplay): the text a person approves cannot be rewritten by them.
+// (EscapeDisplay) and isolated (Isolate): the text a person approves
+// cannot be rewritten or reordered by them.
 // members are the room's members as this machine holds them, so that a
 // seconding request names the machine as the room records it.
 func requestText(q store.Request, label string, members []MemberInfo) string {
@@ -326,7 +327,7 @@ func requestText(q store.Request, label string, members []MemberInfo) string {
 		return "networking " + q.Action + ": " + NetworkText(Network{State: q.Action, Listen: q.Name})
 	}
 	m := "machine " + Fingerprint(q.Node) + machineNames(q, members)
-	room := "room " + EscapeDisplay(label) + " (" + q.Room + ")"
+	room := "room " + Isolate(EscapeDisplay(label)) + " (" + q.Room + ")"
 	hist := map[bool]string{true: "with earlier history", false: "without earlier history"}[q.History]
 	var s string
 	switch q.Action {
@@ -423,6 +424,12 @@ const maxSameName = 3
 func machineNames(q store.Request, members []MemberInfo) string {
 	recRaw := recordedName(members, q.Node)
 	name, rec := EscapeDisplay(q.Name), EscapeDisplay(recRaw)
+	if name != "" {
+		name = Isolate(name)
+	}
+	if rec != "" {
+		rec = Isolate(rec)
+	}
 	var parts []string
 	switch {
 	case q.Seconds == "" && name != "":

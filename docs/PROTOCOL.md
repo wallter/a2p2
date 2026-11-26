@@ -1064,8 +1064,9 @@ the code is `node.ErrorCodes`):
 | `internal` | yes | the daemon failed (500) |
 
 Responses are JSON with `<`, `>` and `&` written as they are, not
-escaped. CLI `--json` prints the response unchanged; otherwise the CLI
-prints the sentence.
+escaped. CLI `--json` prints the response unchanged: strings as stored,
+escaped by JSON's rules only. Otherwise the CLI prints the sentence, with
+what other machines wrote escaped (10.8).
 
 On Windows every call carries the header `A2P2-Local-Key` with the
 contents of `local.key` in the home (48 hex characters, new at each
@@ -1447,29 +1448,39 @@ other default ignorable code point and every variation selector, that
 is U+034F, the Hangul fillers, U+17B4 and U+17B5, U+180B to U+180F,
 U+FE00 to U+FE0F, U+FFF0 to U+FFF8 and the whole block U+E0000 to
 U+E0FFF (tag characters, the variation selectors supplement and the
-unassigned code points around them), is written `\u{<hex>}`, and a byte
-that is not UTF-8 is written `\x{<hex>}`. Nothing is dropped. `body`
+unassigned code points around them), is written `\u{<hex>}` unless the
+text rules below keep it, a byte that is not UTF-8 is written
+`\x{<hex>}`, and a backslash before `u{` or `x{` is written `\u{5c}`, so
+the output reads back as the input. Nothing is dropped. `body`
 escapes each line and keeps the line breaks (`EscapeDisplayLines`). This
-covers every request's `text`: the room label and the machine's name in
-it are escaped, whoever chose them. A request also has `name_from`
+covers every request's `text`: the room label, the machine's name and
+the agent ids in it are escaped, whoever chose them, and each is set
+between U+2068 and U+2069 so that it cannot reorder the words around it.
+A request also has `name_from`
 (`machine`: the machine asking to join chose its name; `admin`: the
 admin whose entry it seconds did; `here`; empty when the request carries
 no name) and `recorded_name`, the name the room records for the machine.
 For a seconding request `text` names both, and says when other members
 of the room have the name shown (compared without case; up to three by
 fingerprint, the rest counted). `room_label` and `name` stay as stored;
-a program that shows them escapes them. The page sends back the `text`
-it showed when it approves, and the daemon compares it again when it
-decides, under the same lock as the decision, so a member who joined in
-between cannot be missed.
+a program that shows them escapes them. The page and `a2p2 confirm`
+send back the `text` they showed (the local API's `confirm` takes it as
+an optional `text`); the daemon refuses a decision whose text is not the
+request's, and for an approval compares it again under the same lock as
+the decision, so a member who joined in between cannot be missed.
 
 Message text a person reads is escaped by `EscapeDisplayText`, which
 keeps a newline, a tab, a zero width joiner between two emoji, a joiner
 or non-joiner between two letters of a script that needs them (Arabic
 and the other scripts of U+0600 to U+08FF, the Indic scripts, Myanmar,
 Khmer, Mongolian, the Arabic presentation forms), and one U+FE0E or
-U+FE0F straight after an emoji, a digit, `#` or `*`. Everything else in
-the table is escaped. What is kept can still carry about one bit per
+U+FE0F straight after an emoji, a digit, `#` or `*`, a right-to-left or
+Arabic letter mark between two right-to-left letters, a zero width space
+between two characters of Thai, Lao, Tibetan, Myanmar or Khmer, one
+ideographic variation selector after a CJK ideograph and the flags of
+England, Scotland and Wales; a CRLF is shown as one line break. One-line
+text follows the same rules without line breaks and tabs. Everything
+else in the table is escaped. What is kept can still carry about one bit per
 such position that nobody sees, since the drawing may look the same with
 or without it; that is accepted, only inside emoji and those scripts,
 because escaping these would break them for every reader. A question's

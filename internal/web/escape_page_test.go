@@ -10,23 +10,26 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/wallter/a2p2/internal/node"
 	"github.com/wallter/a2p2/internal/store"
 )
 
-// The page's HIDDEN, EMOJI and JOINING tables (static/app.js) are node's
-// tables, range for range. This runs without node; the page test below
-// also compares the functions' output.
+// The page's HIDDEN, EMOJI, JOINING, RTL, SPACELESS and HAN tables
+// (static/app.js) are node's tables, range for range. This runs without
+// node; the page test below also compares the functions' output.
 func TestThePageEscapesTheSameCharactersAsTheDaemon(t *testing.T) {
 	src, err := os.ReadFile("static/app.js")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range map[string][][2]rune{"HIDDEN": node.HiddenRanges(), "EMOJI": node.EmojiRanges(), "JOINING": node.JoiningRanges()} {
+	for name, want := range map[string][][2]rune{"HIDDEN": node.HiddenRanges(), "EMOJI": node.EmojiRanges(), "JOINING": node.JoiningRanges(),
+		"RTL_LETTERS": node.RTLLetterRanges(), "SPACELESS": node.SpacelessRanges(), "HAN": node.HanRanges()} {
 		m := regexp.MustCompile(`(?s)const ` + name + ` = \[(.*?)\];`).FindSubmatch(src)
 		if m == nil {
 			t.Fatalf("app.js has no %s table", name)
@@ -75,10 +78,35 @@ func openWithRooms(t *testing.T) (*env, *node.Rooms) {
 	return e, rooms
 }
 
+// escapeCase is one row of the table of test strings the daemon's tests
+// share (internal/node/testdata/escape_cases.json).
+type escapeCase struct {
+	Name   string  `json:"name"`
+	In     string  `json:"in"`
+	Line   *string `json:"line"`
+	Text   *string `json:"text"`
+	Choice *string `json:"choice"`
+	Label  *string `json:"label"`
+}
+
+func escapeCases(t *testing.T) []escapeCase {
+	t.Helper()
+	b, err := os.ReadFile("../node/testdata/escape_cases.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cs []escapeCase
+	if err := json.Unmarshal(b, &cs); err != nil {
+		t.Fatal(err)
+	}
+	return cs
+}
+
 // escapeProbe is the strings the page's escape functions are compared on:
-// the edges of every range of the table, alone, inside ASCII and after an
-// emoji, and the sequences EscapeDisplayText keeps or refuses.
-func escapeProbe() []string {
+// the edges of every range of the tables, alone, inside ASCII and after an
+// emoji, the sequences the text rules keep or refuse, and the inputs of
+// the shared table.
+func escapeProbe(cases []escapeCase) []string {
 	out := []string{"", "plain", "café 🚀", "a\nb\tc\r\x1b[2K", "\u202eabc\u202c", "LGTM\U000E0072\U000E006D",
 		"❤\ufe0f ©\ufe0f 1\ufe0f⃣ #\ufe0f⃣", "👨\u200d💻 🏳\ufe0f\u200d🌈 👩\u200d👩\u200d👧", "می\u200cخواهم", "a\u200db", "👨\u200d", "👨\u200d\u200d💻",
 		"😀\ufe0f\ufe0f", "ok\ufe0f", "\n\ufe0f", `already \u{202e}`,
@@ -88,7 +116,18 @@ func escapeProbe() []string {
 	for _, r := range []rune{0xa0, 0x1680, 0x2000, 0x200a, 0x202f, 0x205f, 0x3000, 0x2800, 0x2801, 0x1f, 0x21} {
 		out = append(out, "a"+string(r)+"b", string(r))
 	}
+	// Every white space character and its neighbours, in a label as the
+	// page and status compare labels (drawnLabel, node.LabelKey).
+	for r := rune(0); r <= 0x3001; r++ {
+		if unicode.Is(unicode.White_Space, r) || r == 0x2800 {
+			out = append(out, " A"+string(r-1)+string(r)+" \u200b"+string(r)+"b"+string(r+1)+" ")
+		}
+	}
+	for _, c := range cases {
+		out = append(out, c.In)
+	}
 	tables := append(append(node.HiddenRanges(), node.EmojiRanges()...), node.JoiningRanges()...)
+	tables = append(append(append(tables, node.RTLLetterRanges()...), node.SpacelessRanges()...), node.HanRanges()...)
 	for _, rg := range tables {
 		for _, r := range []rune{rg[0] - 1, rg[0], rg[1], rg[1] + 1} {
 			if r < 0 || r >= 0xd800 && r <= 0xdfff {
@@ -96,7 +135,8 @@ func escapeProbe() []string {
 			}
 			s := string(r)
 			out = append(out, s, "x"+s+"y", "😀"+s+"é", "é"+s+"\u200d😀", "1"+s+"\ufe0f",
-				s+"\u200d"+s, s+"\u200c"+s, s+"\ufe0f\u200d😀", "😀\u200d"+s)
+				s+"\u200d"+s, s+"\u200c"+s, s+"\ufe0f\u200d😀", "😀\u200d"+s,
+				s+"\u200f"+s, s+"\u061c"+s, s+"\u200b"+s, s+"\U000E0100", s+"\r\n"+s)
 		}
 	}
 	return out
@@ -129,9 +169,40 @@ func TestThePageEscapesRemoteTextAndDoesNotDrawAQuestionAsARequest(t *testing.T)
 		t.Fatal(err)
 	}
 	// A room whose label is the first one's escaped form, typed out: drawn
-	// the same, so both are shown with their ids.
-	lookalike, err := rooms.CreateRoom(e.ctx, node.EscapeDisplay(label))
+	// apart from it (E2), so neither needs its id for that.
+	typed, err := rooms.CreateRoom(e.ctx, node.EscapeDisplay(label))
 	if err != nil {
+		t.Fatal(err)
+	}
+	// Rooms whose labels the page draws alike: "café" composed and
+	// decomposed, and labels that differ in a run of spaces or in a
+	// no-break or ideographic space. Each is shown with its id.
+	alike := map[string]string{}
+	for _, l := range []string{"caf\u00e9", "cafe\u0301", "on  call", "on call", "on\u00a0call", "on\u3000call"} {
+		id, err := rooms.CreateRoom(e.ctx, l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		alike[id] = l
+	}
+	// A room whose label is right-to-left text, drawn in a bdi element.
+	rtl := "\u05e9\u05dc\u05d5\u05dd (prod)"
+	rtlID, err := rooms.CreateRoom(e.ctx, rtl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A machine asks to join it: the request card draws the label and the
+	// machine's name each in a bdi element.
+	inv, err := rooms.Invite(e.ctx, rtlID, node.RoleMember, false, []string{"127.0.0.1:7443"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joiner := open(t, 2, e)
+	p, err := joiner.s.JoinPreview(joiner.ctx, inv.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := joiner.s.JoinAccept(joiner.ctx, inv.Token, p.ID, 0); err != nil {
 		t.Fatal(err)
 	}
 	alice := e.agent(t, "alice")
@@ -152,8 +223,15 @@ func TestThePageEscapesRemoteTextAndDoesNotDrawAQuestionAsARequest(t *testing.T)
 		Choices: []string{"go"}}); err != nil {
 		t.Fatal(err)
 	}
-	probe := escapeProbe()
-	b, err := json.Marshal(probe)
+	cases := escapeCases(t)
+	probe := escapeProbe(cases)
+	// Sentences as the daemon writes a request's text: the page draws each
+	// isolated part in a bdi element and escapes a raw control outside one.
+	sentences := []string{
+		"add machine 0123 (" + node.Isolate("bob") + ") to room " + node.Isolate(node.EscapeDisplay(rtl)) + " (r_1) as a member",
+		"plain\x1b[2K",
+	}
+	b, err := json.Marshal(map[string]any{"strings": probe, "sentences": sentences})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,12 +244,19 @@ func TestThePageEscapesRemoteTextAndDoesNotDrawAQuestionAsARequest(t *testing.T)
 		t.Fatalf("node: %v\n%s", err, out)
 	}
 	var got struct {
-		Errors               []string        `json:"errors"`
-		Rooms                []string        `json:"rooms"`
-		NodeOpen             string          `json:"nodeOpen"`
-		Roomhead             string          `json:"roomhead"`
-		Stream               string          `json:"stream"`
-		Probe                [][]any         `json:"probe"`
+		Errors    []string `json:"errors"`
+		Rooms     []string `json:"rooms"`
+		NodeOpen  string   `json:"nodeOpen"`
+		Roomhead  string   `json:"roomhead"`
+		Stream    string   `json:"stream"`
+		Probe     [][]any  `json:"probe"`
+		Sentences []struct {
+			Text string   `json:"text"`
+			BDI  []string `json:"bdi"`
+		} `json:"sentences"`
+		BDI                  []string        `json:"bdi"`
+		RequestBDI           [][]string      `json:"requestBDI"`
+		QuestionBDI          []string        `json:"questionBDI"`
 		QuestionsTitleHidden bool            `json:"questionsTitleHidden"`
 		Questions            []pageQuestion  `json:"questions"`
 		Clicks               []pageClick     `json:"clicks"`
@@ -190,14 +275,34 @@ func TestThePageEscapesRemoteTextAndDoesNotDrawAQuestionAsARequest(t *testing.T)
 	}
 	for i, s := range probe {
 		p := got.Probe[i]
-		want := []any{node.EscapeDisplay(s), node.EscapeDisplayText(s), node.DisplayHidden(s), node.EscapeChoice(s), node.ChoiceHidden(s)}
-		if len(p) != len(want) {
+		want := []any{node.EscapeDisplay(s), node.EscapeDisplayText(s), node.DisplayHidden(s), node.EscapeChoice(s), node.ChoiceHidden(s),
+			node.LabelKey(s)}
+		if len(p) != len(want)+1 {
 			t.Fatalf("probe %q: page %v", s, p)
+		}
+		// drawnLabel normalises to NFC and node.LabelKey does not: they
+		// are compared where that changes nothing.
+		if p[len(want)] != true {
+			want[len(want)-1] = p[len(want)-1]
 		}
 		for k := range want {
 			if p[k] != want[k] {
 				t.Errorf("probe %q: page %v, daemon %v", s, p, want)
 				break
+			}
+		}
+	}
+
+	// The page gives the shared table's answers.
+	page := map[string][]any{}
+	for i, s := range probe {
+		page[s] = got.Probe[i]
+	}
+	for _, c := range cases {
+		p := page[c.In]
+		for k, want := range map[int]*string{0: c.Line, 1: c.Text, 3: c.Choice, 5: c.Label} {
+			if want != nil && p[k] != *want {
+				t.Errorf("%s: the page gives %q, the table %q", c.Name, p[k], *want)
 			}
 		}
 	}
@@ -217,10 +322,31 @@ func TestThePageEscapesRemoteTextAndDoesNotDrawAQuestionAsARequest(t *testing.T)
 	raw("details", got.NodeOpen)
 	raw("heading", got.Roomhead)
 	raw("stream", got.Stream)
-	if !strings.Contains(sidebar, escLabel+" ("+id+")") || !strings.Contains(sidebar, escLabel+" ("+lookalike+")") {
-		t.Errorf("two rooms drawn the same are not told apart by id: %q", sidebar)
+	if strings.Contains(sidebar, " ("+id+")") || strings.Contains(sidebar, " ("+typed+")") ||
+		!strings.Contains(sidebar, node.EscapeDisplay(escLabel)) {
+		t.Errorf("a label and its escaped form typed out are not drawn apart: %q", sidebar)
 	}
-	if !strings.Contains(sidebar, escLabel) || got.Roomhead != escLabel+" ("+id+")" || !strings.Contains(got.NodeOpen, "Members of "+escLabel+" ("+id+")") {
+	for aid, l := range alike {
+		if !strings.Contains(sidebar, node.EscapeDisplay(l)+" ("+aid+")") {
+			t.Errorf("label %q drawn like another is not shown with its id: %q", l, sidebar)
+		}
+	}
+	if !slices.Contains(got.BDI, rtl) || !slices.Contains(got.BDI, escLabel) {
+		t.Errorf("labels not set apart in bdi elements: %q", got.BDI)
+	}
+	// The request card draws the daemon's sentence with its parts in bdi
+	// elements, escaped; so does the line that says who asked a question.
+	if len(got.RequestBDI) != 1 || !slices.Equal(got.RequestBDI[0], []string{"joiner", node.EscapeDisplay(rtl)}) {
+		t.Errorf("request card bdi %q, want the machine's name and the room's label", got.RequestBDI)
+	}
+	if !slices.Equal(got.QuestionBDI, []string{node.EscapeDisplay(alice), "this machine", escLabel}) {
+		t.Errorf("question card bdi %q, want the agent, its machine and the room's label", got.QuestionBDI)
+	}
+	if len(got.Sentences) != 2 || got.Sentences[0].Text != "add machine 0123 (bob) to room "+rtl+" (r_1) as a member" ||
+		!slices.Equal(got.Sentences[0].BDI, []string{"bob", rtl}) || got.Sentences[1].Text != `plain\u{1b}[2K` {
+		t.Errorf("sentences drawn %+v", got.Sentences)
+	}
+	if !strings.Contains(sidebar, escLabel) || got.Roomhead != escLabel || !strings.Contains(got.NodeOpen, "Members of "+escLabel) {
 		t.Errorf("label not shown escaped: sidebar %q, heading %q", sidebar, got.Roomhead)
 	}
 	if !strings.Contains(got.Stream, node.EscapeDisplayText(text)) {

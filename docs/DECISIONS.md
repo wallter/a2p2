@@ -1733,25 +1733,72 @@ and MCP work that will use the same helper.
 - **Why at display, not on receipt:** stored logs are signed and must
   still load, and a new receipt rule needs the replay change first. A
   later rule that refuses controls in new room labels can come after it.
+- **Second review (2026-11-25):** the first rules mangled honest text
+  and left gaps, so:
+  - One-line positions (labels, names, file names, approval text, the
+    page's download name) use the text rules without line breaks, so an
+    emoji with a selector or joiner and a Persian or Indic joiner show
+    as written.
+  - The text rules also keep a right-to-left or Arabic letter mark
+    between two right-to-left letters (a fixed table of code points, so
+    a browser with an older Unicode agrees), a zero width space between
+    two Thai, Lao, Tibetan, Myanmar or Khmer characters, one
+    ideographic variation selector after a CJK ideograph, and the three
+    tag flags Unicode recommends. In message text a CRLF is one line
+    break.
+  - The escape reads back: a backslash before `u{` or `x{` is written
+    `\u{5c}`. Escaping is no longer idempotent, so the page escapes
+    the daemon's sentences again without that rule.
+  - The room label, names and agent ids in approval text sit between
+    U+2068 and U+2069 (`Isolate`). The page draws each in a `bdi`
+    element; the CLI puts one holding right-to-left text on its own line
+    with `[n]` in the sentence. The page compares labels after NFC,
+    collapsing white space and dropping the invisible characters the
+    rules keep.
+  - The CLI escapes entries, alerts, the room list, status, doctor and
+    `net check`; the question alert is escaped in the daemon; MCP tool
+    results escape message text with the text rules and labels, names,
+    agent ids, choices and file names for one line. The tool
+    definitions are unchanged. `--json` prints the stored strings.
+  - The local API's `confirm` gains one optional field, `text`: the
+    request's text as shown. With it the daemon refuses either decision
+    (the page's `RequestChangedText`) when the text changed, and checks
+    an approval again under the decision lock. `a2p2 confirm` sends it.
+    An older client that leaves it out is decided by id, as before.
+- **Third review (2026-11-25):**
+  - `net check` printed members' addresses raw. The address book keeps
+    any string of up to 255 bytes another member sends, and a probe's
+    detail can quote it. The CLI now escapes every string of
+    `net check` that is not its own words: addresses, details, names,
+    labels, what members saw, their dial-back errors, the router's
+    answers and the advice, as one line. The same sweep of `cmd/a2p2`
+    escapes status's reach line, the terms of a send with files (agent
+    ids, the parent's author, message ids), a join's answer, a fetch's
+    reason and members' answers, a pending change's kind, doctor's
+    error lines, keys cut short, unparsed time stamps and the last line
+    of an error. `--json` is unchanged.
+  - Labels compared as drawn collapsed only ASCII blanks. Now every
+    Unicode white space character and U+2800 count as a space, in the
+    page's `drawnLabel` and in `node.LabelKey`, which status uses. The
+    shared table of test strings has the cases.
 - **Costs:** text that had such characters reads with `\u{...}` in it,
-  including a CR at the end of a line and emoji tag sequences such as
-  subdivision flags. A joiner in Latin, Greek or Cyrillic text, or a
-  selector after punctuation, is shown escaped. What the text rule keeps
-  can still carry about one bit per position nobody sees, inside emoji
-  and the joining scripts only; escaping those would break them. A
-  choice with a non-breaking space or two spaces in a row is refused. A
-  page open across the upgrade must reload before it can approve, since
-  the request text changed. The escape is not reversible: a literal
-  `\u{202e}` reads the same as an escaped one, which is why the page
-  compares labels as drawn. Lookalike letters from other scripts are not
-  detected.
-- **Still open:** the CLI's own printing of messages, choices, alerts
-  and room lists (`printEntry`, `printAlert`, the room list), the question
-  alert text (`surface.go`, `q.From + " asks: " + q.Text`), and the MCP
-  tools' text for the model. Each can call this helper. `a2p2 confirm`
-  decides by id and does not compare the text it showed. Names are not
-  compared with this machine's own name when it is not yet recorded in
-  the room.
+  and a typed `\u{` reads `\u{5c}u{`. A joiner in Latin, Greek or
+  Cyrillic text, a selector after punctuation, a right-to-left mark at
+  the edge of a word or next to a digit, a joiner at the end of a word
+  and any tag sequence other than the three flags are shown escaped.
+  What the text rules keep can still carry about one bit per position
+  nobody sees (an ideographic variation selector, about one byte per
+  ideograph), inside emoji and those scripts only; escaping those would
+  break them. A choice with a non-breaking space or two spaces in a row
+  is refused. Approval text and its alerts carry U+2068 and U+2069, also in
+  `--json`; a page open across the upgrade must reload before it can
+  approve, since the request text changed. Lookalike letters from other
+  scripts are not detected.
+- **Still open:** names are not compared with this machine's own name
+  when it is not yet recorded in the room, and the CLI's check for room
+  labels shown alike (`node.LabelKey`) does what the page's does but
+  does not normalise to NFC. Addresses are still accepted on receipt
+  without a check of their form; that is a separate change.
 
 **Revisit if** Unicode adds a format character (the table test fails on
 a Go upgrade), a script needs a character the table escapes, or receipt

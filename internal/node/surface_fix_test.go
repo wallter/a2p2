@@ -319,17 +319,17 @@ func TestRequestTextNamesTheFullFingerprintAndEachTerm(t *testing.T) {
 		want string
 	}{
 		{store.Request{Kind: "add", Action: ActionAdmitAdmin, Room: "r_1", Node: node, Name: "box", History: true},
-			"add machine " + fp + " (box) to room team (r_1) as an admin, with earlier history"},
+			"add machine " + fp + " (" + Isolate("box") + ") to room " + Isolate("team") + " (r_1) as an admin, with earlier history"},
 		{store.Request{Kind: "admin", Action: ActionAdmitAdmin, Room: "r_1", Node: node, Name: "box", History: true},
-			"add machine " + fp + " (box) to room team (r_1) as an admin, with earlier history"},
+			"add machine " + fp + " (" + Isolate("box") + ") to room " + Isolate("team") + " (r_1) as an admin, with earlier history"},
 		{store.Request{Kind: "add", Action: ActionAdmit, Room: "r_1", Node: node, Name: "box"},
-			"add machine " + fp + " (box) to room team (r_1) as a member, without earlier history"},
+			"add machine " + fp + " (" + Isolate("box") + ") to room " + Isolate("team") + " (r_1) as a member, without earlier history"},
 		{store.Request{Kind: "admin", Action: ActionPromote, Room: "r_1", Node: node, Name: "box"},
-			"make machine " + fp + " (box), a member of room team (r_1), an admin"},
+			"make machine " + fp + " (" + Isolate("box") + "), a member of room " + Isolate("team") + " (r_1), an admin"},
 		{store.Request{Kind: "remove", Action: ActionRemove, Room: "r_1", Node: node},
-			"remove machine " + fp + " from room team (r_1)"},
+			"remove machine " + fp + " from room " + Isolate("team") + " (r_1)"},
 		{store.Request{Kind: "add", Action: ActionRejoin, Room: "r_1", Node: node, Name: "box", Role: "member", History: true},
-			"let machine " + fp + " (box), already a member of room team (r_1) as a member, with earlier history, " +
+			"let machine " + fp + " (" + Isolate("box") + "), already a member of room " + Isolate("team") + " (r_1) as a member, with earlier history, " +
 				"fetch the room's log again; approving changes nothing"},
 	} {
 		if got := requestText(tc.q, "team", nil); got != tc.want {

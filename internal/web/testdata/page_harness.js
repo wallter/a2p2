@@ -167,15 +167,33 @@ async function idle(what) {
   }
 }
 
-// escapeScenario runs with PROBE_JSON, a JSON array of strings: it writes
-// the page's escapeDisplay, escapeText, displayHidden, escapeChoice and
-// choiceHidden of each, what the
-// "Needs you" section shows for each question, and the posts made by
-// clicking each choice, the ones the page shows escaped first.
+// escapeScenario runs with PROBE_JSON, a JSON object: strings, an array
+// of strings, and sentences, an array of sentences the daemon wrote with
+// node.Isolate. It writes the page's escapeDisplay, escapeText,
+// displayHidden, escapeChoice, choiceHidden and drawnLabel of each
+// string, and whether its escapeDisplay is in NFC; how the
+// page draws each sentence (its text, and the text of each bdi element);
+// the bdi elements of each request card's text and of the line that says
+// who asked the first question;
+// what the "Needs you" section shows for each question; and the posts
+// made by clicking each choice, the ones the page shows escaped first.
 async function escapeScenario(out) {
   const probe = JSON.parse(fs.readFileSync(probePath, "utf8"));
-  const fns = ["escapeDisplay", "escapeText", "displayHidden", "escapeChoice", "choiceHidden"].map(inPage);
-  out.probe = probe.map((s) => fns.map((f) => f(s)));
+  const fns = ["escapeDisplay", "escapeText", "displayHidden", "escapeChoice", "choiceHidden", "drawnLabel"].map(inPage);
+  // and whether the label as escaped is already in NFC, which drawnLabel
+  // normalises to and node.LabelKey does not
+  const nfc = (s) => { const e = fns[0](s); return e.normalize("NFC") === e; };
+  out.probe = probe.strings.map((s) => fns.map((f) => f(s)).concat([nfc(s)]));
+  const isolated = inPage("isolated");
+  out.sentences = probe.sentences.map((s) => {
+    const parts = isolated(s);
+    return { text: parts.map((p) => (p.nodeType ? p.textContent : p)).join(""),
+      bdi: parts.filter((p) => p.nodeType && p.tagName === "BDI").map((p) => p.textContent) };
+  });
+  out.bdi = $("rooms").querySelectorAll("bdi").map((b) => b.textContent);
+  out.requestBDI = $("requests").querySelectorAll("div.txt").map((t) => t.querySelectorAll("bdi").map((b) => b.textContent));
+  const asked = $("questions").children[0] && $("questions").children[0].querySelector("div.sub");
+  out.questionBDI = asked ? asked.querySelectorAll("bdi").map((b) => b.textContent) : [];
   out.questionsTitleHidden = $("questions-title").hidden;
   out.nodeOpen = $("node").textContent; // the details of the room opened
   out.questions = $("questions").children.map((card) => ({

@@ -386,6 +386,10 @@ type (
 		// Terms is the terms digest the person was shown; an approval of
 		// a send_files request needs it equal to the request's terms.
 		Terms string `json:"terms,omitempty"`
+		// Text, when set, is the request's text as the person was shown
+		// it (Request.Text). A decision is refused, with nothing decided,
+		// unless the request's text is still the same (D58).
+		Text string `json:"text,omitempty"`
 	}
 	ConfirmResp struct {
 		ID      string   `json:"id"`
@@ -989,7 +993,21 @@ func Handler(s *node.Surface, info Info) http.Handler {
 		return out, err
 	})
 	handle(mux, "confirm", func(ctx context.Context, r ConfirmReq) (ConfirmResp, error) {
-		c, err := s.Confirm(ctx, r.ID, r.Approve, r.NotCaughtUpOK, r.Terms)
+		if r.Text != "" {
+			// As the page's confirm: the text shown must still be the
+			// request's, checked first for either decision and again
+			// under the decision lock for an approval (ConfirmShown).
+			qs, err := s.Waiting(ctx)
+			if err != nil {
+				return ConfirmResp{}, err
+			}
+			for _, q := range qs {
+				if q.ID == r.ID && q.Text != r.Text {
+					return ConfirmResp{}, &node.UserError{Msg: node.RequestChangedText}
+				}
+			}
+		}
+		c, err := s.ConfirmShown(ctx, r.ID, r.Approve, r.NotCaughtUpOK, r.Terms, r.Text)
 		return ConfirmResp{ID: c.ID, State: c.State, Reason: c.Reason, Entries: c.Entries, Effect: c.Effect}, err
 	})
 	handle(mux, "room/create", func(ctx context.Context, r RoomReq) (Room, error) {

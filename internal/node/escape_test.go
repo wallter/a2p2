@@ -1,10 +1,8 @@
 package node
 
 import (
-	"strings"
 	"testing"
 	"unicode"
-	"unicode/utf8"
 )
 
 func TestEscapeDisplayWritesEveryHidingCharacterAsAnEscape(t *testing.T) {
@@ -29,7 +27,7 @@ func TestEscapeDisplayWritesEveryHidingCharacterAsAnEscape(t *testing.T) {
 		{"\u2060\u2061\u2064\ufeff\u00ad\u034f", `\u{2060}\u{2061}\u{2064}\u{feff}\u{ad}\u{34f}`},
 		{"\u115f\u1160\u3164\uffa0\u17b4\u180e", `\u{115f}\u{1160}\u{3164}\u{ffa0}\u{17b4}\u{180e}`},
 		{"ok\U000E0068\U000E0069", `ok\u{e0068}\u{e0069}`},
-		{"❤\ufe0f", `❤\u{fe0f}`},
+		{"x\ufe0f", `x\u{fe0f}`},
 		{"x\U000E0100", `x\u{e0100}`},
 		// default ignorable code points no class marks: drawn as nothing
 		{"go\U000E0080\U000E00FF\U000E01F0\U000E0FFF\ufff0\ufff8", `go\u{e0080}\u{e00ff}\u{e01f0}\u{e0fff}\u{fff0}\u{fff8}`},
@@ -66,7 +64,8 @@ func TestEscapeDisplayTextKeepsWritingAndShowsWhatHides(t *testing.T) {
 		{"emoji joined", "👨\u200d💻 🏳\ufe0f\u200d🌈 👩\u200d👩\u200d👧", "👨\u200d💻 🏳\ufe0f\u200d🌈 👩\u200d👩\u200d👧"},
 		{"Persian non-joiner", "می\u200cخواهم", "می\u200cخواهم"},
 		{"Devanagari joiner", "क्\u200dष", "क्\u200dष"},
-		{"carriage return", "ok\r\nnext", "ok\\u{d}\nnext"},
+		{"carriage return before a line end", "ok\r\nnext", "ok\nnext"},
+		{"carriage return alone", "ok\rnext", `ok\u{d}next`},
 		{"terminal escape", "a\x1b[1A\x1b[2Kb", `a\u{1b}[1A\u{1b}[2Kb`},
 		{"bidi override", "say \u202eon\u202c", `say \u{202e}on\u{202c}`},
 		{"tag characters", "LGTM\U000E0072\U000E006D", `LGTM\u{e0072}\u{e006d}`},
@@ -172,41 +171,4 @@ func TestAChoiceIsShownExactlyAsItIsSentOrRefused(t *testing.T) {
 			t.Errorf("ChoiceHidden(%q) = %v", tc.in, ChoiceHidden(tc.in))
 		}
 	}
-}
-
-// What EscapeDisplay writes holds no character it escapes and is valid
-// UTF-8, so escaping it again changes nothing; what EscapeDisplayText
-// writes holds only the hidden characters it may keep.
-func FuzzEscapeDisplay(f *testing.F) {
-	for _, s := range []string{"", "ok", "\x1b[2K\u202e\n", "👨\u200d💻\ufe0f\ufe0f", "\xff\xed\xa0\x80", "a\U000E0041\u200d"} {
-		f.Add(s)
-	}
-	f.Fuzz(func(t *testing.T, s string) {
-		one := EscapeDisplay(s)
-		if !utf8.ValidString(one) || EscapeDisplay(one) != one || DisplayHidden(one) {
-			t.Fatalf("EscapeDisplay(%q) = %q", s, one)
-		}
-		for _, r := range one {
-			if Hidden(r) {
-				t.Fatalf("EscapeDisplay(%q) kept U+%04X", s, r)
-			}
-		}
-		if lines := EscapeDisplayLines(s); strings.Count(lines, "\n") != strings.Count(s, "\n") {
-			t.Fatalf("EscapeDisplayLines(%q) = %q", s, lines)
-		}
-		if c := EscapeChoice(s); !utf8.ValidString(c) || strings.ContainsAny(c, "\n\t") || EscapeChoice(c) != c {
-			t.Fatalf("EscapeChoice(%q) = %q", s, c)
-		}
-		text := EscapeDisplayText(s)
-		if !utf8.ValidString(text) {
-			t.Fatalf("EscapeDisplayText(%q) is not UTF-8", s)
-		}
-		for _, r := range text {
-			switch {
-			case !Hidden(r), r == '\n', r == '\t', r == 0x200c, r == 0x200d, r == 0xfe0e, r == 0xfe0f:
-			default:
-				t.Fatalf("EscapeDisplayText(%q) kept U+%04X", s, r)
-			}
-		}
-	})
 }

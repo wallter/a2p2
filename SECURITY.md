@@ -62,26 +62,39 @@ reports.
   can read the room data its machine can fetch. Treat messages as
   untrusted input. A message from a peer does not grant permission to act.
 - Room labels, machine names, file names and message text can come from
-  another machine, and its owner may be someone else. The text a person
-  approves (a request in `confirm`, `alerts` and on the page), the join
-  preview, and on the page the room labels, names, agent ids, message
-  text and choices write control characters, line breaks where one line
-  is shown, terminal escapes, bidirectional overrides and characters
-  that draw as nothing as `\u{...}`. Nothing is dropped. So a room
-  creator cannot rewrite or hide the terms of a request with its room's
-  label. Message text keeps joiners and emoji selectors inside emoji
-  and the scripts that need them; there they can still carry a little
-  information nobody sees. A seconding request says that the other admin
-  chose the name it carries, shows the name the room records, and says
-  when other members have that name. On the page, a message that asks
-  the person is drawn apart from requests, says who asked and of whom,
-  and its choices are plain buttons; a choice its button cannot show
-  exactly as it is sent is not sent. Still open: the CLI's own printing
-  of messages, question alerts and room lists, and the text the MCP
-  tools give the model, do not yet use this escaping, so a member can
-  still put terminal escapes or invisible text there. Names are labels,
-  and lookalike letters are not detected: compare fingerprints, not
-  names.
+  another machine, and its owner may be someone else. Where a2p2
+  shows them (the text a person approves in `confirm`, `alerts` and on
+  the page, the join preview, the CLI's messages, alerts, room lists,
+  status, `net check` (members' addresses and probe details among
+  them), `confirm`, `join`, `fetch`, doctor and error lines, the page,
+  and the text of MCP tool results)
+  it writes control characters, line breaks where one line is shown,
+  terminal escapes, bidirectional overrides and characters that draw as
+  nothing as `\u{...}`. Nothing is dropped, and a backslash that would
+  start such an escape is itself written `\u{5c}`, so typed text never
+  reads as an escaped character. So a room creator cannot rewrite or
+  hide the terms of a request with its room's label. Some invisible
+  characters are kept where honest writing needs them and they change
+  no order: joiners and selectors inside emoji, joiners between letters
+  of the scripts that need them, a right-to-left mark between two
+  right-to-left letters, a zero width space between two Thai, Lao,
+  Tibetan, Myanmar or Khmer characters, one variation selector after a
+  CJK ideograph and the flags of England, Scotland and Wales. There they
+  can still carry a little information nobody sees. In the text a person
+  approves, the room label and the names are isolated (Unicode isolates,
+  a `bdi` element on the page, their own line in the terminal when they
+  hold right-to-left text), so they cannot reorder the words around
+  them. `a2p2 confirm` and the page send the text they showed, and the
+  daemon decides nothing if it changed. A seconding request says that
+  the other admin chose the name it carries, shows the name the room
+  records, and says when other members have that name. On the page, a
+  message that asks the person is drawn apart from requests, says who
+  asked and of whom, and its choices are plain buttons; a choice its
+  button cannot show exactly as it is sent is not sent. `--json` output
+  is data: the stored strings, escaped only by JSON's rules, apart from
+  sentences the daemon wrote for a person (a request's or an alert's
+  text). Names are labels, and lookalike letters are not detected:
+  compare fingerprints, not names.
 - The unread notice a hook prints holds a count and up to five sender
   labels, never message text. The sending agent chooses its label. Every
   machine accepts only 1 to 64 characters of letters, digits, `.`, `_` and
