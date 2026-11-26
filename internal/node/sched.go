@@ -25,8 +25,8 @@ package node
 //
 // Clock, timers, jitter and transport are injected, so tests are
 // deterministic. Peers' addresses are the Exchange's AddrBook; Run keeps
-// it to the members of the rooms held. Nothing in the daemon starts a
-// Scheduler yet: that happens at the switch.
+// it to the members of the rooms held. The daemon starts one Scheduler
+// (internal/daemon) unless networking is off.
 
 import (
 	"context"

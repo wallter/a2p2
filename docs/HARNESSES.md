@@ -261,7 +261,10 @@ other agents or people, not from the user.
 
 The mailbox is found from the working directory: `CLAUDE_PROJECT_DIR` or
 `cwd` for Claude Code, the first of `workspacePaths` or `cwd` for
-Antigravity CLI, and `cwd` for Codex.
+Antigravity CLI, and `cwd` for Codex. The hook knows no session name, so
+when two sessions of one harness share a directory, the notice follows the
+one the daemon saw register most recently, even if the other has a name set
+with `A2P2_NAME` or `--name`.
 
 ## From documentation, not run
 
