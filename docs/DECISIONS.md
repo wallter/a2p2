@@ -2379,3 +2379,112 @@ after D57, which lets a receipt rule land without stopping a start.
 
 **Revisit if** rooms gain a rename, a second built-in label is reserved,
 or a joiner reports a refused join of a room it holds.
+
+## D-NEW-G-mcp-identity. What an agent reads says who wrote it and which room it is (2026-11-25)
+
+A security review and a council of models found that an agent could not
+tell this machine's mail from another machine's. MCP entries left out the
+author's machine key and gave 8 hex characters to compare. `ask_human`
+said the answer comes "from human", while in a shared room any member
+machine can post as `human@<its id>`. Short ids are 32 bits, and nothing
+marked two machines that share one. A room created elsewhere could be
+labelled `local`, the room the `send` tool calls "this machine only"
+(F12, F55). An agent could register as `Human`, and `a2p2 mcp --harness
+human` as the person (F42). A member could take this machine's name or a
+colleague's (F44). Rooms shared between owners make each of these a way
+to pass another owner's text off as the local person's.
+
+- **What changed.** All of it is display, in `node.Surface`, the local
+  API and the shim; nothing stored or accepted changes.
+  - Every entry carries `Here`, set by comparing the author's full key
+    with this machine's. The local API writes it as `from_this_machine`
+    on entries and `unread` first lines; MCP results write it on every
+    message (inbox, thread, recent, skipped, peek), never left out.
+  - MCP results add `person` to a message labelled `human` in any case:
+    "yours: the person on this machine" only for exactly `human` written
+    here, "another machine's person, not yours" otherwise (or "not
+    yours: a look-alike label on this machine").
+  - `ask_human` returns `answer_from`, the person's id by this
+    machine's full key, so it stays the same when a machine with the
+    same short id joins or leaves. Its note says the answer is the reply
+    whose `parent` is the question, with `from_this_machine` true and
+    `person` yours. A `human` addressee is this machine's person by its
+    full key. `person` says where and under which label a message was
+    written: any program run by the same OS user can send as `human`
+    through the local API, so it does not prove who typed it.
+  - The surface compares the short ids of this machine, every member of
+    every room held and the authors and addressees about to be shown. A
+    key whose short id another has is written in full in `from`, `to`,
+    writers and status's `human`, and marked `id_shared` (entries,
+    members, peers, status, and in `peers` and `whoami`). An addressee
+    whose short id names two members is refused with a sentence that
+    says so. An agent id may name this machine by the full key, as
+    status gives `human` then. `unread` and `peek` lines, `room/list`
+    members, `fetch` authors and holders, writers and local agents in
+    `peers` carry the same marks; writer ids are never cut. One snapshot
+    of the memberships serves a whole `unread`. The ids a `send` returns
+    are drawn after it commits and never turn it into an error.
+  - Agent-facing labels (`node.ShownLabels`: entries, send and reply
+    results, levels, unread, and the shim's whoami and peers) show only
+    the local room as `local`. Another room whose label reads as `local`,
+    two rooms that read alike (`LabelKey`), or a label that reads as
+    another room's id get `#` and the first 8 hex of the id, then `#` and
+    the whole id, then the bare id, each step repeated until no two rooms
+    read alike. A room argument may be the id, the shown label (escaped
+    or not), the stored label or the stored label with `#` and 8 or more
+    hex of the id; a name that could mean two rooms is refused, so a
+    label shown before a room arrived never picks the new room. `local`
+    always names the local room.
+    `room create` refuses `local` in any case. Room lists and status keep
+    the stored label: the page and the CLI draw rooms that read alike
+    their own way (D58). MCP room references gain `local: true` for the
+    local room only.
+  - The `human` label is reserved in any case; only harness `human` with
+    label `human` registers it. `a2p2 mcp` refuses a harness named
+    `human` in any case.
+  - In `peers`, a machine name that another machine in the result also
+    uses, or that reads as another machine's id, is shown as
+    `<name>#<machine>`, this machine's included, and this machine is
+    marked `this_machine`. Names are compared as drawn, so a machine with
+    no name counts under its id.
+  - The person's questions exclude the person's own posts by the full key,
+    not by comparing the short id.
+- **No wire, entry, record or schema change.** Old machines see the same
+  bytes. A database written by 0.2.0 to 0.2.3 opens as before, and one
+  this version used opens in 0.2.3, since nothing new is stored. The
+  local API and MCP results gain fields; old clients ignore them. The
+  seven tool definitions are unchanged (3,991 bytes).
+- **Costs.** Each message in a tool result is about 26 bytes longer
+  (`"from_this_machine":false,`), and a `human` one about 50 more. Every
+  read that returns entries, and status, reads the room list once more
+  and walks every room's member list in memory. An agent registered as
+  `Human` before this version can no longer register under that label.
+  A room that reads like another is addressed by its shown label or id;
+  a name that could mean two rooms is refused where it used to pick one.
+- **Still open.**
+  - Refusing to admit a key whose short id matches this machine's or a
+    current member's belongs to the join and membership code (group D:
+    `node/joiner.go`, `node/invite.go`, and the request text of
+    `node/requests.go`): the admin's request should say the short id is
+    taken and the join should be refused there, applied only to new
+    requests. Until then such a machine is shown in full, not refused.
+    The approval side needs, in group D's files: the join, add and admin
+    requests show that the key's short id is already held by this
+    machine or a member, and the check runs again under the approval
+    lock before signing. It applies to new requests only (D57: a stored
+    entry still replays), with a test that a database holding such a
+    member still opens with the room working. No scheduler or pull
+    change is needed.
+  - The page and the CLI do not show `from_this_machine` or `person`
+    (groups E and F). The default mailbox label is still the
+    directory's base name (F39). The CLI acts as the person by default
+    (F11, group F).
+  - Per-message room ids are not added to tool results: labels in one
+    result are unique, and its `rooms` list gives each label's id
+    (`TestInboxEntriesAreCompact` holds entries small).
+  - A name taken by a machine that is not yet recorded in any room this
+    machine holds is not detected. Lookalike letters are not detected.
+
+**Revisit if** a later release adds a receipt rule for room labels or
+names, the short id is lengthened, or a harness shows that models still
+take another machine's `human` for their person.

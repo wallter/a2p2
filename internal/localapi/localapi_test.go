@@ -42,20 +42,31 @@ type machine struct {
 	c     *Client
 	human string
 	st    *store.Store
+	rooms *node.Rooms
 }
 
 // newPair starts two machines with local APIs; b joins through a.
 func newPair(t *testing.T) (*machine, *machine) {
 	t.Helper()
+	return newPairSeeds(t, append([]byte{1}, make([]byte, 31)...), append([]byte{2}, make([]byte, 31)...))
+}
+
+// newPairSeeds is newPair with the machines' key seeds.
+func newPairSeeds(t *testing.T, seedA, seedB []byte) (*machine, *machine) {
+	t.Helper()
 	a, b := &machine{}, &machine{}
 	start := func(m *machine, seed byte, peer *machine) {
+		keySeed := seedA
+		if seed == 2 {
+			keySeed = seedB
+		}
 		ctx := context.Background()
 		st, err := store.Open(filepath.Join(t.TempDir(), "a2p2.db"))
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { st.Close() })
-		key := ed25519.NewKeyFromSeed(append([]byte{seed}, make([]byte, 31)...))
+		key := ed25519.NewKeyFromSeed(keySeed)
 		mach := node.NewMachine(st, key, node.MachineOpts{})
 		m.st = st
 		m.id = mach.ID
@@ -63,6 +74,7 @@ func newPair(t *testing.T) (*machine, *machine) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		m.rooms = rooms
 		m.js = node.NewJoinServer(rooms)
 		j := node.NewJoiner(rooms, joinNet{from: mach.ID, server: &peer.js, admin: &peer.id}, node.JoinerOpts{Name: "m" + string('0'+seed)})
 		m.s, err = node.OpenSurface(ctx, mach, rooms, node.SurfaceOpts{Name: "m", Joiner: j, Book: node.NewAddrBook(),

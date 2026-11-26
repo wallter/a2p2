@@ -378,7 +378,7 @@ func TestAskHumanArrivesForTheHumanAndTheAnswerIsAReply(t *testing.T) {
 	a := connect(t, c, "alice")
 	alice := agentID(t, a)
 	out := ok(t, a, "ask_human", map[string]any{"question": "deploy?", "choices": []string{"yes", "no"}})
-	if r := parse(t, out); !strings.Contains(out, "reply from human") || len(r.To) != 1 || !strings.HasPrefix(r.To[0], "human@") {
+	if r := parse(t, out); len(r.To) != 1 || !strings.HasPrefix(r.To[0], "human@") || !strings.Contains(out, `"answer_from":"human@`) {
 		t.Fatal(out)
 	}
 	ctx := context.Background()

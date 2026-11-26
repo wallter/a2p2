@@ -60,8 +60,14 @@ type Entry struct {
 	Room   string
 	// RoomLabel is the room's label (filled in by Surface).
 	RoomLabel string
-	From      string // agent id, label@short node
+	From      string // agent id, label@short node (the full key when shared)
 	FromNode  string
+	// Here: the author is this machine, by the full key (filled in by
+	// Surface). IDShared: the author's or an addressee's short id is
+	// another known machine's too, so it is written in full (From, ToIDs).
+	Here     bool
+	IDShared bool
+	ToIDs    []string // with IDShared: the addressees as shown
 	// AuthorRemoved: the author is not a member of the room now, in this
 	// machine's view [RM1]. Always false in a room without a log.
 	AuthorRemoved bool

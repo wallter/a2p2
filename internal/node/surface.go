@@ -211,10 +211,12 @@ func (s *Surface) agentID(label, node string) string { return label + "@" + shor
 // AgentID renders an addressee as an agent id.
 func AgentID(a core.Addressee) string { return a.Agent + "@" + short(a.Node) }
 
-// label checks that agent is an agent id of this machine and returns its label.
+// label checks that agent is an agent id of this machine and returns its
+// label. The machine part is its short id or, as entries and status write
+// it when another machine shares the short id, its full key.
 func (s *Surface) label(agent string) (string, error) {
 	l, node, ok := strings.Cut(agent, "@")
-	if !ok || node != short(s.m.ID) || !core.ValidLabel(l) {
+	if !ok || (node != short(s.m.ID) && node != s.m.ID) || !core.ValidLabel(l) {
 		return "", userErr("%q is not an agent on this machine", agent)
 	}
 	return l, nil
@@ -222,22 +224,33 @@ func (s *Surface) label(agent string) (string, error) {
 
 // ---- rooms ----
 
-// ResolveRoom accepts a room id or a label; empty means the local room. A
-// label several rooms share is an error naming them.
+// ResolveRoom accepts a room id or a label; empty and "local" mean the
+// local room, whatever another room is labelled. Otherwise a name may
+// match a room by its label as shown (ShownLabels, "ops#1a2b3c4d"), as an
+// agent result escapes it (EscapeDisplay), as stored, or as the stored
+// label with "#" and the start of the room's id. A name that matches
+// more than one room is an error naming them, so a label shown before a
+// room arrived never picks another room.
 func (s *Surface) ResolveRoom(ctx context.Context, name string) (string, error) {
-	if name == "" {
+	if name == "" || name == LocalLabel {
 		return s.local, nil
 	}
 	rooms, err := s.m.st.LogRooms(ctx)
 	if err != nil {
 		return "", err
 	}
-	var ids []string
 	for _, r := range rooms {
 		if r.ID == name {
 			return r.ID, nil
 		}
-		if s.r.ShownLabel(r.ID, r.Label) == name {
+	}
+	shown := s.shownLabels(rooms)
+	var ids []string
+	for _, r := range rooms {
+		if r.ID == s.local {
+			continue // named by "local" and its id only
+		}
+		if shown[r.ID] == name || EscapeDisplay(shown[r.ID]) == name || r.Label == name || taggedLabel(name, r) {
 			ids = append(ids, r.ID)
 		}
 	}
@@ -247,7 +260,14 @@ func (s *Surface) ResolveRoom(ctx context.Context, name string) (string, error) 
 	case 1:
 		return ids[0], nil
 	}
-	return "", userErr("several rooms are labelled %q: use one of their ids: %s", name, strings.Join(ids, ", "))
+	return "", userErr("%q could name %d rooms here: use one of their ids: %s", name, len(ids), strings.Join(ids, ", "))
+}
+
+// taggedLabel reports whether name is r's stored label, "#" and at least
+// the first 8 characters of r's id (ShownLabels).
+func taggedLabel(name string, r store.LogRoom) bool {
+	l, tag, ok := strings.Cut(strings.TrimPrefix(name, r.Label), "#")
+	return ok && l == "" && strings.HasPrefix(name, r.Label) && len(tag) >= 8 && strings.HasPrefix(strings.TrimPrefix(r.ID, "r_"), tag)
 }
 
 // roomOf finds the room holding record id (a message, or the record a
@@ -280,6 +300,9 @@ func (s *Surface) roomOf(ctx context.Context, id string) (string, error) {
 func (s *Surface) CreateRoom(ctx context.Context, label string) (RoomInfo, error) {
 	if !core.ValidLabel(label) {
 		return RoomInfo{}, userErr("a room label is 1 to 64 letters, digits, '.', '_' or '-', starting with a letter or digit")
+	}
+	if reservedLocal(label) {
+		return RoomInfo{}, userErr("the label %q is reserved for this machine's own room: choose another", LocalLabel)
 	}
 	id, err := s.r.CreateRoom(ctx, label)
 	if err != nil {
@@ -548,8 +571,10 @@ func (s *Surface) Register(ctx context.Context, harness, label, cwd string) (sto
 		}
 	}
 	label = core.CleanLabel(label)
-	if label == HumanLabel && harness != HumanLabel {
-		return store.Agent{}, userErr("the label %q is reserved", HumanLabel)
+	// The person's label is reserved in any case: only the person's own
+	// path (harness human, label human) registers it (F42).
+	if IsPerson(label) && (label != HumanLabel || harness != HumanLabel) {
+		return store.Agent{}, userErr("the label %q is reserved for the person, in any case", HumanLabel)
 	}
 	if !core.ValidLabel(label) {
 		return store.Agent{}, userErr("bad agent label %q", label)
@@ -708,25 +733,29 @@ func (s *Surface) roomLabel(ctx context.Context, id string) (string, error) {
 	return labels[id], err
 }
 
+// roomLabels is each held room's label as shown (shownLabels).
 func (s *Surface) roomLabels(ctx context.Context) (map[string]string, error) {
 	rs, err := s.m.st.LogRooms(ctx)
-	out := make(map[string]string, len(rs))
-	for _, r := range rs {
-		out[r.ID] = s.r.ShownLabel(r.ID, r.Label)
+	if err != nil {
+		return map[string]string{}, err
 	}
-	return out, err
+	return s.shownLabels(rs), nil
 }
 
-// withLabels fills in the room label of each entry.
+// withLabels fills in the room label of each entry as shown, whether this
+// machine wrote it and the ids as shown (marked).
 func (s *Surface) withLabels(ctx context.Context, es []Entry, err error) ([]Entry, error) {
 	if err != nil || len(es) == 0 {
 		return es, err
 	}
 	labels, err := s.roomLabels(ctx)
+	if err != nil {
+		return es, err
+	}
 	for i := range es {
 		es[i].RoomLabel = labels[es[i].Room]
 	}
-	return es, err
+	return s.marked(ctx, es)
 }
 
 // participants is whom a reply to parent addresses by default from the
@@ -797,8 +826,9 @@ func (s *Surface) addressees(room string, to []string) ([]core.Addressee, error)
 		if a == Everyone {
 			return nil, userErr("everyone is the only addressee when given")
 		}
-		if a == HumanLabel { // the person at this machine
-			a = s.HumanID()
+		if a == HumanLabel { // the person at this machine, by its full key
+			out = append(out, core.Addressee{Node: s.m.ID, Agent: HumanLabel})
+			continue
 		}
 		l, node, ok := strings.Cut(a, "@")
 		if !ok || !core.ValidLabel(l) || len(node) < 8 {
@@ -809,6 +839,9 @@ func (s *Surface) addressees(room string, to []string) ([]core.Addressee, error)
 			if strings.HasPrefix(m, node) {
 				got = append(got, m)
 			}
+		}
+		if len(got) > 1 {
+			return nil, userErr("%q names %d machines in this room that share that short id: use the full id peers lists", a, len(got))
 		}
 		if len(got) != 1 {
 			return nil, userErr("%q is not an agent of a machine in this room", a)
@@ -851,8 +884,15 @@ func (s *Surface) Ack(ctx context.Context, agent, id string) (Sent, error) {
 // rooms is every room held, local first.
 func (s *Surface) rooms(ctx context.Context) ([]store.LogRoom, error) {
 	rs, err := s.m.st.LogRooms(ctx)
+	if err != nil {
+		return nil, err
+	}
+	shown := s.shownLabels(rs)
+	for i := range rs {
+		rs[i].Label = shown[rs[i].ID]
+	}
 	sort.SliceStable(rs, func(i, j int) bool { return rs[i].ID == s.local && rs[j].ID != s.local })
-	return rs, err
+	return rs, nil
 }
 
 // Inbox shows agent what it has not confirmed, in room or in every room,
@@ -1353,10 +1393,12 @@ type RoomCount struct {
 
 // FirstLine is an unread message's first line, clipped.
 type FirstLine struct {
-	ID   string
-	Room string
-	From string
-	Line string
+	ID       string
+	Room     string
+	From     string
+	Here     bool // the author is this machine (Entry.Here)
+	IDShared bool // the author's short id is another known machine's too
+	Line     string
 }
 
 // Unread summarises agent's unread entries in room, or in every room when
@@ -1372,24 +1414,36 @@ func (s *Surface) Unread(ctx context.Context, agent, room string, lines bool) (U
 		return UnreadView{}, err
 	}
 	u := UnreadView{Agent: agent}
-	seen := map[string]bool{}
-	for _, r := range rs {
+	byRoom := make([][]Entry, len(rs))
+	var all []Entry
+	for i, r := range rs {
 		v, err := s.m.Inbox(ctx, r.ID, label)
 		if err != nil {
 			return UnreadView{}, err
 		}
-		if len(v.Entries) == 0 {
+		byRoom[i] = v.Entries
+		all = append(all, v.Entries...)
+	}
+	// One snapshot of the memberships for every room's entries.
+	x, err := s.ids(ctx, entryNodes(all))
+	if err != nil {
+		return UnreadView{}, err
+	}
+	seen := map[string]bool{}
+	for i, r := range rs {
+		es := s.markWith(x, byRoom[i])
+		if len(es) == 0 {
 			continue
 		}
-		u.Count += len(v.Entries)
-		u.Rooms = append(u.Rooms, RoomCount{Room: r.ID, Label: shownLabel(s.m.ID, r.ID, r.Label), Count: len(v.Entries)})
-		for _, e := range v.Entries {
+		u.Count += len(es)
+		u.Rooms = append(u.Rooms, RoomCount{Room: r.ID, Label: shownLabel(s.m.ID, r.ID, r.Label), Count: len(es)})
+		for _, e := range es {
 			if !seen[e.From] {
 				seen[e.From] = true
 				u.From = append(u.From, e.From)
 			}
 			if lines && len(u.First) < maxFirstLines {
-				u.First = append(u.First, FirstLine{ID: e.ID, Room: r.ID, From: e.From, Line: firstLine(e)})
+				u.First = append(u.First, FirstLine{ID: e.ID, Room: r.ID, From: e.From, Here: e.Here, IDShared: e.IDShared, Line: firstLine(e)})
 			}
 		}
 	}
@@ -1422,9 +1476,12 @@ type PeerView struct {
 
 // StatusView is the machine at a glance: what whoami and peers show.
 type StatusView struct {
-	Node   string
-	Name   string
-	Human  string
+	Node  string
+	Name  string
+	Human string // the person's agent id, as entries show it
+	// Shared holds every machine key whose short id another machine
+	// known here shares: those are written in full.
+	Shared map[string]bool
 	Local  string
 	Rooms  []RoomInfo
 	Agents []store.Agent
@@ -1467,7 +1524,7 @@ type WriterView struct {
 // maxWriters bounds the writers listed per room.
 const maxWriters = 64
 
-func (s *Surface) writers(ctx context.Context, rooms []RoomInfo) (map[string][]WriterView, error) {
+func (s *Surface) writers(ctx context.Context, rooms []RoomInfo, x idForms) (map[string][]WriterView, error) {
 	out := map[string][]WriterView{}
 	err := s.m.st.View(ctx, func(rd *store.Reader) error {
 		for _, r := range rooms {
@@ -1481,7 +1538,7 @@ func (s *Surface) writers(ctx context.Context, rooms []RoomInfo) (map[string][]W
 			}
 			for _, w := range ws {
 				if member[w.Node] {
-					out[r.ID] = append(out[r.ID], WriterView{Agent: s.agentID(w.Agent, w.Node), Node: w.Node, Last: w.Last})
+					out[r.ID] = append(out[r.ID], WriterView{Agent: x.agent(w.Agent, w.Node), Node: w.Node, Last: w.Last})
 				}
 			}
 		}
@@ -1499,6 +1556,10 @@ func (s *Surface) Status(ctx context.Context, show bool) (StatusView, error) {
 	}
 	s.named(rooms)
 	sort.SliceStable(rooms, func(i, j int) bool { return rooms[i].ID == s.local && rooms[j].ID != s.local })
+	ids, err := s.ids(ctx, nil)
+	if err != nil {
+		return StatusView{}, err
+	}
 	agents, err := s.Agents(ctx)
 	if err != nil {
 		return StatusView{}, err
@@ -1507,7 +1568,7 @@ func (s *Surface) Status(ctx context.Context, show bool) (StatusView, error) {
 	if err != nil {
 		return StatusView{}, err
 	}
-	writers, err := s.writers(ctx, rooms)
+	writers, err := s.writers(ctx, rooms, ids)
 	if err != nil {
 		return StatusView{}, err
 	}
@@ -1531,7 +1592,7 @@ func (s *Surface) Status(ctx context.Context, show bool) (StatusView, error) {
 	if err != nil {
 		return StatusView{}, err
 	}
-	return StatusView{Node: s.m.ID, Name: s.name, Human: s.HumanID(), Local: s.local, Rooms: rooms, Agents: agents,
+	return StatusView{Node: s.m.ID, Name: s.name, Human: ids.agent(HumanLabel, s.m.ID), Shared: ids.shared, Local: s.local, Rooms: rooms, Agents: agents,
 		Peers: peers, Waiting: waiting, Network: s.net, Decided: decided, Fault: s.fault(), Notice: notice, Writers: writers,
 		Levels: levels, Reach: s.ReachNow(), Mapping: s.MappingNow(), Files: files, RoomFiles: roomFiles,
 		Quarantined: s.r.Quarantined()}, nil

@@ -107,11 +107,12 @@ func (s *Surface) Questions(ctx context.Context) ([]Entry, error) {
 		}
 		for _, e := range v.Entries {
 			asked := e.Kind == EntryMessage || e.Kind == EntryReplaced
-			if asked && e.From != s.HumanID() && (len(e.Choices) > 0 || slices.Contains(e.To, human)) {
+			own := e.FromNode == s.m.ID && fromLabel(e) == HumanLabel // by the full key
+			if asked && !own && (len(e.Choices) > 0 || slices.Contains(e.To, human)) {
 				out = append(out, e)
 			}
 		}
 	}
 	sortEntries(out)
-	return out, nil
+	return s.marked(ctx, out)
 }

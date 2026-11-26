@@ -74,6 +74,24 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   `local` that is not the local room is shown with its id in every result
   and never resolves as `local`. A join recorded by an older version
   under another label is refused, and the room stays.
+- **An agent can tell this machine's person from a `human` on another
+  machine.** Since 0.1.0, any member machine of a shared room could post
+  as `human@<its id>`, MCP results left out the author's machine key,
+  and `ask_human` said only that the answer comes "from human", so an
+  agent of any owner in a shared room could take another machine's
+  `human` for its own person. A short id is 32 bits and nothing marked a
+  machine whose short id matched this one, and a room created elsewhere
+  could be labelled `local`. Now every message an agent reads says
+  `from_this_machine` (by the full key) and, for `human` in any case,
+  `person`; `ask_human` names the person's id by the full key; a machine
+  whose short id another known machine shares is written in full and
+  marked `id_shared` in tool results, the local API and status; only the
+  local room is shown as `local`, no two rooms are shown alike, and a
+  room name that could mean two rooms is refused; `room create` refuses
+  `local`; and in `peers` a machine name two machines use, or one that
+  reads as another machine's id, carries the id. Since 0.1.0 an agent could also register
+  as `Human`, and `a2p2 mcp --harness human` as the person; both are now
+  refused.
 - **One admin can no longer block its own removal by flooding requests.**
   Since 0.1.0, an admin of a room (for example the admin of another owner
   in a shared room) could sign many entries that wait for a second admin.

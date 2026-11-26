@@ -1035,17 +1035,50 @@ Every result is one JSON object, with `<`, `>` and `&` as written; a
 refusal is a tool error whose text is one JSON object
 `{"error","code","retryable"}` as in section 7 (the shim adds
 `unavailable` when the daemon cannot be reached).
-A room is `room` (its id) with `room_label`, a machine `machine` (its short
-id) with `machine_name`, an agent `agent`. `send`, `reply` and `ask_human`
-return `{"id","room","room_label","to","note"}` (`to` is `["everyone"]` for
+A room is `room` (its id) with `room_label` and `local: true` only for
+this machine's own room, a machine `machine` (its short id, or its full
+key with `id_shared: true` when another machine known here has the same
+short id) with `machine_name`, an agent `agent`. Only the local room's
+label is shown as `local`; another room whose label reads as `local`, or
+two rooms whose labels read alike (`node.LabelKey`), are shown as
+`<label>#<first 8 hex of the id>`, then `<label>#<whole id>`, then the
+bare room id, each step repeated until no two rooms read alike (a label
+that reads as another room's id counts too), so no label is shown for
+two rooms. A room argument may be the id, the label as shown (escaped or
+not), the stored label, or the stored label with `#` and at least 8 hex
+of the id; a name that could mean two rooms is refused, so a label shown
+before another room arrived never picks that room. `send`, `reply` and `ask_human`
+return `{"id","room","room_label","local"?,"to","note"}` (`to` is `["everyone"]` for
 a room-wide post; `replaced` or `withdrew` instead for `replaces`), `reply`
-also `handled_report`; `ack` returns `{"handled","report","already"?}`; `inbox`
-returns `{"notice","marked_seen","messages":[…],"rooms"?:[{"room","room_label"}],"streams_still_fetching"?,"waited"?,"levels"?:[{"room","room_label","level"}]}`,
-and with `peek` `{"notice","marked_seen":false,"unread","rooms":[{"room","room_label","unread"}],"first_lines":[{"id","room_label","from","line"}],"levels"?}`.
-`whoami` returns `{"agent","machine","machine_name","rooms":[{"room","room_label","level","unread"}],"human","note"}`.
-Results are compact JSON. An inbox message is `{"id","kind"?,"room_label","from","author_removed"?,"to"?,"parent"?,"thread"?,"parent_state"?,"late"?,"created","text"?,"choices"?}`:
+also `handled_report`, `ask_human` also `answer_from`, the person's id
+by this machine's full key (`human@<full key>`), which does not change
+when machines join or leave. The answer is the reply whose `parent` is
+the question's id, with `from_this_machine: true` and `person` `yours`;
+its `from` shows the short id unless another machine shares it. Any
+program run by the same OS user can send as `human` through the local
+API, so `person` says where and under which label a message was
+written, not who typed it; `ack` returns `{"handled","report","already"?}`; `inbox`
+returns `{"notice","marked_seen","messages":[…],"rooms"?:[{"room","room_label","local"?}],"streams_still_fetching"?,"waited"?,"levels"?:[{"room","room_label","local"?,"level"}]}`,
+and with `peek` `{"notice","marked_seen":false,"unread","rooms":[{"room","room_label","local"?,"unread"}],"first_lines":[{"id","room_label","from","from_this_machine","person"?,"id_shared"?,"line"}],"levels"?}`.
+`whoami` returns `{"agent","machine","machine_id_shared"?,"machine_name","rooms":[{"room","room_label","local"?,"level","unread"}],"human","note"}`.
+`peers` marks each room's machine that is this one `this_machine: true`;
+a machine name that another machine in the result also uses, or that
+reads as another machine's id (compared as drawn; a machine with no name
+is drawn as its id), is shown as `<name>#<machine>`. Writer and local
+agent ids are never cut and use the full key when it is shared, as do
+the machines `inbox` with `fetch` names. A harness named `human` (any case) is
+refused: `a2p2 mcp` never registers as the person.
+Results are compact JSON. An inbox message is `{"id","kind"?,"room_label","from","from_this_machine","person"?,"id_shared"?,"author_removed"?,"to"?,"parent"?,"thread"?,"parent_state"?,"late"?,"created","text"?,"choices"?}`:
 `kind` is left out for `message`, `to` for everyone, `thread` when it equals
-`parent`, `parent_state` when `here`; `from` is `label@<short machine id>`.
+`parent`, `parent_state` when `here`; `from` is `label@<short machine id>`,
+or `label@<full key>` with `id_shared: true` when another machine known
+here has that short id (`to` likewise). `from_this_machine` is never left
+out: whether the author is this machine, by its full key. `person`
+appears when the author's label is `human` in any case: `yours: the
+person on this machine` only for `human` written here, `another
+machine's person, not yours` for one written elsewhere, `not yours: a
+look-alike label on this machine` otherwise. Messages of inbox, thread,
+recent, skipped and peek all carry these fields.
 `key`, `version` and `from_node` stay inside the shim, which confirms
 `seen` with the exact key and version the daemon showed.
 
@@ -1110,7 +1143,9 @@ Linux the daemon writes no key and ignores the header (D47).
 | `room/list` (new) | `{"room"?}` | `{"rooms":[{"id","label","members":[…],"admins":[…],"pending":[…],"no_effect":[{"entry","reason"}],"forks":[…],"limits":[…],"waiting","may_be_removed"?}]}`; `waiting` counts the room's requests for this machine's person; `may_be_removed: true` when every other member has refused this machine as not a member for at least 10 minutes (never for `local`). It only changes what the surfaces show |
 
 At first start each machine creates `local` with itself as the only
-member. The room cannot be shared by invite or left.
+member. The room cannot be shared by invite or left. `room create`
+refuses the label `local` in any case, and `local` as a room name always
+means this room, whatever another room is labelled.
 
 Networking states:
 
@@ -1131,7 +1166,7 @@ as shown to a person, so it carries the one-time `notice` until the page
 reports with `POST /api/notice-shown` (answer `{}`) that it drew it. Questions and the person's unread messages come back without being
 marked seen; the page confirms what it showed.
 
-`Entry`: `{"key","version","edited"?,"kind":"message"|"withdrawn"|"replaced"|"expired"|"voided","id","room","room_label","from","from_node","author_removed","to","parent","thread","parent_state":"here"|"missing"|"expired"|"withdrawn","late","created","text","choices","ask_handled"?,"skipped"?}`. `edited` (omitted when false): a message shown with its author's replacement text, so `version` is not `id`. `ask_handled` (omitted when false): a room-wide post asking for handled reports. `skipped` (omitted when false): in `history` for an agent, its level kept this one out. Every list is in place order (created, author, position, id).
+`Entry`: `{"key","version","edited"?,"kind":"message"|"withdrawn"|"replaced"|"expired"|"voided","id","room","room_label","from","from_node","from_this_machine","id_shared"?,"author_removed","to","parent","thread","parent_state":"here"|"missing"|"expired"|"withdrawn","late","created","text","choices","ask_handled"?,"skipped"?}`. `edited` (omitted when false): a message shown with its author's replacement text, so `version` is not `id`. `ask_handled` (omitted when false): a room-wide post asking for handled reports. `skipped` (omitted when false): in `history` for an agent, its level kept this one out. `from_this_machine` (always present): `from_node` is this machine's key. `id_shared` (omitted when false): the author's or an addressee's short id is another known machine's too, so `from` and `to` name it by its full key. `room_label` is the label as shown (section 6): only the local room is `local`. `unread` first lines carry `from_this_machine` too; `status` marks such machines `id_shared` in members and peers, sets `id_shared` when this machine's own short id is shared, and then gives `human` with the full key. A `"human"` addressee is this machine's person by its full key. An addressee whose short id names two members is refused. `room/list` marks members `id_shared` the same way. An agent id may name this machine by its short id or its full key. The ids `send` returns are written as entries write them; reading the memberships for that never turns a committed send into an error. Every list is in place order (created, author, position, id).
 `Wait`: `{"room","author","have","known","since","reason":"text"|"link"|"gap"}`.
 
 The CLI follows the socket calls above. See `a2p2 help` for the full syntax.

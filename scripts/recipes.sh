@@ -18,7 +18,8 @@ tools_json=internal/mcpshim/testdata/tools.json
 # Words that are not tools or arguments but are fine as bare code spans:
 # room and agent names, result fields, harness names and status words.
 allow='local everyone human id parent from created kind local_agents
-agents_seen_writing claude codex agy opencode hermes pi yes ok recent'
+agents_seen_writing claude codex agy opencode hermes pi yes ok recent
+answer_from from_this_machine person'
 
 if [ "$#" -gt 0 ]; then files=("$@"); else
   files=(); while IFS= read -r f; do files+=("$f"); done < <(find recipes skills -name '*.md' | sort)
