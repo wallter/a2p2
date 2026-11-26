@@ -116,6 +116,52 @@ daemon and the CLI make these connections and no others:
 
 Hooks and the MCP server talk only to the daemon over its Unix socket.
 
+## A host that reaches your listening port
+
+While networking is on, any host that can reach the peer port can open
+connections and complete a TLS handshake under a key it makes up. Such a
+key shares no room with you, so it reads nothing and joins nothing
+without an invite and your approval. A connection is placed in a pool
+only after its handshake has proved the client's key. What a host can
+still do, by the numbers:
+
+- Hold a few connection slots. One IPv4 address or one IPv6 /64 gets at
+  most 8 connections that are not members' connections, one IPv6 /56 at
+  most 16, and one IPv6 /48 at most 32. All keys that share no room get
+  32 between them. Connections still in the TLS handshake get 64 shared
+  slots for 5 s each, and a connection that finds no slot is closed at
+  once. Members of your rooms have 256 slots of their own, at most 16
+  for one key, and rate buckets of their own.
+- Keep joiners out while it lasts. Joiners use the 32 slots of keys that
+  share no room. Hosts in 4 source groups fill them: 4 IPv4 addresses,
+  or 2 IPv6 /56s, or one /48. Members keep pulling.
+- Keep members from opening new connections while it lasts. Hosts in 8
+  source groups keep the 64 shared handshake slots full: 8 IPv4
+  addresses, or 4 IPv6 /56s, or 2 /48s. Connections members already have
+  keep working. A member whose address group completed a member's
+  handshake here in the last 24 hours also has 16 handshake slots kept
+  for such groups, which the flood cannot take. A member that connects
+  from a new address, or for the first time since your daemon started,
+  has no such slot and is refused until the flood stops.
+- Spend join budgets of its own source only. Join requests and polls
+  naming unknown invites are counted per IPv4 address or IPv6 /64, so one
+  host cannot refuse joiners elsewhere or a joiner that resumes by the
+  invite's hash. Each /64 can make 10 invite lookups a minute; a host
+  with many /64s (a /48 has 65,536) can make that many more, bounded only
+  by its connection slots, and refuses no one else.
+- Not fill the log at the default level. Refused requests from keys that
+  share no room, and refused connections, are logged at Debug; one Info
+  line a minute says connections are being refused. A member's refused
+  requests reach Info 5 at once, then one per 10 s per key. At Debug
+  each refusal is a line, and `daemon.log` is not rotated.
+
+A member of one of your rooms is trusted more. One member key can hold
+16 connections, so 16 member keys together can fill the members' pool.
+A host behind the same IPv4 address as a member, or in the same /64,
+shares that member's per-source share. While it holds all 8, the member
+cannot open a new connection; connections the member already has are not
+affected.
+
 ## Release binaries
 
 Release binaries are built by GitHub Actions from the tag, with no module

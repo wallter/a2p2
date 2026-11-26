@@ -324,14 +324,14 @@ func TestCertIsNodeID(t *testing.T) {
 	}
 }
 
-// Connections that never finish a handshake hold at most maxConns slots;
-// once they close, requests are served again.
+// Connections that never finish a handshake hold at most maxPendingConns
+// slots; once they close, requests are served again.
 func TestConnectionLimit(t *testing.T) {
-	set(t, &maxConns, 3)
+	set(t, &maxPendingConns, 3)
 	h := &countH{}
 	addr := serve(t, newID(t), h, nil)
 	var idle []net.Conn
-	for i := 0; i < maxConns; i++ {
+	for i := 0; i < maxPendingConns; i++ {
 		c, err := net.Dial("tcp", addr)
 		if err != nil {
 			t.Fatal(err)

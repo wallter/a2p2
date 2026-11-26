@@ -1754,3 +1754,75 @@ and MCP work that will use the same helper.
 **Revisit if** Unicode adds a format character (the table test fails on
 a Go upgrade), a script needs a character the table escapes, or receipt
 rules for labels land.
+
+## D-NEW-C-peer-transport. Inbound slots by pool and join limits by source group (2026-11-25)
+
+A security review showed that any host that reaches the peer port could
+hold all 256 inbound connections, with raw TCP or with TLS under keys it
+made up, and lock members out of a listening machine (F4, F17). In the
+room shapes a2p2 is built for, laptops that cannot accept connections
+depend on one listening member, so that one host could stop the room.
+The join route had the same flaw by address: one IPv6 /64 filled its
+table and refused every joiner, and a budget of 60 polls a minute shared
+by all sources refused every resume by hash (F6). Every refusal was an
+Info line in an uncapped log (F19, F26). Fixed now because rooms span
+machines of different owners and the listener is on the open network.
+
+- **What changed.** The listener does each TLS handshake itself and
+  counts connections in three pools: 256 for keys that are members of a
+  room held here, at most 16 of them for one key; 32 for other keys; and
+  64 still in the TLS handshake, cut at 5 s (the bound the 5 s header
+  timeout set before). A connection is placed only after the handshake
+  has finished, because crypto/tls calls `VerifyPeerCertificate` before
+  it checks the client's signature, so a copied certificate would
+  otherwise take a member's slot. Outside the members' pool, one IPv4
+  address or IPv6 /64 holds at most 8 connections, one /56 16 and one /48
+  32. Source groups that completed a member's handshake in the last
+  24 hours (in memory, at most 1,024) have 16 more handshake slots, which
+  no other source can take. A connection that finds no slot is closed at
+  once, instead of waiting in the operating system's queue. Membership is
+  checked again for every request: a key that became a member moves to
+  the members' pool, and a key no longer a member is served as a stranger
+  and its connection ends within 15 s. Session tickets are off, since a
+  resumed session presents no certificate. Every answer to a stranger
+  carries `Connection: close` (a GOAWAY on HTTP/2), and its connection
+  lasts 15 s at most. Strangers have rate buckets of their own on every
+  route. Refusals of strangers are logged at Debug, a member's at Info 5
+  at once and then one per 10 s per key. The join route counts per IPv4
+  address or IPv6 /64 (`node.SourceGroup`), with separate budgets for
+  opens and accepts (10 a minute) and polls (30 a minute), once the
+  bounded body is read. Polls naming unknown invites are counted per
+  source group, 10 a minute instead of 60 a minute for everyone, charged
+  before the lookup and given back when the invite is held. Both tables
+  hold 4,096 groups and forget the one heard from least recently, in
+  constant time (`node.Recent`).
+- **Costs.** One `SharesRoom` call, under the rooms lock, per handshake
+  and per request. A stranger opens a new connection for each request: a
+  joiner already did. A machine admitted by entries in its own request is
+  served as a stranger until the log here names it; a waiting pull it
+  started then is cut at 15 s, and its next request is a member's.
+  Machines behind one IPv4 address share 8 handshake slots. A join
+  request body (at most 16 KiB) is read before its source is counted.
+- **Wire and storage.** No message, field or table changed. Old and new
+  machines work together; a refused client sees a failed handshake or a
+  closed connection and retries under its back-off. The handshake bound
+  stays 5 s, as before.
+- **Still open.** Hosts in 4 source groups (4 IPv4 addresses, 2 IPv6
+  /56s, one /48) keep the strangers' pool full, which keeps joiners out.
+  Hosts in 8 groups (8 IPv4 addresses, 4 /56s, 2 /48s) keep the shared
+  handshake slots full, so members cannot open new connections, except
+  from a source group known from a recent member handshake; existing
+  member connections keep working. The known groups are forgotten when
+  the daemon restarts. Sixteen member keys can fill the members' pool.
+  A host with many /64s can make 10 invite lookups a minute in each, with
+  no total bound but the connection slots; it refuses no one else.
+  Joiners behind one source share its join budget. At Debug each refusal
+  is still a line, and `daemon.log` is still not rotated (another
+  group's fix). Keys that share no room still update the "connected in"
+  record (F25, another group's fix; the pool is known per request, so the
+  check is one line in `guard`).
+
+**Revisit if** members behind one NAT report refused connections, joins
+through a busy admin machine fail under load, members report refused
+connections during a flood from more groups than the limits stop, or the
+rooms lock shows up in handshake or request times.

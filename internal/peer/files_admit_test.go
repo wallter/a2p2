@@ -37,7 +37,7 @@ func TestFileRequestsDoNotSpendThePullExchangesAdmission(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle(pathFileV2, fileRoute(notHeld{}))
 	mux.HandleFunc("POST "+pathPullV2, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	h := guard(lim, mux, nil)
+	h := guard(limiters{member: lim, stranger: newLimiter()}, mux, nil)
 	pub, _, _ := ed25519.GenerateKey(nil)
 	state := &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{PublicKey: pub}}}
 	do := func(method, path string) int {

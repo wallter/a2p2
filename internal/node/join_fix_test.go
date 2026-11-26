@@ -364,8 +364,8 @@ func TestJoinRequestFailsWhenTheAdminCountChanged(t *testing.T) {
 	}
 }
 
-// Credentials are looked up before anything is written: polls naming an
-// invite not held here share one budget; a full queue of requests is 503
+// Credentials are looked up before anything is written: polls from one
+// source naming invites not held here share one budget; a full queue is 503
 // with Retry-After; a server's refusal text is shown only as a known code.
 //
 // Requirements: T3; review should-fix 7, 8, 9
@@ -377,7 +377,7 @@ func TestJoinUnknownPollsFullQueueAndRefusalText(t *testing.T) {
 	s := NewJoinServer(a.r)
 	for i := 0; i <= unknownPolls; i++ {
 		body := fmt.Sprintf(`{"v":2,"op":"poll","invite":"%064x"}`, i+1)
-		rp := s.Handle(ctx, b.id, fmt.Sprintf("src%d", i), []byte(body))
+		rp := s.Handle(ctx, b.id, "198.51.100.7:4000", []byte(body))
 		want := http.StatusForbidden
 		if i == unknownPolls {
 			want = http.StatusTooManyRequests
