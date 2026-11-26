@@ -412,11 +412,13 @@ A machine that left locally but is still listed needs a fresh invite,
 preview and confirmation. No choice means no history.
 
 **Not modelled: requests for a person (P3), narrowed.** Signing log
-entries, turning networking on and sending a join accept wait for
-a recorded confirmation naming exactly what is approved, given on the local
-page or by `a2p2 confirm` in a terminal (always-on machines are often
-headless), never through agent tools. A same-user agent set on bypassing
-it can; an OS-separated approver may come later.
+entries and sending files wait for a recorded confirmation naming exactly
+what is approved, given on the local page or by `a2p2 confirm` in a
+terminal (always-on machines are often headless). Turning networking on
+and accepting a join invite are decided at a terminal, by `a2p2 net on`
+and `a2p2 join`, each with a typed `yes` that the daemon records; the page
+offers neither. No decision goes through agent tools. A same-user agent
+set on bypassing it can; an OS-separated approver may come later.
 
 | Change | Entries | Confirmed on |
 |---|---|---|
