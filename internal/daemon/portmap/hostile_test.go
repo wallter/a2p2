@@ -347,8 +347,12 @@ func TestAKeeperThatEndsGivesOutNoMappingEvenIfItsRemovalFailed(t *testing.T) {
 // withdraws the address given out before, while the mapping stays held
 // to be renewed and removed.
 func TestARenewalAnsweredWithAnUnusableAddressWithdrawsTheOneGivenOut(t *testing.T) {
-	defer func(l, w time.Duration) { Lifetime, minWait = l, w }(Lifetime, minWait)
-	Lifetime, minWait = 2*time.Second, time.Millisecond
+	defer func(l, w, ra time.Duration) { Lifetime, minWait, retryAfter = l, w, ra }(Lifetime, minWait, retryAfter)
+	// retryAfter is short so that a first attempt lost under load (two
+	// tries of 250 ms) is tried again within waitFor's 5 s, not in 5
+	// minutes; renewals answered with the unusable address then repeat,
+	// which changes nothing the test checks.
+	Lifetime, minWait, retryAfter = 2*time.Second, time.Millisecond, 50*time.Millisecond
 	r := &pcpRouter{extIP: netip.MustParseAddr("203.0.113.7"), extPort: 40001, maps: map[string]uint16{}}
 	gw := newFakeUDP(t, r.answer)
 	k := NewKeeper(client(gw), 7423, record(t), nil)
