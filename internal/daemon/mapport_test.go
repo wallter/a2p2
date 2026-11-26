@@ -17,11 +17,12 @@ import (
 
 // Only a gateway with a private address on this machine's network is
 // asked to map a port: not one on the internet side, not one in shared
-// (carrier) address space. The address the router forwards to is still
+// (carrier) address space, not a loopback one (any local process could
+// answer as it; keeper allows the fake routers of tests). The address the router forwards to is still
 // found for every gateway on the local network, so that what an earlier
 // run recorded there can be removed.
 func TestPortMappingAsksOnlyAPrivateGatewayOnTheLocalNetwork(t *testing.T) {
-	for gw, ok := range map[string]bool{"192.168.1.1": true, "10.0.0.1": true, "172.16.0.1": true, "127.0.0.1": true,
+	for gw, ok := range map[string]bool{"192.168.1.1": true, "10.0.0.1": true, "172.16.0.1": true, "127.0.0.1": false,
 		"203.0.113.1": false, "100.64.0.1": false, "8.8.8.1": false, "2001:db8::1": false, "fe80::1": false} {
 		g := netip.MustParseAddr(gw)
 		if err := askable(g); ok != (err == nil) {

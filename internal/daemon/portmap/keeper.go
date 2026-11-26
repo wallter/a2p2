@@ -97,6 +97,21 @@ func (k *Keeper) leftLocked() []string {
 	return out
 }
 
+// Pending shows ms, each with why, as not removed yet until Run has
+// tried: what an earlier run left in the record, so status says it from
+// the start of a run. Run loads the record itself and replaces why with
+// the outcome of each removal.
+func (k *Keeper) Pending(ms []Mapping, why string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for _, m := range ms {
+		if !slices.ContainsFunc(k.held, func(x Mapping) bool { return x.Key() == m.Key() }) {
+			k.held = append(k.held, m)
+		}
+		k.why[m.Key()] = why
+	}
+}
+
 // maxHeld limits adding: no request for a new handle is sent while a
 // keeper holds this many to remove. It is well under what a record loads
 // (maxRecorded), so the next start can always read it; a record an older
@@ -232,9 +247,16 @@ func (k *Keeper) Run(ctx context.Context) {
 		}
 	}
 	var cur *Mapping
+	// shown: cur may be given out. A renewal answered with something that
+	// cannot be used withdraws it until a usable grant; a later renewal
+	// with no answer does not bring it back.
+	shown := false
 	for {
 		m, err := k.m.Map(ctx, k.internal, Lifetime, cur, k.note)
-		answered := err == nil
+		// answered: the router (or a host answering as it) granted
+		// something, usable or not. No answer, or a refusal, leaves the
+		// mapping held as it was.
+		answered := err == nil || errors.Is(err, errUnsure)
 		if err == nil {
 			// The answer carries no authentication: an address that is
 			// not public is not taken, and the request's handle stays
@@ -258,22 +280,26 @@ func (k *Keeper) Run(ctx context.Context) {
 			// A failed renewal leaves the mapping in place until it
 			// expires: it stays held (to be removed) and is renewed again
 			// before then. A renewal the router answered waits retryAfter:
-			// a router that answers at once is not asked every minWait
-			// once the mapping held has expired.
+			// a router that answers at once is not asked every minWait.
+			// So does one with no answer once the lease has run out:
+			// nothing is left to keep in place.
 			wait = retryAfter
 			if cur != nil {
-				// A renewal the router answered with an address that
-				// cannot be used says the one held is no longer right: it
-				// is no longer given out, but still renewed and removed.
-				if !answered {
+				// A renewal answered with something that cannot be used
+				// says the one held is no longer right: it is no longer
+				// given out, but still renewed and removed.
+				if answered {
+					shown = false
+				}
+				if shown {
 					st.Mapping = cur
 				}
-				if !answered && cur.Lifetime > 0 {
-					wait = min(wait, max(time.Until(cur.Expires)/2, minWait))
+				if rest := time.Until(cur.Expires); !answered && cur.Lifetime > 0 && rest > 0 {
+					wait = min(wait, max(rest/2, minWait))
 				}
 			}
 		} else {
-			cur = &m
+			cur, shown = &m, true
 			k.granted(m)
 			k.remove(m.Key()) // anything else held is not the mapping now
 			c := m
@@ -303,14 +329,16 @@ func (k *Keeper) Run(ctx context.Context) {
 
 // end removes every mapping held, as the run ends, and withdraws the one
 // given out: whether or not its removal was confirmed, it forwards to a
-// listener that is gone.
+// listener that is gone. What it could not remove stays in the record for
+// the next start, and is published (and so logged) here too.
 func (k *Keeper) end() {
 	k.remove("")
 	k.mu.Lock()
 	had := k.st.Mapping != nil
 	st := k.st
+	left := len(k.leftLocked()) > 0
 	k.mu.Unlock()
-	if had {
+	if had || left {
 		st.Mapping = nil
 		k.publish(st)
 	}

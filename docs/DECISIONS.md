@@ -2692,7 +2692,8 @@ address in an invite reaches other owners' joiners.
   asks for it: the CLI (`net on --map-port`) asks at a terminal each
   time, and the daemon takes it only from the local API's net call. Any
   later `net on` without it removes the mapping; a recorded decision
-  with it still applies after a restart. No wire, record, schema or `portmap.json`
+  with it still applies after a restart (one an earlier version recorded
+  does not: see after the second review). No wire, record, schema or `portmap.json`
   format change: a record written by 0.2.0 to 0.2.3 loads, and one written
   now loads in them. Documentation addresses still pass the public check;
   nobody holds them and the tests use them.
@@ -2722,6 +2723,29 @@ address in an invite reaches other owners' joiners.
   on error 725, is still unbounded after a crash. The SSDP answer's source
   port is not checked (F65): the UPnP architecture does not fix it, and a
   device that can spoof the gateway can do more by ARP.
+- **After the second review.** A `--map-port` decision an earlier
+  version recorded is no longer applied. The person agreed to it under
+  the earlier text and checks, so keeping it on without asking again was
+  the less safe choice. A decision taken now adds the role word
+  `map_port_v2` next to `map_port` (no schema change; 0.2.0 to 0.2.3 look
+  for `map_port` only, so they still map under it after a downgrade). One
+  without it maps nothing; what the earlier run left is still removed;
+  `status` gives the reason in the mapping line and `map_port_earlier`
+  in the network, and `net on` says what the new decision does with it.
+  A renewal answered with something that cannot be used, including a
+  grant of lifetime 0 or port 0 that the client refuses, withdraws the
+  address until a usable grant: a later renewal with no answer no longer
+  gives it out again. Once the lease held has run out, a router that
+  does not answer is asked every five minutes, not every second. A
+  loopback default gateway is not asked (the fake routers of tests are
+  allowed only through `RunOpts.Gateway`). What a run's end could not
+  remove is published, so it is logged at a stop and at `net off`, and
+  the next run shows what the record holds from its start, before its
+  first removal is tried; without a router, status names what may be
+  left. Still open: `a2p2 stop` prints nothing of a failed removal (the
+  daemon log and the next start's status do); a renewal that the router
+  refuses outright (a PCP result code) is still taken as no answer and
+  keeps the address given out until its lease ends.
 
 **Revisit if** the owner decides on invites or permanent leases, a
 dial-back can tell a relayed connection, or port mapping is removed.

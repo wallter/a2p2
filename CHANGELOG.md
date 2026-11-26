@@ -449,13 +449,24 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   as 2 hours, an external address that is not a public IPv4 address is
   not taken and a2p2 tries to remove what the router made, a UPnP port
   past 65535 is never asked for, a run adds at most 8 mappings to remove,
-  and only a gateway with a private address is asked for a mapping (what
-  an earlier version recorded on another one is still removed). The
-  mapped address is no longer given out once networking stops using it,
-  even if the router did not confirm the removal. Port mapping stays off
+  and only a gateway with a private address, not a loopback one, is asked
+  for a mapping (what an earlier version recorded on another one is still
+  removed). The mapped address is no longer given out once networking
+  stops using it, even if the router did not confirm the removal, nor
+  after a renewal answered with something that cannot be used, until a
+  usable grant. Once a lease has run out, a router that does not answer
+  is asked every 5 minutes, not every second. Port mapping stays off
   unless a person asks for it; the CLI asks at a terminal each time. The
   `net on --map-port` text now says a router may keep a mapping past 2
   hours after a crash.
+- **Port mapping turned on by 0.2.3 or earlier is off after the
+  upgrade.** A `--map-port` decision an earlier version recorded is not
+  applied: nothing is mapped, what that version left on the router is
+  removed, and `status` and `net on` say so. Run `a2p2 net on --map-port`
+  again to map. A decision taken now carries a new role word,
+  `map_port_v2`, next to `map_port`; 0.2.3 reads it as before. A removal
+  that fails at `net off` or a stop is logged and shown in `status` from
+  the start of the next run, and retried.
 - **The team launcher refuses a state directory another user could
   swap.** Since 0.1.0 `scripts/team` used a `state_dir` that another user
   of the machine could replace, for example under a directory they made

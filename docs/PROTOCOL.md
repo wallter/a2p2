@@ -618,8 +618,11 @@ no mapping was asked for.
 
 **Port mapping.** `net` takes `"map_port": true` with `on`, refused with
 `off` and `outbound`; it is recorded in the networking decision's role
-(words `ipv6` and `map_port`, no new column; older daemons ignore it), and
-`status`'s `network` carries `map_port`. A mapping is asked for only while
+(words `ipv6`, `map_port` and `map_port_v2`, no new column; older daemons
+ignore it), and `status`'s `network` carries `map_port`. A decision with
+`map_port` but not `map_port_v2` was recorded by 0.2.3 or earlier and is
+not applied: `network` carries `map_port_earlier` and `mapping.error`
+says why. A mapping is asked for only while
 such a decision applies and the listener is bound to the wildcard address
 or to this machine's address on the gateway's network, which is the
 source address the system selects for the gateway (a route lookup by

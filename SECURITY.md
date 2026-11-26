@@ -436,8 +436,12 @@ Only after `a2p2 net on --map-port`. The CLI asks the person to confirm
 it at a terminal each time; the daemon takes it only from the local
 API's net call, which no agent tool or hook makes. The router's answers
 carry no authentication, so a device on the same network can answer in
-its place. a2p2 asks for a mapping only on a default gateway with a
-private IPv4 address on this machine's network. A PCP answer must carry
+its place. A `--map-port` decision that 0.2.3 or an earlier version
+recorded is not applied after the upgrade: nothing is mapped, what that
+version left on the router is removed, and `status` and `net on` say so
+until the person decides again. a2p2 asks for a mapping only on a default
+gateway with a private IPv4 address on this machine's network, never a
+loopback one. A PCP answer must carry
 the request's nonce, and NAT-PMP's version answer counts only if no PCP
 answer comes in any of the tries. A lifetime longer than the 2 hours
 asked counts as 2 hours. An external address that is not a public IPv4
@@ -445,9 +449,13 @@ address (private, shared, loopback, link-local, multicast, reserved, or
 any IPv6 address) is not taken, and a2p2 tries to remove what the router
 made. Every request is recorded before it is sent, a run adds at most 8
 to the record (which loads with up to 16), and the record always loads.
-On `net off`, on a stop and when the listener stops, a2p2 tries to
-remove the mapping and stops giving its address out; a removal the
-router does not confirm stays recorded and is retried.
+A renewal answered with something that cannot be used stops the address
+being given out until a usable grant; a renewal with no answer does not
+bring it back. On `net off`, on a stop and when the listener stops, a2p2
+tries to remove the mapping and stops giving its address out; a removal
+the router does not confirm stays recorded, is logged, is shown in
+`status` from the start of the next run (so the status `net off` prints
+names it), and is retried. `a2p2 stop` itself does not print it.
 
 Such a device can still:
 

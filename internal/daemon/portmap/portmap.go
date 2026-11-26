@@ -194,6 +194,7 @@ func (c *Client) Map(ctx context.Context, internal uint16, lifetime time.Duratio
 		note = func(Mapping, bool) error { return nil }
 	}
 	var why []string
+	unsure := false // a protocol answered with a grant that cannot be used
 	if prev == nil || prev.Protocol != UPnP {
 		m, err := c.mapPCP(ctx, internal, lifetime, prev, note)
 		var old *oldVersion
@@ -205,8 +206,10 @@ func (c *Client) Map(ctx context.Context, internal uint16, lifetime time.Duratio
 			if err == nil {
 				return m, nil
 			}
+			unsure = unsure || errors.Is(err, errUnsure)
 			why = append(why, "NAT-PMP: "+err.Error())
 		default:
+			unsure = unsure || errors.Is(err, errUnsure)
 			why = append(why, "PCP: "+err.Error())
 		}
 	}
@@ -217,9 +220,21 @@ func (c *Client) Map(ctx context.Context, internal uint16, lifetime time.Duratio
 	if err == nil {
 		return m, nil
 	}
+	unsure = unsure || errors.Is(err, errUnsure)
 	why = append(why, "UPnP: "+err.Error())
-	return Mapping{}, fmt.Errorf("the router did not forward the port (%s)", strings.Join(why, "; "))
+	err = fmt.Errorf("the router did not forward the port (%s)", strings.Join(why, "; "))
+	if unsure {
+		err = unsureErr{err}
+	}
+	return Mapping{}, err
 }
+
+// unsureErr is a failed Map in which a protocol answered with a grant
+// that cannot be used: it is errUnsure, so the keeper counts the attempt
+// as answered.
+type unsureErr struct{ error }
+
+func (unsureErr) Is(target error) bool { return target == errUnsure }
 
 // Unmap removes m. A mapping the router no longer holds counts as
 // removed; one on another router than this client's cannot be. Each

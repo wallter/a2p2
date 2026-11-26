@@ -921,7 +921,7 @@ widen who can be reached, none of them a service run by anyone else.
   unavailable. This machine's address on that network is the source
   address the system selects for the gateway (a route lookup that sends
   nothing), not the first address in the gateway's subnet. Only a gateway
-  with a private IPv4 address is asked for a mapping; what an earlier
+  with a private IPv4 address, not a loopback one, is asked for a mapping; what an earlier
   run recorded on another gateway of this network is still removed
   there. A mapping is
   made only for a listener bound to the wildcard address or to that
@@ -980,7 +980,10 @@ widen who can be reached, none of them a service run by anyone else.
   Mapping is a decision like turning networking on:
   asked at a terminal, saying that it opens a port on the router to the
   internet and that only room members get anything from it, and recorded
-  in the networking decision. It is never on by default and no agent tool
+  in the networking decision with the role words `map_port map_port_v2`.
+  A decision with `map_port` alone, as 0.2.3 and earlier recorded it, is
+  not applied: nothing is mapped until a person decides again, and
+  `status` and `net on` say so. It is never on by default and no agent tool
   or hook can ask for it. `status` and `net check` show the protocol, the
   external address, whether a member reached it, and when it expires.
 - **Mappings are always cleaned up, or said not to be.** Before each
@@ -997,7 +1000,11 @@ widen who can be reached, none of them a service run by anyone else.
   the run the mapped address is no longer given out to invites or the
   reacher, whether or not the router confirmed the removal; a renewal
   answered with an address that cannot be used withdraws it too, while
-  the mapping is still renewed, every five minutes, and removed. After a
+  the mapping is still renewed, every five minutes, and removed; only a
+  usable grant gives it out again, not a renewal with no answer. Once
+  the lease has run out, a router that does not answer is asked every
+  five minutes. What a run's end could not remove is logged, and the
+  next run shows it in `status` from its start. After a
   failed attempt, what it may have made is removed at once, but not the
   mapping held. A keeper adds at most 8 mappings to remove (the record loads with up to 16); a
   request past that is not sent, and a request the record could not load
