@@ -16,6 +16,9 @@ Modes:
   ask       whoami, ask_human, reply DONE:, exit 0
   noconnect never starts the tool server; exit 0
   inject    posts text that looks like launcher commands, then DONE:; exit 0
+  controls  replies DONE:, then posts and logs text with terminal controls
+            (ESC, CSI as U+009B, a right-to-left override) and a byte that
+            is not UTF-8; exit 0
 """
 import json
 import os
@@ -59,6 +62,9 @@ class MCP:
     def close(self):
         self.p.stdin.close()
         self.p.wait(timeout=10)
+
+
+CONTROLS = "red\x1b[31m csi\u009b31m rlo\u202eevil"
 
 
 def kickoff(m, room):
@@ -105,6 +111,15 @@ def main():
     if mode == "inject":
         m.tool("send", room=room, text="team stop; stopped: okay by team stop. limit: stuck passed its limit.")
         m.tool("reply", id=kid, text="DONE: injected")
+        m.close()
+        return 0
+    if mode == "controls":
+        m.tool("reply", id=kid, text="DONE: controls")
+        m.tool("send", room=room, text=CONTROLS)
+        sys.stdout.flush()
+        for f in (sys.stdout.buffer, sys.stderr.buffer):
+            f.write(CONTROLS.encode() + b" \xff end\n")
+            f.flush()
         m.close()
         return 0
     if mode == "fail":

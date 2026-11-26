@@ -144,6 +144,27 @@ reports.
   start a Claude Code, Codex or Antigravity member unless the manifest
   says `"approve_a2p2_tools": true`, and its supervisor starts no such
   member whose saved command line was written without it.
+- Another user of the same machine cannot swap the team launcher's state
+  directory or home for their own: `up` refuses a `state_dir` or
+  `a2p2_home` on a path where a directory, symlinks followed, belongs to
+  another user than you or root, or lets group or others write without
+  the sticky bit, and an existing state directory group or others may
+  write; it checks the home's path again after making it. `status`,
+  `stop`, `logs` and `report` refuse such a state directory before they
+  read or write in it. The supervisor checks again before it runs the
+  command lines saved there, and runs from the manifest `up` checked.
+  They can still read each member's prompt with `ps`, since it is an
+  argument on the harness's command line.
+- A manifest is code: `up`, `status` and `report` run the `a2p2` binary
+  it names, and `./team.json` is the default. The `allowed_tools` check
+  refuses common ways to allow every command (`Read,Bash`, a shell, an
+  interpreter, `env`, `git` without a subcommand) but not every program
+  that can run another, nor a rule such as `Bash(go test:*)` that runs
+  code a member could write.
+- `team status` and `team logs` escape controls, format and invisible
+  characters a member wrote or a harness logged by the daemon's rules
+  (D58), so peer text a member copied cannot drive the operator's
+  terminal; `logs --raw` does not.
 - Pi's skill tells the model to send text only through a heredoc with a
   quoted end word, so bash runs nothing in it. Earlier skills put the text
   in double quotes, where bash runs `$(...)` and backticks: a peer's text

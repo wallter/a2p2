@@ -281,6 +281,31 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 - A test now opens databases written by each release from v0.2.0 to
   v0.2.3 with the current code, so a rule that would refuse old data
   fails it.
+- **The team launcher refuses a state directory another user could
+  swap.** Since 0.1.0 `scripts/team` used a `state_dir` that another user
+  of the machine could replace, for example under a directory they made
+  in `/tmp`, and its supervisor ran the command lines saved there, so
+  that user's command could run as you. `up` now refuses a `state_dir`
+  or `a2p2_home` whose path another user could change, and an existing
+  state directory group or others may write (a group that is only you,
+  as with the umask 002 on many Linux systems, does not count); it checks the home again
+  after making it, and makes missing directories 0700 whatever the umask.
+  `status`, `stop`, `logs`, `report` and the supervisor refuse such a
+  state directory too, and the supervisor runs from the manifest `up`
+  checked, saved in the state directory.
+- **The team launcher's `allowed_tools` check catches more ways to allow
+  every command.** Since 0.1.0 it let through `Read,Bash`, `Read Bash`
+  and rules such as `Bash(sh:*)`, `Bash(python3:*)` or `Bash(git *)`,
+  which give a Claude Code member unscoped shell access. These are
+  refused now, also in other case or with a control character, and so is
+  a model or prompt that starts with `-`. A kickoff that starts with `-`
+  is now posted as text.
+- **`team status` and `team logs` escape terminal controls.** Since 0.1.0
+  they printed C1 controls (such as CSI, U+009B) and bidi overrides that a
+  member wrote or a harness logged. They are written as `\u{...}` now, by
+  the daemon's rules, so a Persian non-joiner or an emoji with a joiner
+  still shows as written; `team logs --raw` prints the bytes, and
+  `team logs -n` reads only the end of each log.
 
 
 ## [0.2.3] - 2026-11-25
