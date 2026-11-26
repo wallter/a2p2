@@ -137,7 +137,7 @@ func (f *Files) SweepAll(ctx context.Context) error {
 		return err
 	}
 	for _, room := range rooms {
-		if _, err := f.m.st.SweepFiles(ctx, room, f.m.ID, f.m.now()); err != nil {
+		if _, err := f.sweep(ctx, room); err != nil {
 			return err
 		}
 	}
@@ -145,7 +145,16 @@ func (f *Files) SweepAll(ctx context.Context) error {
 }
 
 func (f *Files) sweepRoom(ctx context.Context, room string) {
-	_, _ = f.m.st.SweepFiles(ctx, room, f.m.ID, f.m.now())
+	_, _ = f.sweep(ctx, room)
+}
+
+// sweep applies F1 to room; in a room set aside, whose membership is not
+// known, only what retention requires (store.SweepRetained).
+func (f *Files) sweep(ctx context.Context, room string) (int, error) {
+	if f.r.isQuarantined(room) {
+		return f.m.st.SweepRetained(ctx, room, f.m.ID, f.m.now())
+	}
+	return f.m.st.SweepFiles(ctx, room, f.m.ID, f.m.now())
 }
 
 // UseFiles makes the exchange carry wants in its answers and run the

@@ -35,9 +35,10 @@ var version = "dev" // set by -ldflags at release
 const usage = `a2p2 - peer-to-peer messaging for AI agents and the people who run them
 
 Getting started
-  a2p2 install claude|codex|agy|opencode|hermes|pi [--on-stop] [--dry-run]
+  a2p2 install claude|codex|agy|opencode|hermes|pi [--on-stop] [--dry-run] [--approve-tools]
                                   connect a harness (undo with: a2p2 uninstall NAME)
                                   --on-stop also checks for messages when a turn ends.
+                                  --approve-tools (Codex) lets every a2p2 tool, send included, run without a prompt.
   a2p2 ui [--print]               open the local web page; --print only prints its address
                                   The address carries the page's access token: do not log or share it.
   a2p2 doctor                     check the daemon and harness connections
@@ -111,15 +112,20 @@ func main() {
 	switch {
 	case err == nil:
 	case errors.As(err, &le) || errors.Is(err, errUsage):
-		fmt.Fprintln(os.Stderr, "a2p2:", err)
+		fmt.Fprintln(os.Stderr, "a2p2:", errorText(err))
 		os.Exit(2)
 	default:
-		fmt.Fprintln(os.Stderr, "a2p2:", err)
+		fmt.Fprintln(os.Stderr, "a2p2:", errorText(err))
 		os.Exit(1)
 	}
 }
 
 var errUsage = errors.New("usage")
+
+// errorText is an error as the last line of a command: escaped as one
+// line, since an error can quote what another machine sent (a refusal, an
+// address, a name) and no error of a2p2 spans lines.
+func errorText(err error) string { return node.EscapeDisplay(err.Error()) }
 
 // showUI prints the page's address, which carries its access token, and
 // opens it with open unless printOnly. The address goes only to w, never to a log.
@@ -361,10 +367,11 @@ func run(ctx context.Context, name string, args []string) (err error) {
 func installArgs(fs *flag.FlagSet, name string, args []string) (string, harness.Options, error) {
 	onStop := fs.Bool("on-stop", false, "also check for mail when the agent finishes a turn (may start another turn)")
 	dry := fs.Bool("dry-run", false, "show what would change")
+	approve := fs.Bool("approve-tools", false, "Codex: let every a2p2 tool, send included, run without a prompt")
 	if err := fs.Parse(permute(fs, args)); err != nil || fs.NArg() != 1 {
-		return "", harness.Options{}, usagef("a2p2 %s <%s> [--on-stop] [--dry-run]", name, strings.Join(harness.Names, "|"))
+		return "", harness.Options{}, usagef("a2p2 %s <%s> [--on-stop] [--dry-run] [--approve-tools]", name, strings.Join(harness.Names, "|"))
 	}
-	return fs.Arg(0), harness.Options{OnStop: *onStop, DryRun: *dry}, nil
+	return fs.Arg(0), harness.Options{OnStop: *onStop, DryRun: *dry, ApproveTools: *approve}, nil
 }
 
 // ackText is what a2p2 ack prints: a repeated ack names the first report
@@ -455,23 +462,29 @@ func permute(fs *flag.FlagSet, args []string) []string {
 	return append(append(flags, "--"), pos...)
 }
 
+// clock is a time stamp as a person reads it; one that does not parse is
+// shown escaped, since a stamp can come from another machine.
 func clock(t string) string {
 	if tm, err := time.Parse(time.RFC3339, t); err == nil {
 		return tm.Local().Format("Jan 02 15:04:05")
 	}
-	return t
+	return node.EscapeDisplay(t)
 }
 
+// printEntry shows one entry. Its text, choices, author and addressees
+// come from other machines, so each is escaped (node.EscapeDisplayText for
+// the text, node.EscapeDisplay for the rest): a terminal escape or a
+// character that hides or reorders text is shown as \u{...}.
 func printEntry(w io.Writer, e localapi.Entry) {
-	head := e.From
+	head := node.EscapeDisplay(e.From)
 	if len(e.To) > 0 {
-		head += " → " + strings.Join(e.To, ", ")
+		head += " → " + escapeAll(e.To, ", ")
 	}
 	if e.Kind != "message" {
 		head += " [" + e.Kind + "]"
 	}
 	if e.Parent != "" {
-		head += " (reply to " + e.Parent
+		head += " (reply to " + node.EscapeDisplay(e.Parent)
 		if e.ParentState != "" && e.ParentState != "here" {
 			head += ", " + e.ParentState
 		}
@@ -491,17 +504,17 @@ func printEntry(w io.Writer, e localapi.Entry) {
 	}
 	fmt.Fprintf(w, "%s  %s\n", clock(e.Created), head)
 	if e.Text != "" {
-		fmt.Fprintf(w, "    %s\n", strings.ReplaceAll(e.Text, "\n", "\n    "))
+		fmt.Fprintf(w, "    %s\n", strings.ReplaceAll(node.EscapeDisplayText(e.Text), "\n", "\n    "))
 	}
 	if len(e.Choices) > 0 {
-		fmt.Fprintf(w, "    choices: %s\n", strings.Join(e.Choices, " | "))
+		fmt.Fprintf(w, "    choices: %s\n", escapeAll(e.Choices, " | "))
 	}
 	if e.Kind == node.EntryRequest {
 		switch e.State {
 		case node.RequestSent:
 			fmt.Fprintf(w, "    your send with files (request %s) was approved and sent\n", e.Request)
 		default:
-			fmt.Fprintf(w, "    your send with files (request %s) was declined: %s; nothing was sent\n", e.Request, e.Reason)
+			fmt.Fprintf(w, "    your send with files (request %s) was declined: %s; nothing was sent\n", e.Request, node.EscapeDisplay(e.Reason))
 		}
 	}
 	printFiles(w, e)
@@ -535,21 +548,57 @@ func printFiles(w io.Writer, e localapi.Entry) {
 	}
 }
 
+// escapeAll is ss, each escaped for one line (node.EscapeDisplay), joined
+// by sep.
+func escapeAll(ss []string, sep string) string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = node.EscapeDisplay(s)
+	}
+	return strings.Join(out, sep)
+}
+
+// approvalText is a sentence the daemon wrote with node.Isolate (the text
+// of a request, the join preview) as a terminal shows it. A terminal that
+// orders text by direction could move right-to-left text in a remote
+// string across the words around it, so when an isolated part holds any,
+// each such part is shown as [1], [2] in the sentence and on its own line
+// after it, under indent, where it cannot reorder anything else. Other
+// parts stay in place.
+func approvalText(text, indent string) string {
+	var b, after strings.Builder
+	n := 0
+	for _, p := range node.Isolated(text) {
+		if !p.Isolated || !node.RightToLeft(p.Text) {
+			b.WriteString(p.Text)
+			continue
+		}
+		n++
+		fmt.Fprintf(&b, "[%d]", n)
+		fmt.Fprintf(&after, "\n%s[%d] %s", indent, n, p.Text)
+	}
+	return b.String() + after.String()
+}
+
+// short is the first 8 bytes of a machine's key or an entry's id, as
+// shown: escaped, since a key or id named in an entry from another
+// machine is whatever that machine wrote.
 func short(s string) string {
 	if len(s) > 8 {
-		return s[:8]
+		s = s[:8]
 	}
-	return s
+	return node.EscapeDisplay(s)
 }
 
 // Label loopback addresses without implying that a public or LAN address
-// was tested from another machine.
+// was tested from another machine. The address is escaped: an advertised
+// one can be the router's answer.
 func addressText(addr string) string {
 	host, _, err := net.SplitHostPort(addr)
 	if err == nil && (net.ParseIP(host).IsLoopback() || strings.EqualFold(host, "localhost")) {
-		return addr + " (this machine only)"
+		return node.EscapeDisplay(addr) + " (this machine only)"
 	}
-	return addr
+	return node.EscapeDisplay(addr)
 }
 
 func status(c *cmd) error {
@@ -564,7 +613,7 @@ func status(c *cmd) error {
 		if st.Notice != "" {
 			fmt.Println("NOTICE   " + st.Notice)
 		}
-		fmt.Printf("machine  %s (%s)  a2p2 %s  pid %d\n", st.Name, short(st.Node), st.Version, st.PID)
+		fmt.Printf("machine  %s (%s)  a2p2 %s  pid %d\n", node.EscapeDisplay(st.Name), short(st.Node), st.Version, st.PID)
 		switch {
 		case st.Network.Reason == "being applied":
 			fmt.Printf("network  %s decided, being applied (still %s)\n", st.Network.State, st.Network.Applied)
@@ -593,7 +642,8 @@ func status(c *cmd) error {
 				reach += ", checked " + clock(st.Reach.Checked)
 			}
 			if st.Reach.Why != "" {
-				reach += " (" + st.Reach.Why + ")"
+				// it can quote members' dial-back errors
+				reach += " (" + node.EscapeDisplay(st.Reach.Why) + ")"
 			}
 			fmt.Println("         " + reach + "; a2p2 net check explains")
 		}
@@ -609,13 +659,15 @@ func status(c *cmd) error {
 		}
 		fmt.Println("ui       run a2p2 ui to open the local page")
 		fmt.Println("rooms")
+		// Labels come from the rooms' creators, perhaps on other
+		// machines: escaped, and compared as shown.
 		labels := make(map[string]int, len(st.Rooms))
 		for _, r := range st.Rooms {
-			labels[r.Label]++
+			labels[node.LabelKey(r.Label)]++
 		}
 		for _, r := range st.Rooms {
-			name := r.Label
-			if labels[name] > 1 {
+			name := node.EscapeDisplay(r.Label)
+			if labels[node.LabelKey(r.Label)] > 1 {
 				name += " (" + r.ID + ")"
 			}
 			files := ""
@@ -626,6 +678,11 @@ func status(c *cmd) error {
 			if r.MayBeRemoved {
 				fmt.Println("    " + node.MaybeRemovedText)
 			}
+		}
+		for _, q := range st.Quarantined {
+			fmt.Printf("  %-20s %s\n", node.EscapeDisplay(q.Label)+" ("+q.ID+")", node.QuarantineText)
+			fmt.Println("    why: " + node.EscapeDisplay(q.Reason))
+			fmt.Println("    fix: " + node.QuarantineFix(q.ID, q.ID == st.Local))
 		}
 		fmt.Println("agents on this machine")
 		if len(st.Agents) == 0 {
@@ -641,7 +698,7 @@ func status(c *cmd) error {
 				if p.LastHeard != "" {
 					heard = "last heard " + clock(p.LastHeard)
 				}
-				fmt.Printf("  %-16s %s  %s  %s\n", p.Name, short(p.Node), strings.Join(p.Addrs, ","), heard)
+				fmt.Printf("  %-16s %s  %s  %s\n", node.EscapeDisplay(p.Name), short(p.Node), escapeAll(p.Addrs, ","), heard)
 			}
 		}
 	})
@@ -692,15 +749,15 @@ func printTrace(w io.Writer, t localapi.TraceResp) {
 		fmt.Fprintln(w, "handled reports (time signed by the agent's machine):")
 	}
 	for _, h := range t.Handled {
-		fmt.Fprintf(w, "  by %s at %s\n", h.Agent, clock(h.At))
+		fmt.Fprintf(w, "  by %s at %s\n", node.EscapeDisplay(h.Agent), clock(h.At))
 	}
 	if len(t.Files) > 0 {
 		fmt.Fprintln(w, "files (what this machine holds; each member's last answer, as this machine observed it):")
 	}
 	for _, f := range t.Files {
-		fmt.Fprintf(w, "  %s  %s  %s  sha256 %s\n", node.EscapeDisplay(f.Name), sizeText(f.Size), f.State, f.SHA256)
+		fmt.Fprintf(w, "  %s  %s  %s  sha256 %s\n", node.EscapeDisplay(f.Name), sizeText(f.Size), node.EscapeDisplay(f.State), node.EscapeDisplay(f.SHA256))
 		for _, h := range f.Holders {
-			fmt.Fprintf(w, "    %s answered %s at %s\n", short(h.Node), h.Answer, clock(h.At))
+			fmt.Fprintf(w, "    %s answered %s at %s\n", short(h.Node), node.EscapeDisplay(h.Answer), clock(h.At))
 		}
 	}
 }
@@ -732,12 +789,7 @@ func join(c *cmd, args []string) error {
 	if err := cl.Call(c.ctx, "room/join", localapi.JoinReq{Token: token}, &pv); err != nil {
 		return err
 	}
-	hist := "without earlier history"
-	if pv.History {
-		hist = "with earlier history"
-	}
-	fmt.Fprintf(os.Stderr, "Invite to room %q (%s), as %s, %s, from admin machine %s; expires %s.\n",
-		pv.Room.Label, pv.Room.ID, pv.Role, hist, short(pv.Admin), clock(pv.Expires))
+	fmt.Fprintln(os.Stderr, previewText(pv))
 	if pv.Member {
 		fmt.Fprintln(os.Stderr, "This machine is a member already: approving fetches the room's log and changes nothing.")
 	}
@@ -766,11 +818,13 @@ func join(c *cmd, args []string) error {
 			}
 			switch o.State {
 			case "signed":
-				fmt.Printf("joined room %s as %s.%s\n", o.Room, o.Role, map[bool]string{true: " " + o.Note, false: ""}[o.Note != ""])
+				// the admin machine's answer: escaped
+				fmt.Printf("joined room %s as %s.%s\n", node.EscapeDisplay(o.Room), node.EscapeDisplay(o.Role),
+					map[bool]string{true: " " + node.EscapeDisplay(o.Note), false: ""}[o.Note != ""])
 			case "accepted":
 				fmt.Println("Invite accepted on this machine. Waiting for admin approval. The daemon will keep checking.")
 			default:
-				fmt.Printf("%s: %s\n", o.State, o.Reason)
+				fmt.Printf("%s: %s\n", node.EscapeDisplay(o.State), node.EscapeDisplay(o.Reason))
 			}
 			return nil
 		}
@@ -800,7 +854,7 @@ func room(c *cmd, args []string) error {
 				if i > 0 {
 					fmt.Println()
 				}
-				fmt.Printf("Room %s  %s\n", r.Label, r.ID)
+				fmt.Printf("Room %s  %s\n", node.EscapeDisplay(r.Label), r.ID)
 				if r.MayBeRemoved {
 					fmt.Println("  " + node.MaybeRemovedText)
 				}
@@ -809,13 +863,13 @@ func room(c *cmd, args []string) error {
 					if m.Admin {
 						role = "admin"
 					}
-					fmt.Printf("  %s %-16s %s\n", short(m.Node), m.Name, role)
+					fmt.Printf("  %s %-16s %s\n", short(m.Node), node.EscapeDisplay(m.Name), role)
 				}
 				for _, p := range r.Pending {
-					fmt.Printf("  waiting for a second admin: %s %s by %s\n", p.Kind, short(p.Target), short(p.Author))
+					fmt.Printf("  waiting for a second admin: %s %s by %s\n", node.EscapeDisplay(p.Kind), short(p.Target), short(p.Author))
 				}
 				for _, n := range r.NoEffect {
-					fmt.Printf("  no effect: entry %s: %s\n", short(n.Entry), n.Reason)
+					fmt.Printf("  no effect: entry %s: %s\n", short(n.Entry), node.EscapeDisplay(n.Reason))
 				}
 				for _, f := range r.Forks {
 					state := "settled"
@@ -836,7 +890,7 @@ func room(c *cmd, args []string) error {
 	case rest[0] == "create" && len(rest) == 2:
 		var r localapi.Room
 		return c.call("room/create", localapi.RoomReq{Room: rest[1]}, &r, func() {
-			fmt.Printf("created %q (%s). Invite a machine with: a2p2 room invite %s\n", r.Label, r.ID, r.Label)
+			fmt.Printf("created \"%s\" (%s). Invite a machine with: a2p2 room invite %s\n", node.EscapeDisplay(r.Label), r.ID, node.EscapeDisplay(r.Label))
 		})
 	case rest[0] == "invite" && len(rest) == 2:
 		if *member && *admin {
@@ -891,17 +945,44 @@ func room(c *cmd, args []string) error {
 // The daemon describes the action, room ID, full fingerprint, role, history
 // and second signature in Text. Keep those terms together for review.
 func printTerms(w io.Writer, q localapi.Request) {
-	fmt.Fprintf(w, "Request %s\n  If approved: %s\n", q.ID, q.Text)
+	fmt.Fprintf(w, "Request %s\n  If approved: %s\n", q.ID, approvalText(q.Text, "    "))
 	if q.Kind == store.RequestSendFiles {
 		printSendTerms(w, q)
 		return
 	}
 	if q.Name != "" && q.Kind != store.RequestNetwork {
-		fmt.Fprintln(w, "  The machine chose its own name. Check its fingerprint.")
+		fmt.Fprintln(w, "  "+nameNote(q))
 	}
 	if q.Deadline != "" {
 		fmt.Fprintf(w, "  Invite expires %s\n", clock(q.Deadline))
 	}
+}
+
+// previewText is the invite a person accepts or not. The room's label was
+// chosen by the room's creator, on another machine: it is escaped and
+// isolated as every remote string a person approves (node.EscapeDisplay,
+// approvalText).
+func previewText(pv localapi.PreviewResp) string {
+	hist := "without earlier history"
+	if pv.History {
+		hist = "with earlier history"
+	}
+	return approvalText(fmt.Sprintf("Invite to room \"%s\" (%s), as %s, %s, from admin machine %s; expires %s.",
+		node.Isolate(node.EscapeDisplay(pv.Room.Label)), node.EscapeDisplay(pv.Room.ID), pv.Role, hist, short(pv.Admin), clock(pv.Expires)), "  ")
+}
+
+// nameNote says who chose the name a request carries (node.NameFrom*),
+// so that a name another admin wrote is not read as the machine's own.
+func nameNote(q localapi.Request) string {
+	switch q.NameFrom {
+	case node.NameFromMachine:
+		return "The machine chose its own name. Check its fingerprint."
+	case node.NameFromAdmin:
+		return "The admin who signed the first entry chose this name. Check the fingerprint against the room's members."
+	case node.NameFromHere:
+		return "The name was given on this machine. Check the fingerprint."
+	}
+	return "Check the machine's fingerprint, not its name."
 }
 
 // printSendTerms shows every term of a send with files (DESIGN 12 item
@@ -909,25 +990,28 @@ func printTerms(w io.Writer, q localapi.Request) {
 // paths, names and lines, so each path is shown in full as resolved from
 // the file opened.
 func printSendTerms(w io.Writer, q localapi.Request) {
-	fmt.Fprintf(w, "  agent     %s\n", q.Agent)
+	// The daemon escaped the text, paths, names and the replaced line;
+	// agent ids are escaped here: the author of a parent is another
+	// machine's.
+	fmt.Fprintf(w, "  agent     %s\n", node.EscapeDisplay(q.Agent))
 	fmt.Fprintf(w, "  room      %s (%s)\n", node.EscapeDisplay(q.RoomLabel), q.Room)
 	switch {
 	case len(q.To) == 1 && q.To[0] == node.Everyone:
 		fmt.Fprintf(w, "  to        everyone in the room (%d members)\n", q.Members)
 	case len(q.To) > 0:
-		fmt.Fprintf(w, "  to        %s\n", strings.Join(q.To, ", "))
+		fmt.Fprintf(w, "  to        %s\n", escapeAll(q.To, ", "))
 	case q.ReplyTo != "" && q.ReplyAuthor != "":
-		fmt.Fprintf(w, "  to        %s, the author of message %s\n", q.ReplyAuthor, q.ReplyTo)
+		fmt.Fprintf(w, "  to        %s, the author of message %s\n", node.EscapeDisplay(q.ReplyAuthor), node.EscapeDisplay(q.ReplyTo))
 	case q.ReplyTo != "":
-		fmt.Fprintf(w, "  to        the author of message %s\n", q.ReplyTo)
+		fmt.Fprintf(w, "  to        the author of message %s\n", node.EscapeDisplay(q.ReplyTo))
 	}
 	if q.ReplyTo != "" {
-		fmt.Fprintf(w, "  reply to  %s\n", q.ReplyTo)
+		fmt.Fprintf(w, "  reply to  %s\n", node.EscapeDisplay(q.ReplyTo))
 	}
 	if q.Replaces != nil {
-		fmt.Fprintf(w, "  replaces  %s: \"%s\"\n", q.Replaces.ID, q.Replaces.Line)
+		fmt.Fprintf(w, "  replaces  %s: \"%s\"\n", node.EscapeDisplay(q.Replaces.ID), q.Replaces.Line)
 		if q.Replaces.Version != "" {
-			fmt.Fprintf(w, "            its version %s\n", q.Replaces.Version)
+			fmt.Fprintf(w, "            its version %s\n", node.EscapeDisplay(q.Replaces.Version))
 		}
 		fmt.Fprintln(w, "            the replacement keeps its recipients and has only the files listed here")
 	}
@@ -1012,9 +1096,14 @@ func confirm(c *cmd, args []string) error {
 		raw, err := cl.CallRaw(c.ctx, "confirm", q, &r)
 		return r, raw, err
 	}
-	// the terms digest shown goes with the decision; the daemon refuses
-	// an approval whose terms are not the request's current ones
-	r, raw, err := decide(send, ask, os.Stderr, localapi.ConfirmReq{ID: id, Approve: !*decline, Terms: q.Terms})
+	// the text and terms digest shown go with the decision; the daemon
+	// refuses a decision on a request whose text changed since, and an
+	// approval whose terms are not the request's current ones
+	r, raw, err := decide(send, ask, os.Stderr, localapi.ConfirmReq{ID: id, Approve: !*decline, Terms: q.Terms, Text: q.Text})
+	var ue *localapi.Error
+	if errors.As(err, &ue) && ue.Msg == node.RequestChangedText {
+		return errors.New("request " + id + " changed since it was shown; nothing was decided. Run a2p2 confirm " + id + " again to see it as it is now")
+	}
 	if err != nil {
 		return err
 	}
@@ -1027,7 +1116,7 @@ func confirm(c *cmd, args []string) error {
 		fmt.Printf(" (%s)", r.Effect)
 	}
 	if r.Reason != "" {
-		fmt.Printf(": %s", r.Reason)
+		fmt.Printf(": %s", node.EscapeDisplay(r.Reason))
 	}
 	fmt.Println()
 	return nil
@@ -1067,18 +1156,21 @@ func alerts(c *cmd, args []string) error {
 	})
 }
 
-// printAlert shows one alert with the command that deals with it.
+// printAlert shows one alert with the command that deals with it. The
+// daemon has escaped what other machines wrote in its text; a request's
+// text is shown as confirm shows it (approvalText), and the lines of a
+// question are indented.
 func printAlert(w io.Writer, a localapi.Alert) {
 	switch a.Kind {
 	case node.AlertRequest:
-		fmt.Fprintf(w, "Request %s\n  %s\n  Review with a2p2 confirm %s\n", a.ID, a.Text, a.ID)
+		fmt.Fprintf(w, "Request %s\n  %s\n  Review with a2p2 confirm %s\n", a.ID, approvalText(a.Text, "    "), a.ID)
 	case node.AlertQuestion:
 		fmt.Fprintf(w, "Question %s in room %s\n  %s\n  Answer with a2p2 send --room %s --reply-to %s TEXT\n",
-			a.ID, a.Room, a.Text, a.Room, a.ID)
+			a.ID, a.Room, strings.ReplaceAll(a.Text, "\n", "\n  "), a.Room, a.ID)
 	case node.AlertNetwork:
 		fmt.Fprintf(w, "Networking\n  %s\n  Choose another address with a2p2 net on ADDR, or run a2p2 net off\n", a.Text)
 	case node.AlertRemoved:
-		fmt.Fprintf(w, "Room %s\n  %s\n", a.Room, a.Text)
+		fmt.Fprintf(w, "Room %s\n  %s\n", a.Room, approvalText(a.Text, "    "))
 	default:
 		fmt.Fprintf(w, "%s %s in room %s\n  %s\n", a.Kind, a.ID, a.Room, a.Text)
 	}
@@ -1177,13 +1269,25 @@ func noHarnessHint() string {
 		" (or " + strings.Join(harness.Names[1:], ", ") + "), then a2p2 doctor again."
 }
 
+// quarantineChecks is one failing doctor line per room set aside, with
+// what the person can do about it.
+func quarantineChecks(st localapi.Status) []harness.Check {
+	var out []harness.Check
+	for _, q := range st.Quarantined {
+		out = append(out, harness.Check{Name: "room " + node.EscapeDisplay(q.Label) + " (" + short(q.ID) + ")",
+			Info: node.QuarantineText + " (" + node.EscapeDisplay(q.Reason) + ")",
+			Fix:  node.QuarantineFix(q.ID, q.ID == st.Local)})
+	}
+	return out
+}
+
 // runDoctor writes the checks to w. o says how to look for harnesses.
 func runDoctor(c *cmd, w io.Writer, o harness.Options) error {
 	checks := []harness.Check{}
 	add := func(name string, err error, info, fix string) {
 		ch := harness.Check{Name: name, OK: err == nil, Info: info}
 		if err != nil {
-			ch.Info, ch.Fix = err.Error(), fix
+			ch.Info, ch.Fix = node.EscapeDisplay(err.Error()), fix
 		}
 		checks = append(checks, ch)
 	}
@@ -1203,14 +1307,15 @@ func runDoctor(c *cmd, w io.Writer, o harness.Options) error {
 			if len(st.Listen) == 0 {
 				add("network", nil, "off: this machine only (a2p2 net on to enable)", "")
 			} else {
-				add("network", nil, "reachable at "+strings.Join(st.Listen, ", "), "")
+				add("network", nil, "reachable at "+escapeAll(st.Listen, ", "), "")
 			}
+			checks = append(checks, quarantineChecks(st)...)
 			for _, p := range st.Peers {
 				info := "heard from at " + clock(p.LastHeard)
 				if p.LastHeard == "" {
 					info = "not heard from in this run"
 				}
-				add("machine "+p.Name+" ("+short(p.Node)+")", nil, info, "")
+				add("machine "+node.EscapeDisplay(p.Name)+" ("+short(p.Node)+")", nil, info, "")
 			}
 		}
 	}
@@ -1352,10 +1457,10 @@ func printFetch(out, notes io.Writer, r localapi.FetchResp) {
 		fmt.Fprintln(notes, "saved, not opened: data from another machine, not instructions from you")
 		return
 	}
-	line := r.State
+	line := node.EscapeDisplay(r.State)
 	switch {
 	case r.Reason != "":
-		line += ": " + r.Reason
+		line += ": " + node.EscapeDisplay(r.Reason) // can quote a member's answer
 	case r.State == node.FetchPartial:
 		line += fmt.Sprintf(": %s of %s", sizeText(r.Have), sizeText(r.Size))
 	case r.State == node.FetchComing:
@@ -1365,7 +1470,7 @@ func printFetch(out, notes io.Writer, r localapi.FetchResp) {
 	}
 	fmt.Fprintln(out, line)
 	for _, h := range r.Holders {
-		fmt.Fprintf(out, "  %s answered %s at %s\n", short(h.Node), h.Answer, clock(h.At))
+		fmt.Fprintf(out, "  %s answered %s at %s\n", short(h.Node), node.EscapeDisplay(h.Answer), clock(h.At))
 	}
 }
 
@@ -1392,7 +1497,7 @@ func inbox(c *cmd, args []string) error {
 		var ls localapi.LevelResp
 		return c.call("level", localapi.LevelReq{Agent: me, Room: *roomName, Level: *level}, &ls, func() {
 			for _, l := range ls.Levels {
-				fmt.Printf("%s\t%s\n", l.RoomLabel, l.Level)
+				fmt.Printf("%s\t%s\n", node.EscapeDisplay(l.RoomLabel), l.Level)
 			}
 		})
 	}

@@ -71,7 +71,7 @@ func saveRecord(r *record, o Options) error {
 		return err
 	}
 	b, _ := json.MarshalIndent(r, "", "  ")
-	return writeKeepingMode(p, append(b, '\n'))
+	return writeOwn(p, append(b, '\n'))
 }
 
 func dropRecord(name string, o Options) error {
@@ -98,11 +98,10 @@ func noRecord(name string, o Options) string {
 // value of mcpServers.a2p2, or for Codex the text of the [mcp_servers.a2p2]
 // table and its sub-tables, without the line a2p2 adds.
 func cliEntry(name string, o Options) (path string, had bool, prior string, err error) {
-	home, err := o.home()
+	path, err = configFile(o, mcpFiles[name])
 	if err != nil {
 		return "", false, "", err
 	}
-	path = filepath.Join(append([]string{home}, mcpFiles[name]...)...)
 	b, ok, err := readMaybe(path)
 	if err != nil || !ok {
 		return path, false, "", err
@@ -124,21 +123,23 @@ func cliEntry(name string, o Options) (path string, had bool, prior string, err 
 }
 
 func isCodexA2P2Header(l string) bool {
-	t := strings.TrimSpace(l)
+	t := tomlHeaderName(l)
 	return t == codexTable || strings.HasPrefix(t, "[mcp_servers.a2p2.")
 }
 
 // codexTables splits config.toml into the text without a2p2's tables and
-// those tables (without the approval line a2p2 adds).
+// those tables (without the approval lines a2p2 adds).
 func codexTables(s string) (rest, table string) {
 	var keep, ours []string
 	in := false
-	for _, l := range strings.SplitAfter(s, "\n") {
-		if t := strings.TrimSpace(l); strings.HasPrefix(t, "[") {
+	lines := strings.SplitAfter(s, "\n")
+	kind := tomlLines(lines)
+	for i, l := range lines {
+		if kind[i] == tomlHeader {
 			in = isCodexA2P2Header(l)
 		}
 		switch {
-		case in && strings.TrimSpace(l) == codexApproval:
+		case in && kind[i] == tomlPlain && isCodexApproval(l):
 		case in:
 			ours = append(ours, l)
 		default:
@@ -149,7 +150,7 @@ func codexTables(s string) (rest, table string) {
 }
 
 // putBackCLIEntry writes the recorded entry back after the harness CLI
-// removed a2p2's own one.
+// removed a2p2's own one, in a guarded write (see writeGuarded).
 func putBackCLIEntry(name string, r *record) error {
 	b, ok, err := readMaybe(r.File)
 	if err != nil {
@@ -161,7 +162,7 @@ func putBackCLIEntry(name string, r *record) error {
 		if rest = strings.TrimRight(rest, "\n"); rest != "" {
 			rest += "\n\n"
 		}
-		return writeKeepingMode(r.File, []byte(rest+r.Prior))
+		return writeGuarded(r.File, []byte(rest+r.Prior), b, ok)
 	}
 	doc := map[string]json.RawMessage{}
 	if ok && len(bytes.TrimSpace(b)) > 0 {
@@ -174,11 +175,11 @@ func putBackCLIEntry(name string, r *record) error {
 	servers["a2p2"] = json.RawMessage(r.Prior)
 	doc["mcpServers"], _ = json.Marshal(servers)
 	if !ok {
-		if err := os.MkdirAll(filepath.Dir(r.File), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(r.File), 0o700); err != nil {
 			return err
 		}
 	}
-	return writeKeepingMode(r.File, encodeJSON(doc))
+	return writeGuarded(r.File, encodeJSON(doc), b, ok)
 }
 
 // --- symlinks ---

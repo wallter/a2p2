@@ -27,18 +27,169 @@ function btn(label, cls, fn, title) {
   return b;
 }
 const fp = (id) => String(id || "").slice(0, 8);
-// escapeDisplay writes the characters that can hide or reorder what a
-// person reads as \u{...}, as node.EscapeDisplay does (PROTOCOL 10.8).
-function escapeDisplay(s) {
-  let out = "";
-  for (const ch of String(s == null ? "" : s)) {
-    const c = ch.codePointAt(0);
-    const hides = c < 0x20 || (c >= 0x7f && c <= 0x9f) || c === 0x61c || c === 0x200e || c === 0x200f ||
-      (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069);
-    out += hides ? "\\u{" + c.toString(16) + "}" : ch;
+// ---- display escaping (escape:begin) ----
+// Text from other machines must not change what the person reads. These
+// are node.EscapeDisplay, EscapeDisplayText, EscapeChoice, DisplayHidden
+// and ChoiceHidden (internal/node/escape.go, PROTOCOL 10.8), with the same
+// tables and the same rules; Go tests keep the two equal, on the strings
+// of internal/node/testdata/escape_cases.json among others. Each
+// character of HIDDEN is written \u{hex} unless the text rules keep it
+// where it stands, and a backslash before "u{" or "x{" is written
+// \u{5c}; nothing is dropped.
+const HIDDEN = [
+  [0x0000, 0x001f], [0x007f, 0x009f], [0x00ad, 0x00ad], [0x034f, 0x034f], [0x0600, 0x0605],
+  [0x061c, 0x061c], [0x06dd, 0x06dd], [0x070f, 0x070f], [0x0890, 0x0891], [0x08e2, 0x08e2],
+  [0x115f, 0x1160], [0x17b4, 0x17b5], [0x180b, 0x180f], [0x200b, 0x200f], [0x2028, 0x202e],
+  [0x2060, 0x206f], [0x3164, 0x3164], [0xd800, 0xdfff], [0xfe00, 0xfe0f], [0xfeff, 0xfeff],
+  [0xffa0, 0xffa0], [0xfff0, 0xfffb], [0x110bd, 0x110bd], [0x110cd, 0x110cd], [0x13430, 0x1343f],
+  [0x1bca0, 0x1bca3], [0x1d173, 0x1d17a], [0xe0000, 0xe0fff],
+];
+// EMOJI: a joiner may stand between two, a selector after one.
+const EMOJI = [
+  [0x00a9, 0x00a9], [0x00ae, 0x00ae], [0x203c, 0x203c], [0x2049, 0x2049],
+  [0x2122, 0x2122], [0x2139, 0x2139], [0x2194, 0x21aa], [0x231a, 0x23ff],
+  [0x24c2, 0x24c2], [0x25aa, 0x27bf], [0x2934, 0x2935], [0x2b05, 0x2b55],
+  [0x3030, 0x3030], [0x303d, 0x303d], [0x3297, 0x3297], [0x3299, 0x3299],
+  [0x1f000, 0x1faff],
+];
+// JOINING: scripts whose letters take a joiner or non-joiner.
+const JOINING = [
+  [0x0600, 0x08ff], [0x0900, 0x0dff], [0x1000, 0x109f], [0x1780, 0x18af],
+  [0xfb50, 0xfdff], [0xfe70, 0xfefe],
+];
+// RTL_LETTERS: letters of right-to-left scripts; a right-to-left or Arabic
+// letter mark may stand between two of them. Code points, not a Unicode
+// class, so that every browser gives the daemon's answer.
+const RTL_LETTERS = [
+  [0x05d0, 0x05ea], [0x05ef, 0x05f2], [0x0620, 0x064a], [0x066e, 0x066f], [0x0671, 0x06d3],
+  [0x06d5, 0x06d5], [0x06ee, 0x06ef], [0x06fa, 0x06fc], [0x06ff, 0x06ff], [0x0710, 0x0710],
+  [0x0712, 0x072f], [0x074d, 0x07a5], [0x07b1, 0x07b1], [0x07ca, 0x07ea], [0x0800, 0x0815],
+  [0x0840, 0x0858], [0x0860, 0x086a], [0x0870, 0x0887], [0x0889, 0x088e], [0x08a0, 0x08c9],
+  [0xfb1d, 0xfb1d], [0xfb1f, 0xfb28], [0xfb2a, 0xfb36], [0xfb38, 0xfb3c], [0xfb3e, 0xfb3e],
+  [0xfb40, 0xfb41], [0xfb43, 0xfb44], [0xfb46, 0xfbb1], [0xfbd3, 0xfd3d], [0xfd50, 0xfd8f],
+  [0xfd92, 0xfdc7], [0xfdf0, 0xfdfb], [0xfe70, 0xfe74], [0xfe76, 0xfefc],
+];
+// SPACELESS: scripts written without spaces; a zero width space may stand
+// between two of their characters.
+const SPACELESS = [
+  [0x0e00, 0x0fff], [0x1000, 0x109f], [0x1780, 0x17ff],
+];
+// HAN: CJK ideographs; one ideographic variation selector may follow one.
+const HAN = [
+  [0x3400, 0x4dbf], [0x4e00, 0x9fff], [0xf900, 0xfaff], [0x20000, 0x3ffff],
+];
+// FLAGS: the tag sequences after U+1F3F4 of the flags of England,
+// Scotland and Wales, with the cancel tag.
+const FLAGS = ["gbeng", "gbsct", "gbwls"].map((s) => Array.from(s, (ch) => 0xe0000 + ch.codePointAt(0)).concat([0xe007f]));
+function inRanges(tab, c) {
+  let lo = 0, hi = tab.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1, r = tab[mid];
+    if (c < r[0]) hi = mid - 1; else if (c > r[1]) lo = mid + 1; else return true;
+  }
+  return false;
+}
+const hidden = (c) => inRanges(HIDDEN, c);
+const esc = (c) => "\\u{" + c.toString(16) + "}";
+const str = (s) => String(s == null ? "" : s);
+// textClass is what a character is to the text rules, as bits as in Go.
+const EMOJI_C = 1, SEL_C = 2, JOIN_C = 4, KEYCAP_C = 8, RTL_C = 16, SPACELESS_C = 32, HAN_C = 64;
+function textClass(c) {
+  if (c === undefined || hidden(c)) return 0;
+  let k = 0;
+  if ((c >= 0x30 && c <= 0x39) || c === 0x23 || c === 0x2a) k |= KEYCAP_C;
+  if (inRanges(EMOJI, c)) k |= EMOJI_C;
+  if (inRanges(JOINING, c)) k |= JOIN_C;
+  if (inRanges(RTL_LETTERS, c)) k |= RTL_C;
+  if (inRanges(SPACELESS, c)) k |= SPACELESS_C;
+  if (inRanges(HAN, c)) k |= HAN_C;
+  return k;
+}
+// flagTail is the length of the flag tag sequence at cs[i], or 0.
+function flagTail(cs, i) {
+  for (const t of FLAGS) if (t.every((c, k) => cs[i + k] === c)) return t.length;
+  return 0;
+}
+// escapeRules is node.escapeText: the text rules, with newlines and tabs
+// kept (and a CR before a newline shown as that line break) when lines is
+// true. literal false skips the backslash rule, for text the daemon has
+// escaped already, so that escaping it again changes nothing.
+function escapeRules(s, lines, literal = true) {
+  const cs = Array.from(str(s), (ch) => ch.codePointAt(0));
+  let out = "", prev = 0;
+  for (let i = 0; i < cs.length; i++) {
+    const c = cs[i];
+    const tail = c === 0x1f3f4 ? flagTail(cs, i + 1) : 0;
+    if (tail) {
+      out += String.fromCodePoint(...cs.slice(i, i + 1 + tail));
+      i += tail; prev = EMOJI_C;
+      continue;
+    }
+    if (lines && c === 0x0d && cs[i + 1] === 0x0a) { out += "\n"; i++; prev = 0; continue; }
+    const nc = textClass(cs[i + 1]);
+    let hide = hidden(c), next = 0;
+    if (c === 0x0a || c === 0x09) hide = !lines;
+    else if (c === 0x5c && literal && (cs[i + 1] === 0x75 || cs[i + 1] === 0x78) && cs[i + 2] === 0x7b) hide = true;
+    else if ((c === 0x200d && (prev & (EMOJI_C | SEL_C)) && (nc & EMOJI_C)) ||
+      ((c === 0x200c || c === 0x200d) && (prev & JOIN_C) && (nc & JOIN_C)) ||
+      ((c === 0x200f || c === 0x061c) && (prev & RTL_C) && (nc & RTL_C)) ||
+      (c === 0x200b && (prev & SPACELESS_C) && (nc & SPACELESS_C)) ||
+      (c >= 0xe0100 && c <= 0xe01ef && (prev & HAN_C))) hide = false;
+    else if ((c === 0xfe0e || c === 0xfe0f) && (prev & EMOJI_C)) { hide = false; next = SEL_C; }
+    else if ((c === 0xfe0e || c === 0xfe0f) && (prev & KEYCAP_C)) hide = false;
+    else if (!hide) next = textClass(c);
+    out += hide ? esc(c) : String.fromCodePoint(c);
+    prev = next;
   }
   return out;
 }
+// escapeDisplay is a string shown as one line: line breaks and tabs too.
+const escapeDisplay = (s) => escapeRules(s, false);
+// displayHidden: escapeDisplay would change s.
+const displayHidden = (s) => escapeDisplay(s) !== str(s);
+// escapeText is message text: lines stay lines.
+const escapeText = (s) => escapeRules(s, true);
+// blankChoice: a space other than U+0020, or blank braille.
+const blankChoice = (c) => c === 0x2800 || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) ||
+  c === 0x202f || c === 0x205f || c === 0x3000;
+// escapeChoice is a choice as its button shows it: one line, and every
+// blank that would not be sent as shown (a space other than U+0020, blank
+// braille, a space at either end or next to another) written \u{...}.
+function escapeChoice(s) {
+  const cs = Array.from(escapeRules(s, false), (ch) => ch.codePointAt(0));
+  let out = "";
+  for (let i = 0; i < cs.length; i++) {
+    const c = cs[i];
+    if (blankChoice(c)) out += esc(c);
+    else if (c === 0x20 && (i === 0 || i === cs.length - 1 || cs[i - 1] === 0x20 || cs[i + 1] === 0x20)) out += esc(c);
+    else out += String.fromCodePoint(c);
+  }
+  return out;
+}
+// choiceHidden: the button would not show s exactly as it is sent.
+const choiceHidden = (s) => escapeChoice(s) !== str(s);
+// iso sets a remote string apart in a sentence (a bdi element), so that
+// right-to-left text in it cannot reorder the words around it.
+const iso = (s) => el("bdi", "", s);
+// isolated draws a sentence the daemon wrote with node.Isolate: each part
+// between U+2068 and U+2069 in a bdi element, and every part escaped
+// again without the backslash rule (the daemon has escaped it).
+function isolated(text) {
+  const out = [];
+  let rest = str(text);
+  while (rest) {
+    const open = rest.indexOf("\u2068");
+    const before = open < 0 ? rest : rest.slice(0, open);
+    if (before) out.push(escapeRules(before, false, false));
+    if (open < 0) break;
+    rest = rest.slice(open + 1);
+    const close = rest.indexOf("\u2069");
+    out.push(iso(escapeRules(close < 0 ? rest : rest.slice(0, close), false, false)));
+    rest = close < 0 ? "" : rest.slice(close + 1);
+  }
+  return out;
+}
+// ---- escape:end ----
 // sizeText is cmd/a2p2 sizeText: bytes, with a rounded size above 1 KiB.
 function sizeText(n) {
   n = Number(n) || 0;
@@ -80,12 +231,40 @@ function showAuthFail() { $("connection").hidden = true; $("app").hidden = true;
 
 const rooms = () => (S.st && S.st.rooms) || [];
 const room = () => rooms().find((r) => r.id === S.room) || null;
-function roomLabel(id) {
+// roomLabel is how the page names a room: its label, which the room's
+// creator chose and may be on another machine, escaped; with its id when
+// another room's label could be drawn the same. Labels are compared as
+// drawn: escaped, in Unicode normal form C (so "café" composed and
+// decomposed match), without the joiners, marks and selectors the text
+// rules keep, with each run of blank characters as one space and
+// trimmed, and without case. Blank is every Unicode white space character
+// (a no-break space, an ideographic space and the other spaces among
+// them) and U+2800, blank braille, as in node.LabelKey. So "Ops" and
+// "ops", "a  b" and "a b", or "a\u3000b" and "a b" get their ids.
+const KEPT_INVISIBLE = /[\u200b\u200c\u200d\u200f\u061c\ufe0e\ufe0f\u{e0100}-\u{e01ef}]/gu;
+const LABEL_BLANK = /[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u2800\u3000]+/gu;
+const drawnLabel = (l) => escapeDisplay(l).normalize("NFC").replace(KEPT_INVISIBLE, "")
+  .replace(LABEL_BLANK, " ").replace(/^ | $/g, "").toLowerCase();
+function roomParts(id) {
   const entries = rooms();
   const r = entries.find((r) => r.id === id);
-  if (!r) return id;
-  return entries.some((other) => other.id !== id && other.label === r.label)
-    ? r.label + " (" + id + ")" : r.label;
+  if (!r) return [escapeDisplay(id), ""];
+  const same = entries.some((other) => other.id !== id && drawnLabel(other.label) === drawnLabel(r.label));
+  return [escapeDisplay(r.label), same ? " (" + escapeDisplay(id) + ")" : ""];
+}
+// roomLabel is that name as one string, for an attribute; isolate
+// characters set the label apart from the words around it.
+const roomLabel = (id) => { const [l, idText] = roomParts(id); return "\u2068" + l + "\u2069" + idText; };
+// roomNode is that name drawn in a sentence: the label in a bdi element.
+const roomNode = (id) => { const [l, idText] = roomParts(id); return [iso(l), idText]; };
+// machineName is how the page names a machine of a room: the name that
+// room records for it, escaped, with its short id; never a name another
+// room gave it.
+function machineName(node, roomId) {
+  if (S.st && node === S.st.node) return "this machine";
+  const r = rooms().find((r) => r.id === roomId);
+  const m = ((r && r.members) || []).find((m) => m.node === node);
+  return m && m.name ? escapeDisplay(m.name) + " " + fp(node) : "machine " + fp(node);
 }
 // Badges count ordinary mail only: questions have their own section.
 const unreadFor = (id) => S.unread.filter((m) => m.room === id && !S.qKeys.has(m.key));
@@ -100,7 +279,7 @@ const NETWORK_WORDS = {
 // ---- sidebar ----
 function renderSide() {
   const ul = $("rooms");
-  const choices = rooms().map((r) => [r.id, roomLabel(r.id), unreadFor(r.id).length,
+  const choices = rooms().map((r) => [r.id, roomParts(r.id), unreadFor(r.id).length,
     (r.members || []).length, !!r.may_be_removed]);
   const sig = JSON.stringify([S.room, choices]);
   if (sig !== S.sigs.rooms) {
@@ -111,7 +290,7 @@ function renderSide() {
       const b = btn("", "room-choice", () => openRoom(id));
       b.dataset.room = id;
       if (id === S.room) b.setAttribute("aria-current", "true");
-      b.append(el("span", "l", label, el("span", "sub" + (removed ? " warn" : ""),
+      b.append(el("span", "l", iso(label[0]), label[1], el("span", "sub" + (removed ? " warn" : ""),
         removed ? REMOVED : count === 1 ? "this machine only" : count + " machines")));
       if (unread) {
         const badge = el("span", "badge", unread);
@@ -130,12 +309,12 @@ function renderSide() {
   box.dataset.room = S.room;
   box.replaceChildren();
   if (r) {
-    box.append(el("h2", "", "Members of " + r.label));
+    box.append(el("h2", "", "Members of ", ...roomNode(r.id)));
     for (const m of r.members || []) {
       const adm = m.admin || (r.admins || []).includes(m.node);
       // A machine with no name (a room's creator, seen from elsewhere) shows its short id once.
       const shared = (r.members || []).length > 1;
-      box.append(el("div", "mem", m.name || fp(m.node), m.name ? " " : null, m.name ? el("span", "muted", fp(m.node)) : null,
+      box.append(el("div", "mem", m.name ? escapeDisplay(m.name) : fp(m.node), m.name ? " " : null, m.name ? el("span", "muted", fp(m.node)) : null,
         " ", adm && shared ? el("span", "mark adm", "admin") : null));
     }
     for (const p of r.pending || []) box.append(el("div", "sub", "pending " + p.kind + " " + p.state + (p.reason ? ": " + p.reason : "")));
@@ -164,14 +343,14 @@ function renderSide() {
   box.append(el("h2", "", "Other machines"));
   if (!(S.st.peers || []).length) box.append(el("div", "sub", "No other machines yet."));
   for (const p of S.st.peers || []) {
-    box.append(el("div", "", p.name || fp(p.node), p.name ? " " : null, p.name ? el("span", "muted", fp(p.node)) : null),
+    box.append(el("div", "", p.name ? escapeDisplay(p.name) : fp(p.node), p.name ? " " : null, p.name ? el("span", "muted", fp(p.node)) : null),
       el("div", "sub", p.last_heard ? "heard " + ago(p.last_heard) : "not heard from yet"));
   }
   box.append(el("h2", "", "Local agents"));
   // Each agent's reading level per room (U1): only levels other than "all"
   // are listed. The person reads every room in full here, whatever any
   // agent's level.
-  const levelRoom = (id) => ((S.st.rooms || []).find((r) => r.id === id) || {}).label || id;
+  const levelRoom = (id) => escapeDisplay(((S.st.rooms || []).find((r) => r.id === id) || {}).label || id);
   for (const a of S.st.agents || []) {
     box.append(el("div", "", a.label || a.id, " ", el("span", "sub", a.harness + " · " + ago(a.last_seen))));
     if (a.id === S.st.human) continue;
@@ -199,7 +378,7 @@ function renderRoomFiles() {
   box.dataset.room = S.room;
   box.replaceChildren();
   if (!f) return;
-  box.append(el("h2", "", "Files in " + r.label),
+  box.append(el("h2", "", "Files in ", ...roomNode(r.id)),
     el("div", "", "Setting: " + (FILE_MODES[f.mode] || f.mode)),
     el("div", "sub", sizeText(f.held) + " of " + sizeText(f.budget) + " held for this room"));
   const sel = el("select");
@@ -242,18 +421,28 @@ function renderNotice() {
 }
 function requestCard(r, row) {
   // These are the exact terms compared by the daemon when the person decides.
-  const c = el("div", "qcard", el("div", "sub", "Request " + fp(r.id)), el("div", "txt", r.text));
+  // The daemon escaped every remote string in the text; escaping it again
+  // changes nothing and keeps a page served by an older daemon safe.
+  const c = el("div", "qcard", el("div", "sub", "Request " + fp(r.id)), el("div", "txt", ...isolated(r.text)));
   const due = r.deadline && !String(r.deadline).startsWith("0001") ? (fmt(r.deadline) || r.deadline) : "";
   if (r.kind === "send_files") {
     c.append(sendTerms(r));
     if (due) c.append(el("div", "sub", "Expires " + due + ", declined unless approved"));
   } else {
-    if (r.name && r.kind !== "network") c.append(el("div", "sub", "The machine chose its own name."));
+    if (r.name && r.kind !== "network") c.append(el("div", "sub", NAME_NOTES[r.name_from] || NAME_NOTES[""]));
     if (due) c.append(el("div", "sub", "Invite expires " + due));
   }
   c.append(row);
   return c;
 }
+// NAME_NOTES say who chose a request's name (node.NameFrom*), in the
+// words of a2p2 confirm (cmd/a2p2 nameNote).
+const NAME_NOTES = {
+  machine: "The machine chose its own name. Check its fingerprint.",
+  admin: "The admin who signed the first entry chose this name. Check the fingerprint against the room's members.",
+  here: "The name was given on this machine. Check the fingerprint.",
+  "": "Check the machine's fingerprint, not its name.",
+};
 // sendTerms shows every term of a send with files, as a2p2 confirm does
 // (cmd/a2p2 printSendTerms). The daemon has escaped controls and
 // bidirectional characters in paths, names and lines; the room's label is
@@ -262,7 +451,7 @@ function sendTerms(r) {
   const t = el("dl", "terms");
   const row = (k, ...v) => t.append(el("dt", "", k), el("dd", "", ...v));
   row("agent", r.agent || "");
-  row("room", escapeDisplay(r.room_label) + " (" + r.room + ")");
+  row("room", iso(escapeDisplay(r.room_label)), " (" + r.room + ")");
   const to = r.to || [];
   if (to.length === 1 && to[0] === "everyone") row("to", "everyone in the room (" + (r.members || 0) + " members)");
   else if (to.length) row("to", to.join(", "));
@@ -313,7 +502,8 @@ function renderNeeds() {
   }
   const al = $("alerts");
   al.replaceChildren();
-  for (const a of alerts) al.append(el("div", "warnline", a.kind + " in " + roomLabel(a.room) + ": " + a.text + (a.since ? " (since " + fmt(a.since) + ")" : "")));
+  for (const a of alerts) al.append(el("div", "warnline", a.kind + " in ", ...roomNode(a.room), ": " + escapeDisplay(a.text) + (a.since ? " (since " + fmt(a.since) + ")" : "")));
+  $("questions-title").hidden = !qs.length;
   const box = $("questions");
   // Keep a draft and its focused control when unrelated alerts or mail arrive.
   const existing = new Map(Array.from(box.children, (card) => [card.dataset.key, card]));
@@ -323,26 +513,46 @@ function renderNeeds() {
     const prev = existing.get(m.key);
     existing.delete(m.key);
     if (prev && prev.dataset.version === m.version) {
-      prev.firstChild.textContent = m.from + " in " + roomLabel(m.room);
+      prev.firstChild.replaceChildren(...askedBy(m));
       continue;
     }
     const input = el("input");
     input.placeholder = "Write a reply";
-    input.setAttribute("aria-label", "Reply to " + m.from + " in " + roomLabel(m.room));
+    input.setAttribute("aria-label", "Reply to \u2068" + escapeDisplay(m.from) + "\u2069 in " + roomLabel(m.room));
     const error = el("div", "question-error");
     error.setAttribute("role", "alert");
     const answer = (t) => t.trim() && sendAnswer(m, t.trim(), error);
     input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); answer(input.value); } });
     const row = el("div", "row");
-    for (const c of m.choices || []) row.append(btn(c, "pri", () => answer(c)));
+    // A choice is the asker's text, sent as the person's own reply: it is
+    // drawn escaped, in the plain style (never as an approval button), and
+    // one holding characters that do not show is not sent; the person
+    // types the reply instead.
+    for (const c of m.choices || []) {
+      row.append(btn(escapeChoice(c), "choice", () => choiceHidden(c)
+        ? showQuestionError(m, error, HIDDEN_CHOICE) : answer(c)));
+    }
     row.append(input, btn("Send reply", "", () => answer(input.value)), btn("Mark handled without replying", "link", () => dismissQuestion(m, error)));
-    const card = el("div", "qcard", el("div", "sub", m.from + " in " + roomLabel(m.room)), el("div", "txt", m.text || ""), row, error);
+    const card = el("div", "qcard ask", el("div", "sub", ...askedBy(m)), el("div", "sub", ASK_NOTE),
+      el("div", "txt", escapeText(m.text || "")), row, error);
     card.dataset.key = m.key;
     card.dataset.version = m.version;
     if (prev) prev.replaceWith(card); else box.append(card);
   }
   for (const obsolete of existing.values()) obsolete.remove();
 }
+// askedBy names who asked a question and of whom: the agent, its machine
+// and the room, and whether it was asked of everyone in the room.
+// A message addressed only to other agents is not the person's to answer
+// and is never among the questions (node.Surface.Questions).
+function askedBy(m) {
+  const whom = (m.to || []).includes(S.st.human) ? ", asked of you" : ", asked of everyone in the room";
+  return [iso(escapeDisplay(m.from)), " on ", iso(machineName(m.from_node, m.room)), " in ", ...roomNode(m.room), whom];
+}
+const ASK_NOTE = "A message, not a request: a choice sends that text as your reply, and approves nothing.";
+const HIDDEN_CHOICE = "This choice holds characters that do not show, that change how text reads, or blanks that " +
+  "would not be sent as shown (written \\u{...}). " +
+  "It was not sent. Type your reply instead.";
 // NOT_CAUGHT_UP is shown before the second approval (node.NotCaughtUpWarning).
 const NOT_CAUGHT_UP = "This machine has not checked the room's log with another member since it started. " +
   "If it was restored from a backup, approving now can damage the room's admin record (two different entries " +
@@ -410,8 +620,8 @@ function showQuestionError(m, error, message) {
 
 // ---- stream ----
 function entryMeta(m) {
-  const meta = el("div", "meta", el("span", "from", m.from), el("span", "", fmt(m.created)));
-  if (m.to && m.to.length) meta.append(el("span", "", "to " + m.to.join(", ")));
+  const meta = el("div", "meta", el("span", "from", escapeDisplay(m.from)), el("span", "", fmt(m.created)));
+  if (m.to && m.to.length) meta.append(el("span", "", "to " + m.to.map(escapeDisplay).join(", ")));
   if (m.parent) meta.append(el("span", "", "reply to " + fp(m.parent) + (m.parent_state && m.parent_state !== "here" ? " (" + m.parent_state + ")" : "")));
   if (m.author_removed) meta.append(el("span", "mark", "removed machine"));
   if (m.late) meta.append(el("span", "mark", "late"));
@@ -503,7 +713,7 @@ function renderStream(force) {
     const meta = entryMeta(m);
     meta.append(el("span", "actions", btn("Reply", "link", () => setReply(m)), btn("Thread", "link", () => openThread(m.thread || m.id)),
       btn("Trace", "link", () => openTrace(m.id))));
-    const d = el("div", "msg" + (m.from === S.st.human ? " mine" : ""), meta, el("div", "body", m.text), filesOf(m));
+    const d = el("div", "msg" + (m.from === S.st.human ? " mine" : ""), meta, el("div", "body", escapeText(m.text)), filesOf(m));
     box.append(d);
   }
   // A notice is drawn with what it says: a replacement with its new text,
@@ -511,8 +721,8 @@ function renderStream(force) {
   S.notesShown = new Map();
   for (const n of notes) {
     const what = { replaced: " changed message ", withdrawn: " withdrew message ", expired: ": the text expired of message " }[n.kind] || " " + n.kind + " ";
-    const line = el("div", "noteline", (n.from || "") + what + fp(n.id) + " (" + fmt(n.created) + ")");
-    if (n.kind === "replaced" && n.text) line.append(el("div", "body", n.text));
+    const line = el("div", "noteline", escapeDisplay(n.from || "") + what + fp(n.id) + " (" + fmt(n.created) + ")");
+    if (n.kind === "replaced" && n.text) line.append(el("div", "body", escapeText(n.text)));
     box.append(line);
     S.notesShown.set(n.key, n.version);
   }
@@ -523,7 +733,7 @@ function renderStream(force) {
 }
 function updateCompose() {
   const r = room(), ready = !!r && S.shown === S.room;
-  $("text").placeholder = r ? "Message " + r.label : "Select a room";
+  $("text").placeholder = r ? "Message " + roomLabel(r.id) : "Select a room";
   const b = $("compose").querySelector("button[type=submit]");
   b.disabled = !ready;
 }
@@ -531,7 +741,7 @@ function updateCompose() {
 const REMOVED = "this machine may have been removed from this room; ask an admin";
 function renderHead() {
   const r = room();
-  $("roomhead").textContent = r ? roomLabel(r.id) + (S.waiting ? " (fetching " + S.waiting + " more)" : "") : "";
+  $("roomhead").replaceChildren(...(r ? [...roomNode(r.id), S.waiting ? " (fetching " + S.waiting + " more)" : ""] : []));
   const note = $("roomnote");
   note.hidden = !(r && r.may_be_removed);
   if (note.textContent !== REMOVED) note.textContent = REMOVED;
@@ -547,9 +757,9 @@ function renderHead() {
   if (sig === S.toSig) return;
   S.toSig = sig;
   const sel = $("to"), cur = sel.value;
-  sel.replaceChildren(el("option", "", S.reply ? S.reply.from + " (reply)" : "Everyone"));
+  sel.replaceChildren(el("option", "", S.reply ? escapeDisplay(S.reply.from) + " (reply)" : "Everyone"));
   sel.firstChild.value = "";
-  for (const s of senders) { const o = el("option", "", s); o.value = s; sel.append(o); }
+  for (const s of senders) { const o = el("option", "", escapeDisplay(s)); o.value = s; sel.append(o); }
   sel.value = cur;
 }
 $("to").addEventListener("change", () => { S.toChosen = $("to").value; });
@@ -558,7 +768,7 @@ function setReply(m) {
   renderHead();
   const r = $("replying");
   r.hidden = false;
-  r.replaceChildren("Replying to " + m.from + ": " + (m.text || "").slice(0, 60) + " ", btn("Cancel reply", "link", () => { S.reply = null; r.hidden = true; renderHead(); $("text").focus(); }));
+  r.replaceChildren("Replying to " + escapeDisplay(m.from) + ": " + escapeDisplay(Array.from(m.text || "").slice(0, 60).join("")) + " ", btn("Cancel reply", "link", () => { S.reply = null; r.hidden = true; renderHead(); $("text").focus(); }));
   $("text").focus();
 }
 
@@ -575,7 +785,7 @@ async function openTrace(id) {
     ct.append(el("tr", "", ...["Machine", "Observed", "Member now"].map((h) => el("th", "", h))));
     for (const c of t.copies || []) ct.append(el("tr", "", el("td", "", fp(c.node)), el("td", "", fmt(c.at)), el("td", "", c.member ? "yes" : "no")));
     ht.append(el("tr", "", ...["Agent", "When"].map((h) => el("th", "", h))));
-    for (const h of t.handled || []) ht.append(el("tr", "", el("td", "", h.agent), el("td", "", fmt(h.at))));
+    for (const h of t.handled || []) ht.append(el("tr", "", el("td", "", escapeDisplay(h.agent)), el("td", "", fmt(h.at))));
     // The same words as a2p2 trace (cmd/a2p2, textWords and copyReportWords).
     const textState = {
       live: "available on this machine", missing: "waiting for a copy",
@@ -594,7 +804,7 @@ async function openThread(id) {
   try {
     const t = await api("/api/thread?id=" + encodeURIComponent(id));
     const kids = [el("h2", "", "Thread " + fp(id))];
-    for (const m of t.entries || []) kids.push(el("div", "thr", entryMeta(m), el("div", "body", m.text || m.kind), filesOf(m, () => openThread(id))));
+    for (const m of t.entries || []) kids.push(el("div", "thr", entryMeta(m), el("div", "body", escapeText(m.text || m.kind)), filesOf(m, () => openThread(id))));
     if (kids.length === 1) kids.push(el("div", "sub", "Nothing in this thread."));
     showDialog(...kids);
   } catch (e) { showDialog(el("h2", "", "Could not open thread"), el("p", "", e.message)); }

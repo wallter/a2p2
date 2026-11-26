@@ -329,12 +329,71 @@ class TeamTest(unittest.TestCase):
             subprocess.run(git + ["add", "-A"], check=True)
             subprocess.run(git + ["commit", "-q", "-m", "x"], check=True)
             self.state = os.path.join(self.dir, "state-" + kind)
-            self.write([{"label": "ag", "harness": "agy", "model": "m", "worktree": repo}])
+            self.write([{"label": "ag", "harness": "agy", "model": "m", "worktree": repo}], approve_a2p2_tools=True)
             err = self.team("up", ok=False).stderr
             self.assertIn("will not overwrite", err)
             with open(cfg) as f:
                 self.assertEqual(f.read(), "keep")
         self.assertFalse(os.path.exists(self.home), "a refused member must not start a daemon")
+
+    def test_a2p2_tools_are_approved_for_headless_members_only_when_the_manifest_says_so(self):
+        # Without the key the run is refused before anything starts (see
+        # test_manifest_refuses_bypass_modes_and_bad_limits). With it, each
+        # member's command line approves a2p2's tools, and Claude Code's
+        # names them one by one instead of a pattern.
+        self.write([{"label": "cx", "harness": "codex", "model": "m", "limit_seconds": 5},
+                    {"label": "cl", "harness": "claude", "model": "haiku", "limit_seconds": 5,
+                     "allowed_tools": ["Read"]}], approve_a2p2_tools=True)
+        self.team("up")
+        self.sees_supervisor()
+        specs = {}
+        for label in ("cx", "cl"):
+            with open(os.path.join(self.state, "members", label, "launch.json")) as f:
+                specs[label] = json.load(f)["argv"]
+        self.assertIn('mcp_servers.a2p2.default_tools_approval_mode="approve"', specs["cx"])
+        for label in ("cx", "cl"):
+            with open(os.path.join(self.state, "members", label, "launch.json")) as f:
+                self.assertIs(json.load(f)["approve_a2p2_tools"], True)
+        self.assertEqual(os.stat(self.state).st_mode & 0o777, 0o700)
+        allowed = specs["cl"][specs["cl"].index("--allowedTools") + 1].split(",")
+        self.assertEqual(allowed, ["mcp__a2p2__" + t for t in
+                                   ("whoami", "peers", "send", "inbox", "reply", "ack", "ask_human")] + ["Read"])
+
+    def test_status_and_stop_work_for_a_run_whose_manifest_lacks_the_approval(self):
+        # A run started before the key existed, or whose manifest lost it
+        # afterwards, can still be inspected and stopped: only `up` asks.
+        self.write([{"label": "cx", "harness": "codex", "model": "m", "limit_seconds": 30}], approve_a2p2_tools=True)
+        self.team("up")
+        self.sees_supervisor()
+        self.write([{"label": "cx", "harness": "codex", "model": "m", "limit_seconds": 30}])
+        self.assertIn("cx", self.team("status").stdout)
+        self.team("stop")
+        self.team("logs", "cx")
+        self.team("report")
+        self.assertIn('"approve_a2p2_tools": true', self.team("up", ok=False).stderr)
+
+    def test_supervisor_starts_no_headless_member_whose_spec_lacks_the_approval(self):
+        # The consent goes with the saved command line: a spec without it,
+        # such as one written for another manifest, is not started.
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("team_under_test", TEAM)
+        team = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(team)
+        d = os.path.join(self.state, "members", "ag")
+        os.makedirs(d)
+        with open(os.path.join(d, "launch.json"), "w") as f:
+            json.dump({"argv": ["agy", "-p=x"], "cwd": self.dir, "env": {}}, f)
+        sup = team.Supervisor.__new__(team.Supervisor)
+        sup.man, sup.lock, sup.posts, sup.procs = {"state": self.state}, team.threading.Lock(), team.queue.Queue(), {}
+        x = {"label": "ag", "harness": "agy", "state": "pending", "launched": None,
+             "out": os.path.join(d, "out.log"), "err": os.path.join(d, "err.log")}
+        sup.roster = {"members": [x]}
+        os.makedirs(self.state, exist_ok=True)
+        sup.launch(x)
+        self.assertEqual(x["state"], "failed")
+        self.assertIn("approve_a2p2_tools", x["note"])
+        self.assertEqual(sup.procs, {})
 
     def test_manifest_refuses_bypass_modes_and_bad_limits(self):
         cases = [
@@ -355,6 +414,11 @@ class TeamTest(unittest.TestCase):
             ([fake("a", "ok", limit=float("nan"))], {}, "limit_seconds must be a finite number above zero"),
             ([fake("a", "ok", limit="10")], {}, "limit_seconds must be a finite number above zero"),
             ([fake("a", "ok")], {"poll_seconds": 0}, "poll_seconds must be a finite number above zero"),
+            ([{"label": "x", "harness": "codex", "model": "m"}], {}, '"approve_a2p2_tools": true'),
+            ([{"label": "c", "harness": "claude", "model": "haiku"}], {"approve_a2p2_tools": False},
+             "send, reply, ack and ask_human included"),
+            ([{"label": "g", "harness": "agy", "model": "m"}], {"approve_a2p2_tools": "yes"}, "must be true or false"),
+            ([{"label": "g", "harness": "agy", "model": "m"}], {}, '"approve_a2p2_tools": true'),
         ]
         for members, extra, want in cases:
             with self.subTest(want=want, members=members):

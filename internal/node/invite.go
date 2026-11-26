@@ -40,7 +40,7 @@ const (
 	MaxJoinEntries     = 256              // entries in one signed answer
 	MaxJoinRequestSize = 16 << 10         // a join request body, in bytes
 	maxOpenSources     = 4096             // sources the open limiter remembers
-	unknownPolls       = 60               // polls naming an unknown invite, a minute, from all sources together
+	unknownPolls       = 10               // polls naming an unknown invite, a minute, per source group
 	queueFullRetry     = 60 * time.Second // Retry-After when too many requests wait
 )
 
@@ -299,12 +299,16 @@ type JoinServer struct {
 	r       *Rooms
 	mu      sync.Mutex
 	opens   map[string][]time.Time // per key that presented a valid secret, its requests in the last minute
-	unknown []time.Time            // polls naming an unknown invite in the last minute, from anyone
+	unknown *Recent[[]time.Time]   // per source group, polls by hash charged in the last minute
+	// getInvite looks an invite up by its hash; a field only so that a
+	// test can hold lookups in flight.
+	getInvite func(context.Context, string) (store.Invite, error)
 }
 
 // NewJoinServer serves the join exchange for r's rooms.
 func NewJoinServer(r *Rooms) *JoinServer {
-	return &JoinServer{r: r, opens: map[string][]time.Time{}}
+	return &JoinServer{r: r, opens: map[string][]time.Time{}, unknown: NewRecent[[]time.Time](maxOpenSources),
+		getInvite: r.m.st.GetInvite}
 }
 
 func lastMinute(ts []time.Time, now time.Time) []time.Time {
@@ -338,35 +342,39 @@ func (s *JoinServer) allow(source string, now time.Time) (bool, time.Duration) {
 	return true, 0
 }
 
-// unknownSpent reports whether the budget shared by every source for
-// polls naming an invite not held here is spent for the last minute.
-func (s *JoinServer) unknownSpent(now time.Time) bool {
+// takeUnknown charges one poll by hash from group (SourceGroup) that
+// named an invite not held here. It reports false, charging nothing,
+// when the group's budget of the last minute is spent. Only polls whose
+// invite was not found are charged, after the lookup, so a poll for an
+// invite held here is never refused by it. Each group has its own budget,
+// so one cannot refuse another; while the table is full, the group
+// charged least recently is forgotten, in constant time.
+func (s *JoinServer) takeUnknown(group string, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.unknown = lastMinute(s.unknown, now)
-	return len(s.unknown) >= unknownPolls
-}
-
-// spendUnknown counts one poll that named an invite not held here.
-func (s *JoinServer) spendUnknown(now time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.unknown = append(s.unknown, now)
+	ts := s.unknown.Use(group)
+	*ts = lastMinute(*ts, now)
+	if len(*ts) >= unknownPolls {
+		return false
+	}
+	*ts = append(*ts, now)
+	return true
 }
 
 // Handle answers one join request. from is the requester's node id as the
 // transport authenticated it (never a field of the request); source is its
-// network address (the peer layer limits requests by it before the body
-// is read). The secret never appears in what is logged, stored or
+// network address (the peer layer limits requests by its group,
+// SourceGroup). The secret never appears in what is logged, stored or
 // answered.
 //
 // Readings (PROTOCOL 5.2): poll may carry, instead of the secret,
 // "invite": the hex SHA-256 of the secret, accepted only from the key the
 // invite is bound to, so a joiner that restarted can resume polling
 // although it never stores the secret; polls naming an unknown invite
-// share one budget, checked before the lookup. A key that presented a
-// valid secret is limited to 10 requests a minute. Accept needs a
-// preview: it carries terms, the preview's identifier.
+// from one source group share one budget, charged after the lookup, and
+// once it is spent they are answered 429 instead of bad_secret. A key
+// that presented a valid secret is limited to 10 requests a minute.
+// Accept needs a preview: it carries terms, the preview's identifier.
 func (s *JoinServer) Handle(ctx context.Context, from, source string, body []byte) JoinReply {
 	q, bad := decodeJoinRequest(body)
 	if bad != "" {
@@ -375,13 +383,8 @@ func (s *JoinServer) Handle(ctx context.Context, from, source string, body []byt
 	if !core.ValidNode(from) {
 		return joinRefusal(CodeBadSecret)
 	}
-	now := s.r.m.now()
-	if q.Invite != "" && s.unknownSpent(now) {
-		// Checked before any lookup: polls naming unknown invites share
-		// one budget, and while it is spent no poll by hash is looked up.
-		return limited(http.StatusTooManyRequests, CodeRateLimited, time.Minute)
-	}
-	rp, err := s.serve(ctx, from, q, now)
+	now, group := s.r.m.now(), SourceGroup(source)
+	rp, err := s.serve(ctx, from, group, q, now)
 	if err != nil {
 		return limited(http.StatusServiceUnavailable, CodeUnavailable, JoinRetry)
 	}
@@ -394,7 +397,7 @@ func limited(status int, code string, wait time.Duration) JoinReply {
 	return rp
 }
 
-func (s *JoinServer) serve(ctx context.Context, from string, q JoinRequest, now time.Time) (JoinReply, error) {
+func (s *JoinServer) serve(ctx context.Context, from, group string, q JoinRequest, now time.Time) (JoinReply, error) {
 	st := s.r.m.st
 	h := q.Invite
 	if q.Secret != "" {
@@ -405,12 +408,15 @@ func (s *JoinServer) serve(ctx context.Context, from string, q JoinRequest, now 
 		h = secretHash(secret)
 	}
 	// The credential first: nothing is written for one not held here.
-	inv, err := st.GetInvite(ctx, h)
+	// A poll by hash is looked up before its group's budget for unknown
+	// invites is charged, so a joiner resuming a held invite is never
+	// refused by what others in its group spent (the peer layer bounds
+	// the lookups of each source).
+	inv, err := s.getInvite(ctx, h)
 	switch {
+	case errors.Is(err, store.ErrNotFound) && q.Invite != "" && !s.takeUnknown(group, now):
+		return limited(http.StatusTooManyRequests, CodeRateLimited, time.Minute), nil
 	case errors.Is(err, store.ErrNotFound):
-		if q.Invite != "" {
-			s.spendUnknown(now)
-		}
 		return joinRefusal(CodeBadSecret), nil
 	case err != nil:
 		return JoinReply{}, err
@@ -622,6 +628,9 @@ func (s *JoinServer) accept(ctx context.Context, h, from string, q JoinRequest, 
 	}
 	err = st.AcceptInvite(ctx, h, from, q.Name, q.Addrs, terms, req, r.m.now)
 	switch {
+	case errors.Is(err, store.ErrTooManyPending):
+		// Filled meanwhile, by a send with files (prepared's budget).
+		return limited(http.StatusServiceUnavailable, CodeUnavailable, queueFullRetry), nil
 	case errors.Is(err, store.ErrInviteExpired):
 		return joinRefusal(CodeExpired), nil
 	case errors.Is(err, store.ErrInviteTerms):

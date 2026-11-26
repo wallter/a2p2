@@ -1624,3 +1624,516 @@ withdraw drops.
 **Revisit if** a SQLite upgrade changes a plan (the test fails), the store
 starts running `ANALYZE`, or the pull summary or the unread walk shows up
 in a measurement.
+
+## D57. Separate request budgets, and a stored log that does not load sets one room aside (2026-11-25)
+
+A security review showed two things. One hostile admin could fill the
+32-request queue of the other admins with entries that wait for a second
+admin, so a removal of that admin could not be proposed and was never
+raised (F1). And any stricter receipt rule, or a reworded reason, would
+stop the daemon starting after an upgrade, because a start failed when
+one room's stored log did not parse or replay with the same reason text
+(F71). The other fixes of the review add receipt rules, so this has to
+ship first.
+
+- **What changed.** The person's own requests (proposals, invite accepts,
+  sends with files) keep a budget of 32 per room, checked again in the
+  transaction that stores each one; a proposal to remove an admin passes
+  it once per target. Requests raised to second another admin's entry
+  have their own, counting only those whose entry still waits: 32 in
+  all, and 4 per signing admin. Past its 4 a signer takes only a spare
+  place, one left after every other admin of the room but this machine
+  keeps the places of its 4 it has not used. The first removal of an
+  admin per signer and target passes both and takes no place in them.
+  A pending one whose entry stopped waiting
+  is closed as failed (`ReasonNotWaiting`), and raised again if the entry
+  waits again. Every waiting entry without a request is raised once there
+  is a place: after each batch, after a decline or failure, and at start,
+  removals of admins first, then in arrival order. A raise that fails
+  after a decision or at start is retried at the room's next batch or
+  pull and does not stop the start. Stored entries are decoded for form
+  and signature only (`core.StoredEntryFromParts`). A batch that drops
+  entries (over the held or branch bound) is decided again in a new
+  machine from the rows it leaves, until that drops nothing more, and
+  that decision is stored: otherwise a refused entry released by a
+  settled fork, waiting for a parent and dropped over the held bound, left
+  its dependant refused, and the next start set the room aside. The
+  replay compares
+  dispositions, not reason text, keeps the new reason in memory and
+  leaves the stored text as it is. A room whose stored log does not
+  parse, verify or replay is set aside: not served or pulled, every
+  write to it refused (`not_allowed`: sends, replaces, withdraws, handled
+  reports, sends with files, Seen and a change of its files setting;
+  Seen across rooms leaves its keys `not_shown` and confirms the others),
+  nothing deleted by setting it aside, listed in `status` (`quarantined`)
+  and `a2p2 doctor` with a fix, and it may be left unless it is the local
+  room. Its messages can still be read; a read still records what it
+  showed, which marks nothing seen. Its reading frontier is unknown, so
+  a stream without a cursor is held back and missing text is neither
+  shown as expired nor marked expired by a prune. Other text past
+  retention expires, and the file sweep drops only files whose text is
+  withdrawn or past retention and staged sends past their staging life
+  (`store.SweepRetained`); the stored member cache and wants decide
+  nothing. Leaving a room runs its file deletions after the rooms lock is
+  released (F68).
+- **No wire, entry or schema change.** Old and new machines see the same
+  entries. Requests are local rows. By reading the code, a database
+  written by 0.2.0 to 0.2.3 opens, and they can still open one this
+  version wrote, because no stored reason is rewritten at start. The
+  tests edit a database this version made, and
+  `TestDatabasesFromEachReleaseOpenReplayAndKeepWorking` (D61) opens the
+  databases releases 0.2.0 to 0.2.3 wrote and checks that no room is set
+  aside (F73). `status` gains one optional field.
+- **Why not reason codes on disk.** Storing codes in `log.reason` would
+  need a migration, and 0.2.x compares the text it wrote, so a downgrade
+  would stop at start. Comparing dispositions alone removes the text from
+  the check without that.
+- **Costs.** Each batch where this machine is an admin reads the room's
+  pending seconding requests (an index lookup) and looks at every entry
+  that waits for a second admin, not only the new ones. While one waits,
+  it also reads the id, entry and state of every seconding request the
+  room ever had (no drafts), under the rooms lock. That is bounded by the
+  log, which has no cap of its own. A flooding admin still costs the other people one decline per
+  entry, and while the room has spare places it can hold up to 32 less
+  4 for each other admin at a time. In a room of more than 9 admins,
+  admins under their own 4 can fill the 32 together. A batch that drops
+  entries decides the room's kept log again, so a peer that keeps the
+  held bound full pays that for each such batch. A room set aside is
+  unusable until the person runs the version that stored it (the
+  repair), or leaves it and joins it again (not the local room).
+- **Still open.** A "decline all from this machine" action and showing
+  which admin signed each waiting entry need new UI and wording. A change
+  of disposition under a new rule (a per-signer cap in `members`) sets
+  rooms aside rather than adopting the new decision; adopting it needs a
+  versioned re-decide (a rules version in `meta`). A stored record that
+  fails a later record rule still breaks reading that room (audit r2-4
+  item 2). The
+  warning that a removal targets the only member this machine reaches
+  (F21) is not built and is deferred out of this change; it needs pull
+  state the scheduler owns. A quarantined local room cannot be left; the
+  fix is to run the older version.
+
+**Revisit if** a release adds a receipt rule or changes `members`
+decisions, or a person reports a room set aside.
+
+## D58. Text from other machines is escaped where it is shown (2026-11-25)
+
+A security review showed that a room label chosen by a hostile room
+creator went raw into the text a person approves for a membership
+change. A carriage return, terminal escapes, a right-to-left override or
+a newline could hide that a seconding request makes the creator's second
+machine an admin. The page also drew labels, names, message text and
+choices as sent, and the escape helper missed characters that draw as
+nothing (zero width, tag characters, variation selectors). Rooms that
+span owners make this a real attack now, so it is fixed before the CLI
+and MCP work that will use the same helper.
+
+- **What changed:** one helper, `internal/node/escape.go`:
+  `EscapeDisplay` (one line), `EscapeDisplayLines` (approval text over
+  lines), `EscapeDisplayText` (message text: keeps newlines, tabs, a
+  joiner between two emoji, a joiner or non-joiner between two letters
+  of a script that needs them, and one emoji selector after an emoji or
+  keycap base), `EscapeChoice` and `ChoiceHidden` (a choice, shown
+  exactly as it is sent or refused), `DisplayHidden` and the tables. The
+  table is every Cc, Cf, Zl and Zp character, every other default
+  ignorable code point and every variation selector, plus a few
+  invisible ones of other classes; a test checks it against Go's Unicode
+  tables, and another that `app.js` has the same tables and gives the
+  same output. Request text escapes the room label and names. A
+  seconding request says the other admin chose its name, shows the name
+  the room records and names other members with the name shown (bounded).
+  The local API's request gains `name_from` and `recorded_name`; no new
+  call, tool, command, key or table. The page's approval is compared
+  with the text it showed again under the decision lock. On the page,
+  room labels, names, agent ids and message text are escaped; rooms
+  drawn alike get their ids; a message that asks the person is drawn
+  apart from requests with who asked and of whom; a choice its button
+  cannot show exactly as sent is not sent.
+- **Per position:** escape visibly wherever remote text is shown,
+  including signed data, which must still be shown and still load; refuse
+  only where this machine would send a remote string as its person's own
+  words (a clicked choice). Nothing is dropped.
+- **Why at display, not on receipt:** stored logs are signed and must
+  still load, and a new receipt rule needs the replay change first. A
+  later rule that refuses controls in new room labels can come after it.
+- **Second review (2026-11-25):** the first rules mangled honest text
+  and left gaps, so:
+  - One-line positions (labels, names, file names, approval text, the
+    page's download name) use the text rules without line breaks, so an
+    emoji with a selector or joiner and a Persian or Indic joiner show
+    as written.
+  - The text rules also keep a right-to-left or Arabic letter mark
+    between two right-to-left letters (a fixed table of code points, so
+    a browser with an older Unicode agrees), a zero width space between
+    two Thai, Lao, Tibetan, Myanmar or Khmer characters, one
+    ideographic variation selector after a CJK ideograph, and the three
+    tag flags Unicode recommends. In message text a CRLF is one line
+    break.
+  - The escape reads back: a backslash before `u{` or `x{` is written
+    `\u{5c}`. Escaping is no longer idempotent, so the page escapes
+    the daemon's sentences again without that rule.
+  - The room label, names and agent ids in approval text sit between
+    U+2068 and U+2069 (`Isolate`). The page draws each in a `bdi`
+    element; the CLI puts one holding right-to-left text on its own line
+    with `[n]` in the sentence. The page compares labels after NFC,
+    collapsing white space and dropping the invisible characters the
+    rules keep.
+  - The CLI escapes entries, alerts, the room list, status, doctor and
+    `net check`; the question alert is escaped in the daemon; MCP tool
+    results escape message text with the text rules and labels, names,
+    agent ids, choices and file names for one line. The tool
+    definitions are unchanged. `--json` prints the stored strings.
+  - The local API's `confirm` gains one optional field, `text`: the
+    request's text as shown. With it the daemon refuses either decision
+    (the page's `RequestChangedText`) when the text changed, and checks
+    an approval again under the decision lock. `a2p2 confirm` sends it.
+    An older client that leaves it out is decided by id, as before.
+- **Third review (2026-11-25):**
+  - `net check` printed members' addresses raw. The address book keeps
+    any string of up to 255 bytes another member sends, and a probe's
+    detail can quote it. The CLI now escapes every string of
+    `net check` that is not its own words: addresses, details, names,
+    labels, what members saw, their dial-back errors, the router's
+    answers and the advice, as one line. The same sweep of `cmd/a2p2`
+    escapes status's reach line, the terms of a send with files (agent
+    ids, the parent's author, message ids), a join's answer, a fetch's
+    reason and members' answers, a pending change's kind, doctor's
+    error lines, keys cut short, unparsed time stamps and the last line
+    of an error. `--json` is unchanged.
+  - Labels compared as drawn collapsed only ASCII blanks. Now every
+    Unicode white space character and U+2800 count as a space, in the
+    page's `drawnLabel` and in `node.LabelKey`, which status uses. The
+    shared table of test strings has the cases.
+- **Costs:** text that had such characters reads with `\u{...}` in it,
+  and a typed `\u{` reads `\u{5c}u{`. A joiner in Latin, Greek or
+  Cyrillic text, a selector after punctuation, a right-to-left mark at
+  the edge of a word or next to a digit, a joiner at the end of a word
+  and any tag sequence other than the three flags are shown escaped.
+  What the text rules keep can still carry about one bit per position
+  nobody sees (an ideographic variation selector, about one byte per
+  ideograph), inside emoji and those scripts only; escaping those would
+  break them. A choice with a non-breaking space or two spaces in a row
+  is refused. Approval text and its alerts carry U+2068 and U+2069, also in
+  `--json`; a page open across the upgrade must reload before it can
+  approve, since the request text changed. Lookalike letters from other
+  scripts are not detected.
+- **Still open:** names are not compared with this machine's own name
+  when it is not yet recorded in the room, and the CLI's check for room
+  labels shown alike (`node.LabelKey`) does what the page's does but
+  does not normalise to NFC. Addresses are still accepted on receipt
+  without a check of their form; that is a separate change.
+
+**Revisit if** Unicode adds a format character (the table test fails on
+a Go upgrade), a script needs a character the table escapes, or receipt
+rules for labels land.
+
+## D59. Inbound slots by pool and join limits by source group (2026-11-25)
+
+A security review showed that any host that reaches the peer port could
+hold all 256 inbound connections, with raw TCP or with TLS under keys it
+made up, and lock members out of a listening machine (F4, F17). In the
+room shapes a2p2 is built for, laptops that cannot accept connections
+depend on one listening member, so that one host could stop the room.
+The join route had the same flaw by address: one IPv6 /64 filled its
+table and refused every joiner, and a budget of 60 polls a minute shared
+by all sources refused every resume by hash (F6). Every refusal was an
+Info line in an uncapped log (F19, F26). Fixed now because rooms span
+machines of different owners and the listener is on the open network.
+
+- **What changed.** The listener does each TLS handshake itself and
+  counts connections in three pools: 256 for keys that are members of a
+  room held here, at most 16 of them for one key; 32 for other keys; and
+  64 still in the TLS handshake, cut at 5 s (the bound the 5 s header
+  timeout set before). A connection is placed only after the handshake
+  has finished, because crypto/tls calls `VerifyPeerCertificate` before
+  it checks the client's signature, so a copied certificate would
+  otherwise take a member's slot. Outside the members' pool, one IPv4
+  address or IPv6 /64 holds at most 8 connections, one /56 16 and one /48
+  32. When those are full, an IPv4 address or IPv6 /64 that completed a
+  member's handshake in the last 24 hours (in memory, at most 1,024) may
+  use 16 more handshake slots, at most 4 at once for one, counted in none
+  of the shared groups, so no /56 or /48 count keeps it out. A
+  connection there that does not prove a member's key is closed and its
+  group is forgotten. The membership lookup after the handshake is cut at
+  the same 5 s deadline; lookups running at once are bounded by twice the
+  handshake slots. A connection that finds no slot is closed at once,
+  instead of waiting in the operating system's queue. Membership is
+  checked again for every request: a key that became a member moves to
+  the members' pool, a key no longer a member is served as a stranger and
+  its connection ends within 15 s, and a key added back within those 15 s
+  is a member's again. A listener that fails for good closes the
+  connections it accepted. Session tickets are off, since a resumed
+  session presents no certificate. A stranger's connection serves one
+  request at a time (a second one at once on HTTP/2 is refused 429 before
+  its body is read), every answer to a stranger carries
+  `Connection: close` (a GOAWAY on HTTP/2), and its connection lasts 15 s
+  at most. Strangers have rate buckets of their own on every route.
+  Refusals of strangers are logged at Debug, a member's at Info 5 at once
+  and then one per 10 s per key. The join route counts per source address
+  80 bodies read a minute, before the body is read, then 10 opens and
+  accepts and 30 polls; the addresses of one IPv6 /64 together get 4
+  times each. Polls naming unknown invites are counted per IPv4 address
+  or IPv6 /64 (`node.SourceGroup`), 10 a minute instead of 60 a minute
+  for everyone, charged after the lookup, so a poll for an invite held
+  here is never refused by them. A joiner sends an accept answered 429 or
+  503 again after its `Retry-After` (at most 60 s), three times in all,
+  where it used to report an unexpected answer. The tables hold 4,096
+  addresses or /64s each and forget the one heard from least recently, in
+  constant time (`node.Recent`).
+- **Costs.** One `SharesRoom` call, under the rooms lock, per handshake
+  and per request. A stranger opens a new connection for each request: a
+  joiner already did. A machine admitted by entries in its own request is
+  served as a stranger until the log here names it; a waiting pull it
+  started then is cut at 15 s, and its next request is a member's.
+  Machines behind one IPv4 address share 8 handshake slots, and 4 kept
+  ones once a member came from there; a handshake holds its slot about
+  one round trip, so about 80 new connections a second at 100 ms. 0.2.3
+  had no share per address and queued connections past 256 instead. A
+  stuck lookup leaves a goroutine until the rooms lock frees. Invite
+  lookups are bounded by the join route's budgets (40 a minute per
+  address, 160 per /64), not by the budget for unknown invites.
+- **Wire and storage.** No message, field or table changed. Old and new
+  machines work together; a refused client sees a failed handshake or a
+  closed connection and retries under its back-off. The handshake bound
+  stays 5 s, as before.
+- **Still open.** Hosts in 4 source groups (4 IPv4 addresses, 2 IPv6
+  /56s, one /48) keep the strangers' pool full, which keeps joiners out.
+  Hosts in 8 groups (8 IPv4 addresses, 4 /56s, 2 /48s) keep the shared
+  handshake slots full, so members cannot open new connections, except
+  from a source group known from a recent member handshake; existing
+  member connections keep working. A host at a member's own IPv4 address
+  or /64 can hold that group's 8 shared and 4 kept slots and so keep that
+  member out. The known groups are forgotten when the daemon restarts.
+  Sixteen member keys can fill the members' pool. A host with many /64s
+  can make 160 invite lookups a minute in each, with no total bound but
+  the connection slots; it refuses no one else. Joiners behind one IPv4
+  address share its join budget, and those of one /64 share 4 times
+  that; a host there that spends it delays them, and an older joiner
+  still reports a 429 to its accept as an unexpected answer. At Debug
+  each refusal is still a line, and `daemon.log` is still not rotated (another
+  group's fix). Keys that share no room still update the "connected in"
+  record (F25, another group's fix; the pool is known per request, so the
+  check is one line in `guard`).
+
+**Revisit if** members behind one NAT report refused connections, joins
+through a busy admin machine fail under load, members report refused
+connections during a flood from more groups than the limits stop, or the
+rooms lock shows up in handshake or request times.
+
+## D60. Installers approve no a2p2 tool unless the person asks (2026-11-25)
+
+The security review of 2026-11-25 (F48) found that `a2p2 install codex`
+wrote `default_tools_approval_mode = "approve"` under `[mcp_servers.a2p2]`
+on every install, as D38 chose. That lets every a2p2 tool run
+in Codex without a prompt: `send`, `reply` and `ask_human`, and any tool a
+later a2p2 adds. A member of a room shared with another owner could ask a
+Codex agent to post a file's contents or a summary of the repository, and
+the person would not be asked. The team launcher did the same for every
+headless member. In the same group: Pi's skill put message text inside
+double quotes for bash (F16), install wrote any binary path into hooks and
+MCP entries, a temporary one included (F50), and the Windows advice named
+`C:\a2p2`, which every signed-in user can change by default (F24). Why now:
+rooms between owners are the use the project is built for, and these are
+the paths by which another owner's text reaches a send or a shell without
+the person.
+
+What changed:
+
+- **No approval by default.** `a2p2 install codex` writes none, and
+  removes the line earlier versions wrote. `--approve-tools` (a new
+  install flag) writes it with its own marker, and the report and the dry
+  run say that `send` is among the tools. Doctor has a `codex tool
+  approval` line: a fault for the unasked line, a statement for any other.
+  For the other harnesses the flag does nothing and says so. The edits and
+  doctor use the `config.toml` the Codex CLI writes, in `$CODEX_HOME` when
+  that is set. Each install changes the approval in one write that is made
+  only if the file still holds what a2p2 read. A failed `codex mcp add`
+  still removes the lines a2p2 wrote. When the person's own
+  `default_tools_approval_mode` is in a2p2's table, in any spelling TOML
+  allows (quoted, literal, escaped, spaced dots, an escaped header),
+  `--approve-tools` adds none, since a second key would make the file
+  invalid. When a line that could set something in a2p2's server is one
+  a2p2 does not read in full (an inline table, or a key or header it
+  cannot decode), it adds nothing, names the line and gives the line to
+  add by hand, and doctor's line fails saying it cannot tell.
+- **Guarded writes.** Every write to a file a harness or the person also
+  edits (hook files, the three adapters' files, a harness CLI's file when
+  an entry is put back, uninstall's restores and removals) reads the file
+  again just before the rename and refuses, naming the file, if it
+  changed; a backup made for that write is taken back. The Codex approval
+  edit reads and edits again, up to three times. The instant between that
+  read and the rename remains: no harness takes a lock a2p2 could share.
+- **Team launcher.** A manifest with a Claude Code, Codex or Antigravity
+  member must say `"approve_a2p2_tools": true` (a new manifest key).
+  Only `up` asks, so `status`, `stop`, `logs` and `report` work for a run
+  started without the key. The consent is saved with each member's
+  command line, and the supervisor does not start a Claude Code, Codex or
+  Antigravity member whose saved command line lacks it. The state
+  directory is made the user's alone. Claude Code members are allowed the
+  seven tools by name.
+- **Pi's skill** writes the label out in every command and sends text only
+  through a heredoc with a quoted end word. The end word has eight random
+  hex digits chosen at install and kept on a reinstall, so a peer cannot
+  write the line that ends it early. Doctor fails a skill that an older
+  a2p2 wrote.
+- **The binary.** Install refuses a binary in a temporary directory or Go's
+  build cache, one that it or a directory above it lets every user change,
+  one owned by another user, and a path with a control character. It
+  checks the path as written, which the harness runs, as well as where a
+  symlink in it leads now, and the existing part of a path that does not
+  exist yet. A
+  group-writable directory warns, since that group is often the
+  administrators. Doctor reports the same. Directories install creates are
+  0700. The Windows advice says how to make a folder the user's alone.
+- **Codex `config.toml` edits** skip lines inside multi-line strings and
+  arrays, so text that reads like a2p2's table is neither written into nor
+  removed.
+
+What it costs: a headless `codex exec` through the installed configuration
+refuses a2p2's tools until the person passes `--approve-tools`, and an
+interactive Codex session may ask before tools it used to run silently.
+Existing team manifests are refused until they add the key. A person who
+runs install from `/tmp` or with `go run` must copy the binary first. No
+wire, record or database change.
+
+Still open:
+
+- Codex 0.171.0 has a per-tool `approval_mode` (seen in its binary's
+  strings). Approving only `whoami`, `peers` and `inbox` that way would be
+  a better default, but the key's form has not been run against Codex and a
+  wrong one could stop Codex reading its configuration. Needs one real run
+  in a scratch `CODEX_HOME`.
+- On Windows the binary's access control list is not read. Doing it means
+  sharing the SDDL reader in `internal/daemon` (acl.go, sys_windows.go)
+  with `internal/harness`, with a rule for write, delete and write-DAC
+  rights instead of the home's rule against any access, and a run on
+  Windows.
+- OpenCode's default agent and Pi run a2p2's `send` without asking, by
+  their own design. a2p2 could write an OpenCode `permission` entry that
+  asks, which edits a key the person owns; not done.
+- A model that ignores the skill can still put text in double quotes, or
+  copy the skill's own end word into the text.
+- An agent can pass `--approve-tools` itself; a flag cannot show that the
+  person chose it.
+- Doctor's `a2p2 binary` line checks the binary that runs doctor. A
+  harness entry that names another binary already fails its own line
+  ("points at a different a2p2 binary"), and the fix is a reinstall,
+  which checks that binary.
+
+## D61. Pinned actions, a write job without repository code, and checks the installer can opt into (2026-11-25)
+
+The 2026-11-25 security review found that the release job ran actions
+named by moving tags while it held `contents: write`, `id-token: write`
+and `attestations: write`, and that its checkout left the token in
+`.git/config` (F15). A moved tag of `actions/setup-go` could change the
+build, and the attest step would then sign the result as this
+repository's. It also found that the installers trust a `SHA256SUMS` from
+the same release page as the binary, and that `verify-release.sh`
+checked only the binary of the machine that runs it (F49), and that no
+test opens a database written by an older release (F73). The Windows
+install advice pointed at `C:\a2p2`, a folder that every local user can
+write when it is made by hand. These are fixed now because the next tag
+would run the workflow, and the fixes need no protocol change.
+
+- **Workflows:** every action is pinned to the full commit SHA of the
+  release its major tag named on 2026-11-25, with that release in a
+  comment: `actions/checkout` v4.4.0, `actions/setup-go` v5.6.0,
+  `actions/attest` v4.2.2. Every checkout sets `persist-credentials:
+  false`. The release workflow is split: `build` (read-only token,
+  checkout, Go, `make release`) hands `dist/` to `publish` as a workflow
+  artifact; `publish` holds the three write scopes, checks out nothing,
+  checks that the files are exactly the six binaries, `SHA256SUMS` and
+  the notes and that `SHA256SUMS` has exactly one well-formed line for
+  each binary, checks them against it, attests them and creates the
+  release. That adds two GitHub-owned actions,
+  `actions/upload-artifact` v7.0.2 and `actions/download-artifact`
+  v8.0.2 (which fails on a digest mismatch), both pinned.
+  `scripts/workflows.sh`, run by `make check` (`make release-test`),
+  reads every `.yml` and `.yaml` workflow and refuses a tag or branch
+  pin, a checkout that keeps its token, a write scope at the top level,
+  and a write job (quoted values included) that checks out code or sets
+  up Go. It reads lines, not YAML, so it also refuses the syntax it does
+  not follow: tabs, quoted keys, flow mappings, anchors and aliases, a
+  `uses:` that does not start its line, a job not at two spaces. It
+  skips the text of block scalars. No new workflow or trigger.
+- **verify-release.sh** downloads each of the seven expected files by
+  name, requires the download to hold exactly those, requires
+  `SHA256SUMS` to be exactly one `<sha256>  <name>` line for each binary
+  and no other line, and checks the checksum and the attestation of each
+  binary with `--source-ref refs/tags/<tag>` and
+  `--deny-self-hosted-runners`, before it runs this machine's binary.
+  `scripts/release-test.sh` runs it against a stub `gh` and a fake
+  release, and runs the publish job's file check, taken out of
+  `release.yml`, on fake `dist/` directories.
+- **Installers:** `A2P2_VERIFY_ATTESTATION=1` (a new setting of both
+  scripts, default off) makes the installer run `gh attestation verify`
+  pinned to this repository, `release.yml`, the tag it downloads
+  (`--source-ref`) and a GitHub-hosted runner, and install nothing
+  unless it passes. Without the tag, someone who can edit releases could
+  put an attested build of an older tag, and its `SHA256SUMS` line, into
+  a newer release. With the setting and no `A2P2_VERSION`, the installer
+  asks `gh` once for the latest tag and downloads from that tag; it
+  cannot rule out an older release marked as latest. The setting is off
+  by default because `gh` must be installed and signed in, and the
+  latest release (0.2.3) has no attestation; a check that falls back to
+  "skipped" on failure would not stop a swapped file. Without it the
+  installer now says the checksum does not show who built the file.
+  `install.sh` refuses an install directory, or one above it, that every
+  user may write without the sticky bit, that another user than root
+  owns, that is a symbolic link another user owns, or that a group may
+  write (mode bits, no sticky bit) when the group has a member other
+  than the user and root. Members are the group's listed members and the
+  users whose primary group it is, from `getent` (on macOS without it,
+  `dscacheutil` and `dscl`). On macOS the groups `everyone`,
+  `localaccounts` and `netaccounts`, and any group `dsmemberutil` says
+  the account `nobody` is in, hold accounts those lists do not name, so
+  they are refused. A group it cannot list gets a note and the install
+  goes on, so a group-writable `~/.local/bin` whose group holds only the
+  user, or a Homebrew prefix that the group `admin` of only the user
+  and root may write, installs. Accounts of a network directory that the
+  system does not list, nested groups and access control lists are not
+  read. It takes trailing slashes off each path before it looks at it, so
+  `link/` is judged as the link. It walks the
+  path as written, and each link it meets adds the path the link names
+  (`readlink`, or the resolved path from `cd -P` without it), walked the
+  same way. It makes missing levels with mode 0755 and
+  checks the path again after. `install.ps1` refuses a junction or
+  symbolic link in the path, a directory owned by an account other than
+  you, SYSTEM, Administrators or TrustedInstaller, one whose access list
+  it cannot read, and one another account may change. It makes a missing
+  directory with its own access list already in place (you, SYSTEM,
+  Administrators, nothing inherited), checks it is a real folder, still
+  yours and empty, and checks the path again before it copies the file.
+- **Compatibility test:** `scripts/release-db.sh vX.Y.Z` runs
+  `internal/node/testdata/releases/gen_test.go.txt` in a copy of the
+  tag's source (git archive; no daemon) and writes three machines'
+  databases as SQL text with a manifest. A run holds a lock and replaces
+  the committed set only with a complete new one. Databases from v0.2.0
+  to v0.2.3 are committed (about 380 KB of text).
+  `TestDatabasesFromEachReleaseOpenReplayAndKeepWorking` requires all
+  four and opens each with the current code: logs replay, records,
+  members and admins match the manifest, alice's unread messages and
+  bob's read state are kept, and a and b each send to the other. All
+  four were written at schema 14, the current one, so no migration runs
+  yet. A trial rule that refused the label `bee` made it fail, as an
+  F71-type change would.
+- **Costs:** two more actions in the only unattended workflow; a release
+  takes one more job and an artifact kept for seven days, so the publish
+  job can be re-run alone within that time. Moving an action now
+  means changing a SHA by hand. A step in `make check` of a few seconds.
+  Each release adds a directory of test data. An install into a
+  directory another user can change, which worked before, is refused.
+- **Still open:** a compromised pinned action or Go toolchain in the
+  build job still produces a binary that `publish` attests; an
+  attestation names the workflow, not the honesty of its inputs. No
+  dependabot or other update path for actions and modules: it would open
+  pull requests that run CI, and the owner keeps hosted CI small.
+  Repository settings the files cannot show or set: immutable releases,
+  a protected `release` environment with required reviewers for
+  `publish`, and the tag rule INSTALL.md describes. `install.ps1` has not
+  been run on Windows. No test runs an old binary against a new one over the
+  network, and the release-db step after a tag is by hand.
+
+**Revisit if** an action is moved to a new major release, GitHub offers
+immutable releases or a required environment here, the attestation check
+can be done without `gh`, or a mixed-version chaos run is added.

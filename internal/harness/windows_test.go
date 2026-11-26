@@ -83,6 +83,18 @@ func TestWindowsInstallRefusesABinaryPathEachShellWouldQuoteDifferently(t *testi
 	}
 }
 
+// F24: the advice for a path with spaces no longer names a folder under
+// C:\, which every signed-in user may change by default; it says how to
+// make the folder the user's alone.
+func TestWindowsAdviceDoesNotNameAFolderEveryUserCanChange(t *testing.T) {
+	o, _ := windowsOpts(t, `C:\Users\Jo Smith\bin\a2p2.exe`)
+	_, err := Install("claude", o)
+	if err == nil || strings.Contains(err.Error(), `C:\a2p2`) || !strings.Contains(err.Error(), "only you can change") ||
+		!strings.Contains(err.Error(), "/inheritance:r") {
+		t.Fatalf("%v", err)
+	}
+}
+
 func TestWindowsInstallSaysAntigravityIsNotEstablishedThere(t *testing.T) {
 	o, r := windowsOpts(t, `C:\a2p2\a2p2.exe`)
 	if _, err := Install("agy", o); err == nil || !strings.Contains(err.Error(), "not supported on Windows") {

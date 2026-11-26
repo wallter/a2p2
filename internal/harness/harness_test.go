@@ -241,6 +241,9 @@ func TestDoctor(t *testing.T) {
 	}
 	o.Binary = "/new/a2p2"
 	for _, c := range Doctor(o) {
+		if c.Name == "codex tool approval" {
+			continue // not about the binary
+		}
 		if c.OK || !strings.Contains(c.Info, "different") {
 			t.Errorf("stale: %+v", c)
 		}

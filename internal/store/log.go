@@ -136,6 +136,11 @@ type Request struct {
 	// approves (PROTOCOL 10.6).
 	Draft string
 	Terms string
+	// Cap, if above zero, is checked when a request this machine started
+	// (Seconds empty) is created, in the same transaction: it fails with
+	// ErrTooManyPending while Cap such requests wait in the room. Not
+	// stored.
+	Cap int
 }
 
 // LogRoom is a room as the log path sees it.
@@ -196,6 +201,11 @@ type LogBatch struct {
 	Requests []Request
 	Complete string
 	Entries  string
+	// Fail are pending requests recorded as failed with FailReason (a
+	// request raised to second an entry that no longer waits). One no
+	// longer pending is left as it is.
+	Fail       []string
+	FailReason string
 	// NotCaughtUp records, with Complete, that the person approved it
 	// before the room's log was caught up with (ConfirmOpts).
 	NotCaughtUp bool
@@ -369,6 +379,12 @@ func applyLog(tx *sql.Tx, b LogBatch) (int64, error) {
 			}
 			if n, _ := res.RowsAffected(); n != 1 {
 				return errors.New("request is not pending")
+			}
+		}
+		for _, id := range b.Fail {
+			if _, err := tx.Exec(`UPDATE requests SET state = ?, reason = ?, decided_at = ? WHERE id = ? AND room = ? AND state = ?`,
+				RequestFailed, b.FailReason, ms(b.Now), id, b.Room, RequestPending); err != nil {
+				return err
 			}
 		}
 		if err := hook("log:access"); err != nil {
@@ -665,10 +681,64 @@ func (s *Store) CreateRequest(ctx context.Context, q Request) error {
 }
 
 func insertRequest(tx *sql.Tx, q Request) error {
+	if q.Seconds == "" {
+		if err := checkOwnPending(tx, q.Room, q.Cap); err != nil {
+			return err
+		}
+	}
 	_, err := tx.Exec(`INSERT INTO requests (id, kind, action, room, node, name, role, history, seconds, created_at, state, admins, draft, terms)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, q.ID, q.Kind, q.Action, q.Room, q.Node, q.Name, q.Role, q.History, q.Seconds,
 		ms(q.Created), RequestPending, q.Admins, q.Draft, q.Terms)
 	return err
+}
+
+// checkOwnPending fails with ErrTooManyPending while max (if above zero)
+// requests this machine started wait in room. Requests raised to second
+// another admin's entries have their own budgets (node.raise), so another
+// machine's entries never fill this one.
+func checkOwnPending(tx *sql.Tx, room string, max int) error {
+	if max <= 0 {
+		return nil
+	}
+	var n int
+	if err := tx.QueryRow(`SELECT count(*) FROM requests WHERE room = ? AND state = ? AND seconds = ''`, room, RequestPending).Scan(&n); err != nil {
+		return err
+	}
+	if n >= max {
+		return ErrTooManyPending
+	}
+	return nil
+}
+
+// Seconding is a request raised to second another admin's entry, without
+// the columns raising does not read.
+type Seconding struct {
+	ID, Seconds, State, Reason string
+}
+
+// SecondingRequests lists room's requests raised to second another
+// admin's entry, oldest first; with pendingOnly, only those waiting.
+func (s *Store) SecondingRequests(ctx context.Context, room string, pendingOnly bool) ([]Seconding, error) {
+	q := `SELECT id, seconds, state, reason FROM requests WHERE room = ? AND seconds != ''`
+	args := []any{room}
+	if pendingOnly {
+		q += ` AND state = ?`
+		args = append(args, RequestPending)
+	}
+	rows, err := s.db.QueryContext(ctx, q+` ORDER BY created_at, rowid`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Seconding
+	for rows.Next() {
+		var x Seconding
+		if err := rows.Scan(&x.ID, &x.Seconds, &x.State, &x.Reason); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
 }
 
 const requestCols = `id, kind, action, room, node, name, role, history, seconds, created_at, state, decided_at, entries, reason, admins, not_caught_up, draft, terms`
@@ -772,8 +842,8 @@ func (s *Store) LeaveRoom(ctx context.Context, room string, now time.Time) (int6
 		_, err = tx.Exec(`UPDATE rooms SET gen = ?, left_at = ? WHERE id = ?`, gen, ms(now), room)
 		return err
 	})
-	if err == nil {
-		s.RunTrash(ctx)
-	}
+	// The room's files are queued in this transaction; the caller runs
+	// the queue (RunTrash) once it holds no lock other work waits for,
+	// and the background timer and every start run it too.
 	return gen, err
 }

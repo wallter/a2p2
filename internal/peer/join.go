@@ -12,10 +12,12 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strconv"
@@ -38,59 +40,135 @@ type JoinHandler interface {
 	Handle(ctx context.Context, from, source string, body []byte) node.JoinReply
 }
 
-// sourceLimit counts join requests per source address over the last
-// minute (PROTOCOL 5.3: 10 a minute per source address). While its
-// table is full of addresses seen in the last minute, a new address is
-// refused rather than one of them forgotten.
+// sourceLimit counts join requests over the last minute per source
+// address, and per IPv6 /64 (node.SourceGroup; for IPv4 the address is
+// the group), in three budgets (PROTOCOL 5.3): bodies read, charged
+// before a body is read; opens and accepts, which make the admin machine
+// do work; and polls, which a joiner sends while it waits. One address
+// has the budgets that 0.2.3 gave it and more; the addresses of one /64
+// together have joinGroupShare times as much, since a host can use any
+// address of its /64. Each table forgets, while full, the key heard from
+// least recently, in constant time, so that many addresses cannot refuse
+// every other source; addresses and /64s have tables of their own, so
+// addresses cannot push a /64 out.
 type sourceLimit struct {
-	mu  sync.Mutex
-	now func() time.Time
-	m   map[string][]time.Time
+	mu            sync.Mutex
+	now           func() time.Time
+	addrs, groups *node.Recent[sourceUse]
 }
 
-const maxJoinSources = 4096
+// sourceUse is one address's or group's requests in the last minute.
+type sourceUse struct {
+	read, admit, poll []time.Time
+}
 
-func (l *sourceLimit) allow(src string) (bool, time.Duration) {
+// A request's budgets.
+const (
+	joinRead = iota
+	joinAdmit
+	joinPoll
+)
+
+// Limits per source address, a minute; a /64 has joinGroupShare times
+// each. Variables so tests can change them.
+var (
+	maxJoinSources = 4096
+	joinAdmits     = node.OpensPerMinute
+	joinPolls      = 30
+	joinReads      = 2 * (node.OpensPerMinute + 30)
+	joinGroupShare = 4
+)
+
+func newSourceLimit() *sourceLimit {
+	return &sourceLimit{now: time.Now, addrs: node.NewRecent[sourceUse](maxJoinSources),
+		groups: node.NewRecent[sourceUse](maxJoinSources)}
+}
+
+func (u *sourceUse) of(kind int) (*[]time.Time, int) {
+	switch kind {
+	case joinRead:
+		return &u.read, joinReads
+	case joinAdmit:
+		return &u.admit, joinAdmits
+	}
+	return &u.poll, joinPolls
+}
+
+// take charges one request of kind from src, at its address and its /64,
+// or charges nothing and says when to try again.
+func (l *sourceLimit) take(src string, kind int) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now()
-	recent := func(ts []time.Time) []time.Time {
-		return slices.DeleteFunc(ts, func(t time.Time) bool { return !now.Before(t.Add(time.Minute)) })
+	group := node.SourceGroup(src)
+	type level struct {
+		ts   *[]time.Time
+		most int
 	}
-	ts, known := l.m[src]
-	ts = recent(ts)
-	if len(ts) >= node.OpensPerMinute {
-		l.m[src] = ts
-		return false, ts[0].Add(time.Minute).Sub(now)
+	var levels []level
+	if a, err := netip.ParseAddr(src); err == nil && a.WithZone("").Unmap().String() != group {
+		ts, most := l.addrs.Use(a.WithZone("").Unmap().String()).of(kind)
+		levels = append(levels, level{ts, most})
 	}
-	if !known && len(l.m) >= maxJoinSources {
-		for k, v := range l.m {
-			if len(recent(v)) == 0 {
-				delete(l.m, k)
-			}
+	ts, most := l.groups.Use(group).of(kind)
+	if len(levels) > 0 {
+		most *= joinGroupShare
+	}
+	levels = append(levels, level{ts, most})
+	var wait time.Duration
+	for _, v := range levels {
+		*v.ts = slices.DeleteFunc(*v.ts, func(t time.Time) bool { return !now.Before(t.Add(time.Minute)) })
+		if len(*v.ts) >= v.most {
+			wait = max(wait, (*v.ts)[len(*v.ts)-v.most].Add(time.Minute).Sub(now))
 		}
-		if len(l.m) >= maxJoinSources {
-			return false, time.Minute
-		}
 	}
-	l.m[src] = append(ts, now)
+	if wait > 0 {
+		return false, wait
+	}
+	for _, v := range levels {
+		*v.ts = append(*v.ts, now)
+	}
 	return true, 0
 }
 
-// joinV2Route serves /p/v2/join: each source address is limited before
-// the body is read, and the per-key limit of the other routes does not
-// apply here (guard), so keys that never presented a valid secret take no
-// room in it; the join server limits keys that did.
+// allow charges a request whose body was read: to its opens and accepts,
+// or to its polls.
+func (l *sourceLimit) allow(src string, poll bool) (bool, time.Duration) {
+	if poll {
+		return l.take(src, joinPoll)
+	}
+	return l.take(src, joinAdmit)
+}
+
+// joinOp reads only the op of a join request, to pick its budget; the
+// node checks the whole request strictly. Anything but a poll counts as
+// an open.
+func joinOp(body []byte) string {
+	var q struct {
+		Op string `json:"op"`
+	}
+	_ = json.Unmarshal(body, &q)
+	return q.Op
+}
+
+// joinV2Route serves /p/v2/join: each source address and /64 is limited
+// before its body is read (bodies read), and again once the bounded body
+// is read (opens and accepts, or polls). The per-key limit of the other
+// routes does not apply here (guard), so keys that never presented a
+// valid secret take no room in it; the join server limits keys that did.
 func joinV2Route(j JoinHandler) http.Handler {
-	lim := &sourceLimit{now: time.Now, m: map[string][]time.Time{}}
+	lim := newSourceLimit()
+	limited := func(w http.ResponseWriter, wait time.Duration) {
+		w.Header().Set("Retry-After", strconv.Itoa(int((wait+time.Second-1)/time.Second)))
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": node.CodeRateLimited})
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		source, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil {
 			source = r.RemoteAddr
 		}
-		if ok, wait := lim.allow(source); !ok {
-			w.Header().Set("Retry-After", strconv.Itoa(int((wait+time.Second-1)/time.Second)))
-			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": node.CodeRateLimited})
+		if ok, wait := lim.take(source, joinRead); !ok {
+			limited(w, wait)
 			return
 		}
 		if r.ContentLength > maxJoinV2Body {
@@ -105,6 +183,10 @@ func joinV2Route(j JoinHandler) http.Handler {
 			} else {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": node.CodeBadRequest})
 			}
+			return
+		}
+		if ok, wait := lim.allow(source, joinOp(body) == node.JoinPoll); !ok {
+			limited(w, wait)
 			return
 		}
 		rp := j.Handle(r.Context(), requestNode(r), source, body)

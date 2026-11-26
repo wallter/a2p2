@@ -12,8 +12,10 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 - Release binaries carry a GitHub artifact attestation (build provenance)
   made by the release workflow, checked by `make verify-release`. Check one
-  with `gh attestation verify a2p2_<os>_<arch> --repo wallter/a2p2`. Releases
-  up to 0.2.3 have none, and the binaries are still not code-signed.
+  with `gh attestation verify a2p2_<os>_<arch> --repo wallter/a2p2
+  --signer-workflow wallter/a2p2/.github/workflows/release.yml
+  --source-ref refs/tags/<tag>`. Releases up to 0.2.3 have none, and the
+  binaries are still not code-signed.
 
 ### Changed
 
@@ -46,6 +48,240 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   that still grows with the unread backlog. Results and their order are
   unchanged, and the database schema is not touched, so 0.2.0 to 0.2.3
   can still open the database.
+
+### Security
+
+- **One admin can no longer block its own removal by flooding requests.**
+  Since 0.1.0, an admin of a room (for example the admin of another owner
+  in a shared room) could sign many entries that wait for a second admin.
+  They filled the 32-request queue of the other admins, so a removal of
+  that admin could not be proposed, and an entry that arrived while the
+  queue was full was never raised, even after a restart. Now a machine
+  asks its person about at most 32 waiting entries per room, and one
+  signing admin gets more than 4 only from places no other admin's 4
+  need. The person's own requests have a separate budget, the first
+  removal of an admin per signer and target passes both budgets and takes
+  no place in them, a request whose entry no longer waits is closed, and
+  an entry skipped while a budget was full is raised once there is a
+  place and at start.
+- **One room's stored log can no longer stop the daemon starting.** Since
+  0.1.0, a start failed for every room if one room's stored log did not
+  parse or replayed with a different reason text, so a stricter receipt
+  rule in a later release, or an entry a hostile member got stored, could
+  stop the daemon after an upgrade. Stored entries are now checked for
+  form and signature only, the replay compares dispositions only, and a
+  batch that drops entries over a bound is decided again without them, so
+  delivered entries cannot make a room fail its own replay. A room whose
+  log still does not load is set aside: not served or pulled; sends,
+  Seen and a change of its files setting refused; nothing deleted; shown
+  by `a2p2 status` and `a2p2 doctor` with what to do. It can still be
+  read, except streams without a cursor, undecided text stays undecided, and only retention deletes its
+  text and files. It may be left and joined again, except the local room,
+  for which the fix is the older version. The other rooms work as before.
+- **Leaving a room with many files no longer stalls the other rooms.**
+  Since 0.2.0 the file deletions of a left room ran while the rooms lock
+  was held, about 4 ms per file, so pulls and approvals of every room
+  waited. They now run after the lock is released. Other file work still
+  waits for them.
+- **A room label from another machine can no longer disguise what a person
+  approves.** Exposed since 0.1.0: an admin of a room whose creator was
+  hostile. The creator could put a carriage return, terminal escapes, a
+  right-to-left override or a newline in the room's label, and the label
+  went raw into the text of every membership request and its alert, in
+  `confirm`, `alerts` and on the page. A seconding request could so hide
+  that it makes the creator's second machine an admin. The request text
+  now writes each such character as `\u{...}`; the stored label is
+  unchanged, so old logs still load. The alert that this machine may have
+  been removed from a room, and the join preview in `a2p2 join`, escape
+  the label too.
+- **The escaping covers characters that draw as nothing.** Zero width
+  characters, tag characters and the rest of U+E0000 to U+E0FFF,
+  variation selectors, U+FFF0 to U+FFF8, Hangul fillers, the line and
+  paragraph separators and every other Unicode control, format or
+  default ignorable character are now written `\u{...}` too, in requests
+  and on the page. The helper moved to `internal/node/escape.go` with one
+  rule for message text, used without line breaks for one line. It keeps
+  a joiner or selector inside an emoji sequence or between letters of a
+  script that needs joiners, such as Arabic or Devanagari, and the few
+  other marks listed below.
+- **The page escapes what other machines wrote.** Exposed since 0.2.3,
+  the first release whose page loads: a person using the page in a room
+  with another owner's machines. Room labels in the sidebar, headings and
+  alerts, machine names, agent ids, message text and choices were drawn
+  as sent. They are now escaped as the daemon does, and two rooms whose
+  labels are drawn alike are shown with their ids. A message that asks
+  the person is drawn under its own heading, apart from requests, says
+  who asked from which machine and of whom, says it approves nothing,
+  and has plain buttons. A choice that its button cannot show exactly as
+  it is sent (a hidden character, a line break, a blank other than a
+  plain space, a space at either end or two in a row) is not sent; the
+  person types the reply. An emoji choice such as "❤️ Yes" is sent.
+- **A seconding request says who chose the machine's name.** Since 0.1.0
+  `confirm` (and the page, since it loads in 0.2.3) said "the machine
+  chose its own name" for every request, also when the other admin wrote
+  it. They now say which: the
+  request has `name_from` and `recorded_name`, and its text shows the
+  name the room records and other members with the name shown. An
+  approval from the page is refused if that text changed before the
+  decision; reload and decide again.
+- **Honest text is shown as written, and the CLI and MCP tools escape
+  too.** The first escaping wrote emoji with a selector or joiner and
+  Persian or Indic joiners in room labels, file names and approval text
+  as `\u{...}`, and in message text right-to-left marks, Thai word
+  breaks, the flags of England, Scotland and Wales, Japanese variation
+  sequences and a CR before each line end. These now show as written
+  where they change no order. A typed `\u{202e}` is shown as
+  `\u{5c}u{202e}`, apart from an escaped character. In the text a
+  person approves, the room label and names are isolated so
+  right-to-left text cannot reorder the words around them; `confirm`
+  puts such a label on its own line. The CLI's messages, alerts, room
+  list, status, doctor and `net check`, the question alert, and the text
+  of MCP tool results now escape what other machines wrote. In
+  `net check` that covers members' addresses, which another member can
+  set to any text, the probe details that quote them, what members saw,
+  their errors and the router's answers. Status, `confirm`, `join`,
+  `fetch`, doctor and error lines escape the remote strings they show
+  too. Two room labels that differ only in a no-break, ideographic or
+  other Unicode space now get their ids on the page and in status.
+  `--json` prints the stored strings. `a2p2 confirm` sends the text it showed,
+  and the daemon decides nothing if the request changed since (the
+  local API's `confirm` takes an optional `text`).
+- **One host that reaches a listening machine can no longer lock its
+  members out.** Exposed: every machine with networking `on`, since
+  0.1.0, to any host that can reach its peer port (the local network,
+  and the internet after `net on --map-port` or on a global IPv6
+  address). One host could hold all 256 inbound connections, with raw TCP
+  connections or with TLS connections under keys it made up, so members
+  could not pull from that machine, fetch its files or join through it.
+  Keys that share no room could also fill the per-key rate tables, and
+  then a member's new key was refused. Now a connection is placed in a
+  pool only once its handshake has proved the client's key: 256 for
+  members of a room held here (16 for one key), 32 for other keys, and 64
+  for connections still in the TLS handshake, which is cut at 5 s. One
+  IPv4 address or IPv6 /64 gets at most 8 connections outside the
+  members' pool, a /56 16 and a /48 32; a connection with no slot is
+  closed at once. The handshake and the membership lookup after it end
+  at 5 s. Membership is checked again for each request. A key that
+  shares no room gets one request at a time on a connection, every
+  answer to it closes the connection, and its rate buckets are its own on
+  every route. An attacker with more source groups still can do part of
+  this: 4 groups (4 IPv4 addresses, 2 IPv6 /56s or one /48) keep joiners
+  out, and 8 groups (8 IPv4 addresses, 4 /56s or 2 /48s) keep members from
+  opening new connections, except members whose IPv4 address or IPv6 /64
+  completed a member's handshake here in the last 24 hours: they have 16
+  handshake slots of their own, at most 4 for one address, which no
+  other address or /64 can take. Connections members already have keep
+  working (SECURITY.md).
+- **One IPv6 /64 can no longer refuse every joiner.** Exposed: admin
+  machines with networking `on`, since 0.1.0. Join limits counted each
+  full address, so one /64 filled the table of 4,096 sources and every
+  other joiner was refused for a minute; and 60 polls a minute naming
+  unknown invites, from anyone, refused every joiner that resumed by the
+  invite's hash. Now the join route counts per address, and per IPv6 /64
+  at 4 times as much: 80 bodies read a minute, counted before a body is
+  read, then 10 opens and accepts and 30 polls. Polls naming unknown
+  invites are counted per IPv4 address or IPv6 /64 (10 a minute), after
+  the lookup, so a joiner resuming by its invite's hash is never refused
+  by them. A joiner sends an accept answered 429 or 503 again after the
+  stated delay, instead of reporting an unexpected answer. Tables of
+  sources forget the one heard from least recently in constant time.
+- **Refused peer requests no longer grow `daemon.log` at the default
+  level.** Exposed: every listening machine since 0.1.0. Each refused
+  request was one Info line, so a flood of refusals grew the log without
+  bound. Refusals of keys that share no room, and refused connections,
+  are now logged at Debug, with one Info line a minute about refused
+  connections; a member's refusals reach Info 5 at once, then one per
+  10 s per key. At Debug each refusal is still a line, and the log file
+  is still not rotated.
+- **`a2p2 install codex` no longer approves every a2p2 tool without
+  asking.** Since 0.1.0 it added `default_tools_approval_mode = "approve"`
+  to `[mcp_servers.a2p2]` in `~/.codex/config.toml`, so a Codex agent
+  could `send`, `reply` or `ask_human` without a prompt when a member of a
+  shared room, another owner's included, asked it to post something. Now
+  install approves nothing unless you pass `--approve-tools`, and the
+  dry run says which you chose. Reinstall to remove the old line;
+  `a2p2 doctor` fails a `codex tool approval` line until you do. A headless
+  `codex exec` needs `--approve-tools` (D60). The edits and
+  doctor follow `CODEX_HOME`, as the Codex CLI does.
+- **The team launcher asks before it approves a2p2's tools for members.**
+  Since 0.1.0 `scripts/team` approved every a2p2 tool for each Claude Code,
+  Codex and Antigravity member. A manifest with such members must now say
+  `"approve_a2p2_tools": true` for `up`; `status`, `stop`, `logs` and
+  `report` still work for runs started without it. Claude Code members
+  get the seven tools by name instead of `mcp__a2p2__*`, and the state
+  directory is now 0700.
+- **Pi's skill no longer puts message text in double quotes.** Since 0.1.0
+  the skill told the model to run `a2p2 send ... "text"` in bash, where
+  `$(...)` and backticks in text it copied from a peer would run as you.
+  It now sends text through a heredoc with a quoted end word and writes
+  the `--as` label out in every command, since an empty `--as` acts as
+  the person. The end word has random digits chosen at install. Run
+  `a2p2 install pi` again to get the new skill; `a2p2 doctor` fails the
+  old one.
+- **Install refuses a binary that another user could replace.** A binary
+  in a temporary directory, in Go's build cache (`go run`), in a directory
+  every user can change, owned by another user, or with a control
+  character in its path is refused, whether the path is a symlink or
+  leads through one; a group-writable directory gives a
+  warning, and `a2p2 doctor` reports the same. Directories install
+  creates for a harness's configuration are now 0700. On Windows the
+  advice no longer suggests `C:\a2p2`, which every signed-in user can
+  change by default; the binary's access list is not checked there yet.
+- Codex `config.toml` edits now skip multi-line strings and arrays and
+  touch only a2p2's tables, so text that reads like a2p2's table is not
+  written into or removed. `--approve-tools` adds no second
+  `default_tools_approval_mode` to a table that has one, in any spelling
+  TOML allows, and adds nothing, telling you the line to add, when a line
+  that could set it is one a2p2 does not read in full.
+- Install and uninstall now write a hook or configuration file only if it
+  still holds what they read, checked just before the rename; otherwise
+  they leave it and say which file changed. Before, only Codex's
+  `config.toml` was checked.
+- **The release workflow pins its actions and keeps write scopes away
+  from the build.** Since v0.1.0 the release job ran actions named by
+  moving tags (`actions/checkout@v4`, `actions/setup-go@v5`) while it held
+  `contents: write`, and its checkout kept the token for later steps;
+  after 0.2.3 it also held the signing scopes for attestations. Anyone who
+  could move one of those tags could change a published binary. Now every
+  action is pinned to a commit, no checkout keeps its token, and the
+  write, signing and attestation scopes sit in a publish job that checks
+  out nothing and runs no repository code. That job publishes only the six
+  binaries, with exactly one `SHA256SUMS` line each. `make check` refuses
+  a workflow that undoes this, and workflow syntax its line-based check
+  does not follow. The new form runs for the first time at the next tag.
+- **The installers can require the build attestation.** Since v0.2.2
+  `install.sh` and `install.ps1` check the binary against a `SHA256SUMS`
+  from the same release, which does not stop someone who can replace
+  both. With `A2P2_VERIFY_ATTESTATION=1` they also run `gh attestation
+  verify` and install nothing without a valid attestation from this
+  repository's release workflow for the tag they download (releases after
+  0.2.3), so an attested build of an older tag is refused too. For
+  `latest` they ask `gh` for the tag once. Without the setting they now
+  say the checksum does not show who built the file.
+  `make verify-release` now checks every binary of a release against the
+  tag, not only the one for the machine that runs it.
+- **The installers refuse more directories another user can change.**
+  Since v0.2.3 the Windows notes suggested `C:\a2p2`, which every local
+  user can write when it is made by hand, so another user could replace
+  `a2p2.exe` and run code as you through a hook. `install.ps1` now makes
+  a missing directory with an access list for you, SYSTEM and
+  Administrators only, and refuses a junction or symbolic link in the
+  path, a directory owned by another account, and one another account
+  may change (not yet run on Windows). `install.sh` refuses a directory
+  that every user may write without the sticky bit, one a group with
+  another member than you and root may write, one owned by another user,
+  a symbolic link owned by another user, and the same above it, along the
+  path as written (trailing slashes taken off) and the real path a link
+  leads to. A group of only you and root, such as `admin` for a Homebrew
+  prefix on a Mac with one person, is accepted; a macOS group that holds
+  accounts it does not list, such as `everyone`, is refused; a group
+  whose members it cannot list gets a note, not a refusal. It makes missing
+  directories with mode 0755 and checks again after. The exact cases are
+  in [SECURITY.md](SECURITY.md#release-binaries).
+- A test now opens databases written by each release from v0.2.0 to
+  v0.2.3 with the current code, so a rule that would refuse old data
+  fails it.
+
 
 ## [0.2.3] - 2026-11-25
 

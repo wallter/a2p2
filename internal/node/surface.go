@@ -130,11 +130,14 @@ func OpenSurface(ctx context.Context, m *Machine, r *Rooms, o SurfaceOpts) (*Sur
 	if s.addrs == nil {
 		s.addrs = func() []string { return nil }
 	}
-	if _, err := r.Gen(s.local); errors.Is(err, ErrNoRoom) {
+	switch _, err := r.Gen(s.local); {
+	case errors.Is(err, ErrNoRoom) && r.isQuarantined(s.local):
+		// A local room set aside stays as it is (Quarantined).
+	case errors.Is(err, ErrNoRoom):
 		if err := s.createLocal(ctx); err != nil {
 			return nil, err
 		}
-	} else if err != nil {
+	case err != nil:
 		return nil, err
 	}
 	if _, err := s.Register(ctx, HumanLabel, HumanLabel, ""); err != nil {
@@ -428,12 +431,19 @@ func (s *Surface) Requests(ctx context.Context) ([]store.Request, error) { retur
 // request's current terms (terms_changed), so that what is approved is
 // what was displayed.
 func (s *Surface) Confirm(ctx context.Context, id string, approve, notCaughtUpOK bool, terms string) (Confirmation, error) {
+	return s.ConfirmShown(ctx, id, approve, notCaughtUpOK, terms, "")
+}
+
+// ConfirmShown is Confirm for a surface that showed the person the
+// request's text: with shown set, an approval is refused unless the text
+// is still the same when the decision is made (ConfirmOpts.Shown).
+func (s *Surface) ConfirmShown(ctx context.Context, id string, approve, notCaughtUpOK bool, terms, shown string) (Confirmation, error) {
 	if approve && s.r.files != nil {
 		if q, err := s.m.st.GetRequest(ctx, id); err == nil && q.Kind == store.RequestSendFiles {
 			return s.r.files.ApproveSend(ctx, id, terms)
 		}
 	}
-	c, err := s.r.ConfirmWith(ctx, id, approve, ConfirmOpts{NotCaughtUpOK: notCaughtUpOK})
+	c, err := s.r.ConfirmWith(ctx, id, approve, ConfirmOpts{NotCaughtUpOK: notCaughtUpOK, Shown: shown})
 	if errors.Is(err, ErrNotCaughtUp) {
 		return Confirmation{ID: id, State: store.RequestFailed, Reason: ReasonNotCaughtUp}, nil
 	}
@@ -1018,6 +1028,7 @@ func waitAny(ctx context.Context, chans []<-chan struct{}, deadline time.Time) b
 
 // Seen confirms what the inbox showed agent: each key with its version.
 // A key is looked up in every room; results come back in the given order.
+// A key of a room set aside is left unconfirmed (SeenNotShown).
 func (s *Surface) Seen(ctx context.Context, agent string, reads []store.Read) ([]SeenResult, error) {
 	label, err := s.label(agent)
 	if err != nil {
@@ -1047,6 +1058,11 @@ func (s *Surface) Seen(ctx context.Context, agent string, reads []store.Read) ([
 		byRoom[room] = append(byRoom[room], i)
 	}
 	for _, room := range order {
+		if s.r != nil && s.r.isQuarantined(room) {
+			// Machine.Seen refuses a room set aside. Its keys keep
+			// SeenNotShown, so the other rooms are still confirmed.
+			continue
+		}
 		idx := byRoom[room]
 		rs := make([]store.Read, len(idx))
 		for k, i := range idx {
@@ -1436,6 +1452,9 @@ type StatusView struct {
 	// setting and use, by room id.
 	Files     FilesUsage
 	RoomFiles map[string]RoomFilesView
+	// Quarantined are the rooms set aside because their stored log does
+	// not load in this version (Rooms.Quarantined).
+	Quarantined []Quarantine
 }
 
 // WriterView is an agent seen writing in a room.
@@ -1514,7 +1533,8 @@ func (s *Surface) Status(ctx context.Context, show bool) (StatusView, error) {
 	}
 	return StatusView{Node: s.m.ID, Name: s.name, Human: s.HumanID(), Local: s.local, Rooms: rooms, Agents: agents,
 		Peers: peers, Waiting: waiting, Network: s.net, Decided: decided, Fault: s.fault(), Notice: notice, Writers: writers,
-		Levels: levels, Reach: s.ReachNow(), Mapping: s.MappingNow(), Files: files, RoomFiles: roomFiles}, nil
+		Levels: levels, Reach: s.ReachNow(), Mapping: s.MappingNow(), Files: files, RoomFiles: roomFiles,
+		Quarantined: s.r.Quarantined()}, nil
 }
 
 // mayBeRemoved: every other member of r has refused this machine as not a
@@ -1605,7 +1625,7 @@ func (s *Surface) Alerts(ctx context.Context, wait time.Duration) ([]Alert, erro
 		if rs, err := s.RoomList(ctx, ""); err == nil {
 			for _, r := range rs {
 				if r.MayBeRemoved {
-					as = append(as, Alert{Kind: AlertRemoved, Room: r.ID, Text: "room " + r.Label + ": " + MaybeRemovedText})
+					as = append(as, Alert{Kind: AlertRemoved, Room: r.ID, Text: "room " + Isolate(EscapeDisplay(r.Label)) + ": " + MaybeRemovedText})
 				}
 			}
 		} else {
@@ -1619,7 +1639,7 @@ func (s *Surface) Alerts(ctx context.Context, wait time.Duration) ([]Alert, erro
 			return nil, err
 		}
 		for _, q := range qs {
-			as = append(as, Alert{Kind: AlertQuestion, ID: q.ID, Room: q.Room, Since: q.Created, Text: q.From + " asks: " + q.Text})
+			as = append(as, Alert{Kind: AlertQuestion, ID: q.ID, Room: q.Room, Since: q.Created, Text: EscapeDisplay(q.From) + " asks: " + EscapeDisplayText(q.Text)})
 		}
 		if len(as) > 0 || wait == 0 {
 			return as, err

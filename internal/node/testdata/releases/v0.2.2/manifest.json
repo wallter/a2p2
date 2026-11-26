@@ -1,0 +1,70 @@
+{
+  "a": {
+    "id": "5c8d510c8c0fa75d837f153daa3f5edd63374220e28b032b74dbe14468757f2b",
+    "agents": [
+      "alice"
+    ],
+    "rooms": {
+      "r_005742557a805eebd8741a3a85650ecc": {
+        "label": "solo",
+        "records": 1,
+        "members": [
+          "5c8d510c8c0fa75d837f153daa3f5edd63374220e28b032b74dbe14468757f2b"
+        ],
+        "admins": [
+          "5c8d510c8c0fa75d837f153daa3f5edd63374220e28b032b74dbe14468757f2b"
+        ]
+      },
+      "r_667e5a68a02926b58a7401f7ef7fde96": {
+        "label": "team",
+        "records": 10,
+        "members": [
+          "5c8d510c8c0fa75d837f153daa3f5edd63374220e28b032b74dbe14468757f2b",
+          "e4c85b7223e96af419f8a4201b458638e9454a53ef63381af7469db2ebb5b9e4"
+        ],
+        "admins": [
+          "5c8d510c8c0fa75d837f153daa3f5edd63374220e28b032b74dbe14468757f2b"
+        ]
+      }
+    }
+  },
+  "b": {
+    "id": "e4c85b7223e96af419f8a4201b458638e9454a53ef63381af7469db2ebb5b9e4",
+    "agents": [
+      "bob"
+    ],
+    "rooms": {
+      "r_667e5a68a02926b58a7401f7ef7fde96": {
+        "label": "team",
+        "records": 10,
+        "members": [
+          "5c8d510c8c0fa75d837f153daa3f5edd63374220e28b032b74dbe14468757f2b",
+          "e4c85b7223e96af419f8a4201b458638e9454a53ef63381af7469db2ebb5b9e4"
+        ],
+        "admins": [
+          "5c8d510c8c0fa75d837f153daa3f5edd63374220e28b032b74dbe14468757f2b"
+        ]
+      }
+    }
+  },
+  "c": {
+    "id": "fccf1cece175bf1805658f3d4e3250308b844746f4fcc3f23e63bc869e286849",
+    "agents": [
+      "carol"
+    ],
+    "rooms": {
+      "r_667e5a68a02926b58a7401f7ef7fde96": {
+        "label": "team",
+        "records": 8,
+        "members": [
+          "5c8d510c8c0fa75d837f153daa3f5edd63374220e28b032b74dbe14468757f2b",
+          "e4c85b7223e96af419f8a4201b458638e9454a53ef63381af7469db2ebb5b9e4",
+          "fccf1cece175bf1805658f3d4e3250308b844746f4fcc3f23e63bc869e286849"
+        ],
+        "admins": [
+          "5c8d510c8c0fa75d837f153daa3f5edd63374220e28b032b74dbe14468757f2b"
+        ]
+      }
+    }
+  }
+}

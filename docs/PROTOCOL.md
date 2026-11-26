@@ -447,7 +447,18 @@ Error body: `{"error":"<code>","detail":"<≤ 200 bytes>"}`.
 | Back-off | 1 s doubling to 5 min, ±20 % jitter |
 | Per peer | one waiting pull per room (a new one releases the old); 4 other concurrent (a request counts until it enters a hold); 20 per s, burst 40 |
 | Requester pacing | a waiting pull answered `same` well before its wait, with nothing stored either way, counts as a failure for back-off |
-| Inbound connections | 256 |
+| Inbound connections | 256 of members of a room held here, at most 16 of one key; 32 of other keys ("strangers"); 64 still in the TLS handshake, and 16 more for source groups (IPv4 address or IPv6 /64) that completed a member's handshake in the last 24 h, at most 4 of them for one group |
+| Per source, outside the members' pool | 8 per IPv4 address or IPv6 /64, 16 per /56, 32 per /48, in the shared handshake slots or of strangers; a connection with no slot is closed at once. The 16 kept slots are not counted here; one there that does not prove a member's key is closed and its group is no longer known |
+| Server TLS handshake | 5 s for the handshake and the membership lookup after it; the pool is chosen once the handshake has finished, and a full pool closes the connection |
+| Connection of a stranger | one request at a time (a second one at once is refused 429 before its body is read); closed after each answer (HTTP/1.1 `Connection: close`, HTTP/2 GOAWAY) and after 15 s at most; its rate buckets are separate from members' |
+
+A key is a member here when a room this machine holds lists it now,
+checked at the handshake and again for every request. A machine whose
+request carries the entries that admit it is answered as usual, in the
+strangers' pool, so a waiting pull it starts then lasts 15 s at most.
+None of this changes what is sent: a client that is refused a slot sees
+a failed handshake or a closed connection and retries under its
+back-off.
 
 ### 4.7 Dial-back and `net check`
 
@@ -743,11 +754,12 @@ new grant is signed if it is still a member; approval returns the log).
 |---|---|---|
 | 403 | `bad_secret` | unknown secret, or bound to another key |
 | 403 | `declined`, `revoked`, `expired`, `removed` | as above |
-| 429 | `rate_limited`, `Retry-After` | 10 requests per minute per source IP address, counted before the body is read; 10 per minute per key that presented a valid secret; polls naming an unknown invite share 60 per minute, counted before any lookup |
-| 503 | `unavailable`, `Retry-After` | the room already has 32 requests waiting for a person |
+| 429 | `rate_limited`, `Retry-After` | per source address, a minute: 80 bodies read, counted before the body (at most 16 KiB) is read; then 10 opens and accepts, and separately 30 polls. The addresses of one IPv6 /64 together get 4 times each. 10 per minute per key that presented a valid secret. Polls by hash naming an invite not held here: 10 per minute per IPv4 address or IPv6 /64, charged after the lookup, so a poll for an invite held here is never refused by it. While a table of 4,096 addresses or /64s is full, the one heard from least recently is forgotten |
+| 503 | `unavailable`, `Retry-After` | the room already has 32 requests this machine started waiting for a person (requests raised to second another admin's entry are not counted) |
 
 The joiner starts polling at an interval of `retry_ms` and doubles it
-up to 60 s. It stops on signed with `more` false, refused or expired,
+up to 60 s. An accept answered 429 or 503 is sent again after its
+`Retry-After` (at most 60 s), three times in all. It stops on signed with `more` false, refused or expired,
 and tells the person the outcome.
 
 ## 6. MCP tools (golden file)
@@ -1040,7 +1052,7 @@ the code is `node.ErrorCodes`):
 |---|---|---|
 | `invalid_request` | no | malformed, or names something that cannot be (the default) |
 | `not_found` | no | no such room, message, member or request here |
-| `not_allowed` | no | the caller may not do this (not addressed, its own message, not an admin, the local room) |
+| `not_allowed` | no | the caller may not do this (not addressed, its own message, not an admin, the local room, a room set aside) |
 | `not_shown` | no | a handled report before the agent was shown the text; reading it first makes the call succeed |
 | `already_done` | no | done before (a request already decided, an invite already used) |
 | `not_registered` | yes | the agent is not registered here; registering again (the MCP shim does) makes it succeed |
@@ -1053,8 +1065,9 @@ the code is `node.ErrorCodes`):
 | `internal` | yes | the daemon failed (500) |
 
 Responses are JSON with `<`, `>` and `&` written as they are, not
-escaped. CLI `--json` prints the response unchanged; otherwise the CLI
-prints the sentence.
+escaped. CLI `--json` prints the response unchanged: strings as stored,
+escaped by JSON's rules only. Otherwise the CLI prints the sentence, with
+what other machines wrote escaped (10.8).
 
 On Windows every call carries the header `A2P2-Local-Key` with the
 contents of `local.key` in the home (48 hex characters, new at each
@@ -1077,7 +1090,7 @@ Linux the daemon writes no key and ignores the header (D47).
 | `requests` (new) | `{}` | `{"requests":[{"id","kind","action","room","room_label","node","fingerprint","name","role","history","seconding","created","deadline","text"}]}`; `kind` `network` is a recorded decision about networking |
 | `confirm` (new) | `{"id","approve":bool,"not_caught_up_ok"?:true}` | `{"id","state":"approved"\|"declined"\|"failed","reason"?,"entries"?,"effect"?}`; `reason` `not_caught_up` means this machine has not checked the room's log with another member since it started (DESIGN 3); the surface shows the warning and may repeat with `not_caught_up_ok`, which is recorded |
 | `net` (changed) | `{"state":"off"\|"outbound"\|"on","listen"?}` | `{"state","listen","request","text","applies"}`; a person's decision with the same authority as `confirm`, recorded as a decided request. The daemon applies it at once, without a restart; `applies` is `"now: the daemon applies it at once"` |
-| `status` (changed) | `{"show_notice"?,"notice_shown"?}`; `show_notice`: a person will be shown this status, so the one-time notice is returned while it has not been recorded as shown (returning it records nothing); `notice_shown`: the caller printed or drew the notice, which is recorded as shown before the status is read | machine, version, `network {state, listen, request, applied?, reason?}`, rooms (as in `room/list`, each also with `agents`: `[{"agent","last_seen"}]`, the agents of members seen writing there, newest first), agents, `levels` (`[{"agent","room","level"}]`, every local agent's level that is not `all`), `waiting` (requests for a person), and `notice` until it is recorded as shown. `network` is the latest decision; `applied` and `reason` appear only when what runs differs from it: while a decision is being applied (`applied` is the state still running, `reason` `being applied`), or when `on` cannot listen (`applied` `outbound`, `reason` the listener's error) |
+| `status` (changed) | `{"show_notice"?,"notice_shown"?}`; `show_notice`: a person will be shown this status, so the one-time notice is returned while it has not been recorded as shown (returning it records nothing); `notice_shown`: the caller printed or drew the notice, which is recorded as shown before the status is read | machine, version, `network {state, listen, request, applied?, reason?}`, rooms (as in `room/list`, each also with `agents`: `[{"agent","last_seen"}]`, the agents of members seen writing there, newest first), agents, `levels` (`[{"agent","room","level"}]`, every local agent's level that is not `all`), `waiting` (requests for a person), and `notice` until it is recorded as shown. `network` is the latest decision; `applied` and `reason` appear only when what runs differs from it: while a decision is being applied (`applied` is the state still running, `reason` `being applied`), or when `on` cannot listen (`applied` `outbound`, `reason` the listener's error). `quarantined`: `[{"id","label","reason"}]`, the rooms set aside because their stored log does not load in this version (DESIGN section 5), absent when there are none; such a room is not in `rooms`, and a write to it is refused with `not_allowed` |
 | `room/invite` (changed) | `{"room","history"?,"role"?}` | `{"token","expires","room"}`; refused while networking is off |
 | `room/join` (changed) | `{"token"}` | the previewed answer of 5.3 plus `preview`, the preview's identifier; refused while networking is off |
 | `room/join/accept` (new) | `{"token","preview","wait_ms"?}` | `{"state":"accepted"\|"signed"\|"refused"\|"expired"\|"removed","room"?,"reason"?,"role"?,"history"?,"note"?}`; `role` and `history` are what the joiner's own log shows, `note` says if they differ from the preview |
@@ -1180,8 +1193,14 @@ levels, U1 to U3); leaving a room deletes its rows. Migration 12 adds
 `shown` and replaces the index `records_history` with `records_reading`
 (D-reading); leaving a room deletes its `shown` rows. While `v02_removed` is set and `v02_dropped_notice` is
 not, `status` with `show_notice` and the page return the notice (section
-7). Per room at most 32 requests wait, and 256 refused dependants and 256
-invalid entries are kept.
+7). Per room at most 32 requests this machine started wait (proposals,
+invite accepts, sends with files; a removal of an admin passes it once
+per target), and requests raised to second another admin's entry wait at
+most 32 in all, 4 per signing admin unless the place is spare, the first
+removal of an admin per signer and target outside both (DESIGN section
+7). 256 refused dependants and 256 invalid entries are kept. A `log` row's `reason` is explanation only:
+a replay compares `state`, and a room whose stored log does not replay to
+the same states is set aside, not opened (DESIGN section 5).
 
 `gen` increases on leave and on join. `batch` and `batch_pos` record
 arrival order for replaying `members.Machine`; accepted offers are applied
@@ -1423,10 +1442,55 @@ version shown, `files_pending` and `files_note`. A new `Entry` kind
 any entry; it is recorded in the `shown` table with key `q:<request id>`,
 and is shown only to the agent that asked.
 
-What a request shows is escaped by `EscapeDisplay`: C0 and C1 controls,
-DEL, U+061C, U+200E, U+200F, U+202A to U+202E and U+2066 to U+2069 are
-written `\u{<hex>}`, and a byte that is not UTF-8 is written `\x{<hex>}`.
-`body` escapes each line and keeps the line breaks.
+What a request shows is escaped by `EscapeDisplay`
+(`internal/node/escape.go`): every control, format, line separator and
+paragraph separator character (Unicode classes Cc, Cf, Zl, Zp), every
+other default ignorable code point and every variation selector, that
+is U+034F, the Hangul fillers, U+17B4 and U+17B5, U+180B to U+180F,
+U+FE00 to U+FE0F, U+FFF0 to U+FFF8 and the whole block U+E0000 to
+U+E0FFF (tag characters, the variation selectors supplement and the
+unassigned code points around them), is written `\u{<hex>}` unless the
+text rules below keep it, a byte that is not UTF-8 is written
+`\x{<hex>}`, and a backslash before `u{` or `x{` is written `\u{5c}`, so
+the output reads back as the input. Nothing is dropped. `body`
+escapes each line and keeps the line breaks (`EscapeDisplayLines`). This
+covers every request's `text`: the room label, the machine's name and
+the agent ids in it are escaped, whoever chose them, and each is set
+between U+2068 and U+2069 so that it cannot reorder the words around it.
+A request also has `name_from`
+(`machine`: the machine asking to join chose its name; `admin`: the
+admin whose entry it seconds did; `here`; empty when the request carries
+no name) and `recorded_name`, the name the room records for the machine.
+For a seconding request `text` names both, and says when other members
+of the room have the name shown (compared without case; up to three by
+fingerprint, the rest counted). `room_label` and `name` stay as stored;
+a program that shows them escapes them. The page and `a2p2 confirm`
+send back the `text` they showed (the local API's `confirm` takes it as
+an optional `text`); the daemon refuses a decision whose text is not the
+request's, and for an approval compares it again under the same lock as
+the decision, so a member who joined in between cannot be missed.
+
+Message text a person reads is escaped by `EscapeDisplayText`, which
+keeps a newline, a tab, a zero width joiner between two emoji, a joiner
+or non-joiner between two letters of a script that needs them (Arabic
+and the other scripts of U+0600 to U+08FF, the Indic scripts, Myanmar,
+Khmer, Mongolian, the Arabic presentation forms), and one U+FE0E or
+U+FE0F straight after an emoji, a digit, `#` or `*`, a right-to-left or
+Arabic letter mark between two right-to-left letters, a zero width space
+between two characters of Thai, Lao, Tibetan, Myanmar or Khmer, one
+ideographic variation selector after a CJK ideograph and the flags of
+England, Scotland and Wales; a CRLF is shown as one line break. One-line
+text follows the same rules without line breaks and tabs. Everything
+else in the table is escaped. What is kept can still carry about one bit per
+such position that nobody sees, since the drawing may look the same with
+or without it; that is accepted, only inside emoji and those scripts,
+because escaping these would break them for every reader. A question's
+choice is drawn by `EscapeChoice`: the same rules on one line, with every
+blank that would not be sent as shown (a space other than U+0020, U+2800,
+a space at either end or next to another) escaped too. The page sends a
+choice only when `EscapeChoice` leaves it unchanged (`ChoiceHidden`).
+The page uses the same tables and rules. Nothing in the wire format or
+in what is stored changes: escaping is done when text is shown.
 
 CLI: `a2p2 send --file PATH` (repeatable; a relative path is made
 absolute), `a2p2 fetch SHA256 [--room R] [--message ID] [--wait S]` (the

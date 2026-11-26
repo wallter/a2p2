@@ -83,3 +83,29 @@ func TestHelpEndsWithTheDocsLine(t *testing.T) {
 		t.Fatalf("help ends with %q", usage[len(usage)-80:])
 	}
 }
+
+// A room set aside is a failing doctor line whose fix works: the local
+// room cannot be left, so its fix names only the older version.
+//
+// Requirements: security review F71 (doctor)
+func TestDoctorGivesARoomSetAsideAFixThatWorks(t *testing.T) {
+	local, other := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	st := localapi.Status{Local: local, Quarantined: []localapi.Quarantined{
+		{ID: local, Label: "local", Reason: "stored entry x does not verify"},
+		{ID: other, Label: "team", Reason: "replay decided"}}}
+	cs := quarantineChecks(st)
+	if len(cs) != 2 {
+		t.Fatalf("checks: %+v", cs)
+	}
+	for _, c := range cs {
+		if c.OK || c.Fix == "" {
+			t.Fatalf("not a failing line with a fix: %+v", c)
+		}
+	}
+	if strings.Contains(cs[0].Fix, "room leave") || !strings.Contains(cs[0].Fix, "cannot be left") {
+		t.Fatalf("local room fix: %q", cs[0].Fix)
+	}
+	if !strings.Contains(cs[1].Fix, "a2p2 room leave "+other) {
+		t.Fatalf("other room fix: %q", cs[1].Fix)
+	}
+}

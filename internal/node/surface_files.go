@@ -227,6 +227,11 @@ func (s *Surface) RoomFiles(ctx context.Context, room, mode string) (RoomFilesVi
 	switch mode {
 	case "":
 	case store.FilesOff, store.FilesCarry, store.FilesKeep:
+		if s.r != nil {
+			if err := s.r.setAsideErr(id); err != nil {
+				return RoomFilesView{}, err
+			}
+		}
 		if err := s.m.st.SetFileMode(ctx, id, mode, s.m.now()); err != nil {
 			return RoomFilesView{}, err
 		}
@@ -361,7 +366,7 @@ func (s *Surface) describeSend(ctx context.Context, q store.Request, v *RequestV
 	// addressee is everyone, a reply sent to everyone included [L2].
 	sv := &SendView{Agent: s.agentID(d.Agent, s.m.ID), Everyone: d.Everyone || len(d.To) == 0,
 		Parent: d.Parent, Replaces: d.Replaces, Base: d.Base, TextLine: EscapeDisplay(firstLineOf(d.Text)),
-		Body: escapeLines(d.Text), Terms: q.Terms}
+		Body: EscapeDisplayLines(d.Text), Terms: q.Terms}
 	for _, a := range d.To {
 		sv.To = append(sv.To, AgentID(a))
 	}
@@ -411,13 +416,20 @@ func sendText(sv *SendView, label, room string, total int64) string {
 	if len(sv.Files) == 1 {
 		files = "1 file"
 	}
-	where := "room " + EscapeDisplay(label) + " (" + room + ")"
+	// The label and agent ids can come from other machines: each is
+	// escaped and isolated, as in requestText.
+	where := "room " + Isolate(EscapeDisplay(label)) + " (" + room + ")"
+	agent := func(id string) string { return Isolate(EscapeDisplay(id)) }
 	to := "everyone in " + where + " (" + strconv.Itoa(sv.Members) + " members)"
 	switch {
 	case len(sv.To) > 0:
-		to = strings.Join(sv.To, ", ") + " in " + where
+		ids := make([]string, len(sv.To))
+		for i, a := range sv.To {
+			ids[i] = agent(a)
+		}
+		to = strings.Join(ids, ", ") + " in " + where
 	case !sv.Everyone && sv.ParentAuthor != "":
-		to = sv.ParentAuthor + ", the author of message " + sv.Parent + ", in " + where
+		to = agent(sv.ParentAuthor) + ", the author of message " + sv.Parent + ", in " + where
 	case !sv.Everyone:
 		to = "the author of message " + sv.Parent + " in " + where
 	}
@@ -427,21 +439,10 @@ func sendText(sv *SendView, label, room string, total int64) string {
 			msg += " (version " + sv.Base + ")"
 		}
 		return fmt.Sprintf("replace message %s, which goes to %s, by agent %s, with new text and %s (%d bytes); "+
-			"the replacement has only the files listed", msg, to, sv.Agent, files, total)
+			"the replacement has only the files listed", msg, to, agent(sv.Agent), files, total)
 	}
 	return fmt.Sprintf("send a message by agent %s to %s with %s (%d bytes): the files are the bytes copied when the agent asked",
-		sv.Agent, to, files, total)
-}
-
-// escapeLines is text with each line escaped by EscapeDisplay, joined by
-// "\n": every character that could hide or reorder text is shown, and the
-// lines stay lines.
-func escapeLines(text string) string {
-	lines := strings.Split(text, "\n")
-	for i, l := range lines {
-		lines[i] = EscapeDisplay(l)
-	}
-	return strings.Join(lines, "\n")
+		agent(sv.Agent), to, files, total)
 }
 
 func firstLineOf(text string) string {
@@ -450,39 +451,6 @@ func firstLineOf(text string) string {
 		line = string([]rune(line)[:firstLineRunes]) + "..."
 	}
 	return line
-}
-
-// EscapeDisplay writes the characters that can hide or reorder what a
-// person reads as \u{...} (PROTOCOL 10.8): C0 and C1 controls and DEL,
-// U+061C, U+200E, U+200F, U+202A to U+202E and U+2066 to U+2069. A byte
-// that is not UTF-8 is written \x{..}.
-func EscapeDisplay(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); {
-		r, n := utf8.DecodeRuneInString(s[i:])
-		switch {
-		case r == utf8.RuneError && n == 1:
-			fmt.Fprintf(&b, `\x{%02x}`, s[i])
-		case hides(r):
-			fmt.Fprintf(&b, `\u{%x}`, r)
-		default:
-			b.WriteString(s[i : i+n])
-		}
-		i += n
-	}
-	return b.String()
-}
-
-func hides(r rune) bool {
-	switch {
-	case r < 0x20, r >= 0x7f && r <= 0x9f:
-		return true
-	case r == 0x061c, r == 0x200e, r == 0x200f:
-		return true
-	case r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
-		return true
-	}
-	return false
 }
 
 // ---- telling the agent that asked ----

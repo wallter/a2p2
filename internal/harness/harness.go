@@ -28,14 +28,15 @@ var hookNames = []string{"claude", "codex", "agy"}
 // Options control install/uninstall. Paths default to the real config
 // locations; tests override HomeDir, Run and LookPath.
 type Options struct {
-	HomeDir  string                                  // user's home directory ("" = os.UserHomeDir)
-	Binary   string                                  // absolute path of the a2p2 binary to register
-	OnStop   bool                                    // also install the end-of-turn hook
-	DryRun   bool                                    // describe changes without writing or running anything
-	Run      func(name string, args ...string) error // runs a harness CLI (nil = exec)
-	LookPath func(file string) (string, error)       // nil = exec.LookPath
-	StateDir string                                  // where install records live ("" = $A2P2_HOME/installs or ~/.a2p2/installs)
-	OS       string                                  // the system to install for ("" = runtime.GOOS; tests set "windows")
+	HomeDir      string                                  // user's home directory ("" = os.UserHomeDir)
+	Binary       string                                  // absolute path of the a2p2 binary to register
+	OnStop       bool                                    // also install the end-of-turn hook
+	DryRun       bool                                    // describe changes without writing or running anything
+	ApproveTools bool                                    // Codex: let every a2p2 tool run without a prompt; only when the person asks
+	Run          func(name string, args ...string) error // runs a harness CLI (nil = exec)
+	LookPath     func(file string) (string, error)       // nil = exec.LookPath
+	StateDir     string                                  // where install records live ("" = $A2P2_HOME/installs or ~/.a2p2/installs)
+	OS           string                                  // the system to install for ("" = runtime.GOOS; tests set "windows")
 }
 
 type spec struct {
@@ -181,11 +182,11 @@ func loadHooks(name string, o Options) (*hookFile, error) {
 	if !ok {
 		return nil, fmt.Errorf("unknown harness %q (want one of %s)", name, strings.Join(Names, ", "))
 	}
-	home, err := o.home()
+	path, err := configFile(o, sp.file)
 	if err != nil {
 		return nil, err
 	}
-	h := &hookFile{path: filepath.Join(append([]string{home}, sp.file...)...), spec: sp, doc: map[string]json.RawMessage{}}
+	h := &hookFile{path: path, spec: sp, doc: map[string]json.RawMessage{}}
 	h.orig, err = os.ReadFile(h.path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -330,14 +331,19 @@ func (h *hookFile) realPath() string {
 	return h.path
 }
 
-// write saves atomically, recording the original first (see bakSuffix).
-// Existing permission bits are kept.
+// write saves atomically, recording the original first (see bakSuffix),
+// and only while the file still holds what loadHooks read (see
+// writeGuarded). Existing permission bits are kept.
 func (h *hookFile) write(record bool) error {
 	b, err := h.encode()
 	if err != nil {
 		return err
 	}
-	return saveRecorded(h.realPath(), h.existed, h.orig, b, record)
+	if err := saveRecorded(h.realPath(), h.existed, h.orig, b, record); err != nil {
+		return err
+	}
+	h.orig, h.existed = b, true
+	return nil
 }
 
 func hookEvents(sp spec) []string { return []string{sp.first, "Stop"} }
@@ -364,9 +370,24 @@ func Install(name string, o Options) (string, error) {
 	if err := forOS(name, &o); err != nil { // windows.go
 		return "", err
 	}
-	if a, ok := adapters[name]; ok {
-		return a.install(name, o)
+	warn, err := checkBinary(o) // binary.go
+	if err != nil {
+		return "", err
 	}
+	var rep string
+	if a, ok := adapters[name]; ok {
+		rep, err = a.install(name, o)
+	} else {
+		rep, err = installHooked(name, o)
+	}
+	if warn != "" {
+		rep = strings.TrimPrefix(rep+"\n"+warn, "\n")
+	}
+	return rep, err
+}
+
+// installHooked installs into a harness registered through its own CLI.
+func installHooked(name string, o Options) (string, error) {
 	h, err := loadHooks(name, o) // validate early; re-read below
 	if err != nil {
 		return "", err
@@ -408,21 +429,29 @@ func Install(name string, o Options) (string, error) {
 	if !o.DryRun {
 		_ = o.run(cli, "mcp", "remove", "a2p2") // idempotent: ignore failure
 		if err := o.run(cli, mcpAdd(name, o)...); err != nil {
-			return strings.Join(rep, "\n"), fmt.Errorf("%s mcp add failed: %w", cli, err)
+			err = fmt.Errorf("%s mcp add failed: %w", cli, err)
+			// The approval lines a2p2 wrote go even when the CLI fails and
+			// keeps the table: nothing is approved for a server that is not
+			// registered as asked.
+			if name == "codex" {
+				if removed, rerr := revokeCodexApproval(o); rerr != nil {
+					err = errors.Join(err, rerr)
+				} else if removed {
+					path, _ := codexConfig(o)
+					rep = append(rep, "removed the tool approval an earlier a2p2 install added to "+path)
+				}
+			}
+			return strings.Join(rep, "\n"), err
 		}
 	}
 	if name == "codex" {
-		path, _ := codexConfig(o)
-		switch ok, err := grantCodexApproval(o); {
-		case o.DryRun:
-			rep = append(rep, "would approve this server's tools in "+path+" (this server only)")
-		case err != nil:
+		more, err := setCodexApproval(o)
+		rep = append(rep, more...)
+		if err != nil {
 			return strings.Join(rep, "\n"), err
-		case ok:
-			rep = append(rep, "approved this server's tools in "+path+" (this server only; uninstall removes it)")
-		default:
-			rep = append(rep, "could not find "+codexTable+" in "+path+"; approve a2p2's tools in Codex yourself")
 		}
+	} else if o.ApproveTools {
+		rep = append(rep, "--approve-tools has no effect for "+name+": a2p2 approves no tools there; "+name+" asks by its own rules")
 	}
 	if h, err = loadHooks(name, o); err != nil {
 		return strings.Join(rep, "\n"), err
@@ -509,11 +538,12 @@ func Uninstall(name string, o Options) (string, error) {
 	var mcp []string
 	if name == "codex" {
 		path, _ := codexConfig(o)
-		if o.DryRun {
-			mcp = append(mcp, "would remove a2p2's tool approval from "+path)
-		} else if ok, err := revokeCodexApproval(o); err != nil {
+		switch ok, err := revokeCodexApproval(o); {
+		case err != nil:
 			return "", err
-		} else if ok {
+		case ok && o.DryRun:
+			mcp = append(mcp, "would remove a2p2's tool approval from "+path)
+		case ok:
 			mcp = append(mcp, "removed a2p2's tool approval from "+path)
 		}
 	}
@@ -550,7 +580,7 @@ func (h *hookFile) restore(dry bool) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return restoreRecorded(h.realPath(), cur, len(h.doc) == 0, same, dry)
+	return restoreRecorded(h.realPath(), cur, h.orig, h.existed, len(h.doc) == 0, same, dry)
 }
 
 func prefixed(dry bool, s string) string {
@@ -600,7 +630,8 @@ func AnyConnected(checks []Check) bool {
 
 // Doctor reports whether each installed harness is wired correctly: its
 // unread-notice hook and its MCP registration, each by name, so a half
-// install says which half is missing. It never runs a model or a harness.
+// install says which half is missing, and for Codex which a2p2 tools run
+// without a prompt. It never runs a model or a harness.
 func Doctor(o Options) []Check {
 	var out []Check
 	for _, name := range hookNames {
@@ -654,6 +685,9 @@ func Doctor(o Options) []Check {
 			reg.OK, reg.Info, reg.Fix = true, "MCP server registered with "+name, ""
 		}
 		out = append(out, hook, reg)
+		if name == "codex" {
+			out = append(out, codexApprovalCheck(o))
+		}
 	}
 	for _, name := range Names[len(hookNames):] {
 		if a := adapters[name]; a.cli != "" {
@@ -662,6 +696,11 @@ func Doctor(o Options) []Check {
 				_ = forOS(name, &o)
 				out = append(out, a.doctor(name, o))
 			}
+		}
+	}
+	if AnyConnected(out) {
+		if c, ok := binaryCheck(o); ok {
+			out = append(out, c)
 		}
 	}
 	return out

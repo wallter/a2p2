@@ -223,6 +223,46 @@ A server holds a waiting pull at most 60 s; client and server deadlines
 exceed it by 30 s. A rotating anchor is first probed with a 10 s pull; failure moves on.
 Waiting pulls to one peer share one HTTP/2 connection.
 
+**Inbound connections.** A listener cannot know who connects until the TLS
+handshake proves the client's key, and any key completes one. So it does
+each handshake itself and counts connections in three pools. A
+connection in its handshake takes one of 64 shared slots and a slot of
+each group of its source: 8 for an IPv4 address or an IPv6 /64, 16 for a
+/56 and 32 for a /48. When those are full, an IPv4 address or IPv6 /64
+that completed a member's handshake here in the last 24 hours may use 16
+slots kept for such groups, at most 4 at once, whatever its /56 and /48
+hold. A connection there that does not prove a member's key is closed,
+and its group is no longer known. A connection with no slot is closed at
+once, and one whose handshake and membership lookup have not finished
+after 5 s is closed. Only once the handshake has finished,
+signature included, does the key move the connection to the members'
+pool (256, at most 16 of one key), when it is a member of a room held
+here, or to the strangers' pool (32, still counted against its source).
+With no room there the connection is closed. Membership is checked again
+for every request: a key that became a member moves to the members'
+pool, a removed key is served as a stranger from then on, and a key
+added back is a member's again. A stranger's connection serves one
+request at a time, every answer to a stranger closes its connection, and
+one lasts 15 s at most.
+Strangers have rate buckets of their own, so they cannot fill the
+members' table, and their refused requests are logged at Debug; a
+member's are logged at Info 5 at once, then one per 10 s
+(`TestOneSourceCannotHoldAllInboundSlots`,
+`TestACopiedMemberCertificateWithoutItsKeyTakesNoMemberSlot`,
+`TestAHandshakeFloodFromManySourcesDoesNotKeepOutAKnownMember`,
+`TestMembershipIsCheckedAgainForEveryRequestOnAConnection`,
+`TestRefusedPeerRequestsDoNotGrowLog`). A joiner, a removed machine and a
+member not yet known here (whose request carries the entries that admit
+it) are strangers until the room's log here names them; their requests
+are answered as before, only in the smaller pool, and a waiting pull
+started then is cut at 15 s. The join route limits each source address,
+and each IPv6 /64 at 4 times as much, with budgets for bodies read
+(before the body is read), opens and polls (PROTOCOL 5.3). A poll by hash
+is looked up before it is charged to the budget for unknown invites, and
+a joiner sends an accept answered 429 or 503 again after the stated
+delay. What a flood from many source groups can still do is in
+SECURITY.md.
+
 **Cost (estimates).** About 130 transfers of about 2 KB deliver a 1 KiB
 message to 63 machines. Not yet measured: duplicate offers, 100 rooms,
 anchor load, and N1 behind a relay.
@@ -238,7 +278,30 @@ the machine keeps signed headers and read state for the room's life.
 Each send, response application, request log and offer application, Seen,
 log entry signing and pruning pass takes one transaction. On startup the
 daemon rebuilds `members.Machine` by replaying `log` in arrival batches.
-The result is deterministic. It prunes hourly and before every read, page
+The result is deterministic. A stored entry is checked for its form and
+signature only, not for the content rules a received entry meets (such as
+what a room label or a name may contain), so a rule added to receipt later
+does not reject a log stored before it. The replay compares each entry's
+disposition with the stored one, not its reason: a reason is an
+explanation whose wording may change, and the stored text is left as it
+is, so the version that wrote it can still open the database. A room
+whose stored log does not parse, does not verify, or replays to another
+disposition is set aside: it is not served or pulled, a send, replace,
+withdraw, handled report, send with files, Seen or change of its files
+setting is refused, and setting it aside deletes nothing. Seen across
+rooms leaves its keys `not_shown` and confirms the other rooms. Its stored
+messages can still be read here (a read still records what it showed,
+which marks nothing seen). Its reading frontier is not known, so a stream
+without a cursor is held back, and missing text is neither shown as
+expired nor marked expired. Other text past retention still expires, and the file
+sweep drops only files whose text is withdrawn or past retention; the
+stored member cache decides nothing. `status` and `a2p2 doctor` show it
+with the reason and what to do: run the version that stored it, or leave
+it and join it again (not the local room, which cannot be left). The
+other rooms open as usual. A batch that drops entries (over the held or
+branch bound) is decided again without them, as a start would decide the
+rows it leaves, so no input a peer delivers makes a room fail its own
+replay. It prunes hourly and before every read, page
 and offer. Text past expiry becomes `expired` permanently. The daemon
 deletes withdrawn text when it stores the withdraw [R6].
 
@@ -254,7 +317,12 @@ Agent get the MCP server only, and Pi, which has no MCP, a skill that
 points its model at the CLI ([harness notes](HARNESSES.md)). Install
 records any entry named `a2p2` it replaces in `$A2P2_HOME/installs/`, and
 uninstall puts it back; without a record uninstall removes nothing
-(D44). Replies carry
+(D44). Install and uninstall write a harness file only if it still holds
+what they read (D60). Install approves no a2p2 tool unless the person passes
+`--approve-tools` (Codex only), so whether `send` waits for the person
+is the harness's own rule; it refuses a binary in a temporary directory
+or one another user could replace, and Pi's skill passes message text to
+bash only through a quoted heredoc ([security](../SECURITY.md)). Replies carry
 `parent_state`. The thread view lists held messages of a thread, or with
 `after` only those that follow a given message of it; the branch view
 follows `parent` down from the message, held or not, and misses replies
@@ -420,6 +488,42 @@ and `a2p2 join`, each with a typed `yes` that the daemon records; the page
 offers neither. No decision goes through agent tools. A same-user agent
 set on bypassing it can; an OS-separated approver may come later.
 
+A request's text is built from local facts and escapes every string that
+can come from another machine (`EscapeDisplay`, PROTOCOL 10.8): the room
+label a remote creator chose and the names in entries, each also isolated
+(`Isolate`: U+2068 and U+2069; a `bdi` element on the page, its own line
+in the terminal when it holds right-to-left text). Its line cannot be
+cleared, reordered or split by them. A seconding request says the name
+it carries was written by the admin who signed the first entry, shows
+the name the room records for the machine, and names other members with
+the name shown, compared without case, up to three by fingerprint and
+the rest counted; the page and `confirm` no longer say the machine chose
+it. Because the text depends on the room's members, the page's approval
+and `a2p2 confirm` carry the text they showed; the daemon refuses a
+decision when it changed and compares it again under the decision lock.
+The stored label and entries are not checked or changed: logs signed
+before keep loading. The alert that this machine may have been removed
+from a room, and the CLI's join preview, escape and isolate the room's
+label the same way.
+
+On the page, room labels, machine names, agent ids, message text,
+notices, thread entries, reply previews and choices are escaped when
+drawn (`escapeDisplay`, `escapeText`, `escapeChoice` in `app.js`, the
+same tables as the daemon's). Two rooms whose labels may be drawn the
+same (escaped, in Unicode normal form C, with each run of Unicode white
+space or blank braille as one space, without the invisible characters
+the rules keep, and without case) are shown with their ids; `status`
+does the same without NFC (`node.LabelKey`). The CLI's output and the text of MCP tool results
+escape what other machines wrote the same way; `--json` prints the
+stored strings. A message that asks the person (choices, or addressed
+to `human`) is drawn under its own heading, apart from requests, with who asked, from which machine as
+that room records it, and whether it was asked of the person or of
+everyone; it says it approves nothing, and its choices are plain buttons.
+A choice whose button would not show it exactly as it is sent (a hidden
+character, a line break, a blank other than U+0020, a space at either
+end or next to another) is not sent: the person types the reply instead.
+An emoji sequence in a choice is shown and sent as it is.
+
 | Change | Entries | Confirmed on |
 |---|---|---|
 | Add a machine | one `add` by any admin [M3] | that admin and the joiner |
@@ -432,6 +536,30 @@ set on bypassing it can; an OS-separated approver may come later.
 `a2p2 room admin` replaces a lost admin (T9); the other admin sees the
 first entry as a request [M4].
 
+**Request budgets.** Requests this machine started (proposals, invite
+accepts and sends with files) wait at most 32 per room, checked again in
+the transaction that stores one. A proposal to remove an admin passes
+that budget, once per target. Requests raised to second another admin's
+entry have their own budgets, counting only requests whose entry still
+waits: 32 in all per room, and 4 per signing admin. A signing admin past
+its 4 takes only a spare place: one left after every other admin of the
+room but this machine keeps the places of its 4 that it has not used. The
+first removal of an admin per signing admin and target passes both
+budgets and takes no place in them. So one admin that signs many waiting
+entries takes the spare places on each other admin but not the 4 of
+another admin (while the room has at most 9 admins: 8 others times 4 is
+32), and cannot stop a removal of itself from being proposed or raised;
+removals waiting do not crowd out other requests. With more admins, those
+under their 4 can fill the 32 together. A pending request whose entry no
+longer waits (another admin seconded it, or a later entry changed its
+effect) is closed as
+failed; if the entry waits again it is raised again. The flooder's
+further entries stay in the log; each waiting entry without a request is
+raised when a decision frees a place, after each batch, and at the next
+start, a removal of an admin first, then in arrival order. If raising
+fails after a decision or at start, the room's next batch or pull tries
+again, and the start goes on.
+
 **First three admins (T9 default).** The second machine gets one `admin`
 entry; the third an `add` (it joins at once) plus `admin` entries from both
 admins, confirmed on both and on the joiner. The model test
@@ -442,7 +570,10 @@ covers the daemon's code. A daemon never co-signs alone.
 **Leaving.** A vote on one's own removal does not count [M5], so `a2p2 room
 leave` (otherwise a machine cannot stop carrying a room) is local: the
 room's data is deleted and its generation changes, so no late response
-applies. Rejoining needs a new invite; an admin removes it from the list.
+applies. Its files are deleted after the rooms lock is released, so
+leaving a room with many files does not stall the other rooms' pulls and
+approvals (other file work still waits for the deletions). Rejoining
+needs a new invite; an admin removes it from the list.
 
 ## 8. Failure handling
 
@@ -538,8 +669,10 @@ exists, from the CLI process under a throwaway key (PROTOCOL 4.7).
 and an invite's addresses at a join), only while networking is on or
 outbound only; the local router after `net on --map-port`; the address a
 person names to `net check HOST:PORT` or `--invite`, from the CLI and
-whatever the networking state; and, for `install.sh`, GitHub's release
-page, run by a person and not the daemon. No other code opens a
+whatever the networking state; and, for `install.sh` and `install.ps1`,
+GitHub's release page (and GitHub's API through `gh` when
+`A2P2_VERIFY_ATTESTATION=1` asks for the attestation check), run by a
+person and not the daemon. No other code opens a
 connection: no update check, no telemetry, no lookup of its own (D11, with
 its 2026-11-25 note; [SECURITY](../SECURITY.md#what-a2p2-connects-to)).
 
@@ -857,7 +990,8 @@ How a message carries files (requirement L1), added in 0.2.0. **[F1]** to
    opens each path once, refuses anything but a regular file after
    opening, and copies and hashes from that one handle into staging. The
    request shows each path as resolved from the opened file, in full,
-   with control and bidirectional characters escaped, its size and
+   with control, bidirectional and invisible characters escaped
+   (`EscapeDisplay`, PROTOCOL 10.8), its size and
    SHA-256, the room, the recipients, and for a replacement which message
    it replaces. The CLI and the page show the whole text, every line
    escaped, and send back the terms digest they showed; an approval

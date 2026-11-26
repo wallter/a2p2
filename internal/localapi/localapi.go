@@ -329,11 +329,16 @@ type (
 		Node        string `json:"node"`
 		Fingerprint string `json:"fingerprint"`
 		Name        string `json:"name,omitempty"`
-		Role        string `json:"role,omitempty"`
-		History     bool   `json:"history"`
-		Seconding   bool   `json:"seconding,omitempty"`
-		Created     string `json:"created"`
-		Deadline    string `json:"deadline,omitempty"`
+		// NameFrom says who chose name: machine (the machine asking to
+		// join), admin (the admin whose entry this seconds) or here.
+		// RecordedName is the name the room records for the machine.
+		NameFrom     string `json:"name_from,omitempty"`
+		RecordedName string `json:"recorded_name,omitempty"`
+		Role         string `json:"role,omitempty"`
+		History      bool   `json:"history"`
+		Seconding    bool   `json:"seconding,omitempty"`
+		Created      string `json:"created"`
+		Deadline     string `json:"deadline,omitempty"`
 		// Text says exactly what approving it does.
 		Text string `json:"text"`
 		// For kind send_files (PROTOCOL 10.6): the agent that asked, the
@@ -381,6 +386,10 @@ type (
 		// Terms is the terms digest the person was shown; an approval of
 		// a send_files request needs it equal to the request's terms.
 		Terms string `json:"terms,omitempty"`
+		// Text, when set, is the request's text as the person was shown
+		// it (Request.Text). A decision is refused, with nothing decided,
+		// unless the request's text is still the same (D58).
+		Text string `json:"text,omitempty"`
 	}
 	ConfirmResp struct {
 		ID      string   `json:"id"`
@@ -603,6 +612,16 @@ type (
 		// Files is what attachments take on this machine (each room's is
 		// in its files).
 		Files FilesUsage `json:"files"`
+		// Quarantined are the rooms set aside because their stored log
+		// does not load in this version: not served or pulled, nothing
+		// deleted. Absent when there are none.
+		Quarantined []Quarantined `json:"quarantined,omitempty"`
+	}
+	// Quarantined is one room set aside (node.Quarantine).
+	Quarantined struct {
+		ID     string `json:"id"`
+		Label  string `json:"label"`
+		Reason string `json:"reason"`
 	}
 	Empty struct{}
 )
@@ -761,7 +780,7 @@ func roomsOf(rs []node.RoomInfo) []Room {
 // RequestOf renders a request for a person.
 func RequestOf(q node.RequestView) Request {
 	out := Request{ID: q.ID, Kind: q.Kind, Action: q.Action, Room: q.Room, RoomLabel: q.RoomLabel, Node: q.Machine,
-		Fingerprint: q.Fingerprint, Name: q.Name, Role: q.Role, History: q.History, Seconding: q.Seconding,
+		Fingerprint: q.Fingerprint, Name: q.Name, NameFrom: q.NameFrom, RecordedName: q.RecordedName, Role: q.Role, History: q.History, Seconding: q.Seconding,
 		Created: Time(q.Created), Deadline: Time(q.Deadline), Text: q.Text}
 	if s := q.Send; s != nil {
 		out.Agent, out.To, out.ReplyTo, out.TextLine, out.Terms = s.Agent, s.To, s.Parent, s.TextLine, s.Terms
@@ -824,6 +843,9 @@ func StatusOf(st node.StatusView, listen []string, info Info) Status {
 		out.Levels = []store.AgentLevel{}
 	}
 	out.Files = FilesUsage{Held: st.Files.Held, Budget: st.Files.Budget, Unknown: st.Files.Unknown}
+	for _, q := range st.Quarantined {
+		out.Quarantined = append(out.Quarantined, Quarantined{ID: q.Room, Label: q.Label, Reason: q.Reason})
+	}
 	for i := range out.Rooms {
 		for _, w := range st.Writers[out.Rooms[i].ID] {
 			out.Rooms[i].Agents = append(out.Rooms[i].Agents, Writer{Agent: w.Agent, LastSeen: Time(w.Last)})
@@ -971,7 +993,21 @@ func Handler(s *node.Surface, info Info) http.Handler {
 		return out, err
 	})
 	handle(mux, "confirm", func(ctx context.Context, r ConfirmReq) (ConfirmResp, error) {
-		c, err := s.Confirm(ctx, r.ID, r.Approve, r.NotCaughtUpOK, r.Terms)
+		if r.Text != "" {
+			// As the page's confirm: the text shown must still be the
+			// request's, checked first for either decision and again
+			// under the decision lock for an approval (ConfirmShown).
+			qs, err := s.Waiting(ctx)
+			if err != nil {
+				return ConfirmResp{}, err
+			}
+			for _, q := range qs {
+				if q.ID == r.ID && q.Text != r.Text {
+					return ConfirmResp{}, &node.UserError{Msg: node.RequestChangedText}
+				}
+			}
+		}
+		c, err := s.ConfirmShown(ctx, r.ID, r.Approve, r.NotCaughtUpOK, r.Terms, r.Text)
 		return ConfirmResp{ID: c.ID, State: c.State, Reason: c.Reason, Entries: c.Entries, Effect: c.Effect}, err
 	})
 	handle(mux, "room/create", func(ctx context.Context, r RoomReq) (Room, error) {

@@ -53,8 +53,22 @@ const (
 	// chain, invalid parent), kept so a replay judges their dependants
 	// as before. Beyond it a further invalid entry is not taken at all.
 	MaxInvalidKept = 256
-	// MaxPendingRequests: requests waiting for a person, per room.
+	// MaxPendingRequests: requests this machine started that wait for a
+	// person, per room: proposals, invite accepts and sends with files.
+	// Requests raised to second another admin's entry are not counted
+	// here, so another machine cannot fill this budget [F1].
 	MaxPendingRequests = 32
+	// MaxRaisedPerSigner: requests raised to second one admin's entries
+	// that wait for a person, per room, kept for that admin while the
+	// room-wide budget is contended. Past it an admin takes only places
+	// no other admin's own budget needs (Rooms.raise). Its further
+	// waiting entries stay in the log and are raised as the person
+	// decides the earlier ones.
+	MaxRaisedPerSigner = 4
+	// MaxRaisedRequests: requests raised to second entries, from every
+	// admin, that wait for a person, per room. The first removal of an
+	// admin per signer and target is raised past it and not counted.
+	MaxRaisedRequests = 32
 )
 
 // EntryResult is what ingress did with one received entry. ID is empty
@@ -106,6 +120,12 @@ type Rooms struct {
 	pubs map[string]*publication
 	// files, set by NewFiles, is the machine's attachment part (nil: none).
 	files *Files
+	// quarantined, under smu, holds the rooms whose stored log did not
+	// load or replay, by room id. Such a room is not in rooms: it is not
+	// served or pulled, writes to it are refused (setAsideErr), and
+	// setting it aside deletes nothing. A person sees it in status and
+	// doctor, and may leave it unless it is the local room.
+	quarantined map[string]Quarantine
 	// signs counts membership entries signed (create entries excluded);
 	// tests read it.
 	signs int
@@ -127,11 +147,55 @@ type roomLog struct {
 	// heads are all accepted here, or a completed join), or it created
 	// the room (DESIGN section 3). See maySign.
 	pulled bool
+	// raiseDue: raising the room's waiting entries failed after a decision
+	// or at start; the room's next batch or unchanged pull tries again.
+	raiseDue bool
 }
+
+// Quarantine is a room set aside because its stored log does not load or
+// replay under this version's rules.
+type Quarantine struct {
+	Room, Label string
+	Reason      string
+}
+
+// QuarantineText is what a person is told about a room set aside.
+const QuarantineText = "set aside: its stored log does not load in this version of a2p2. " +
+	"It is not served or pulled, nothing can be sent to it or marked seen in it, and setting it aside deleted nothing"
+
+// QuarantineFix is what a person can do about room id set aside; local
+// says it is this machine's local room, which cannot be left.
+func QuarantineFix(id string, local bool) string {
+	if local {
+		return "run the a2p2 version that stored it; the local room cannot be left"
+	}
+	return "run the a2p2 version that stored it, or a2p2 room leave " + id + " to delete it here and join it again"
+}
+
+// setAsideErr refuses a write to a room set aside.
+func (r *Rooms) setAsideErr(room string) error {
+	if !r.isQuarantined(room) {
+		return nil
+	}
+	return codedErr(ErrorNotAllowed, "the room is %s; nothing was changed (a2p2 doctor says what to do)", QuarantineText)
+}
+
+// loadFault is why a room's stored log cannot be used: the room is set
+// aside (Quarantine), and the other rooms open.
+type loadFault struct{ msg string }
+
+func (e *loadFault) Error() string { return e.msg }
+
+func faultf(format string, a ...any) error { return &loadFault{fmt.Sprintf(format, a...)} }
 
 // OpenRooms rebuilds the membership of every room with a log from the
 // store, replaying each room's log in its arrival batches, and refreshes
-// the member cache from the result.
+// the member cache from the result. A room whose stored log does not
+// parse, verify or replay as it was decided is set aside (Quarantined),
+// not opened, and the other rooms open: one room's log never stops the
+// daemon starting. Requests the logs raise that are not stored yet (a
+// budget was full when the entry arrived) are raised now, or at the room's
+// next batch or pull if that fails.
 func OpenRooms(ctx context.Context, m *Machine) (*Rooms, error) {
 	r := &Rooms{m: m, rooms: map[string]*roomLog{}, fronts: map[string]readFront{}}
 	m.fronts = r.frontiers
@@ -140,12 +204,18 @@ func OpenRooms(ctx context.Context, m *Machine) (*Rooms, error) {
 		defer r.mu.Unlock()
 		return fn()
 	}
+	m.setAside = r.setAsideErr
 	lrs, err := m.st.LogRooms(ctx)
 	if err != nil {
 		return nil, err
 	}
 	for _, lr := range lrs {
 		rl, err := r.load(ctx, lr)
+		var lf *loadFault
+		if errors.As(err, &lf) {
+			r.quarantine(lr.ID, lr.Label, lf.msg)
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("room %s: %w", lr.ID, err)
 		}
@@ -154,8 +224,45 @@ func OpenRooms(ctx context.Context, m *Machine) (*Rooms, error) {
 		}
 		r.rooms[rl.id] = rl
 		r.setState(rl.id, &rl.st)
+		// A failure does not stop the start: the room's next batch or
+		// pull retries it (raiseDue).
+		_ = r.raiseWaiting(ctx, rl)
 	}
 	return r, nil
+}
+
+// quarantine sets room aside (Quarantine). The caller holds mu, or is
+// opening the rooms.
+func (r *Rooms) quarantine(room, label, reason string) {
+	// Its reading frontier is not known: reads and Prune hold back what
+	// it might have held back.
+	r.fmu.Lock()
+	r.fronts[room] = readFront{Unknown: true}
+	r.fmu.Unlock()
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	if r.quarantined == nil {
+		r.quarantined = map[string]Quarantine{}
+	}
+	r.quarantined[room] = Quarantine{Room: room, Label: label, Reason: reason}
+}
+
+// Quarantined lists the rooms set aside, in room id order.
+func (r *Rooms) Quarantined() []Quarantine {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	out := make([]Quarantine, 0, len(r.quarantined))
+	for _, id := range sortedIDs(r.quarantined) {
+		out = append(out, r.quarantined[id])
+	}
+	return out
+}
+
+func (r *Rooms) isQuarantined(room string) bool {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	_, ok := r.quarantined[room]
+	return ok
 }
 
 func (r *Rooms) load(ctx context.Context, lr store.LogRoom) (*roomLog, error) {
@@ -166,13 +273,15 @@ func (r *Rooms) load(ctx context.Context, lr store.LogRoom) (*roomLog, error) {
 	rl := &roomLog{id: lr.ID, label: lr.Label, createID: lr.CreateID, gen: lr.Gen,
 		ents: map[string]*core.VerifiedEntry{}, state: map[string]store.LogRow{}}
 	for _, row := range rows {
-		e, err := core.EntryFromParts(row.Header, row.Sig)
+		// Checked on receipt already: only its form and signature now, so
+		// that a stricter receipt rule does not reject a stored log.
+		e, err := core.StoredEntryFromParts(row.Header, row.Sig)
 		if err != nil {
-			return nil, errors.New("stored entry does not parse")
+			return nil, faultf("stored entry %s does not parse: %s", short(row.ID), refusalCode(err))
 		}
 		v, err := e.Verified()
 		if err != nil {
-			return nil, errors.New("stored entry does not verify")
+			return nil, faultf("stored entry %s does not verify", short(row.ID))
 		}
 		row.Header, row.Sig = nil, nil
 		rl.ents[v.ID()], rl.state[v.ID()] = v, row
@@ -186,9 +295,46 @@ func (r *Rooms) load(ctx context.Context, lr store.LogRoom) (*roomLog, error) {
 // replay rebuilds rl's machine from its kept entries in their arrival
 // batches, and the state derived from it. members.Machine is
 // deterministic, so the replay decides every kept entry as it was decided
-// before; a difference is reported as an error rather than adopted. It
-// uses nothing but memory: it cannot be cancelled.
+// before. Only the disposition is compared: a different disposition is
+// reported as an error (a loadFault) rather than adopted. A reason is an
+// explanation, and its wording may change between versions: the reason
+// the replay gives is kept in memory, and the stored text stays as it is
+// until the entry's disposition next changes, so that an older version
+// can still open the database. It uses nothing but memory: it cannot be
+// cancelled.
 func (r *Rooms) replay(rl *roomLog) error {
+	mach, final, err := rl.decideKept(nil, nil)
+	if err != nil {
+		return err
+	}
+	reasons := map[string]string{}
+	for id, row := range rl.state {
+		x := final[id]
+		if string(x.Disposition) != row.State {
+			return faultf("replay decided entry %s as %q, stored %q", short(id), x.Disposition, row.State)
+		}
+		if x.Reason != row.Reason {
+			reasons[id] = x.Reason
+		}
+	}
+	for id, reason := range reasons {
+		row := rl.state[id]
+		row.Reason = reason
+		rl.state[id] = row
+	}
+	rl.mach = mach
+	rl.st = mach.State()
+	rl.perm = r.permKey(rl.st)
+	rl.cache = r.memberCache(rl.st, rl.lookup(nil))
+	r.setFrontier(rl)
+	return nil
+}
+
+// decideKept decides rl's kept entries again in a new machine, as a start
+// does: the stored rows in their batches and positions, leaving out the
+// ids in skip, then extra, the entries a batch being stored would keep, as
+// one more batch.
+func (rl *roomLog) decideKept(skip map[string]bool, extra []*core.VerifiedEntry) (*members.Machine, map[string]members.Result, error) {
 	ids := sortedIDs(rl.state)
 	sort.SliceStable(ids, func(i, j int) bool {
 		a, b := rl.state[ids[i]], rl.state[ids[j]]
@@ -199,11 +345,11 @@ func (r *Rooms) replay(rl *roomLog) error {
 	})
 	root := rl.ents[rl.createID]
 	if root == nil || rl.state[rl.createID].Batch != 0 {
-		return errors.New("log does not start with the pinned create")
+		return nil, nil, faultf("log does not start with the pinned create")
 	}
 	mach, err := members.NewMachine(root)
 	if err != nil {
-		return err
+		return nil, nil, faultf("the pinned create: %v", err)
 	}
 	final := map[string]members.Result{rl.createID: {ID: rl.createID, Disposition: members.Accepted}}
 	var batch []*core.VerifiedEntry
@@ -216,7 +362,7 @@ func (r *Rooms) replay(rl *roomLog) error {
 	cur := int64(0)
 	for _, id := range ids {
 		row := rl.state[id]
-		if id == rl.createID {
+		if id == rl.createID || skip[id] {
 			continue
 		}
 		if row.Batch != cur && len(batch) > 0 {
@@ -228,17 +374,77 @@ func (r *Rooms) replay(rl *roomLog) error {
 	if len(batch) > 0 {
 		flush()
 	}
-	for id, row := range rl.state {
-		if x := final[id]; string(x.Disposition) != row.State || x.Reason != row.Reason {
-			return fmt.Errorf("replay decided entry %s as %s, stored %s", id, x.Disposition, row.State)
+	for _, v := range extra {
+		if !skip[v.ID()] {
+			batch = append(batch, v)
 		}
 	}
-	rl.mach = mach
-	rl.st = mach.State()
-	rl.perm = r.permKey(rl.st)
-	rl.cache = r.memberCache(rl.st, rl.lookup(nil))
-	r.setFrontier(rl)
-	return nil
+	if len(batch) > 0 {
+		flush()
+	}
+	return mach, final, nil
+}
+
+// settleDrops makes a batch that drops entries decide what a start will
+// decide from the rows it leaves. The machine decided the others while
+// the dropped ones were there (a refused entry, released when its fork
+// settled, waits for a parent and is dropped over the held bound while
+// what depends on it stays refused), but a dropped entry leaves the log,
+// so a start would decide them without it and set the room aside. So the
+// room's kept entries and the batch's are decided again in a new machine
+// without the dropped ones, as many times as that drops more, and that
+// machine and its decisions replace the batch's. It returns the results
+// to store: final's ids, every id whose disposition the new machine
+// changes, and the dropped ones. It changes rl.mach; the caller restores
+// rl if the batch is not stored.
+func (r *Rooms) settleDrops(rl *roomLog, batch []*core.VerifiedEntry, final map[string]members.Result) (map[string]members.Result, error) {
+	skip := map[string]bool{}
+	dropped := map[string]members.Result{}
+	for id, x := range final {
+		if x.Disposition == members.Dropped {
+			skip[id], dropped[id] = true, x
+		}
+	}
+	if len(skip) == 0 {
+		return final, nil
+	}
+	for {
+		var extra []*core.VerifiedEntry
+		for _, v := range batch {
+			if x, ok := final[v.ID()]; ok && x.Disposition != members.Dropped {
+				extra = append(extra, v)
+			}
+		}
+		mach, again, err := rl.decideKept(skip, extra)
+		if err != nil {
+			return nil, err
+		}
+		more := false
+		for id, x := range again {
+			if x.Disposition == members.Dropped && !skip[id] {
+				skip[id], dropped[id], more = true, x, true
+			}
+		}
+		if more {
+			continue
+		}
+		out := map[string]members.Result{}
+		for id := range final {
+			if x, ok := again[id]; ok {
+				out[id] = x
+			}
+		}
+		for id, row := range rl.state {
+			if x, ok := again[id]; ok && string(x.Disposition) != row.State {
+				out[id] = x
+			}
+		}
+		for id, x := range dropped {
+			out[id] = x
+		}
+		rl.mach = mach
+		return out, nil
+	}
 }
 
 // setFrontier publishes rl's reading frontier for Machine.fronts.
@@ -309,10 +515,14 @@ func (r *Rooms) frontiers() map[string]readFront {
 // were not changed, so this is a replay from memory.
 func (r *Rooms) restore(rl *roomLog) {
 	if err := r.replay(rl); err != nil {
-		// Only a non-deterministic machine gets here; the next start
-		// reports it. Until then the room is not served.
+		// Only a non-deterministic machine gets here. The room is set
+		// aside, as at a start, and not served.
 		delete(r.rooms, rl.id)
 		r.setState(rl.id, nil)
+		r.fmu.Lock()
+		delete(r.fronts, rl.id)
+		r.fmu.Unlock()
+		r.quarantine(rl.id, rl.label, err.Error())
 		return
 	}
 	r.setState(rl.id, &rl.st)
@@ -417,6 +627,9 @@ func (r *Rooms) pinWith(ctx context.Context, v *core.VerifiedEntry, create func(
 	if r.rooms[f.Room] != nil {
 		return 0, codedErr(ErrorAlreadyDone, "room is held here already")
 	}
+	if r.isQuarantined(f.Room) {
+		return 0, codedErr(ErrorAlreadyDone, "room is held here already, "+QuarantineText)
+	}
 	row := entryRow(v)
 	row.State = store.LogAccepted
 	rl := &roomLog{id: f.Room, label: f.Label, createID: v.ID(),
@@ -471,11 +684,37 @@ func (r *Rooms) CheckGen(room string, gen int64) error {
 // Leave stops carrying room (DESIGN section 7): its records, reading
 // state, log and requests are deleted here, and the room stays as a local
 // tombstone with a new generation, so a late response is not applied.
-// Other members still list this machine until an admin removes it.
+// Other members still list this machine until an admin removes it. A
+// room set aside (Quarantined) may be left too.
+//
+// The room's files are deleted after mu is released, so that leaving a
+// room with many files does not stall the other rooms [F68].
 func (r *Rooms) Leave(ctx context.Context, room string) error {
+	err := r.leave(ctx, room)
+	if err == nil {
+		_ = hookAt("leave:trash") // tests: mu is released here
+		r.m.st.RunTrash(ctx)
+	}
+	return err
+}
+
+func (r *Rooms) leave(ctx context.Context, room string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rl := r.rooms[room]
+	if rl == nil && r.isQuarantined(room) {
+		if _, err := r.m.st.LeaveRoom(ctx, room, r.m.now()); err != nil {
+			return err
+		}
+		r.smu.Lock()
+		delete(r.quarantined, room)
+		r.smu.Unlock()
+		r.fmu.Lock()
+		delete(r.fronts, room)
+		r.fmu.Unlock()
+		r.m.wakes.touch(room, roomSet)
+		return nil
+	}
 	if rl == nil {
 		return ErrNoRoom
 	}
@@ -718,6 +957,7 @@ func (r *Rooms) ingestWith(ctx context.Context, rl *roomLog, gen int64, wires []
 				return nil, err
 			}
 		}
+		r.raiseIfDue(ctx, rl)
 		return out, nil
 	}
 
@@ -735,6 +975,12 @@ func (r *Rooms) ingestWith(ctx context.Context, rl *roomLog, gen int64, wires []
 				final[x.ID] = x
 			}
 		}
+		settled, err := r.settleDrops(rl, batch, final)
+		if err != nil {
+			r.restore(rl)
+			return nil, err
+		}
+		final = settled
 		for id := range excluded {
 			final[id] = members.Result{ID: id, Disposition: members.Dropped, Reason: ReasonOverLimit}
 		}
@@ -757,6 +1003,7 @@ func (r *Rooms) ingestWith(ctx context.Context, rl *roomLog, gen int64, wires []
 					return nil, err
 				}
 			}
+			r.raiseIfDue(ctx, rl)
 			return out, nil
 		}
 		if err == nil {
@@ -793,6 +1040,14 @@ func (r *Rooms) ingestWith(ctx context.Context, rl *roomLog, gen int64, wires []
 		// nothing, and the committed batch is not reported as failed.
 		_ = hookAt("ingest:committed")
 		return out, nil
+	}
+}
+
+// raiseIfDue retries raiseWaiting for a room whose last attempt failed.
+// The caller holds mu; a failure is left for the next try.
+func (r *Rooms) raiseIfDue(ctx context.Context, rl *roomLog) {
+	if rl.raiseDue {
+		_ = r.raiseWaiting(ctx, rl)
 	}
 }
 
@@ -851,11 +1106,13 @@ func (r *Rooms) stage(ctx context.Context, rl *roomLog, gen int64, batch []*core
 	}
 	b := &store.LogBatch{Room: rl.id, Gen: gen, Now: r.m.now()}
 	byID := map[string]*core.VerifiedEntry{}
+	fresh := map[string]int{} // position in this batch, for raise's order
 	for _, v := range batch {
 		byID[v.ID()] = v
 		if x, ok := final[v.ID()]; ok && kept(x.Disposition) {
 			row := entryRow(v)
 			row.State, row.Reason = string(x.Disposition), x.Reason
+			fresh[v.ID()] = len(b.New) + 1
 			b.New = append(b.New, row)
 		}
 	}
@@ -886,11 +1143,15 @@ func (r *Rooms) stage(ctx context.Context, rl *roomLog, gen int64, batch []*core
 			b.MembersGone = append(b.MembersGone, n)
 		}
 	}
-	reqs, err := r.raise(ctx, rl, st, look, final)
+	keep := ""
+	if done != nil {
+		keep = done.request
+	}
+	x, err := r.raise(ctx, rl, st, look, fresh, keep)
 	if err != nil {
 		return nil, nil, err
 	}
-	b.Requests = reqs
+	b.Requests, b.Fail, b.FailReason = x.reqs, x.stale, ReasonNotWaiting
 	if done != nil {
 		b.Complete, b.Entries, b.NotCaughtUp = done.request, done.entry, done.notCaughtUp
 	}
@@ -916,6 +1177,7 @@ func (r *Rooms) stage(ctx context.Context, rl *roomLog, gen int64, batch []*core
 			delete(rl.state, id)
 		}
 		rl.st, rl.perm, rl.cache = st, perm, cache
+		rl.raiseDue = false // raise ran for this state, in the same commit
 		r.setState(rl.id, &rl.st)
 		r.setFrontier(rl)
 	}

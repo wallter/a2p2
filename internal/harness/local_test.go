@@ -243,7 +243,7 @@ func TestPiInstallWritesOnlyItsSkill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, s := range []string{"name: a2p2\n", "Binary: /opt/my tools/a2p2\n", `'/opt/my tools/a2p2' inbox --as "$ME" --json`, "ack --as", "--reply-to ID", piMarker} {
+	for _, s := range []string{"name: a2p2\n", "Binary: /opt/my tools/a2p2\n", `'/opt/my tools/a2p2' inbox --as "pi-$(basename "$PWD")" --json`, "ack --as", "--reply-to ID", piMarker} {
 		if !strings.Contains(string(b), s) {
 			t.Errorf("skill lacks %q:\n%s", s, b)
 		}

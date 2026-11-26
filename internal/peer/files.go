@@ -40,10 +40,10 @@ func isFileRoute(p string) bool { return strings.HasPrefix(p, pathFileV2) }
 // File requests are admitted by their own bucket per machine, so file
 // traffic never spends the pull exchange's (B7).
 func fileRoute(h FileHandler) http.Handler {
-	lim := newLimiter()
+	lims := newLimiters()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		from := requestNode(r)
-		if !lim.allow(from) {
+		if !lims.of(strangerRequest(r)).allow(from) {
 			pullRefuse(w, &node.PullError{Status: http.StatusTooManyRequests, Code: node.CodeRateLimited, RetryAfter: time.Second})
 			return
 		}

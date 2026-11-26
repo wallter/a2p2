@@ -93,14 +93,17 @@ func addrCheck(c *cmd, addrs []string, want func(string) error, invite bool) err
 	for _, r := range out.Addrs {
 		fmt.Println(addrLine(r))
 		if r.Node != "" {
-			fmt.Println("    key", node.Fingerprint(r.Node))
+			fmt.Println("    key", node.EscapeDisplay(node.Fingerprint(r.Node)))
 		}
 	}
-	fmt.Println(out.Advice)
+	fmt.Println(out.Advice) // its address is escaped (addrAdvice)
 	return nil
 }
 
-// addrLine is one address tried, in words.
+// addrLine is one address tried, in words. A member's address comes from
+// the address book, which holds what other machines sent, and a probe's
+// detail can quote it: both are escaped, as is a result the words do not
+// name.
 func addrLine(r node.AddrCheck) string {
 	what := map[string]string{
 		node.ProbeReached:     "an a2p2 machine answered",
@@ -113,19 +116,21 @@ func addrLine(r node.AddrCheck) string {
 		node.ProbeNotTried:    "not tried",
 	}[r.Result]
 	if what == "" {
-		what = r.Result
+		what = node.EscapeDisplay(r.Result)
 	}
-	s := fmt.Sprintf("  %-28s %s", r.Addr, what)
+	s := fmt.Sprintf("  %-28s %s", node.EscapeDisplay(r.Addr), what)
 	if r.Result != node.ProbeNotTried {
 		s += fmt.Sprintf(" in %d ms", r.MS)
 	}
 	if r.Detail != "" && r.Result != node.ProbeReached {
-		s += ": " + r.Detail
+		s += ": " + node.EscapeDisplay(r.Detail)
 	}
 	return s
 }
 
 // addrAdvice is the closing sentence of the HOST:PORT and --invite forms.
+// The address it names is escaped, as the issuer is (InterceptedAdvice):
+// it came from the argument or from an invite another person wrote.
 func addrAdvice(out addrCheckOut) string {
 	best := ""
 	addr := ""
@@ -134,7 +139,7 @@ func addrAdvice(out addrCheckOut) string {
 		node.ProbeTimeout: 2, node.ProbeUnreachable: 1}
 	for _, r := range out.Addrs {
 		if best == "" || rank[r.Result] > rank[best] {
-			best, addr, top = r.Result, r.Addr, r
+			best, addr, top = r.Result, node.EscapeDisplay(r.Addr), r
 		}
 	}
 	switch best {
@@ -163,19 +168,20 @@ func addrAdvice(out addrCheckOut) string {
 	return "The address cannot be reached from this network; check the address and this machine's connection."
 }
 
-// mappingText is the router's port mapping in one line.
+// mappingText is the router's port mapping in one line. What the router
+// answered (its address, its errors) is escaped.
 func mappingText(m *node.PortMapping) string {
 	left := ""
 	if len(m.NotRemoved) > 0 {
-		left = "; not removed yet, retried at stop and at the next start: " + strings.Join(m.NotRemoved, "; ")
+		left = "; not removed yet, retried at stop and at the next start: " + escapeAll(m.NotRemoved, "; ")
 	}
 	if m.External == "" {
 		if m.Error == "" {
 			return "port mapping: none" + left
 		}
-		return "port mapping: none (" + m.Error + ")" + left
+		return "port mapping: none (" + node.EscapeDisplay(m.Error) + ")" + left
 	}
-	s := "port mapping: " + m.Protocol + ", " + m.External
+	s := "port mapping: " + node.EscapeDisplay(m.Protocol) + ", " + node.EscapeDisplay(m.External)
 	if m.Expires != "" {
 		s += ", expires " + clock(m.Expires) + " unless renewed"
 	} else {
@@ -196,13 +202,18 @@ func inAgo(s int64) string {
 	return fmt.Sprintf("%d min ago", s/60)
 }
 
-// printNetCheck prints the daemon's check in plain words.
+// printNetCheck prints the daemon's check in plain words. Much of it can
+// come from other machines: members' addresses and names, room labels,
+// what members say they saw, their dial-back errors and the router's
+// answers. Every string that is not this function's own words is escaped
+// as one line (node.EscapeDisplay); --json gives the data as it is.
 func printNetCheck(nc node.NetCheck) {
+	esc := node.EscapeDisplay
 	switch {
 	case nc.State == node.NetworkOn && nc.Listening:
 		fmt.Printf("network    on, listening on %s\n", addressText(nc.Listen))
 	case nc.State == node.NetworkOn:
-		fmt.Printf("network    on, but not listening: %s\n", nc.Fault)
+		fmt.Printf("network    on, but not listening: %s\n", esc(nc.Fault))
 	case nc.State == node.NetworkOutbound:
 		fmt.Println("network    outbound only, listening on nothing")
 	default:
@@ -213,7 +224,7 @@ func printNetCheck(nc node.NetCheck) {
 			"again to add it")
 	}
 	if len(nc.Advertised) > 0 {
-		fmt.Println("advertised", strings.Join(nc.Advertised, ", "))
+		fmt.Println("advertised", escapeAll(nc.Advertised, ", "))
 	}
 	if nc.State != node.NetworkOff {
 		fmt.Println("members")
@@ -223,9 +234,9 @@ func printNetCheck(nc node.NetCheck) {
 		for _, m := range nc.Members {
 			who := short(m.Node)
 			if m.Name != "" {
-				who = m.Name + " (" + who + ")"
+				who = esc(m.Name) + " (" + who + ")"
 			}
-			fmt.Printf("  %s / %s\n", m.RoomLabel, who)
+			fmt.Printf("  %s / %s\n", esc(m.RoomLabel), who)
 			switch {
 			case len(m.Addrs) == 0 && m.ConnectsIn != nil:
 				fmt.Println("    connects in (last " + inAgo(m.ConnectsIn.AgoS) + ")")
@@ -239,37 +250,40 @@ func printNetCheck(nc node.NetCheck) {
 			}
 		}
 	}
-	line := "reachable by peers: " + nc.Reach.State
+	line := "reachable by peers: " + esc(nc.Reach.State)
 	if nc.Reach.Checked != "" {
 		line += ", checked " + clock(nc.Reach.Checked)
 	}
 	if len(nc.Reach.Reached) > 0 {
-		line += " at " + strings.Join(nc.Reach.Reached, ", ")
+		line += " at " + escapeAll(nc.Reach.Reached, ", ")
 	}
 	if nc.Reach.Why != "" {
-		line += " (" + nc.Reach.Why + ")"
+		line += " (" + esc(nc.Reach.Why) + ")"
 	}
 	fmt.Println(line)
 	if nc.Mapping != nil {
 		fmt.Println(mappingText(nc.Mapping))
 	}
 	if len(nc.Reach.NotTried) > 0 {
-		fmt.Println("not tried by members:", strings.Join(nc.Reach.NotTried, ", "), "("+node.NotTriedText+")")
+		fmt.Println("not tried by members:", escapeAll(nc.Reach.NotTried, ", "), "("+node.NotTriedText+")")
 	}
 	for _, n := range nc.Reach.NotChecked {
 		if len(nc.Reach.ConnectedIn) > 0 {
 			n = "dial-back " + n // the connection in answers the question; the dial-back did not run
 		}
-		fmt.Println(n)
+		fmt.Println(esc(n))
 	}
 	for _, a := range nc.NotAdvertised {
-		fmt.Println("not advertised:", a)
+		fmt.Println("not advertised:", esc(a))
 	}
 	if len(nc.Reach.Saw) > 0 {
-		fmt.Println("members see this machine as", strings.Join(nc.Reach.Saw, ", "), "(what they say; shown, never advertised)")
+		fmt.Println("members see this machine as", escapeAll(nc.Reach.Saw, ", "), "(what they say; shown, never advertised)")
 	}
 	if nc.Forward != "" {
-		fmt.Println("if the router forwards the port by hand, config.json needs:", nc.Forward)
+		fmt.Println("if the router forwards the port by hand, config.json needs:", esc(nc.Forward))
 	}
-	fmt.Println(nc.Advice)
+	// The advice is one sentence that can quote room labels, addresses and
+	// members' errors: escaped as one line, so no line break in them
+	// starts a line of its own.
+	fmt.Println(esc(nc.Advice))
 }
