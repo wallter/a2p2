@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -465,10 +466,10 @@ func place(tx *sql.Tx, r *core.VerifiedRecord, o PutOpts) (Outcome, error) {
 		// lose their text, whatever reason they had (withdrawn overrides
 		// expired, as in the model's setBody). A withdraw naming anything
 		// but a message does nothing.
-		if _, err := tx.Exec(`UPDATE records SET body = NULL, reason = ? WHERE room = ? AND author = ?
-			AND ((id = ? AND kind = 'message') OR (kind = 'replace' AND ref = ?
-			  AND NOT EXISTS (SELECT 1 FROM records t WHERE t.room = ? AND t.id = ? AND t.kind != 'message')))`,
-			ReasonWithdrawn, f.Room, r.Author(), f.Ref, f.Ref, f.Room, f.Ref); err != nil {
+		if _, err := tx.Exec(sqlWithdrawMessage, ReasonWithdrawn, f.Room, f.Ref, r.Author()); err != nil {
+			return "", err
+		}
+		if _, err := tx.Exec(sqlWithdrawReplaces, ReasonWithdrawn, f.Room, f.Ref, r.Author(), f.Room, f.Ref); err != nil {
 			return "", err
 		}
 		if err := hook("put:withdrawn"); err != nil {
@@ -534,8 +535,7 @@ func reasonFor(rd *Reader, id, author string, f core.RecordFields, o PutOpts, ha
 	}
 	if target != "" {
 		var n int
-		if err := rd.tx.QueryRow(`SELECT count(*) FROM records WHERE room = ? AND kind = 'withdraw'
-			AND ref = ? AND author = ?`, f.Room, target, author).Scan(&n); err != nil {
+		if err := rd.tx.QueryRow(sqlWithdrawsOf, f.Room, target, author).Scan(&n); err != nil {
 			return "", err
 		}
 		if n > 0 {
@@ -610,14 +610,76 @@ func CanHandle(msg *core.Record, node, agent string) bool {
 	return false
 }
 
+// The lookups by one key column: a record's dependants, the withdraws of
+// a message, what refers to a message, its replies and its thread. Each
+// seeks on the index of its key (records_ref, records_parent,
+// records_thread or the primary key), so it reads only the records that
+// match and not the room's history (D56). Two things would make the
+// planner, which has no statistics here, read the whole room instead:
+//
+//   - An ORDER BY author, epoch, seq: it prefers the unique (room, author,
+//     epoch, seq) index, which returns that order, over the key's. So these
+//     return their rows unordered and sortByPosition sorts them.
+//   - A term on kind: records_reading leads with (room, kind), which ties
+//     with (room, key). So kind is written +kind, which no index can use.
+//
+// An OR of two keys is two lookups.
+// TestPerRecordLookupsSeekOnTheirKeyNotOnTheWholeRoom checks each plan.
+const (
+	whereDependantsByRef    = `WHERE room = ? AND ref = ? AND effect = ?`
+	whereDependantsByParent = `WHERE room = ? AND parent = ? AND effect = ?`
+	sqlWithdrawsOf          = `SELECT count(*) FROM records WHERE room = ? AND ref = ? AND author = ? AND +kind = 'withdraw'`
+	whereByRef              = `WHERE room = ? AND ref = ?`
+	whereByParent           = `WHERE room = ? AND parent = ? AND +kind = 'message'`
+	whereByThread           = `WHERE room = ? AND thread = ? AND +kind = 'message'`
+	// A withdraw drops the text of its message and of the author's
+	// replacements of it, if the target is a message (or not held).
+	sqlWithdrawMessage  = `UPDATE records SET body = NULL, reason = ? WHERE room = ? AND id = ? AND author = ? AND kind = 'message'`
+	sqlWithdrawReplaces = `UPDATE records SET body = NULL, reason = ? WHERE room = ? AND ref = ? AND author = ? AND +kind = 'replace'
+		AND NOT EXISTS (SELECT 1 FROM records t WHERE t.room = ? AND t.id = ? AND t.kind != 'message')`
+)
+
+// sortByPosition orders records of one room by (author, epoch, seq), which
+// is unique: the order SQLite's ORDER BY author, epoch, seq gives (BINARY
+// collation compares text bytewise, as Go compares strings).
+func sortByPosition(hs []Held) {
+	type pos struct {
+		author, epoch string
+		seq           int64
+	}
+	keys := make(map[*core.Record]pos, len(hs))
+	for _, h := range hs {
+		f := h.Record.Fields()
+		keys[h.Record] = pos{h.Record.Author(), f.Epoch, f.Seq}
+	}
+	sort.Slice(hs, func(i, j int) bool {
+		a, b := keys[hs[i].Record], keys[hs[j].Record]
+		if a.author != b.author {
+			return a.author < b.author
+		}
+		if a.epoch != b.epoch {
+			return a.epoch < b.epoch
+		}
+		return a.seq < b.seq
+	})
+}
+
 // resolveDependants re-resolves the records that were waiting for id,
 // whatever its kind: a reference to a record of the wrong kind or author
 // becomes bad_reference as soon as the target is learned.
 func resolveDependants(tx *sql.Tx, rd *Reader, room, id string) error {
-	deps, err := rd.query(`WHERE room = ? AND effect = ? AND (ref = ? OR parent = ?)`,
-		room, EffectUnresolved, id, id)
+	deps, err := rd.query(whereDependantsByRef, room, id, EffectUnresolved)
 	if err != nil {
 		return err
+	}
+	byParent, err := rd.query(whereDependantsByParent, room, id, EffectUnresolved)
+	if err != nil {
+		return err
+	}
+	for _, d := range byParent {
+		if d.Record.Fields().Ref != id { // not listed by ref already
+			deps = append(deps, d)
+		}
 	}
 	for _, d := range deps {
 		e, err := effectOf(rd, d.Record.Author(), d.Record.Fields())
@@ -822,19 +884,33 @@ func (rd *Reader) RecordsFrom(room, author, epoch string, from int64) ([]Held, e
 // ByRef returns the records whose ref is id (handled, withdraw, replace),
 // whatever their effect, ordered by position.
 func (rd *Reader) ByRef(room, id string) ([]Held, error) {
-	return rd.query(`WHERE room = ? AND ref = ? ORDER BY author, epoch, seq`, room, id)
+	hs, err := rd.query(whereByRef, room, id)
+	sortByPosition(hs)
+	return hs, err
 }
 
 // ByParent returns the messages whose parent is id, whatever their effect.
 func (rd *Reader) ByParent(room, id string) ([]Held, error) {
-	return rd.query(`WHERE room = ? AND parent = ? AND kind = 'message' ORDER BY author, epoch, seq`, room, id)
+	hs, err := rd.query(whereByParent, room, id)
+	sortByPosition(hs)
+	return hs, err
 }
 
 // ByThread returns the messages that name root as their thread, and root,
 // whatever their effect.
 func (rd *Reader) ByThread(room, root string) ([]Held, error) {
-	return rd.query(`WHERE room = ? AND kind = 'message' AND (id = ? OR thread = ?) ORDER BY author, epoch, seq`,
-		room, root, root)
+	hs, err := rd.query(whereByThread, room, root)
+	if err != nil {
+		return nil, err
+	}
+	switch r, ok, err := rd.Record(room, root); {
+	case err != nil:
+		return nil, err
+	case ok && r.Record.Fields().Kind == core.KindMessage && r.Record.Fields().Thread != root:
+		hs = append(hs, r) // root itself, unless it named itself as its thread and is listed already
+	}
+	sortByPosition(hs)
+	return hs, nil
 }
 
 // Streams returns every stream of room, held or only known, with its first

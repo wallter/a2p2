@@ -528,3 +528,9 @@ containers through kills, pauses and network splits (see
 - End-to-end throughput and memory. There are membership benchmarks and
   measurements of request and response bytes, including
   `TestPullSizesInASixtyFourMachineRoomAfterThirtyDaysOfDailyRestarts`.
+  `make bench-local` measures real daemons but is not in the gate. The
+  gate checks only the query plans of the lookups run for each stored
+  record and each inbox entry
+  (`TestPerRecordLookupsSeekOnTheirKeyNotOnTheWholeRoom`, D56); the pull
+  summary, `Writers` and `MissingBetween` still read a whole room or
+  table, and nothing bounds their time.
