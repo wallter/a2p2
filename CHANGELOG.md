@@ -133,27 +133,31 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   for connections still in the TLS handshake, which is cut at 5 s. One
   IPv4 address or IPv6 /64 gets at most 8 connections outside the
   members' pool, a /56 16 and a /48 32; a connection with no slot is
-  closed at once. Membership is checked again for each request. Every
-  answer to a key that shares no room closes its connection, and its rate
-  buckets are its own on every route. An attacker with more source
-  groups still can do part of this: 4 groups (4 IPv4 addresses, 2 IPv6 /56s or one /48) keep joiners
+  closed at once. The handshake and the membership lookup after it end
+  at 5 s. Membership is checked again for each request. A key that
+  shares no room gets one request at a time on a connection, every
+  answer to it closes the connection, and its rate buckets are its own on
+  every route. An attacker with more source groups still can do part of
+  this: 4 groups (4 IPv4 addresses, 2 IPv6 /56s or one /48) keep joiners
   out, and 8 groups (8 IPv4 addresses, 4 /56s or 2 /48s) keep members from
-  opening new connections, except members whose address completed a
-  member's handshake here in the last 24 hours, which have 16 handshake
-  slots of their own. Connections members already have keep working
-  (SECURITY.md).
+  opening new connections, except members whose IPv4 address or IPv6 /64
+  completed a member's handshake here in the last 24 hours: they have 16
+  handshake slots of their own, at most 4 for one address, which no
+  other address or /64 can take. Connections members already have keep
+  working (SECURITY.md).
 - **One IPv6 /64 can no longer refuse every joiner.** Exposed: admin
   machines with networking `on`, since 0.1.0. Join limits counted each
   full address, so one /64 filled the table of 4,096 sources and every
   other joiner was refused for a minute; and 60 polls a minute naming
   unknown invites, from anyone, refused every joiner that resumed by the
-  invite's hash. Now the join route counts by IPv4 address or IPv6 /64,
-  with separate budgets for opens and accepts (10 a minute) and polls (30
-  a minute); a full table forgets the source heard from least recently;
-  and polls naming unknown invites are counted per source (10 a minute),
-  charged before the lookup so that requests in flight together cannot
-  pass it, and given back when the invite is held. Tables of sources
-  forget the one heard from least recently in constant time.
+  invite's hash. Now the join route counts per address, and per IPv6 /64
+  at 4 times as much: 80 bodies read a minute, counted before a body is
+  read, then 10 opens and accepts and 30 polls. Polls naming unknown
+  invites are counted per IPv4 address or IPv6 /64 (10 a minute), after
+  the lookup, so a joiner resuming by its invite's hash is never refused
+  by them. A joiner sends an accept answered 429 or 503 again after the
+  stated delay, instead of reporting an unexpected answer. Tables of
+  sources forget the one heard from least recently in constant time.
 - **Refused peer requests no longer grow `daemon.log` at the default
   level.** Exposed: every listening machine since 0.1.0. Each refused
   request was one Info line, so a flood of refusals grew the log without

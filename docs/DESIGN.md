@@ -228,17 +228,22 @@ handshake proves the client's key, and any key completes one. So it does
 each handshake itself and counts connections in three pools. A
 connection in its handshake takes one of 64 shared slots and a slot of
 each group of its source: 8 for an IPv4 address or an IPv6 /64, 16 for a
-/56 and 32 for a /48. A source group that completed a member's handshake
-here in the last 24 hours may also use 16 slots kept for such groups. A
-connection with no slot is closed at once, and one whose handshake has
-not finished after 5 s is closed. Only once the handshake has finished,
+/56 and 32 for a /48. When those are full, an IPv4 address or IPv6 /64
+that completed a member's handshake here in the last 24 hours may use 16
+slots kept for such groups, at most 4 at once, whatever its /56 and /48
+hold. A connection there that does not prove a member's key is closed,
+and its group is no longer known. A connection with no slot is closed at
+once, and one whose handshake and membership lookup have not finished
+after 5 s is closed. Only once the handshake has finished,
 signature included, does the key move the connection to the members'
 pool (256, at most 16 of one key), when it is a member of a room held
 here, or to the strangers' pool (32, still counted against its source).
 With no room there the connection is closed. Membership is checked again
 for every request: a key that became a member moves to the members'
-pool, and a removed key is served as a stranger from then on. Every
-answer to a stranger closes its connection, and one lasts 15 s at most.
+pool, a removed key is served as a stranger from then on, and a key
+added back is a member's again. A stranger's connection serves one
+request at a time, every answer to a stranger closes its connection, and
+one lasts 15 s at most.
 Strangers have rate buckets of their own, so they cannot fill the
 members' table, and their refused requests are logged at Debug; a
 member's are logged at Info 5 at once, then one per 10 s
@@ -250,9 +255,12 @@ member's are logged at Info 5 at once, then one per 10 s
 member not yet known here (whose request carries the entries that admit
 it) are strangers until the room's log here names them; their requests
 are answered as before, only in the smaller pool, and a waiting pull
-started then is cut at 15 s. The join route limits each source by IPv4
-address or IPv6 /64, with separate budgets for opens and polls
-(PROTOCOL 5.3). What a flood from many source groups can still do is in
+started then is cut at 15 s. The join route limits each source address,
+and each IPv6 /64 at 4 times as much, with budgets for bodies read
+(before the body is read), opens and polls (PROTOCOL 5.3). A poll by hash
+is looked up before it is charged to the budget for unknown invites, and
+a joiner sends an accept answered 429 or 503 again after the stated
+delay. What a flood from many source groups can still do is in
 SECURITY.md.
 
 **Cost (estimates).** About 130 transfers of about 2 KB deliver a 1 KiB

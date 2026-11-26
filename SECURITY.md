@@ -172,27 +172,37 @@ still do, by the numbers:
 - Hold a few connection slots. One IPv4 address or one IPv6 /64 gets at
   most 8 connections that are not members' connections, one IPv6 /56 at
   most 16, and one IPv6 /48 at most 32. All keys that share no room get
-  32 between them. Connections still in the TLS handshake get 64 shared
-  slots for 5 s each, and a connection that finds no slot is closed at
-  once. Members of your rooms have 256 slots of their own, at most 16
-  for one key, and rate buckets of their own.
+  32 between them, and each such connection serves one request at a
+  time. Connections still in the TLS handshake get 64 shared slots for
+  5 s each, membership lookup included, and a connection that finds no
+  slot is closed at once. Members of your rooms have 256 slots of their
+  own, at most 16 for one key, and rate buckets of their own.
 - Keep joiners out while it lasts. Joiners use the 32 slots of keys that
   share no room. Hosts in 4 source groups fill them: 4 IPv4 addresses,
   or 2 IPv6 /56s, or one /48. Members keep pulling.
 - Keep members from opening new connections while it lasts. Hosts in 8
   source groups keep the 64 shared handshake slots full: 8 IPv4
   addresses, or 4 IPv6 /56s, or 2 /48s. Connections members already have
-  keep working. A member whose address group completed a member's
-  handshake here in the last 24 hours also has 16 handshake slots kept
-  for such groups, which the flood cannot take. A member that connects
-  from a new address, or for the first time since your daemon started,
-  has no such slot and is refused until the flood stops.
-- Spend join budgets of its own source only. Join requests and polls
-  naming unknown invites are counted per IPv4 address or IPv6 /64, so one
-  host cannot refuse joiners elsewhere or a joiner that resumes by the
-  invite's hash. Each /64 can make 10 invite lookups a minute; a host
-  with many /64s (a /48 has 65,536) can make that many more, bounded only
-  by its connection slots, and refuses no one else.
+  keep working. A member whose IPv4 address or IPv6 /64 completed a
+  member's handshake here in the last 24 hours also has 16 handshake
+  slots kept for such addresses, at most 4 at once for one. Hosts at
+  other addresses and in other /64s cannot take them, whatever they hold
+  of the member's /56 or /48. A member that connects from a new address,
+  or for the first time since your daemon started, has no such slot and
+  is refused until the flood stops; so is one whose /56 or /48 share a
+  neighbour in another /64 holds.
+- Spend join budgets of its own address, and of its /64. Join requests
+  are counted per source address (80 bodies read, then 10 opens and
+  accepts and 30 polls, a minute) and per IPv6 /64 at 4 times each. A host
+  refuses no joiner at another IPv4 address or in another /64; in its own
+  /64, it refuses joiners only once it has spent the /64's budget. A
+  refused joiner is told when to try again, and an accept is sent again
+  after that delay. Polls naming unknown invites are counted per IPv4
+  address or IPv6 /64 after the lookup, so a joiner that resumes by its
+  invite's hash is never refused by them. Each address can make 40 invite
+  lookups a minute and each /64 160; a host with many /64s (a /48 has
+  65,536) can make that many more, bounded only by its connection slots,
+  and refuses no one else.
 - Not fill the log at the default level. Refused requests from keys that
   share no room, and refused connections, are logged at Debug; one Info
   line a minute says connections are being refused. A member's refused
@@ -202,9 +212,18 @@ still do, by the numbers:
 A member of one of your rooms is trusted more. One member key can hold
 16 connections, so 16 member keys together can fill the members' pool.
 A host behind the same IPv4 address as a member, or in the same /64,
-shares that member's per-source share. While it holds all 8, the member
+shares that member's 8 shared handshake slots and its 4 kept ones. A
+connection in a kept slot that does not prove a member's key, a key that
+shares no room or a handshake that fails, makes the address unknown, so
+the kept slots are gone until a member's next handshake there through
+the shared slots. While the host holds all 8 shared slots, the member
 cannot open a new connection; connections the member already has are not
-affected.
+affected. Honest machines behind one address share the same 8 slots, and
+4 kept ones once a member came from there. A handshake holds its slot
+for about one round trip, so at 100 ms that is about 80 new connections
+a second; a refused one is retried under the client's back-off. 0.2.3
+had no share per address: it queued connections past 256 in all instead
+of refusing them.
 
 ## Release binaries
 
