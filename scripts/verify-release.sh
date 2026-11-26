@@ -6,10 +6,14 @@
 # Waits for the release workflow run of the tag, then: the release has
 # exactly the six binaries and SHA256SUMS; the binary for this machine and
 # SHA256SUMS download into a temporary directory; the checksum matches; the
-# binary's `version` reports the tag. Prints the asset list and the first
+# binary's `version` reports the tag; the binary has a GitHub artifact
+# attestation (`gh attestation verify`) made by this repository's
+# release.yml. The attestation is required: releases up to v0.2.3 have none,
+# and this script is only run for new tags. Prints the asset list and the first
 # lines of the notes. Exits non-zero on any mismatch. Needs gh, signed in.
 #
-# Environment: REPO (default: the repository of the current directory),
+# Environment: REPO (default: the repository of the current directory, from
+# `gh repo view`),
 # WAIT (seconds to wait for the run to appear, 300).
 set -euo pipefail
 v=${1:?usage: verify-release.sh vX.Y.Z}
@@ -53,6 +57,10 @@ line=$(grep -E "^[0-9a-f]{64}  $asset\$" "$dir/SHA256SUMS" || true)
 if command -v sha256sum > /dev/null; then sum=$(sha256sum "$dir/$asset"); else sum=$(shasum -a 256 "$dir/$asset"); fi
 [ "${sum%% *}" = "${line%% *}" ] || no "the checksum of $asset does not match SHA256SUMS"
 echo "verify-release: $asset matches SHA256SUMS"
+repo=${REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)} || no "cannot work out the repository"
+gh attestation verify "$dir/$asset" --repo "$repo" --signer-workflow "$repo/.github/workflows/release.yml" > /dev/null \
+  || no "$asset has no valid attestation from $repo/.github/workflows/release.yml"
+echo "verify-release: $asset attestation verified (built by $repo release.yml)"
 chmod +x "$dir/$asset"
 out=$("$dir/$asset" version) || no "$asset version failed"
 [ "$out" = "a2p2 $v" ] || no "$asset reports '$out', not 'a2p2 $v'"

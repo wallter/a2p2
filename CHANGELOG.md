@@ -8,6 +8,13 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- Release binaries carry a GitHub artifact attestation (build provenance)
+  made by the release workflow, checked by `make verify-release`. Check one
+  with `gh attestation verify a2p2_<os>_<arch> --repo wallter/a2p2`. Releases
+  up to 0.2.3 have none, and the binaries are still not code-signed.
+
 ### Changed
 
 - **The MCP tool descriptions are clearer, and the server sends short

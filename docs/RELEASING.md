@@ -75,8 +75,10 @@ publish that commit untested. Do not tag by hand.
 5. `make verify-release VERSION=vX.Y.Z` (needs `gh`, signed in). It waits
    for the release workflow, checks that the release has exactly the six
    binaries and `SHA256SUMS`, downloads the binary for this machine and
-   `SHA256SUMS` into a temporary directory, checks the checksum and that
-   `version` reports the tag, and prints the asset list and the first
+   `SHA256SUMS` into a temporary directory, checks the checksum, runs
+   `gh attestation verify` on the binary (pinned to this repository's
+   `release.yml`; it fails if there is none), checks that `version` reports
+   the tag, and prints the asset list and the first
    lines of the notes. Read the notes once.
 6. For a release candidate (wire protocol or database changes only), do
    steps 3 to 5 with `vX.Y.Z-rc.N`, try the binaries, then tag the final
@@ -88,7 +90,12 @@ publish that commit untested. Do not tag by hand.
 Static binaries `a2p2_<os>_<arch>` for linux and darwin on amd64 and
 arm64, and `a2p2_windows_<arch>.exe` for windows on amd64 and arm64 (from
 0.2.0), built by GitHub Actions from the tag with no build cache, CGO off
-and `-trimpath`, and `SHA256SUMS`. They are not signed yet. Before a
+and `-trimpath`, and `SHA256SUMS`. From the next version after 0.2.3,
+the release workflow also makes a GitHub artifact attestation (SLSA build
+provenance) for the binaries before it publishes. It is signed through the
+public Sigstore instance, so each release adds a public log entry that
+names the repository, the commit and the workflow. The binaries are not
+code-signed or notarised for macOS or Windows. Before a
 release that changes Windows code, run the ci workflow by hand once with
 `what` set to `windows` and read its log.
 `go install github.com/wallter/a2p2/cmd/a2p2@vX.Y.Z` builds the same source.
