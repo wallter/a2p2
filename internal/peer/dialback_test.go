@@ -324,6 +324,20 @@ func TestAProbeShowsOnlyAThrowawayCertificateAndNoneToAWrongKey(t *testing.T) {
 		!strings.Contains(got.Detail, "certificate key mismatch") {
 		t.Fatalf("wrong key: %+v", got)
 	}
+	// The server sees the client's certificate after the client's handshake
+	// has returned: wait for the one it is to see, then a moment for any
+	// request or second certificate that must not come.
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		mu.Lock()
+		n := len(shown)
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the server was shown no certificate")
+		}
+	}
 	time.Sleep(100 * time.Millisecond)
 	mu.Lock()
 	defer mu.Unlock()

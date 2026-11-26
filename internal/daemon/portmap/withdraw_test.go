@@ -15,7 +15,7 @@ import (
 
 // TestMain shortens the wait after a failed attempt for every test here:
 // a first attempt lost under load (every UDP try of a loaded machine
-// running the race detector) is tried again within waitFor's 5 s instead
+// running the race detector) is tried again within waitFor's deadline instead
 // of in five minutes. A test that measures the wait sets it itself.
 func TestMain(m *testing.M) {
 	retryAfter = 100 * time.Millisecond
@@ -91,7 +91,7 @@ func TestAWithdrawnMappingIsNotGivenOutAgainByARenewalWithNoAnswer(t *testing.T)
 		}}
 		var seen states
 		k := NewKeeper(s, 7423, record(t), seen.add)
-		stop := runKeeper(k)
+		stop := runKeeper(t, k)
 		waitFor(t, unusable.name+": a renewal with no answer", func() bool { return s.calls.Load() >= 3 && len(seen.list()) >= 3 })
 		stop()
 		all := seen.list()
@@ -125,7 +125,7 @@ func TestARenewalWithNoAnswerKeepsTheMappingAndAUsableGrantGivesItOutAgain(t *te
 	}}
 	var seen states
 	k := NewKeeper(s, 7423, record(t), seen.add)
-	stop := runKeeper(k)
+	stop := runKeeper(t, k)
 	waitFor(t, "four attempts", func() bool { return len(seen.list()) >= 4 })
 	all := seen.list()
 	stop()
@@ -147,7 +147,7 @@ func TestARouterThatStopsAnsweringIsNotAskedEveryMinWaitOnceTheLeaseRanOut(t *te
 		return Mapping{}, errSilent
 	}}
 	k := NewKeeper(s, 7423, record(t), nil)
-	stop := runKeeper(k)
+	stop := runKeeper(t, k)
 	defer stop()
 	time.Sleep(700 * time.Millisecond) // the lease ends at 100 ms
 	// Before it ends the renewals halve the time left (about 7 tries from
@@ -167,7 +167,7 @@ func TestAKeeperThatEndsReportsWhatItCouldNotRemoveWithNoMappingGivenOut(t *test
 	gw := newFakeUDP(t, r.answer)
 	var seen states
 	k := NewKeeper(client(gw), 7423, record(t), seen.add)
-	stop := runKeeper(k)
+	stop := runKeeper(t, k)
 	waitFor(t, "the mapping", func() bool { return k.State().Mapping != nil })
 	r.set(func(r *pcpRouter) { r.extIP = netip.MustParseAddr("10.0.0.7") })
 	waitFor(t, "the withdrawal", func() bool { st := k.State(); return st.Mapping == nil && st.Err != "" })
@@ -198,7 +198,7 @@ func TestPendingMappingsAreShownUntilTheirRemovalIsTried(t *testing.T) {
 	if st := k.State(); len(st.Left) != 1 || !strings.Contains(st.Left[0], "trying again") {
 		t.Fatalf("before the removal: %+v", st)
 	}
-	runKeeper(k)()
+	runKeeper(t, k)()
 	if st := k.State(); len(st.Left) != 0 || r.held() != 0 || len(get(t, rec)) != 0 {
 		t.Fatalf("after the removal: %+v, router holds %d", st, r.held())
 	}
