@@ -361,9 +361,11 @@ voided) are never filtered (D9). The rule is in the delivery model
 (`internal/model/delivery/levels.go`) and the differential tests compare
 the code with it under random level changes.
 
-**Receipts.** A full inbox read writes, in the same transaction that lists
-the entries, a receipt per entry: the agent, the room, the entry's key and
-the version listed (table `shown`). `Seen` confirms only an entry with a
+**Receipts.** A full inbox read writes, in a transaction right after the
+one that lists the entries, a receipt per entry: the agent, the room, the
+entry's key and the version listed (table `shown`). If the room was left
+in between, or left and joined again (another generation), it writes
+none. `Seen` confirms only an entry with a
 receipt whose version is the one given, and deletes the receipt; anything
 else is refused as `not_shown`, so an id from `peek`, `recent`, `skipped`
 or a thread can never be marked seen. A receipt outlives a level change:
@@ -398,7 +400,21 @@ gets one. `reply` sends the report after the reply; a later `ack`
 of the same message, or a second `ack`, succeeds without a second report
 and names the first. An `ack` that is not allowed is refused with the
 reason: no such message, not addressed and no `ask_handled`, the agent's
-own message, or not yet shown its text by any read. The reply and ack
+own message, or not yet shown its text by any read. Unless the message
+was withdrawn, the read must also have shown the version reads show now:
+its newest replacement held with text, or the message itself while its
+text is live. A replacement since the read is refused as `not_shown`
+until a read shows it, and so is a replacement whose text is not here
+yet, which the inbox and thread also wait for. An expired message with
+no live replacement is not checked, and neither is an expired message
+the agent confirmed no text of: only the inbox's replace notice, shown
+after a confirmed read, shows such an agent the replacement. `Draft.ReplyVersion` applies the
+same rule to a reply that names the version answered; the local API,
+the page and the MCP reply tool do not pass one yet. A message entry
+whose text is its author's replacement says `edited` (node `Entry` and
+local API), in the inbox, thread, branch, history, `recent` and
+`skipped` views; the CLI, the MCP tools and the page do not show it
+yet. The reply and ack
 tools name the message `id`. Entries say `ask_handled` when a room-wide
 post asks for handled reports.
 

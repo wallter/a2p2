@@ -530,16 +530,24 @@ func (m *Machine) accept(w *World, it wire) (stored, fork bool) {
 // observe records what a peer said it held, and the highest positions it
 // knows of, so gaps can be shown. A known position is a hint: a higher
 // report from any peer raises it, and the peer whose report set it lowers
-// it by reporting less, or nothing, of a stream of an author it takes.
+// it by reporting less, or nothing, of a stream; a peer reports only the
+// authors it takes, so one it does not take drops its hints too
+// (store.Tx.NoteKnown). The implementation also bounds the hints one peer
+// can set for streams that hold nothing (store.MaxHintedStreams); honest
+// machines here never reach that bound.
 func (m *Machine) observe(peer MachineID, s Summary, authors map[MachineID]bool, now Time, tick int) {
 	m.st.obs[peer] = observation{At: now, Tick: tick, Have: s, Authors: authors}
+	takes := func(a MachineID) bool { return authors == nil || authors[a] }
 	for sid, h := range s {
+		if !takes(sid.Author) {
+			continue
+		}
 		if k := m.st.known[sid]; h.Contig > k.Seq || k.From == peer && h.Contig < k.Seq {
 			m.st.known[sid] = known{Seq: h.Contig, At: now, From: peer}
 		}
 	}
 	for sid, k := range m.st.known {
-		if _, ok := s[sid]; !ok && k.From == peer && (authors == nil || authors[sid.Author]) {
+		if _, ok := s[sid]; k.From == peer && (!ok || !takes(sid.Author)) {
 			delete(m.st.known, sid)
 		}
 	}

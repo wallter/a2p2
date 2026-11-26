@@ -402,7 +402,11 @@ func canHandle(msg *Record, m MachineID, agent string) bool {
 // Handle records that agent dealt with message ref. It travels like any
 // record. Reporting twice is a no-op. The agent must have been shown the
 // text: confirmed from its inbox (Seen), or returned by another read
-// (Showed).
+// (Showed); and the version shown must be the newest replacement held
+// with text (none is waited for), unless the message was withdrawn, or
+// its text expired and either no live replacement is held or the agent
+// confirmed no text of it (only the inbox's replace notice shows that
+// agent the replacement).
 func (w *World) Handle(id MachineID, agent string, ref RecordID) (RecordID, error) {
 	m, err := w.awake(id)
 	if err != nil {
@@ -420,8 +424,26 @@ func (w *World) Handle(id MachineID, agent string, ref RecordID) (RecordID, erro
 			return r.ID, nil
 		}
 	}
-	if g := m.st.agents[agent]; g == nil || !g.seen[string(ref)] && !g.shown[ref] {
+	g := m.st.agents[agent]
+	if g == nil || !g.seen[string(ref)] && !g.shown[ref] {
 		return "", ErrNotAllow // only an agent that was shown the text may report it
+	}
+	_, confirmed := g.seenMsg[ref]
+	if t.dropped == Live || (t.dropped == Expired && confirmed) {
+		// The agent must have been shown the version reads show now: a
+		// replacement since the read is read first, and one whose text is
+		// missing here is waited for. A withdrawn message has no text
+		// left to show; an expired one without a live replacement has none
+		// newer, and one the agent never confirmed text of is shown by no
+		// read with its replacement (node.currentVersion).
+		_, ver, wait := m.currentText(t)
+		switch {
+		case wait != nil:
+			return "", ErrNotAllow
+		case ver == t.rec.ID && t.dropped != Live:
+		case !shownVersion(g, ref, m.get(ver)):
+			return "", ErrNotAllow
+		}
 	}
 	return w.write(m, &Record{Kind: Handled, Agent: agent, Ref: ref}, "").ID, nil
 }

@@ -105,6 +105,21 @@ reports.
   sentences the daemon wrote for a person (a request's or an alert's
   text). Names are labels, and lookalike letters are not detected:
   compare fingerprints, not names.
+- The author of a message can replace it at any time, also after it was
+  answered. Inbox, thread, branch, history, recent and skipped entries
+  carry `edited` in the local API when the text is a replacement; the
+  CLI, the MCP tools and the page do not show it yet. A handled report is
+  refused when newer text arrived after the read, or while a newer text
+  is announced but not here yet. A signed reply and a handled report
+  name only the message, not its version, so a thread read later cannot
+  show which text an answer saw. The author also chooses a message's
+  time, up to 24 hours ahead or any time in the past. That time orders
+  every view and starts the 30 days of retention, so a member can place
+  a message above an answer given after it, or send one whose text
+  expires minutes after it arrives.
+- What a peer reports it holds is unsigned. It can make this machine list
+  up to 32 streams per author that are not there as still being fetched,
+  until it stops reporting them.
 - The unread notice a hook prints holds a count and up to five sender
   labels, never message text. The sending agent chooses its label. Every
   machine accepts only 1 to 64 characters of letters, digits, `.`, `_` and
