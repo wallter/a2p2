@@ -528,3 +528,12 @@ containers through kills, pauses and network splits (see
 - End-to-end throughput and memory. There are membership benchmarks and
   measurements of request and response bytes, including
   `TestPullSizesInASixtyFourMachineRoomAfterThirtyDaysOfDailyRestarts`.
+  `make bench-local` measures real daemons but is not in the gate. The
+  gate checks only query plans, not time:
+  `TestPerRecordLookupsSeekOnTheirKeyNotOnTheWholeRoom` (D56) requires
+  every step over `records`, including the withdraw guard's subquery, of
+  the lookups for a stored record's dependants and withdraws, what refers
+  to a message, its replies, its thread and its root, to be an index
+  search on the key. The pull summary, `Writers`, `MissingBetween` and the
+  inbox's walk of unread stream tails still grow with a room's history or
+  its unread backlog, and nothing bounds their time.

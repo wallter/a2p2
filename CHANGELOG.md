@@ -27,6 +27,21 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   parameter name, schema or annotation changed; the definitions are 3,991
   bytes (was 3,979), under the 4,000 limit.
 
+### Fixed
+
+- **A send no longer slows down as a room's history grows, and an inbox
+  much less.** Looking up what refers to a message, its replies, its
+  thread and a new record's dependants read every record of the room;
+  they now read only the records that match (D56). Measured on one laptop
+  with a real daemon (`make bench-local`, one run each; the "before" run
+  overlapped other work on the machine): a send's p50 was 4.1 ms at
+  10,000 messages and 10.8 ms at 30,000, now 0.26 and 0.27 ms. An agent's
+  first inbox page of 50 plus its Seen, with the whole history unread,
+  took 2.1 s at 1,000 messages and 75 s at 10,000, now 73 ms and 0.40 s;
+  that still grows with the unread backlog. Results and their order are
+  unchanged, and the database schema is not touched, so 0.2.0 to 0.2.3
+  can still open the database.
+
 ## [0.2.3] - 2026-11-25
 
 The local web page loads. It did not in any earlier release: `a2p2 ui`

@@ -1555,3 +1555,72 @@ SHA-256 only and does not need `gh`.
 
 **Revisit if** the action changes its permissions or format, a user wants
 checking without `gh`, or macOS or Windows signing is added.
+
+## D56. Lookups by one key read only their matches, without a new index (2026-11-25)
+
+Measured with real daemons on one laptop (`make bench-local`, case M7),
+two queries read every record of a room, so their cost grew with the
+room's history. A record's dependants (`resolveDependants`, run on every
+record stored: `ref = ? OR parent = ?`) took a send's p50 from 0.40 ms
+in an empty room to 4.1 ms at 10,000 messages and 10.8 ms at 30,000.
+What refers to a message (`Reader.ByRef`, run once per message an inbox
+shows, `ORDER BY author, epoch, seq`) made the benchmark's "first inbox
+page" figure (an inbox call of up to 50 entries for an agent with the
+whole history unread, plus the Seen that confirms them) 2.1 s at 1,000
+messages and 75 s at 10,000. Without statistics (no `ANALYZE`), the
+planner took the index matching the ORDER BY, or `records_reading`'s
+(room, kind) for an OR or a term on kind, over the index of the key. The
+same applied to the replies of a message and its thread (`ByParent`,
+`ByThread`; the thread is read for the default recipients of a reply),
+the count of a message's withdraws (every message stored) and the text a
+withdraw drops.
+
+- **What changed:** the queries, not the schema. Each seeks on the index
+  that already exists for its key (`records_ref`, `records_parent`,
+  `records_thread`, the primary key). An OR of two keys became two
+  lookups, the second leaving out in SQL what the first matched (`ref !=
+  ?` for dependants by parent; `thread != ?` for the thread's root), so
+  the rows decoded are exactly the old statement's, each once, whatever a
+  header says. An ORDER BY over the position became a sort in Go of the
+  few rows found, by the stored author, epoch and seq columns (unique in
+  a room; SQLite's BINARY collation compares bytes as Go does). A term on
+  kind is written `+kind`, which no index can use, so it no longer ties
+  with the key's index.
+- **What the gate checks:** `TestPerRecordLookupsSeekOnTheirKeyNotOnTheWholeRoom`
+  runs EXPLAIN QUERY PLAN on the nine statements (dependants by ref and
+  by parent, the withdraw count, by ref, by parent, by thread, the
+  thread's root, and the two withdraw updates) and requires every step
+  over `records`, including the withdraw guard's subquery (alias `t`), to
+  be a SEARCH whose constraint names the key; it reads SQLite's plan
+  text, so it is tied to that wording. Results are checked against the old
+  statements by `TestRefParentAndThreadLookupsKeepThePositionOrder` and
+  `TestSplitLookupsReadTheOldRowsOnceWhateverTheStoredColumnsSay`, the
+  withdraw guard by `TestAReplacementAndAWithdrawOfAHandledRecordDropNoText`,
+  and room isolation by `TestLookupsByRefParentAndThreadStayInTheirRoom`.
+  No test bounds time.
+- **After (same laptop, same benchmark, one run each):** a send's p50 is
+  0.26 to 0.27 ms at 0, 1,000, 10,000 and 30,000 messages; the first inbox
+  page plus Seen takes 73 ms at 1,000 messages and 0.40 s at 10,000. That
+  still grows with the unread backlog: the inbox walks the unread stream
+  tails before it applies its limit. The "before" run overlapped other
+  work on the machine (a test run and another agent's daemons), so its
+  smaller figures may read a little high.
+- **Why not an index:** an index of (room, ref, author, epoch, seq) in
+  place of `records_ref` would have served the ORDER BY too. It would
+  need a migration, which an older binary refuses ("database is version
+  N, this binary understands M: upgrade a2p2"), so 0.2.3 could no longer
+  open a database a newer daemon had touched; and in process it cost
+  about 3 µs (2%) per record stored; building it on a room of 30,000
+  records took about 40 ms. The sort needs neither.
+- **Costs:** none on the wire or on disk. The plans now depend on how
+  the statements are written, which the test guards on the bundled
+  SQLite.
+- **Still read room-wide (not changed):** the pull summary
+  (`Reader.Summary`, every exchange), `applyAccess` when access changes,
+  `Writers` (status), `MissingBetween` (alerts; the whole table), the
+  replacements read by the file sweep, and the inbox's walk of unread
+  stream tails.
+
+**Revisit if** a SQLite upgrade changes a plan (the test fails), the store
+starts running `ANALYZE`, or the pull summary or the unread walk shows up
+in a measurement.
