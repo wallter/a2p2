@@ -1079,7 +1079,7 @@ is drawn as its id), is shown as `<name>#<machine>`. Writer and local
 agent ids are never cut and use the full key when it is shared, as do
 the machines `inbox` with `fetch` names. A harness named `human` (any case) is
 refused: `a2p2 mcp` never registers as the person.
-Results are compact JSON. An inbox message is `{"id","kind"?,"room_label","from","from_this_machine","person"?,"id_shared"?,"author_removed"?,"to"?,"parent"?,"thread"?,"parent_state"?,"late"?,"created","text"?,"choices"?}`:
+Results are compact JSON. An inbox message is `{"id","kind"?,"edited"?,"room_label","from","from_this_machine","person"?,"id_shared"?,"author_removed"?,"to"?,"parent"?,"thread"?,"parent_state"?,"late"?,"created","text"?,"choices"?}`:
 `kind` is left out for `message`, `to` for everyone, `thread` when it equals
 `parent`, `parent_state` when `here`; `from` is `label@<short machine id>`,
 or `label@<full key>` with `id_shared: true` when another machine known
@@ -1089,7 +1089,8 @@ appears when the author's label is `human` in any case: `yours: the
 person on this machine` only for `human` written here, `another
 machine's person, not yours` for one written elsewhere, `not yours: a
 look-alike label on this machine` otherwise. Messages of inbox, thread,
-recent, skipped and peek all carry these fields.
+recent, skipped and peek all carry these fields. `edited` (left out when
+false): the text is its author's replacement (D62).
 `key`, `version` and `from_node` stay inside the shim, which confirms
 `seen` with the exact key and version the daemon showed.
 

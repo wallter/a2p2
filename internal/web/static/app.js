@@ -597,7 +597,9 @@ function renderNeeds() {
 // and is never among the questions (node.Surface.Questions).
 function askedBy(m) {
   const whom = (m.to || []).includes(S.st.human) ? ", asked of you" : ", asked of everyone in the room";
-  return [iso(escapeDisplay(m.from)), " on ", iso(machineName(m.from_node, m.room)), " in ", ...roomNode(m.room), whom];
+  const marks = authorMarks(m).filter((k) => k !== "edited");
+  return [iso(escapeDisplay(m.from)), marks.length ? " (" + marks.join(", ") + ")" : "", " on ",
+    iso(machineName(m.from_node, m.room)), " in ", ...roomNode(m.room), whom];
 }
 const ASK_NOTE = "A message, not a request: a choice sends that text as your reply, and approves nothing.";
 const HIDDEN_CHOICE = "This choice holds characters that do not show, that change how text reads, or blanks that " +
@@ -669,8 +671,26 @@ function showQuestionError(m, error, message) {
 }
 
 // ---- stream ----
+// authorMarks are the page's words for where a message's author is, from
+// from_this_machine, which the daemon sets by the full machine key (D65),
+// and whether its text is a replacement (edited, D62). Any member machine
+// can post as human, so a human on another machine is never drawn as
+// this machine's person.
+function authorMarks(m) {
+  const from = String(m.from || "");
+  const label = from.split("@")[0];
+  const person = label.toLowerCase() === "human";
+  const out = [];
+  if (from && person && !m.from_this_machine) out.push("another machine's person, not you");
+  else if (from && person && label === "human") out.push("this machine's person");
+  else if (from && person) out.push("this machine, not its person");
+  else if (from && m.from_this_machine) out.push("this machine");
+  if (m.edited) out.push("edited");
+  return out;
+}
 function entryMeta(m) {
   const meta = el("div", "meta", el("span", "from", escapeDisplay(m.from)), el("span", "", fmt(m.created)));
+  for (const k of authorMarks(m)) meta.append(el("span", "mark", k));
   if (m.to && m.to.length) meta.append(el("span", "", "to " + m.to.map(escapeDisplay).join(", ")));
   if (m.parent) meta.append(el("span", "", "reply to " + fp(m.parent) + (m.parent_state && m.parent_state !== "here" ? " (" + m.parent_state + ")" : "")));
   if (m.author_removed) meta.append(el("span", "mark", "removed machine"));
@@ -764,7 +784,7 @@ function renderStream(force) {
     const meta = entryMeta(m);
     meta.append(el("span", "actions", btn("Reply", "link", () => setReply(m)), btn("Thread", "link", () => openThread(m.thread || m.id)),
       btn("Trace", "link", () => openTrace(m.id))));
-    const d = el("div", "msg" + (m.from === S.st.human ? " mine" : ""), meta, el("div", "body", escapeText(m.text)), filesOf(m));
+    const d = el("div", "msg" + (m.from === S.st.human && m.from_this_machine ? " mine" : ""), meta, el("div", "body", escapeText(m.text)), filesOf(m));
     box.append(d);
   }
   // A notice is drawn with what it says: a replacement with its new text,

@@ -2187,8 +2187,8 @@ ran (F70). Rooms that span owners make the first three real now.
   and one statement per pair with missing text past retention; the test
   with 40,001 undecided pairs has one such pair, so the time for many
   pairs to update is not measured.
-- **Still open.** The CLI, the MCP results and the page do not show
-  `edited` yet. The local API's send, the page's reply, the MCP reply
+- **Still open.** (The CLI, the MCP results and the page show
+  `edited` since the merge of this wave; see D65.) The local API's send, the page's reply, the MCP reply
   tool and a staged reply with files do not pass `reply_version`, so no
   client reply is tied to the version it drew yet. A signed reply and a
   handled report name only the message, not the version answered. F31 is
@@ -2477,8 +2477,11 @@ to pass another owner's text off as the local person's.
     entry still replays), with a test that a database holding such a
     member still opens with the room working. No scheduler or pull
     change is needed.
-  - The page and the CLI do not show `from_this_machine` or `person`
-    (groups E and F). The default mailbox label is still the
+  - The page and the CLI did not show `from_this_machine` or `person`
+    (groups E and F). Since the merge of this wave they mark, beside
+    the author, a message this machine wrote and one from `human` on
+    another machine as another machine's person, and print or draw
+    `edited` (D62). The default mailbox label is still the
     directory's base name (F39). The CLI acts as the person by default
     (F11, group F).
   - Per-message room ids are not added to tool results: labels in one

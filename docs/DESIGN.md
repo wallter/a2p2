@@ -437,8 +437,11 @@ same rule to a reply that names the version answered; the local API,
 the page and the MCP reply tool do not pass one yet. A message entry
 whose text is its author's replacement says `edited` (node `Entry` and
 local API), in the inbox, thread, branch, history, `recent` and
-`skipped` views; the CLI, the MCP tools and the page do not show it
-yet. The reply and ack
+`skipped` views; MCP inbox messages carry it too, the CLI prints
+`[edited]` and the page draws an `edited` mark. The CLI and the page
+also mark beside the author a message this machine wrote and one from
+`human` on another machine ("another machine's person, not you"), from
+`from_this_machine`. The reply and ack
 tools name the message `id`. Entries say `ask_handled` when a room-wide
 post asks for handled reports.
 

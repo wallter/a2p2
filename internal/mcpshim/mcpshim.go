@@ -865,8 +865,11 @@ const maxWaitSeconds = 30
 type entry struct {
 	ID   string `json:"id"`
 	Kind string `json:"kind,omitempty"` // omitted: message
-	Room string `json:"room_label"`     // the result's rooms give its id
-	From string `json:"from"`
+	// Edited: the text is its author's replacement, not the text first
+	// sent (D62); omitted when it is not.
+	Edited bool   `json:"edited,omitempty"`
+	Room   string `json:"room_label"` // the result's rooms give its id
+	From   string `json:"from"`
 	// FromThisMachine: the author is this machine, by its full key; never
 	// omitted. Person, when the author is labelled human: whether that is
 	// this machine's person. IDShared: an id here is written in full,
@@ -949,7 +952,7 @@ func view(es []localapi.Entry, local string) inboxOut {
 	out := inboxOut{Notice: notice, Messages: []entry{}}
 	seen := map[string]bool{}
 	for _, e := range es {
-		x := entry{ID: e.ID, Kind: e.Kind, Room: line(e.RoomLabel, 0), From: line(e.From, 0),
+		x := entry{ID: e.ID, Kind: e.Kind, Edited: e.Edited, Room: line(e.RoomLabel, 0), From: line(e.From, 0),
 			FromThisMachine: e.FromThisMachine, Person: person(e.From, e.FromThisMachine), IDShared: e.IDShared, AuthorRemoved: e.AuthorRemoved,
 			To: lines(e.To), AskHandled: e.AskHandled, Skipped: e.Skipped, Parent: e.Parent, Thread: e.Thread, Late: e.Late, Created: e.Created,
 			Text: node.EscapeDisplayText(e.Text), Choices: lines(e.Choices),

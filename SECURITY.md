@@ -137,8 +137,9 @@ an invite.
   compare fingerprints, not names.
 - The author of a message can replace it at any time, also after it was
   answered. Inbox, thread, branch, history, recent and skipped entries
-  carry `edited` in the local API when the text is a replacement; the
-  CLI, the MCP tools and the page do not show it yet. A handled report is
+  carry `edited` when the text is a replacement: in the local API and
+  the MCP tools' results, as `[edited]` in the CLI and as a mark on the
+  page. A handled report is
   refused when newer text arrived after the read, or while a newer text
   is announced but not here yet. A signed reply and a handled report
   name only the message, not its version, so a thread read later cannot

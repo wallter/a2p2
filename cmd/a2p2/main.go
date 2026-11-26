@@ -479,17 +479,43 @@ func clock(t string) string {
 	return node.EscapeDisplay(t)
 }
 
+// authorMark says where a message's author is, from from_this_machine,
+// which the daemon sets by the full machine key (D65): any member machine
+// can post as human, so a human on another machine is marked as that
+// machine's person and never as this machine's.
+func authorMark(e localapi.Entry) string {
+	if e.From == "" {
+		return ""
+	}
+	l, _, _ := strings.Cut(e.From, "@")
+	switch person := node.IsPerson(l); {
+	case person && !e.FromThisMachine:
+		return " [another machine's person, not you]"
+	case person && l == node.HumanLabel:
+		return " [this machine's person]"
+	case person:
+		return " [this machine, not its person]"
+	case e.FromThisMachine:
+		return " [this machine]"
+	}
+	return ""
+}
+
 // printEntry shows one entry. Its text, choices, author and addressees
 // come from other machines, so each is escaped (node.EscapeDisplayText for
 // the text, node.EscapeDisplay for the rest): a terminal escape or a
-// character that hides or reorders text is shown as \u{...}.
+// character that hides or reorders text is shown as \u{...}. The marks
+// after the author and [edited] are the CLI's own words.
 func printEntry(w io.Writer, e localapi.Entry) {
-	head := node.EscapeDisplay(e.From)
+	head := node.EscapeDisplay(e.From) + authorMark(e)
 	if len(e.To) > 0 {
 		head += " → " + escapeAll(e.To, ", ")
 	}
 	if e.Kind != "message" {
 		head += " [" + e.Kind + "]"
+	}
+	if e.Edited {
+		head += " [edited]"
 	}
 	if e.Parent != "" {
 		head += " (reply to " + node.EscapeDisplay(e.Parent)

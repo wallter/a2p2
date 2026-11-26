@@ -328,8 +328,8 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   new text above the answer with nothing to tell it was changed; a
   handled report was accepted for a version replaced since the read.
   Message entries in the local API now say `edited` when their text is a
-  replacement. The CLI, the MCP tools and the page do not show the mark
-  yet. A handled report is refused as `not_shown` until a read shows the
+  replacement, MCP inbox messages carry `edited`, the CLI prints
+  `[edited]` and the page marks the message edited. A handled report is refused as `not_shown` until a read shows the
   newest text held, and while newer text is announced but not here. A
   signed reply or handled report still names only the message, not the
   version answered.
