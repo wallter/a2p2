@@ -14,6 +14,12 @@ Measures a2p2 on this computer and prints one table per run:
   M3 ping-pong between two labels
   M4 the same through the real `a2p2 mcp` process (JSON-RPC over pipes)
   M5 two daemons joined over 127.0.0.1 (pinned TLS); B connects out only
+  M8 fan-in: N workers each ask one orchestrator and wait for the answer
+     (N = 1, 10, 50, 200; room-wide at level all; 50 rooms; two daemons with
+     a two minute limit; a 100 ms orchestrator delay). The orchestrator's
+     thinking time is not simulated; A2P2_BENCH_M8_DELAY=100ms (a Go
+     duration, default 0) adds a fixed delay per reply to the one-machine
+     and two-machine cases. Alone: scripts/bench.sh --only M8 --runs 2
   M7 scale: 1, 10 and 100 rooms; 100, 10,000 and 100,000 messages held
   micro: Ed25519, record encode/parse, raw SQLite commit and fsync, the
      product's Surface.Send with and without the socket
