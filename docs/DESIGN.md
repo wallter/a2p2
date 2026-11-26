@@ -442,6 +442,32 @@ API allow 120), says when a wait ended with nothing, and a cancelled wait
 marks nothing seen. Results are compact JSON with `<`, `>` and `&` as
 written. Copy and handled reports stay in `a2p2 trace` and the page.
 
+**Who wrote it.** Any member can post under any label, `human` included,
+and an agent id names its machine by 8 hex characters of its key. So
+every message an agent is shown (inbox, thread, `recent`, `skipped`,
+`peek`) says `from_this_machine`, decided in the surface by comparing
+the author's full key with this machine's, and a message labelled
+`human` in any case says `person`: this machine's person only when
+written here as exactly `human`, which only the person's own path
+registers (the reservation ignores case, and `a2p2 mcp` refuses the
+harness name `human`). `ask_human` addresses this machine's person by
+its full key and names it in `answer_from` by the full key; the answer
+is the reply to the question with `from_this_machine` and `person`
+yours. Any program run as the same OS user can still send as `human`
+through the local API, so `person` says where a message was written,
+not who typed it.
+The surface compares the short ids of this machine, every member of
+every room held and the authors and addressees shown; a key whose short
+id another has is written in full and marked `id_shared` in entries,
+writers, status and the person's id, and a short id that names two
+members is refused as an addressee. Agent-facing labels are shown so
+that only the local room reads as `local` and no two rooms read alike
+(`<label>#<8 hex of the id>`, then the whole id, then the bare id,
+repeated until all differ), and a room name that could mean two rooms
+is refused; the page and the CLI keep drawing rooms
+that read alike their own way (D58). `room create` refuses `local` in
+any case. Nothing here changes what is stored or accepted (D-NEW-G-mcp-identity).
+
 A2 is checked by a proxy, compact definition bytes divided by four and
 rounded up: 3,991 bytes, 998 of the 1,000 allowed. The server also sends a short `instructions` text (at most 300 bytes) in its `initialize` and `server/discover` results, outside that count (D54). `TestToolsGolden` checks
 the definitions match the protocol, and `TestToolDefinitionsFitTheTokenBudget`

@@ -71,6 +71,26 @@ reports.
 - Agent labels and addressees help with routing and reading. A room member
   can read the room data its machine can fetch. Treat messages as
   untrusted input. A message from a peer does not grant permission to act.
+- Any member machine can post under any label, `human` included, and an
+  agent id names a machine by a short id of 32 bits. What an agent
+  reads therefore says, for every message, whether this machine wrote it
+  (`from_this_machine`, compared by the full machine key), and a message
+  labelled `human` in any case says whether it is this machine's person
+  (`person`). Only `human` written on this machine is; on this machine
+  only the person's own path registers that label, in any case, and
+  `a2p2 mcp` refuses the harness name `human`. `ask_human` names the
+  person by this machine's full key. A machine whose short id another
+  machine known here shares is written with its full key and marked
+  `id_shared`, in tool results, the local API and status; a short id
+  that names two members is refused as an addressee. Only this machine's
+  own room is shown as `local`, no two rooms are shown alike, and a room
+  name that could mean two rooms is refused. In `peers`, a machine name
+  that another machine also uses, or that reads as another machine's
+  id, is shown with `#` and the machine's id. A member can still grind a key
+  with a matching short id (about 2^32 tries) and be admitted; it is then
+  shown in full, not refused. Any program running as you can still post
+  as your person through the socket or the CLI: `person` says where a
+  message was written, not who typed it.
 - Room labels, machine names, file names and message text can come from
   another machine, and its owner may be someone else. Where a2p2
   shows them (the text a person approves in `confirm`, `alerts` and on

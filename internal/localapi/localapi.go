@@ -145,16 +145,21 @@ type (
 		WaitMS int64  `json:"wait_ms,omitempty"`
 	}
 	Entry struct {
-		Key           string   `json:"key"`
-		Version       string   `json:"version,omitempty"`
-		Kind          string   `json:"kind"`
-		ID            string   `json:"id"`
-		Room          string   `json:"room"`
-		RoomLabel     string   `json:"room_label"`
-		From          string   `json:"from"`
-		FromNode      string   `json:"from_node"`
-		AuthorRemoved bool     `json:"author_removed,omitempty"`
-		To            []string `json:"to,omitempty"`
+		Key       string `json:"key"`
+		Version   string `json:"version,omitempty"`
+		Kind      string `json:"kind"`
+		ID        string `json:"id"`
+		Room      string `json:"room"`
+		RoomLabel string `json:"room_label"`
+		From      string `json:"from"`
+		FromNode  string `json:"from_node"`
+		// FromThisMachine: the author is this machine, by its full key.
+		// IDShared: the author's or an addressee's short id is another
+		// known machine's too, so from and to name it in full.
+		FromThisMachine bool     `json:"from_this_machine"`
+		IDShared        bool     `json:"id_shared,omitempty"`
+		AuthorRemoved   bool     `json:"author_removed,omitempty"`
+		To              []string `json:"to,omitempty"`
 		// AskHandled: the post asked for handled reports.
 		AskHandled  bool     `json:"ask_handled,omitempty"`
 		Parent      string   `json:"parent,omitempty"`
@@ -497,10 +502,13 @@ type (
 	RoomListReq struct {
 		Room string `json:"room,omitempty"`
 	}
+	// Member: id_shared, another machine known here has the same short
+	// id (the first 8 hex characters of node), so ids name it in full.
 	Member struct {
-		Node  string `json:"node"`
-		Name  string `json:"name,omitempty"`
-		Admin bool   `json:"admin,omitempty"`
+		Node     string `json:"node"`
+		Name     string `json:"name,omitempty"`
+		Admin    bool   `json:"admin,omitempty"`
+		IDShared bool   `json:"id_shared,omitempty"`
 	}
 	Change struct {
 		Entry  string `json:"entry"`
@@ -565,10 +573,12 @@ type (
 		Count int    `json:"count"`
 	}
 	FirstLine struct {
-		ID   string `json:"id"`
-		Room string `json:"room"`
-		From string `json:"from"`
-		Line string `json:"line"`
+		ID              string `json:"id"`
+		Room            string `json:"room"`
+		From            string `json:"from"`
+		FromThisMachine bool   `json:"from_this_machine"`
+		IDShared        bool   `json:"id_shared,omitempty"`
+		Line            string `json:"line"`
 	}
 	// Unread is counts and sender labels, and first lines only when asked.
 	// It never marks anything seen.
@@ -582,25 +592,29 @@ type (
 	Peer struct {
 		Node      string   `json:"node"`
 		Name      string   `json:"name,omitempty"`
+		IDShared  bool     `json:"id_shared,omitempty"`
 		Rooms     []string `json:"rooms"`
 		Addrs     []string `json:"addrs,omitempty"`
 		LastHeard string   `json:"last_heard,omitempty"`
 	}
 	Status struct {
-		Node    string        `json:"node"`
-		Name    string        `json:"name"`
-		Human   string        `json:"human"`
-		Local   string        `json:"local"`
-		Rooms   []Room        `json:"rooms"`
-		Agents  []store.Agent `json:"agents"`
-		Peers   []Peer        `json:"peers"`
-		Network Network       `json:"network"`
-		Waiting int           `json:"waiting"` // requests waiting for this machine's person
-		Listen  []string      `json:"listen"`  // addresses other machines can dial; empty: no listener
-		UI      string        `json:"ui"`      // URL of the web page including its access token
-		Version string        `json:"version"`
-		PID     int           `json:"pid"`
-		Notice  string        `json:"notice,omitempty"`
+		Node  string `json:"node"`
+		Name  string `json:"name"`
+		Human string `json:"human"`
+		Local string `json:"local"`
+		// IDShared: another machine known here has this machine's short
+		// id, so human and this machine's agents in entries name it in full.
+		IDShared bool          `json:"id_shared,omitempty"`
+		Rooms    []Room        `json:"rooms"`
+		Agents   []store.Agent `json:"agents"`
+		Peers    []Peer        `json:"peers"`
+		Network  Network       `json:"network"`
+		Waiting  int           `json:"waiting"` // requests waiting for this machine's person
+		Listen   []string      `json:"listen"`  // addresses other machines can dial; empty: no listener
+		UI       string        `json:"ui"`      // URL of the web page including its access token
+		Version  string        `json:"version"`
+		PID      int           `json:"pid"`
+		Notice   string        `json:"notice,omitempty"`
 		// Levels are the local agents' reading levels other than the
 		// default: an agent and room not listed is at "all".
 		Levels []store.AgentLevel `json:"levels"`
@@ -708,12 +722,16 @@ func waitOf(ms int64) (time.Duration, error) {
 // EntryOf renders a node entry (PROTOCOL section 7, Entry).
 func EntryOf(e node.Entry) Entry {
 	out := Entry{Key: e.Key, Version: e.Version, Kind: e.Kind, ID: e.ID, Room: e.Room, RoomLabel: e.RoomLabel,
-		From: e.From, FromNode: e.FromNode, AuthorRemoved: e.AuthorRemoved, Parent: e.Parent, Thread: e.Thread,
+		From: e.From, FromNode: e.FromNode, FromThisMachine: e.Here, IDShared: e.IDShared, AuthorRemoved: e.AuthorRemoved, Parent: e.Parent, Thread: e.Thread,
 		ParentState: e.ParentState, Late: e.Late, Created: Time(e.Created), Text: e.Text, Choices: e.Choices,
 		AskHandled: e.AskHandled, Skipped: e.Skipped, FilesPending: e.FilesPending, FilesNote: e.FilesNote,
 		Request: e.Request, State: e.RequestState, Reason: e.RequestReason}
-	for _, a := range e.To {
-		out.To = append(out.To, node.AgentID(a))
+	if e.ToIDs != nil {
+		out.To = append(out.To, e.ToIDs...)
+	} else {
+		for _, a := range e.To {
+			out.To = append(out.To, node.AgentID(a))
+		}
 	}
 	for _, f := range e.Files {
 		out.Files = append(out.Files, EntryFile{SHA256: f.SHA256, Name: f.Name, Size: f.Size, Type: f.Type, State: f.State})
@@ -835,7 +853,7 @@ func PreviewOf(p node.Preview) PreviewResp {
 
 // StatusOf renders the machine at a glance.
 func StatusOf(st node.StatusView, listen []string, info Info) Status {
-	out := Status{Node: st.Node, Name: st.Name, Human: st.Human, Local: st.Local, Rooms: roomsOf(st.Rooms),
+	out := Status{Node: st.Node, Name: st.Name, Human: st.Human, Local: st.Local, IDShared: st.Shared[st.Node], Rooms: roomsOf(st.Rooms),
 		Agents: st.Agents, Peers: []Peer{}, Listen: listen, Version: info.Version, PID: info.PID, Notice: st.Notice,
 		Network: statusNetwork(st), Waiting: st.Waiting, Levels: st.Levels, Reach: st.Reach,
 		Mapping: st.Mapping}
@@ -847,6 +865,9 @@ func StatusOf(st node.StatusView, listen []string, info Info) Status {
 		out.Quarantined = append(out.Quarantined, Quarantined{ID: q.Room, Label: q.Label, Reason: q.Reason})
 	}
 	for i := range out.Rooms {
+		for k := range out.Rooms[i].Members {
+			out.Rooms[i].Members[k].IDShared = st.Shared[out.Rooms[i].Members[k].Node]
+		}
 		for _, w := range st.Writers[out.Rooms[i].ID] {
 			out.Rooms[i].Agents = append(out.Rooms[i].Agents, Writer{Agent: w.Agent, LastSeen: Time(w.Last)})
 		}
@@ -862,7 +883,7 @@ func StatusOf(st node.StatusView, listen []string, info Info) Status {
 		out.Agents = []store.Agent{}
 	}
 	for _, p := range st.Peers {
-		out.Peers = append(out.Peers, Peer{Node: p.Node, Name: p.Name, Rooms: p.Rooms, Addrs: p.Addrs, LastHeard: Time(p.LastHeard)})
+		out.Peers = append(out.Peers, Peer{Node: p.Node, Name: p.Name, IDShared: st.Shared[p.Node], Rooms: p.Rooms, Addrs: p.Addrs, LastHeard: Time(p.LastHeard)})
 	}
 	if info.UIURL != nil {
 		out.UI = info.UIURL()
@@ -899,10 +920,11 @@ func Handler(s *node.Surface, info Info) http.Handler {
 		}
 		m, err := s.Send(ctx, in)
 		out := SendResp{ID: m.ID, Room: m.Room, RoomLabel: m.Label, Created: Time(m.Created), ToOmitted: m.ToOmitted}
-		for _, a := range m.To {
-			out.To = append(out.To, node.AgentID(a))
+		if err != nil || len(m.To) == 0 {
+			return out, err
 		}
-		return out, err
+		out.To = s.AgentIDs(ctx, m.To) // a shared short id in full; never fails a committed send
+		return out, nil
 	})
 	// fetch is an agent's request for one file's bytes, copied for it
 	// under the daemon's home and never opened (PROTOCOL 10.6).
@@ -1059,7 +1081,17 @@ func Handler(s *node.Surface, info Info) http.Handler {
 	})
 	handle(mux, "room/list", func(ctx context.Context, r RoomListReq) (RoomsResp, error) {
 		rs, err := s.RoomList(ctx, r.Room)
-		return RoomsResp{roomsOf(rs)}, err
+		if err != nil {
+			return RoomsResp{}, err
+		}
+		out := roomsOf(rs)
+		shared, err := s.SharedIDs(ctx)
+		for i := range out {
+			for k := range out[i].Members {
+				out[i].Members[k].IDShared = shared[out[i].Members[k].Node]
+			}
+		}
+		return RoomsResp{out}, err
 	})
 	handle(mux, "unread", func(ctx context.Context, r UnreadReq) (Unread, error) {
 		id := r.Agent
@@ -1076,7 +1108,7 @@ func Handler(s *node.Surface, info Info) http.Handler {
 			out.Rooms = append(out.Rooms, RoomCount{Room: c.Room, Label: c.Label, Count: c.Count})
 		}
 		for _, f := range u.First {
-			out.First = append(out.First, FirstLine{ID: f.ID, Room: f.Room, From: f.From, Line: f.Line})
+			out.First = append(out.First, FirstLine{ID: f.ID, Room: f.Room, From: f.From, FromThisMachine: f.Here, IDShared: f.IDShared, Line: f.Line})
 		}
 		return out, err
 	})
