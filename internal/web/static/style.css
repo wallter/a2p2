@@ -103,6 +103,10 @@ summary { cursor: pointer; }
   border-radius: .45rem;
 }
 .qcard:last-child { margin-bottom: 0; }
+/* A message that asks is not a request: no warning edge, and its choices
+   are plain buttons, never styled as an approval. */
+.qcard.ask { border-inline-start: 1px dashed var(--control); border-style: dashed; }
+#questions-title { margin-top: .9rem; font-size: 1rem; }
 #outcome:not(:empty) { margin-bottom: .75rem; }
 #questions:not(:empty), #alerts:not(:empty) { margin-top: .75rem; }
 .qcard .txt, .body { white-space: pre-wrap; margin: .45rem 0; }

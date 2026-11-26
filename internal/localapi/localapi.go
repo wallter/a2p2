@@ -329,11 +329,16 @@ type (
 		Node        string `json:"node"`
 		Fingerprint string `json:"fingerprint"`
 		Name        string `json:"name,omitempty"`
-		Role        string `json:"role,omitempty"`
-		History     bool   `json:"history"`
-		Seconding   bool   `json:"seconding,omitempty"`
-		Created     string `json:"created"`
-		Deadline    string `json:"deadline,omitempty"`
+		// NameFrom says who chose name: machine (the machine asking to
+		// join), admin (the admin whose entry this seconds) or here.
+		// RecordedName is the name the room records for the machine.
+		NameFrom     string `json:"name_from,omitempty"`
+		RecordedName string `json:"recorded_name,omitempty"`
+		Role         string `json:"role,omitempty"`
+		History      bool   `json:"history"`
+		Seconding    bool   `json:"seconding,omitempty"`
+		Created      string `json:"created"`
+		Deadline     string `json:"deadline,omitempty"`
 		// Text says exactly what approving it does.
 		Text string `json:"text"`
 		// For kind send_files (PROTOCOL 10.6): the agent that asked, the
@@ -771,7 +776,7 @@ func roomsOf(rs []node.RoomInfo) []Room {
 // RequestOf renders a request for a person.
 func RequestOf(q node.RequestView) Request {
 	out := Request{ID: q.ID, Kind: q.Kind, Action: q.Action, Room: q.Room, RoomLabel: q.RoomLabel, Node: q.Machine,
-		Fingerprint: q.Fingerprint, Name: q.Name, Role: q.Role, History: q.History, Seconding: q.Seconding,
+		Fingerprint: q.Fingerprint, Name: q.Name, NameFrom: q.NameFrom, RecordedName: q.RecordedName, Role: q.Role, History: q.History, Seconding: q.Seconding,
 		Created: Time(q.Created), Deadline: Time(q.Deadline), Text: q.Text}
 	if s := q.Send; s != nil {
 		out.Agent, out.To, out.ReplyTo, out.TextLine, out.Terms = s.Agent, s.To, s.Parent, s.TextLine, s.Terms

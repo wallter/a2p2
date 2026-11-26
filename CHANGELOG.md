@@ -75,6 +75,48 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   was held, about 4 ms per file, so pulls and approvals of every room
   waited. They now run after the lock is released. Other file work still
   waits for them.
+- **A room label from another machine can no longer disguise what a person
+  approves.** Exposed since 0.1.0: an admin of a room whose creator was
+  hostile. The creator could put a carriage return, terminal escapes, a
+  right-to-left override or a newline in the room's label, and the label
+  went raw into the text of every membership request and its alert, in
+  `confirm`, `alerts` and on the page. A seconding request could so hide
+  that it makes the creator's second machine an admin. The request text
+  now writes each such character as `\u{...}`; the stored label is
+  unchanged, so old logs still load. The alert that this machine may have
+  been removed from a room, and the join preview in `a2p2 join`, escape
+  the label too.
+- **The escaping covers characters that draw as nothing.** Zero width
+  characters, tag characters and the rest of U+E0000 to U+E0FFF,
+  variation selectors, U+FFF0 to U+FFF8, Hangul fillers, the line and
+  paragraph separators and every other Unicode control, format or
+  default ignorable character are now written `\u{...}` too, in requests
+  and on the page. The helper moved to `internal/node/escape.go` with one
+  rule for one-line text and one for message text. The message rule keeps
+  a joiner or selector only inside an emoji sequence or between letters
+  of a script that needs joiners, such as Arabic or Devanagari.
+- **The page escapes what other machines wrote.** Exposed since 0.2.3,
+  the first release whose page loads: a person using the page in a room
+  with another owner's machines. Room labels in the sidebar, headings and
+  alerts, machine names, agent ids, message text and choices were drawn
+  as sent. They are now escaped as the daemon does, and two rooms whose
+  labels are drawn alike are shown with their ids. A message that asks
+  the person is drawn under its own heading, apart from requests, says
+  who asked from which machine and of whom, says it approves nothing,
+  and has plain buttons. A choice that its button cannot show exactly as
+  it is sent (a hidden character, a line break, a blank other than a
+  plain space, a space at either end or two in a row) is not sent; the
+  person types the reply. An emoji choice such as "❤️ Yes" is sent.
+- **A seconding request says who chose the machine's name.** Since 0.1.0
+  `confirm` (and the page, since it loads in 0.2.3) said "the machine
+  chose its own name" for every request, also when the other admin wrote
+  it. They now say which: the
+  request has `name_from` and `recorded_name`, and its text shows the
+  name the room records and other members with the name shown. An
+  approval from the page is refused if that text changed before the
+  decision; reload and decide again.
+- Still open: the CLI's printing of messages, question alerts and room
+  lists, and the MCP tools' text, do not escape yet.
 
 ## [0.2.3] - 2026-11-25
 

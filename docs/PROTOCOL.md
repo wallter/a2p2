@@ -1429,10 +1429,45 @@ version shown, `files_pending` and `files_note`. A new `Entry` kind
 any entry; it is recorded in the `shown` table with key `q:<request id>`,
 and is shown only to the agent that asked.
 
-What a request shows is escaped by `EscapeDisplay`: C0 and C1 controls,
-DEL, U+061C, U+200E, U+200F, U+202A to U+202E and U+2066 to U+2069 are
-written `\u{<hex>}`, and a byte that is not UTF-8 is written `\x{<hex>}`.
-`body` escapes each line and keeps the line breaks.
+What a request shows is escaped by `EscapeDisplay`
+(`internal/node/escape.go`): every control, format, line separator and
+paragraph separator character (Unicode classes Cc, Cf, Zl, Zp), every
+other default ignorable code point and every variation selector, that
+is U+034F, the Hangul fillers, U+17B4 and U+17B5, U+180B to U+180F,
+U+FE00 to U+FE0F, U+FFF0 to U+FFF8 and the whole block U+E0000 to
+U+E0FFF (tag characters, the variation selectors supplement and the
+unassigned code points around them), is written `\u{<hex>}`, and a byte
+that is not UTF-8 is written `\x{<hex>}`. Nothing is dropped. `body`
+escapes each line and keeps the line breaks (`EscapeDisplayLines`). This
+covers every request's `text`: the room label and the machine's name in
+it are escaped, whoever chose them. A request also has `name_from`
+(`machine`: the machine asking to join chose its name; `admin`: the
+admin whose entry it seconds did; `here`; empty when the request carries
+no name) and `recorded_name`, the name the room records for the machine.
+For a seconding request `text` names both, and says when other members
+of the room have the name shown (compared without case; up to three by
+fingerprint, the rest counted). `room_label` and `name` stay as stored;
+a program that shows them escapes them. The page sends back the `text`
+it showed when it approves, and the daemon compares it again when it
+decides, under the same lock as the decision, so a member who joined in
+between cannot be missed.
+
+Message text a person reads is escaped by `EscapeDisplayText`, which
+keeps a newline, a tab, a zero width joiner between two emoji, a joiner
+or non-joiner between two letters of a script that needs them (Arabic
+and the other scripts of U+0600 to U+08FF, the Indic scripts, Myanmar,
+Khmer, Mongolian, the Arabic presentation forms), and one U+FE0E or
+U+FE0F straight after an emoji, a digit, `#` or `*`. Everything else in
+the table is escaped. What is kept can still carry about one bit per
+such position that nobody sees, since the drawing may look the same with
+or without it; that is accepted, only inside emoji and those scripts,
+because escaping these would break them for every reader. A question's
+choice is drawn by `EscapeChoice`: the same rules on one line, with every
+blank that would not be sent as shown (a space other than U+0020, U+2800,
+a space at either end or next to another) escaped too. The page sends a
+choice only when `EscapeChoice` leaves it unchanged (`ChoiceHidden`).
+The page uses the same tables and rules. Nothing in the wire format or
+in what is stored changes: escaping is done when text is shown.
 
 CLI: `a2p2 send --file PATH` (repeatable; a relative path is made
 absolute), `a2p2 fetch SHA256 [--room R] [--message ID] [--wait S]` (the

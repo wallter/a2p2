@@ -21,12 +21,19 @@ type RequestView struct {
 	Machine     string // the target's node id, in full
 	Fingerprint string // Machine grouped for reading
 	Name        string // the target's name; for networking, the address listened on
-	Role        string
-	History     bool
-	Seconding   bool // matches an entry another admin already signed
-	Created     time.Time
-	Deadline    time.Time // the invite's expiry, for a request an invite raised
-	Text        string
+	// NameFrom says who chose Name: NameFromMachine (the machine asking
+	// to join), NameFromAdmin (the admin whose entry this request
+	// seconds) or NameFromHere; empty without a name.
+	NameFrom string
+	// RecordedName is the name the room records for the target, when it
+	// is a member: compare it with Name.
+	RecordedName string
+	Role         string
+	History      bool
+	Seconding    bool // matches an entry another admin already signed
+	Created      time.Time
+	Deadline     time.Time // the invite's expiry, for a request an invite raised
+	Text         string
 	// Send is a send with files (kind store.RequestSendFiles), every term
 	// as the person approves it.
 	Send *SendView
@@ -35,16 +42,23 @@ type RequestView struct {
 // Describe renders q for a person.
 func (s *Surface) Describe(ctx context.Context, q store.Request) (RequestView, error) {
 	label := ""
+	var members []MemberInfo
 	if q.Room != "" {
 		lr, err := s.m.st.LogRoom(ctx, q.Room)
 		if err != nil {
 			return RequestView{}, err
 		}
 		label = lr.Label
+		if s.r != nil && q.Kind != store.RequestSendFiles {
+			members = s.r.memberNames(q.Room)
+		}
 	}
+	// RoomLabel and Name are kept as stored, for programs; Text, which a
+	// person approves, escapes them (requestText).
 	v := RequestView{ID: q.ID, Kind: q.Kind, Action: q.Action, Room: q.Room, RoomLabel: label, Machine: q.Node,
-		Fingerprint: Fingerprint(q.Node), Name: q.Name, Role: q.Role, History: q.History, Seconding: q.Seconds != "",
-		Created: q.Created, Deadline: q.Deadline, Text: requestText(q, label)}
+		Fingerprint: Fingerprint(q.Node), Name: q.Name, NameFrom: nameFrom(q), RecordedName: recordedName(members, q.Node),
+		Role: q.Role, History: q.History, Seconding: q.Seconds != "",
+		Created: q.Created, Deadline: q.Deadline, Text: requestText(q, label, members)}
 	if q.Kind == store.RequestSendFiles {
 		v.Machine, v.Fingerprint = "", ""
 		v.Deadline = q.Created.Add(core.StagingLife)
