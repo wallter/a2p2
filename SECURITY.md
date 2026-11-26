@@ -131,7 +131,14 @@ reports.
   `codex exec` needs this. a2p2 0.1.0 to 0.2.3 wrote this approval on every
   Codex install without asking. The next `a2p2 install codex` removes it,
   and `a2p2 doctor` reports it as a fault until then. An agent can pass
-  the flag itself: a flag cannot show that the person chose it.
+  the flag itself: a flag cannot show that the person chose it. When a
+  line that could set an approval for a2p2's server is one a2p2 does not
+  read in full, such as an inline table, the flag writes nothing and
+  doctor says it cannot tell.
+- Install and uninstall read each harness file again just before they
+  replace or remove it, and leave it as it is if it changed since they
+  read it. The instant between that read and the rename remains, since no
+  harness takes a lock a2p2 could also take.
 - The team launcher (`scripts/team`) starts members with no person to
   answer prompts, so it approves every a2p2 tool for them. It refuses to
   start a Claude Code, Codex or Antigravity member unless the manifest

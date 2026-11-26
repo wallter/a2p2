@@ -290,7 +290,8 @@ install codex` removes that line, with or without `--approve-tools`
 (which writes its own), and `a2p2 doctor` fails its `codex tool approval`
 line until then. Doctor also names a server-wide approval the person wrote
 and tools approved one by one (`[mcp_servers.a2p2.tools.NAME]
-approval_mode = "approve"`, or `tools.NAME.approval_mode` in a2p2's table).
+approval_mode = "approve"`, or `tools.NAME.approval_mode` in a2p2's table),
+in any of the spellings below.
 
 Codex 0.171.0 also has a per-tool setting: the strings of its binary name
 a `McpServerToolConfig` with `approval_mode`. A per-tool approval of only
@@ -305,10 +306,24 @@ set, where the Codex documentation says the CLI keeps it (the default is
 set has checked this. If `[mcp_servers.a2p2]` already has a
 `default_tools_approval_mode` that a2p2 did not write, `--approve-tools`
 leaves it and says so, since a second key would make the file invalid.
+a2p2 reads keys and headers in every form TOML allows: bare, quoted,
+literal, with escapes such as `\u005f`, and with spaces around the dots.
+When a line that could set an approval is one it does not read in full
+(an inline table, one spread over several lines, or a key it cannot
+decode), `--approve-tools` writes nothing, names the line, and gives the
+line to add by hand; doctor's `codex tool approval` line fails and says
+it cannot tell what is approved. Only the top level, `[mcp_servers]`,
+a2p2's table, its `tools` table and one tool's table can set an approval,
+so an inline `env = { ... }` in a2p2's table, as the Codex documentation
+writes it, stops neither `--approve-tools` nor doctor. Doctor also says
+it cannot tell when an approval value is a multi-line string it does not
+decode: one that goes on past its line, or holds a quote or a backslash.
+It reads `"""approve"""` and `'''approve'''`.
 
-`--dry-run` prints the choice: "tool approval: a2p2 approves none" or
+`--dry-run` prints the choice: "tool approval: a2p2 approves none",
 "tool approval: would let every a2p2 tool, send, reply, ack and ask_human
-included, ... run without a prompt".
+included, ... run without a prompt", or that a2p2 would add nothing and
+why.
 
 ## What the hook prints
 
@@ -567,6 +582,17 @@ Hermes and OpenCode file is parsed back and compared with the original
 before it is written, and the write replaces the file atomically. These
 are covered by tests against fake homes
 (`internal/harness/record_test.go`), not by a further real run.
+
+Every write a2p2 makes to a file a harness or the person also edits (the
+hook files, the adapters' files, the harness CLIs' files when an entry is
+put back, and uninstall's restores and removals) reads the file again just
+before the rename and compares it with what a2p2 read. If it changed, a2p2
+leaves it as it is, takes back the backup it made for that write, and
+stops with a message that names the file; run the command again. The Codex
+approval edit instead reads and edits the file again, up to three times.
+The instant between that last read and the rename remains: closing it
+needs a lock the harness also takes, and none of these harnesses has one.
+Covered by `internal/harness/guard_test.go`, not by a real run.
 
 Since 2026-11-25 Pi's skill writes the label out in every command (`--as
 "pi-$(basename "$PWD")"`) instead of a `ME` variable, and sends text only
