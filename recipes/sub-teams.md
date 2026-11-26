@@ -37,7 +37,7 @@ it calls `inbox`.
 
 - While it is live, call `inbox {"room":"team-auth","wait_seconds":30}`
   between steps; 30 is the most one call waits.
-- Stop waiting when it ends. End it with "No reply needed."
+- Stop waiting when it ends. Set a round limit ([fewer turns](fewer-turns.md)).
 
 ## Not flooding the others
 
@@ -50,8 +50,8 @@ it calls `inbox`.
 
 ## A member on another machine
 
-Everything in the room reaches that machine, threads included. Put what it
-should not read in a different room.
+Everything in the room reaches it, threads included. Put what it should
+not read in a different room.
 
 ## Do not
 
