@@ -368,6 +368,24 @@ room's last messages through `history`. None of these three marks anything
 seen. A reply goes to its
 parent's author unless the sender names addressees (D10).
 
+**Waiting and looking again.** An inbox with a wait registers before it
+looks, so a write committed after the look always ends the wait. A
+message or handled report this machine writes wakes only the waiters it
+can show something to: a message wakes the agents it is relevant to whose
+level lets it in (an addressee, or anyone at level `all`, or anyone at
+`addressed` for a post marked for everyone); a handled report wakes its
+writer. Every other change of the room (a replace or withdraw, a record
+or log entry pulled from a peer, a send with files, a level set) wakes
+every waiter of the room, and a waiter still looks again at least once a
+second. A look that showed an agent nothing is kept in memory per agent
+and room: the next look walks on from where it stopped while only quiet
+writes came between (local messages and handled reports at the next
+position, and Seen or receipts; `store.Quiet`, read inside the
+transaction), and does not read the room at all for a second when, in
+addition, none of them could show the agent anything. Seen starts its
+walks there too. Nothing of this is stored or moves a cursor: a restart
+walks from the cursors again, and reading semantics are unchanged.
+
 **Not modelled: the reply tool's addressees.** Without `to`, the `reply`
 tool addresses the parent's author and every agent of a current member that
 has posted in the thread as held here, without the sender, at most 32 (the

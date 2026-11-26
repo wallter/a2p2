@@ -73,6 +73,8 @@ type Store struct {
 	// before its commit. With one connection, a read that starts after
 	// changes was read sees every write counted by then (see Changes).
 	changes atomic.Int64
+	// quiet counts the write transactions that were quiet (Quiet).
+	quiet atomic.Int64
 	// root is the directory under which attachments live (files.go):
 	// the database's own directory. fileMu serialises putting bytes at a
 	// path with the deletion queue's run.
@@ -184,17 +186,48 @@ func (s *Store) Check(ctx context.Context) error {
 }
 
 func (s *Store) tx(ctx context.Context, fn func(*sql.Tx) error) error {
+	return s.txQuiet(ctx, func(tx *sql.Tx) (bool, error) { return false, fn(tx) })
+}
+
+// txQuiet is tx for a write that may be quiet (see Quiet): fn says whether
+// what it wrote is. The quiet count is raised after changes, inside the
+// transaction, so that a reader of Quiet then Changes never counts a write
+// quiet that was not.
+func (s *Store) txQuiet(ctx context.Context, fn func(*sql.Tx) (bool, error)) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if err := fn(tx); err != nil {
+	if h := txHook; h != nil {
+		defer h(true, time.Now())
+	}
+	quiet, err := fn(tx)
+	if err != nil {
 		tx.Rollback()
 		return err
 	}
 	s.changes.Add(1)
+	if quiet {
+		s.quiet.Add(1)
+	}
 	return tx.Commit()
 }
+
+// Quiet is the number of write transactions counted by Changes that were
+// quiet: each stored only one record of this machine of kind message or
+// handled, at the next position of its stream (Write), or changed only one
+// agent's reading state in one room (Seen, ShowAt). Such a write never
+// changes what reading decides at a position held before it, for any
+// agent, so a reader that read Changes and Quiet inside an earlier read
+// transaction can tell, inside a later one, that only quiet writes came
+// between (both grew by the same amount). Read Quiet before Changes
+// outside a transaction.
+func (s *Store) Quiet() int64 { return s.quiet.Load() }
+
+// txHook, when set, is told of every transaction once it ends: whether it
+// could write, and when it began (it holds the one connection from then).
+// Only the benchmark build sets it (bench_hooks.go).
+var txHook func(write bool, began time.Time)
 
 func ms(t time.Time) int64     { return t.UnixMilli() }
 func fromMS(v int64) time.Time { return time.UnixMilli(v).UTC() }

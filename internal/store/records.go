@@ -352,22 +352,25 @@ func (s *Store) PutRecord(ctx context.Context, r *core.VerifiedRecord, o PutOpts
 // written.
 func (s *Store) Write(ctx context.Context, now time.Time, build func(*Reader) (*core.VerifiedRecord, error)) (*core.VerifiedRecord, error) {
 	var r *core.VerifiedRecord
-	err := s.tx(ctx, func(tx *sql.Tx) error {
+	err := s.txQuiet(ctx, func(tx *sql.Tx) (bool, error) {
 		var err error
 		if r, err = build(&Reader{tx: tx}); err != nil {
-			return err
+			return false, err
 		}
 		if r == nil || r.ID() == "" {
-			return ErrUnverified
+			return false, ErrUnverified
 		}
 		out, err := place(tx, r, PutOpts{Now: now, MayRead: true})
 		if err != nil {
-			return err
+			return false, err
 		}
 		if out != OutcomeStored {
-			return &NotPlaced{out}
+			return false, &NotPlaced{out}
 		}
-		return nil
+		// A new message or handled report at the next position (Quiet); a
+		// replace or withdraw changes what an earlier position shows.
+		k := r.Fields().Kind
+		return k == core.KindMessage || k == core.KindHandled, nil
 	})
 	if err != nil {
 		return nil, err
@@ -838,6 +841,9 @@ func (s *Store) View(ctx context.Context, fn func(*Reader) error) error {
 	if err != nil {
 		return err
 	}
+	if h := txHook; h != nil {
+		defer h(false, time.Now())
+	}
 	defer tx.Rollback()
 	return fn(&Reader{tx: tx})
 }
@@ -847,50 +853,52 @@ func (s *Store) View(ctx context.Context, fn func(*Reader) error) error {
 // which confirmations are valid; a read confirmed again takes the new
 // version.
 func (s *Store) Seen(ctx context.Context, agent, room string, plan func(*Reader) (SeenPlan, error)) error {
-	return s.tx(ctx, func(tx *sql.Tx) error {
-		p, err := plan(&Reader{tx: tx})
-		if err != nil {
+	return s.txQuiet(ctx, func(tx *sql.Tx) (bool, error) { return true, s.seen(tx, agent, room, plan) })
+}
+
+func (s *Store) seen(tx *sql.Tx, agent, room string, plan func(*Reader) (SeenPlan, error)) error {
+	p, err := plan(&Reader{tx: tx})
+	if err != nil {
+		return err
+	}
+	for _, r := range p.Reads {
+		if _, err := tx.Exec(`INSERT INTO reads (agent, room, key, version, msg) VALUES (?,?,?,?,?)
+			ON CONFLICT (agent, room, key) DO UPDATE SET version = excluded.version, msg = excluded.msg`,
+			agent, room, r.Key, r.Version, r.Msg); err != nil {
 			return err
 		}
-		for _, r := range p.Reads {
-			if _, err := tx.Exec(`INSERT INTO reads (agent, room, key, version, msg) VALUES (?,?,?,?,?)
-				ON CONFLICT (agent, room, key) DO UPDATE SET version = excluded.version, msg = excluded.msg`,
-				agent, room, r.Key, r.Version, r.Msg); err != nil {
-				return err
-			}
-			// The confirmation replaces the receipt it needed (shown.go).
-			if _, err := tx.Exec(`DELETE FROM shown WHERE agent = ? AND room = ? AND key = ?`,
-				agent, room, r.Key); err != nil {
-				return err
-			}
-		}
-		if err := hook("seen:reads"); err != nil {
+		// The confirmation replaces the receipt it needed (shown.go).
+		if _, err := tx.Exec(`DELETE FROM shown WHERE agent = ? AND room = ? AND key = ?`,
+			agent, room, r.Key); err != nil {
 			return err
 		}
-		for author, ids := range p.Heads {
-			if _, err := tx.Exec(`DELETE FROM read_heads WHERE agent = ? AND room = ? AND author = ?`,
-				agent, room, author); err != nil {
-				return err
-			}
-			for _, id := range ids {
-				if _, err := tx.Exec(`INSERT INTO read_heads (agent, room, author, record) VALUES (?,?,?,?)
-					ON CONFLICT DO NOTHING`, agent, room, author, id); err != nil {
-					return err
-				}
-			}
-		}
-		if err := hook("seen:heads"); err != nil {
+	}
+	if err := hook("seen:reads"); err != nil {
+		return err
+	}
+	for author, ids := range p.Heads {
+		if _, err := tx.Exec(`DELETE FROM read_heads WHERE agent = ? AND room = ? AND author = ?`,
+			agent, room, author); err != nil {
 			return err
 		}
-		for _, c := range p.Cursors {
-			if _, err := tx.Exec(`INSERT INTO cursors (agent, room, author, epoch, start, pos) VALUES (?,?,?,?,?,?)
-				ON CONFLICT (agent, room, author, epoch) DO UPDATE SET pos = excluded.pos`,
-				agent, room, c.Author, c.Epoch, c.Start, c.Pos); err != nil {
+		for _, id := range ids {
+			if _, err := tx.Exec(`INSERT INTO read_heads (agent, room, author, record) VALUES (?,?,?,?)
+				ON CONFLICT DO NOTHING`, agent, room, author, id); err != nil {
 				return err
 			}
 		}
-		return nil
-	})
+	}
+	if err := hook("seen:heads"); err != nil {
+		return err
+	}
+	for _, c := range p.Cursors {
+		if _, err := tx.Exec(`INSERT INTO cursors (agent, room, author, epoch, start, pos) VALUES (?,?,?,?,?,?)
+			ON CONFLICT (agent, room, author, epoch) DO UPDATE SET pos = excluded.pos`,
+			agent, room, c.Author, c.Epoch, c.Start, c.Pos); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Reader reads one consistent state inside a transaction. It is only valid

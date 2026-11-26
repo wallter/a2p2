@@ -134,6 +134,9 @@ const (
 type InboxView struct {
 	Entries []Entry
 	Waiting []Wait
+	// levels is the agent's reading level in each room the look read
+	// (what wakes a waiting Inbox: touchWrite).
+	levels map[string]string
 }
 
 // Why Seen refused one confirmation.
@@ -152,8 +155,22 @@ type SeenResult struct {
 
 // Inbox shows agent what it has not confirmed in room, in each author's
 // order, and what the walk waits for. It marks nothing [R7].
+//
+// A look that shows nothing is remembered (lookMemo): the next look walks
+// on from where it stopped when only quiet writes came between (Quiet),
+// and does not read the room at all when, besides, none of them could show
+// the agent anything and it is under lookFresh old.
 func (m *Machine) Inbox(ctx context.Context, room, agent string) (InboxView, error) {
+	narrow, memo := m.wakes.lookAt(room, agent)
+	if memo != nil && memo.narrow == narrow && memo.fresh(m.now(), m.lookFresh) && memo.quietSince(m.st) {
+		if m.inboxWalked != nil {
+			m.inboxWalked(room, walkSkipped, 0)
+		}
+		return InboxView{Waiting: slices.Clone(memo.waits), levels: map[string]string{room: memo.level}}, nil
+	}
 	var out InboxView
+	var keep *lookMemo
+	now := m.now()
 	err := m.view(ctx, room, func(v *roomView) error {
 		if err := v.requireAgent(agent); err != nil {
 			return err
@@ -162,11 +179,79 @@ func (m *Machine) Inbox(ctx context.Context, room, agent string) (InboxView, err
 		if err != nil {
 			return err
 		}
-		es, _, ws, err := v.walk(g, agent, false)
-		out = InboxView{Entries: es, Waiting: ws}
+		// Inside the transaction: exactly the writes committed before it.
+		quiet, changes := m.st.Quiet(), m.st.Changes()
+		if memo != nil && memo.gen == v.gen && changes-memo.changes == quiet-memo.quiet {
+			g.from = memo.pos
+		}
+		es, pos, ws, err := v.walk(g, agent, false)
+		if m.inboxWalked != nil {
+			n := 0
+			for k, p := range pos {
+				n += int(p - max(g.cursor[k], g.from[k]))
+			}
+			how := walkFromCursor
+			if g.from != nil {
+				how = walkFromMemo
+			}
+			m.inboxWalked(room, how, n)
+		}
+		out = InboxView{Entries: es, Waiting: ws, levels: map[string]string{room: g.level}}
+		if err == nil && len(es) == 0 {
+			keep = &lookMemo{gen: v.gen, changes: changes, quiet: quiet, narrow: narrow, level: g.level,
+				pos: pos, waits: slices.Clone(ws), at: now, real: time.Now()}
+		}
 		return err
 	})
+	if keep != nil {
+		m.wakes.keepLook(room, agent, keep)
+	}
 	return out, err
+}
+
+// How Machine.Inbox read a room (the inboxWalked test hook).
+const (
+	walkSkipped    = "skipped"     // not read: nothing new (lookMemo)
+	walkFromMemo   = "from memo"   // walked on from the last empty look
+	walkFromCursor = "from cursor" // walked from the agent's cursors
+)
+
+// lookFresh is how long a look that showed nothing stands for the room
+// without reading it, when nothing since could show the agent anything.
+// It keeps the one-second fallback of a waiting Inbox (waitAny) a real
+// look, for a change no write and no wake announces.
+const lookFresh = time.Second
+
+// lookMemo is one agent's look at one room that showed it nothing, in
+// memory: rebuilt by the next look, gone at a restart. Every position up
+// to pos in each stream was decided as nothing for the agent then, and a
+// quiet write (store.Quiet) never changes what an earlier position shows.
+// It never stands for a cursor: Seen alone moves those.
+type lookMemo struct {
+	gen            int64
+	changes, quiet int64  // the store's counts inside the look's transaction
+	narrow         uint64 // the agent's narrow count before it (lookState)
+	level          string
+	pos            map[streamKey]int64
+	waits          []Wait
+	at, real       time.Time // by this machine's clock, and the real one
+}
+
+// fresh reports whether the look is under lookFresh old, both by this
+// machine's clock (now) and in real time.
+func (l *lookMemo) fresh(now time.Time, within time.Duration) bool {
+	if within == 0 {
+		within = lookFresh
+	}
+	d := now.Sub(l.at)
+	return d >= 0 && d < within && time.Since(l.real) < within
+}
+
+// quietSince reports whether only quiet writes were counted since the
+// look, read outside a transaction: Quiet first, then Changes.
+func (l *lookMemo) quietSince(st *store.Store) bool {
+	q := st.Quiet()
+	return st.Changes()-l.changes == q-l.quiet
 }
 
 // Seen confirms entries for agent [R7]. A confirmation counts only if a
@@ -192,6 +277,7 @@ func (m *Machine) Seen(ctx context.Context, room, agent string, reads []store.Re
 	now := m.now()
 	var results []SeenResult
 	var expiredByClock bool
+	_, memo := m.wakes.lookAt(room, agent)
 	err := m.st.Seen(ctx, agent, room, func(rd *store.Reader) (store.SeenPlan, error) {
 		v := m.newView(rd, room, now)
 		defer func() { expiredByClock = v.expiredByClock }()
@@ -204,6 +290,13 @@ func (m *Machine) Seen(ctx context.Context, room, agent string, reads []store.Re
 		g, err := v.agent(agent)
 		if err != nil {
 			return store.SeenPlan{}, err
+		}
+		// Both walks start where the agent's last empty look stopped when
+		// only quiet writes came since (lookMemo): every position before
+		// is nothing for it, whatever this call confirms, so the cursors
+		// move as far as from the cursors themselves.
+		if memo != nil && memo.gen == v.gen && m.st.Changes()-memo.changes == m.st.Quiet()-memo.quiet {
+			g.from = memo.pos
 		}
 		shown, _, _, err := v.walk(g, agent, false)
 		if err != nil {
@@ -816,6 +909,10 @@ type agentState struct {
 	// receipts: what full inbox listings showed the agent and it has not
 	// confirmed, key -> version (store/shown.go).
 	receipts map[string]string
+	// from, if set, is where an inbox walk starts in each stream it
+	// names, when past the cursor: a look that showed nothing got there
+	// (lookMemo). Never a cursor.
+	from map[streamKey]int64
 }
 
 func copyCursor(c map[streamKey]int64) map[streamKey]int64 {
@@ -1197,6 +1294,11 @@ func (v *roomView) addHead(heads map[string][]string, r *rec) {
 // the first entry not yet confirmed and returns how far it got.
 func (v *roomView) walk(g *agentState, agent string, advance bool) ([]Entry, map[streamKey]int64, []Wait, error) {
 	pos := copyCursor(g.cursor)
+	for k, n := range g.from { // a look that showed nothing got this far (lookMemo)
+		if n > pos[k] {
+			pos[k] = n
+		}
+	}
 	heads := copyHeads(g.heads)
 	var entries []Entry
 	wait := map[streamKey]Wait{}

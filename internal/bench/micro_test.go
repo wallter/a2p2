@@ -187,6 +187,7 @@ type inproc struct {
 	agent string
 	c     *localapi.Client
 	srv   *http.Server
+	sock  string
 }
 
 func newInproc(b testing.TB) *inproc {
@@ -215,6 +216,7 @@ func newInproc(b testing.TB) *inproc {
 	}
 	x.agent = a.ID
 	sock := filepath.Join(x.dir, "sock")
+	x.sock = sock
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		b.Fatal(err)

@@ -95,6 +95,7 @@ type proc struct {
 	home string
 	c    *localapi.Client
 	node string
+	sock string // an in-process daemon's socket (fanDaemon); home is then empty
 }
 
 func binary(t testing.TB) string {
@@ -226,7 +227,12 @@ func (p *proc) tailLog(n int) {
 
 // client is a new client of p's socket: one per simulated agent, as each
 // agent's shim process has its own.
-func (p *proc) client() *localapi.Client { return localapi.NewClient(daemon.SockPath(p.home)) }
+func (p *proc) client() *localapi.Client {
+	if p.sock != "" {
+		return localapi.NewClient(p.sock)
+	}
+	return localapi.NewClient(daemon.SockPath(p.home))
+}
 
 func call[T any](t testing.TB, c *localapi.Client, name string, req any) T {
 	t.Helper()

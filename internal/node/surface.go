@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"maps"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -112,6 +113,12 @@ type Surface struct {
 	// waiting, if set (tests), is called each time Inbox starts to wait:
 	// a readiness barrier.
 	waiting func()
+	// scanned, if set (tests and the benchmark build), is told of each
+	// look Inbox takes: how many rooms it walked and when it began.
+	scanned func(rooms int, began time.Time)
+	// fallback, if set (tests), is called when a waiting Inbox looks again
+	// because its wait timed out, not because a wake came.
+	fallback func(label string, at time.Time)
 }
 
 // OpenSurface prepares the surfaces over m and r: it creates the local
@@ -933,9 +940,12 @@ func (s *Surface) Inbox(ctx context.Context, agent, room string, limit int, wait
 	}
 	deadline := time.Now().Add(wait)
 	for {
-		wakes := s.wakes(ctx, room)
+		// Registered before the look, so that a change committed after it
+		// wakes this call (roomWakes.waitInbox).
+		x := s.m.wakes.waitInbox(label, room)
 		v, err := s.inbox(ctx, label, room)
 		if err != nil || len(v.Entries) > 0 || wait == 0 {
+			s.m.wakes.doneInbox(x)
 			if len(v.Entries) > limit {
 				v.Entries = v.Entries[:limit]
 			}
@@ -944,11 +954,21 @@ func (s *Surface) Inbox(ctx context.Context, agent, room string, limit int, wait
 			}
 			return v, err
 		}
+		s.m.wakes.setLevels(x, v.levels)
 		if s.waiting != nil {
 			s.waiting()
 		}
-		if !waitAny(ctx, wakes, deadline) {
+		ok := waitAny(ctx, []<-chan struct{}{x.ch}, deadline)
+		s.m.wakes.doneInbox(x)
+		if !ok {
 			return v, ctx.Err()
+		}
+		if s.fallback != nil {
+			select {
+			case <-x.ch:
+			default: // the fallback look: no wake came
+				s.fallback(label, time.Now())
+			}
 		}
 	}
 }
@@ -966,6 +986,9 @@ func (s *Surface) inbox(ctx context.Context, label, room string) (InboxView, err
 			ids = append(ids, r.ID)
 		}
 	}
+	if s.scanned != nil {
+		defer s.scanned(len(ids), time.Now())
+	}
 	var out InboxView
 	for _, id := range ids {
 		v, err := s.m.Inbox(ctx, id, label)
@@ -977,6 +1000,10 @@ func (s *Surface) inbox(ctx context.Context, label, room string) (InboxView, err
 		}
 		out.Entries = append(out.Entries, v.Entries...)
 		out.Waiting = append(out.Waiting, v.Waiting...)
+		if out.levels == nil {
+			out.levels = map[string]string{}
+		}
+		maps.Copy(out.levels, v.levels)
 	}
 	reqs, err := s.requestEntries(ctx, label, room)
 	if err != nil {

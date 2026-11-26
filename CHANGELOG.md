@@ -36,6 +36,25 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Fixed
 
+- **Many agents waiting in one room no longer slow every send down.** A
+  message this machine writes now wakes only the waiting inboxes it can
+  show something to (its addressees, or the agents whose level lets a
+  room-wide post in; a handled report wakes its writer); other changes
+  still wake every waiter, and a waiter still looks again each second.
+  A look that showed an agent nothing is remembered in memory, so the
+  next look, and Seen, walk on from where it stopped instead of from the
+  cursor, and an inbox of every room skips the rooms with nothing new for
+  the agent. Nothing is stored, no cursor moves and what an inbox shows is
+  unchanged. Fan-in on one machine (N workers each ask one orchestrator
+  in one room at level `addressed` and wait for the answer; real daemons,
+  Apple Silicon laptop shared with other work, two runs each, before /
+  after): answer p50 1.5-3.0 / 1.4-1.5 ms at N=1, 23-38 / 12-13 ms at
+  N=10, 878-1009 / 89 ms at N=50, 38-44 s / 0.67-0.68 s at N=200; answers
+  a second 3 / 192-195 at N=200; the orchestrator's reply 212-233 / 3.4 ms
+  at N=200. Room-wide at level `all`, N=50: 512-1181 / 434-441 ms. With a
+  room per worker, N=50: 99-227 / 95-96 ms. Local sends with no waiters
+  (2,200-3,800 a second) and a send to one waiting inbox (0.56-0.59 ms)
+  are unchanged.
 - **A send no longer slows down as a room's history grows, and an inbox
   much less.** Looking up what refers to a message, its replies, its
   thread and a new record's dependants read every record of the room;
