@@ -57,8 +57,10 @@ type PullHandler interface {
 
 // pullServer is the endpoint: limits per authenticated peer, then the node.
 type pullServer struct {
-	h   PullHandler
-	lim *pullLimiter
+	h PullHandler
+	// lim is the members' buckets; strangers holds those of keys that
+	// share no room here, so they never fill the members' table.
+	lim, strangers *pullLimiter
 	// closing ends when the listener begins to shut down: every request
 	// in progress, a held one above all, is cancelled then and refused
 	// 503, rather than lasting into the grace period.
@@ -71,13 +73,18 @@ type pullServer struct {
 }
 
 func newPullServer(closing context.Context, h PullHandler) *pullServer {
-	return &pullServer{h: h, lim: newPullLimiter(pullRatePerSec, pullRateBurst), closing: closing, busy: map[string]int{}}
+	return &pullServer{h: h, lim: newPullLimiter(pullRatePerSec, pullRateBurst),
+		strangers: newPullLimiter(pullRatePerSec, pullRateBurst), closing: closing, busy: map[string]int{}}
 }
 
 func (s *pullServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	from := requestNode(r) // step 1: from the certificate, never the body
 	// The rate limit for this peer, before anything of the body is read.
-	if ok, wait := s.lim.take(from); !ok {
+	lim := s.lim
+	if strangerRequest(r) {
+		lim = s.strangers
+	}
+	if ok, wait := lim.take(from); !ok {
 		pullRefuse(w, &node.PullError{Status: http.StatusTooManyRequests, Code: node.CodeRateLimited, RetryAfter: wait})
 		return
 	}

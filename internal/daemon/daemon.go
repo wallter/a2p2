@@ -517,7 +517,7 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	}()
 	keeping := false
 	if peerLn != nil {
-		h := filesPeerHandler{peerHandler{JoinServer: node.NewJoinServer(rooms), x: x, g: g, db: node.NewDialBackServer(rooms, prober), reach: reach}, files}
+		h := filesPeerHandler{peerHandler{JoinServer: node.NewJoinServer(rooms), rooms: rooms, x: x, g: g, db: node.NewDialBackServer(rooms, prober), reach: reach}, files}
 		ln := peerLn
 		peerLn = nil // Serve owns it now
 		lnCtx, lnStop := context.WithCancel(ctx)
@@ -778,11 +778,17 @@ func prune(ctx context.Context, m *node.Machine) {
 // call inside the gate.
 type peerHandler struct {
 	*node.JoinServer
+	rooms *node.Rooms
 	x     *node.Exchange
 	g     *gate
 	db    *node.DialBackServer
 	reach *node.Reacher
 }
+
+// SharesRoom tells the listener which keys are members, so that keys that
+// share no room here get only their own small share of its connection
+// slots (peer.MemberHandler).
+func (h peerHandler) SharesRoom(n string) bool { return h.rooms.SharesRoom(n) }
 
 // Inbound records a connection in for "reachable by peers" (DESIGN 11).
 func (h peerHandler) Inbound(from, local string) {

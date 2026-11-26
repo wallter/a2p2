@@ -15,9 +15,11 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -38,7 +40,21 @@ var (
 	dialTimeout    = 3 * time.Second
 	requestTimeout = 15 * time.Second
 	maxClients     = 256 // cached per-destination HTTP clients
-	maxConns       = 256 // concurrent inbound TCP connections, counted before TLS
+
+	// Inbound connections are counted in three pools (PROTOCOL 4.6), so
+	// that keys that share no room here can never take a member's slot.
+	maxConns         = 256 // connections of keys that are members of a room held here
+	maxPerKey        = 16  // of those, connections of one key
+	maxStrangerConns = 32  // connections of keys that share no room here, joiners among them
+	maxPendingConns  = 64  // connections still in the TLS handshake
+	maxKnownPending  = 16  // more of those, kept for source groups a member came from lately
+	maxPerSource     = 8   // handshaking and stranger connections from one IPv4 address or IPv6 /64
+	maxPerSlash56    = 16  // the same from one IPv6 /56
+	maxPerSlash48    = 32  // the same from one IPv6 /48
+	maxKnownSources  = 1024
+	knownSourceLife  = 24 * time.Hour
+	handshakeTimeout = 5 * time.Second
+	strangerLife     = 15 * time.Second // the longest a stranger's connection is kept
 )
 
 // ---- certificates ----
@@ -215,31 +231,39 @@ func Serve(ctx context.Context, ln net.Listener, id *Identity, h Handler) error 
 	if i, ok := h.(InboundHandler); ok {
 		in = i.Inbound
 	}
+	var member func(string) bool
+	if m, ok := h.(MemberHandler); ok {
+		member = m.SharesRoom
+	}
+	tlsCfg := serverTLS(cert)
+	// The listener completes each TLS handshake itself, so that a
+	// connection is placed in a pool only once the client has proved its
+	// key; the server is handed connections ready to serve.
+	lln := newLimitListener(ln, tlsCfg, member)
 	srv := &http.Server{
-		Handler:           guard(newLimiter(), mux, in),
+		Handler:           guard(newLimiters(), mux, in),
 		Protocols:         protos,
-		ReadHeaderTimeout: 5 * time.Second, // also bounds the TLS handshake
+		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 		ErrorLog:          slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug),
-		TLSConfig: &tls.Config{
-			MinVersion:   tls.VersionTLS13,
-			Certificates: []tls.Certificate{cert},
-			// Any self-signed client certificate is accepted by crypto/tls
-			// (which still verifies the client's possession of the key);
-			// certNode then insists it is a well-formed node certificate.
-			// Whether that node may do anything is decided by internal/node.
-			ClientAuth: tls.RequireAnyClientCert,
-			VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-				_, err := certNode(raw)
-				return err
-			},
-		},
+		// Not used for handshakes (the listener does them); naming "h2"
+		// here makes Serve answer HTTP/2 on connections that chose it.
+		TLSConfig: tlsCfg,
 	}
 	// Requests end when ctx does, so that held (waiting) calls return.
 	srv.BaseContext = func(net.Listener) context.Context { return ctx }
+	// Each request can tell which pool its connection is in.
+	srv.ConnContext = func(ctx context.Context, c net.Conn) context.Context {
+		if tc, ok := c.(*tls.Conn); ok {
+			if lc, ok := tc.NetConn().(*limitConn); ok {
+				return context.WithValue(ctx, connKey{}, lc)
+			}
+		}
+		return ctx
+	}
 	down := make(chan struct{})
 	go func() {
 		defer close(down)
@@ -250,56 +274,424 @@ func Serve(ctx context.Context, ln net.Listener, id *Identity, h Handler) error 
 			srv.Close()
 		}
 	}()
-	// Limit before TLS so stalled handshakes count against the cap too.
-	if err := srv.ServeTLS(newLimitListener(ln, maxConns), "", ""); !errors.Is(err, http.ErrServerClosed) {
+	err = srv.Serve(lln)
+	if !errors.Is(err, http.ErrServerClosed) {
+		lln.Close()
+		lln.wg.Wait()
 		return err
 	}
-	<-down // ServeTLS returns as Shutdown starts; Shutdown waits for the handlers
+	<-down // Serve returns as Shutdown starts; Shutdown waits for the handlers
+	lln.wg.Wait()
 	return nil
 }
 
-// limitListener caps concurrent accepted connections. Accept blocks while the
-// cap is reached; a slot frees when its conn is closed (exactly once).
+// serverTLS is the listener's TLS configuration. Any self-signed client
+// certificate is accepted by crypto/tls (which still verifies the
+// client's possession of the key); certNode then insists it is a
+// well-formed node certificate. Whether that node may do anything is
+// decided by internal/node.
+func serverTLS(cert tls.Certificate) *tls.Config {
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.RequireAnyClientCert,
+		// HTTP/2 for pulls, HTTP/1.1 for joins.
+		NextProtos: []string{"h2", "http/1.1"},
+		// A resumed session presents no certificate of its own. No a2p2
+		// client resumes one; a client that tries gets a full handshake.
+		SessionTicketsDisabled: true,
+		// Called before crypto/tls checks the client's signature, so it
+		// only checks the form; the pool is chosen after the handshake.
+		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
+			_, err := certNode(raw)
+			return err
+		},
+	}
+}
+
+// MemberHandler, if the handler has it, says whether a key is now a
+// member of a room held here (node.Rooms.SharesRoom). Without it every
+// key counts as a member.
+type MemberHandler interface {
+	SharesRoom(node string) bool
+}
+
+// srcCount is one of the groups a connection's source is counted in, with
+// the most connections outside the members' pool that group may hold.
+type srcCount struct {
+	key string
+	max int
+}
+
+// sourceCounts are the groups addr is counted in: an IPv4 address; or an
+// IPv6 /64, /56 and /48, since one customer of an IPv6 network is often
+// given a /56 or a /48 and can use every address in it.
+func sourceCounts(addr string) []srcCount {
+	g := node.SourceGroup(addr)
+	out := []srcCount{{g, maxPerSource}}
+	p, err := netip.ParsePrefix(g)
+	if err != nil || !p.Addr().Is6() {
+		return out
+	}
+	for _, w := range []struct{ bits, max int }{{56, maxPerSlash56}, {48, maxPerSlash48}} {
+		if q, err := p.Addr().Prefix(w.bits); err == nil {
+			out = append(out, srcCount{q.String(), w.max})
+		}
+	}
+	return out
+}
+
+// limitListener counts accepted connections in three pools, and does
+// their TLS handshakes. A connection starts pending: it holds one of
+// maxPendingConns slots, and a slot of each of its source's groups
+// (sourceCounts), while its handshake runs, for handshakeTimeout at
+// most. A source group that completed a member's handshake lately may
+// also use maxKnownPending slots of its own, which no other source can
+// take. A connection that finds no slot is closed at once, so the queue
+// of the operating system never fills behind a busy listener. Once the
+// handshake has proved the client's key, the connection moves to the
+// members' pool (maxConns, at most maxPerKey of one key) or to the
+// strangers' pool (maxStrangerConns, still counted against its source);
+// with no room there it is closed. A stranger's connection lives
+// strangerLife at most, and every response on it closes it (guard).
+// Membership is checked again for every request (limitConn.classify). A
+// slot frees when its connection is closed (exactly once).
 type limitListener struct {
-	net.Listener
-	sem  chan struct{}
-	done chan struct{}
-	once sync.Once
+	raw    net.Listener
+	cfg    *tls.Config
+	member func(string) bool
+	ready  chan net.Conn
+	errc   chan error
+	ctx    context.Context // ends when the listener is closed
+	stop   context.CancelFunc
+	wg     sync.WaitGroup // run and the handshakes it started
+
+	mu                 sync.Mutex
+	pending, known     int // handshakes in the shared slots, and in those kept for known member sources
+	members, strangers int
+	perKey             map[string]int // members' connections per key
+	per                map[string]int // pending and stranger connections per source group
+	recent             *node.Recent[time.Time]
+	said               atomic.Int64 // unix nanoseconds of the last Info line about a refusal
 }
 
-func newLimitListener(ln net.Listener, n int) net.Listener {
-	return &limitListener{Listener: ln, sem: make(chan struct{}, n), done: make(chan struct{})}
+func newLimitListener(ln net.Listener, cfg *tls.Config, member func(string) bool) *limitListener {
+	ctx, stop := context.WithCancel(context.Background())
+	l := &limitListener{raw: ln, cfg: cfg, member: member, ready: make(chan net.Conn), errc: make(chan error, 1),
+		ctx: ctx, stop: stop, perKey: map[string]int{}, per: map[string]int{},
+		recent: node.NewRecent[time.Time](maxKnownSources)}
+	l.wg.Go(l.run)
+	return l
 }
 
+// Accept returns the next connection whose handshake is done and that
+// has a slot.
 func (l *limitListener) Accept() (net.Conn, error) {
 	select {
-	case l.sem <- struct{}{}:
-	case <-l.done:
+	case c := <-l.ready:
+		return c, nil
+	case err := <-l.errc:
+		return nil, err
+	case <-l.ctx.Done():
 		return nil, net.ErrClosed
 	}
-	c, err := l.Listener.Accept()
-	if err != nil {
-		<-l.sem
-		return nil, err
-	}
-	return &limitConn{Conn: c, release: func() { <-l.sem }}, nil
 }
 
+func (l *limitListener) Addr() net.Addr { return l.raw.Addr() }
+
 func (l *limitListener) Close() error {
-	l.once.Do(func() { close(l.done) })
-	return l.Listener.Close()
+	l.stop()
+	return l.raw.Close()
 }
+
+// run accepts connections from the operating system until the listener
+// closes, and starts a handshake for each that finds a slot.
+func (l *limitListener) run() {
+	var delay time.Duration
+	for {
+		c, err := l.raw.Accept()
+		if err != nil {
+			if l.ctx.Err() != nil {
+				return
+			}
+			// Out of file descriptors and the like: wait and go on, as
+			// http.Server does.
+			var te interface{ Temporary() bool }
+			if errors.As(err, &te) && te.Temporary() {
+				delay = min(max(2*delay, 5*time.Millisecond), time.Second)
+				select {
+				case <-time.After(delay):
+					continue
+				case <-l.ctx.Done():
+					return
+				}
+			}
+			l.errc <- err
+			return
+		}
+		delay = 0
+		lc, why := l.take(c)
+		if lc == nil {
+			c.Close()
+			l.refused(why)
+			continue
+		}
+		l.wg.Go(func() { l.handshake(lc) })
+	}
+}
+
+// take gives c a pending slot, or says why there is none.
+func (l *limitListener) take(c net.Conn) (*limitConn, string) {
+	srcs := sourceCounts(c.RemoteAddr().String())
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, s := range srcs {
+		if l.per[s.key] >= s.max {
+			return nil, "a source over its share of inbound connections"
+		}
+	}
+	lc := &limitConn{Conn: c, l: l, srcs: srcs}
+	switch {
+	case l.pending < maxPendingConns:
+		l.pending++
+	case l.known < maxKnownPending && l.knownSource(srcs[0].key):
+		l.known++
+		lc.knownSlot = true
+	default:
+		return nil, "the handshake slots are full"
+	}
+	for _, s := range srcs {
+		l.per[s.key]++
+	}
+	return lc, ""
+}
+
+// knownSource says whether a member's handshake from group completed
+// within knownSourceLife; l.mu is held.
+func (l *limitListener) knownSource(group string) bool {
+	t := l.recent.Get(group)
+	return t != nil && time.Since(*t) < knownSourceLife
+}
+
+// handshake completes c's TLS handshake, within handshakeTimeout, and
+// places it in its pool; Accept then returns it.
+func (l *limitListener) handshake(c *limitConn) {
+	tc := tls.Server(c, l.cfg)
+	_ = c.SetDeadline(time.Now().Add(handshakeTimeout))
+	ctx, cancel := context.WithTimeout(l.ctx, handshakeTimeout)
+	err := tc.HandshakeContext(ctx)
+	cancel()
+	if err != nil {
+		tc.Close()
+		return
+	}
+	key := connNode(tc.ConnectionState())
+	member := l.member == nil || l.member(key) // outside the locks: it may wait for the rooms
+	if err := c.enter(key, member); err != nil {
+		switch {
+		case !errors.Is(err, errPoolFull):
+		case member:
+			l.refused("the members' connection slots are full, or this key's share of them")
+		default:
+			l.refused("the connection slots of keys that share no room are full")
+		}
+		tc.Close()
+		return
+	}
+	_ = c.SetDeadline(time.Time{})
+	select {
+	case l.ready <- tc:
+	case <-l.ctx.Done():
+		tc.Close()
+	}
+}
+
+// connNode is the key a finished handshake proved.
+func connNode(cs tls.ConnectionState) string {
+	if len(cs.PeerCertificates) == 0 {
+		return ""
+	}
+	pub, ok := cs.PeerCertificates[0].PublicKey.(ed25519.PublicKey)
+	if !ok {
+		return ""
+	}
+	return hex.EncodeToString(pub)
+}
+
+// unsource gives back c's slot of each of its source's groups; l.mu is
+// held.
+func (l *limitListener) unsource(c *limitConn) {
+	for _, s := range c.srcs {
+		if l.per[s.key]--; l.per[s.key] <= 0 {
+			delete(l.per, s.key)
+		}
+	}
+}
+
+// addMember counts c, of key, in the members' pool if there is room; l.mu
+// is held.
+func (l *limitListener) addMember(c *limitConn, key string) bool {
+	if l.members >= maxConns || l.perKey[key] >= maxPerKey {
+		return false
+	}
+	l.members++
+	l.perKey[key]++
+	*l.recent.Use(c.srcs[0].key) = time.Now()
+	return true
+}
+
+func (l *limitListener) dropMember(key string) {
+	l.members--
+	if l.perKey[key]--; l.perKey[key] <= 0 {
+		delete(l.perKey, key)
+	}
+}
+
+// refused logs a refused connection: at Debug, and at Info at most once
+// a minute, so that a flood of them cannot fill the log.
+func (l *limitListener) refused(why string) {
+	now, last := time.Now().UnixNano(), l.said.Load()
+	lvl := slog.LevelDebug
+	if now-last >= int64(time.Minute) && l.said.CompareAndSwap(last, now) {
+		lvl = slog.LevelInfo
+	}
+	slog.Log(context.Background(), lvl, "peer connection refused", "why", why)
+}
+
+type connPool int
+
+const (
+	poolPending connPool = iota
+	poolMember
+	poolStranger
+	poolClosed
+)
+
+var errPoolFull = errors.New("peer: no free connection slot for this key")
 
 type limitConn struct {
 	net.Conn
-	once    sync.Once
-	release func()
+	l         *limitListener
+	srcs      []srcCount
+	knownSlot bool // its pending slot is one of those kept for known member sources
+
+	mu      sync.Mutex
+	key     string // set once, by enter
+	pool    connPool
+	revoked bool        // a member's connection whose key is no longer a member: served as a stranger's
+	timer   *time.Timer // a stranger's (or revoked member's) end of life; set and stopped under mu
+}
+
+// enter moves c out of the handshake into the pool of key, which the
+// finished handshake proved. A full pool refuses it.
+func (c *limitConn) enter(key string, member bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pool != poolPending {
+		return net.ErrClosed
+	}
+	l := c.l
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	switch {
+	case member && l.addMember(c, key):
+		l.unsource(c)
+		c.pool = poolMember
+	case !member && l.strangers < maxStrangerConns:
+		l.strangers++
+		c.pool = poolStranger
+		c.timer = time.AfterFunc(strangerLife, func() { _ = c.Close() })
+	default:
+		return errPoolFull
+	}
+	c.key = key
+	if c.knownSlot {
+		l.known--
+	} else {
+		l.pending--
+	}
+	return nil
+}
+
+// classify checks c's key against the rooms again, for a request on it,
+// and says whether the request is a stranger's. A stranger's connection
+// whose key has become a member moves to the members' pool if there is
+// room; a member's connection whose key is no longer one is served as a
+// stranger's from now on and ends within strangerLife.
+func (c *limitConn) classify() bool {
+	c.mu.Lock()
+	key, pool := c.key, c.pool
+	c.mu.Unlock()
+	if pool != poolMember && pool != poolStranger {
+		return true
+	}
+	member := c.l.member == nil || c.l.member(key) // outside the locks
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case c.pool == poolMember && !member && !c.revoked:
+		c.revoked = true
+		c.timer = time.AfterFunc(strangerLife, func() { _ = c.Close() })
+	case c.pool == poolStranger && member:
+		l := c.l
+		l.mu.Lock()
+		if l.addMember(c, key) {
+			l.strangers--
+			l.unsource(c)
+			c.pool = poolMember
+			c.timer.Stop()
+			c.timer = nil
+		}
+		l.mu.Unlock()
+	}
+	return c.pool != poolMember || c.revoked
+}
+
+// stranger says whether requests on c are served as a stranger's.
+func (c *limitConn) stranger() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pool != poolMember || c.revoked
 }
 
 func (c *limitConn) Close() error {
 	err := c.Conn.Close()
-	c.once.Do(c.release)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pool == poolClosed {
+		return err
+	}
+	if c.timer != nil {
+		c.timer.Stop()
+	}
+	l := c.l
+	l.mu.Lock()
+	switch c.pool {
+	case poolPending:
+		if c.knownSlot {
+			l.known--
+		} else {
+			l.pending--
+		}
+		l.unsource(c)
+	case poolMember:
+		l.dropMember(c.key)
+	case poolStranger:
+		l.strangers--
+		l.unsource(c)
+	}
+	l.mu.Unlock()
+	c.pool = poolClosed
 	return err
+}
+
+type connKey struct{}
+
+// strangerRequest says whether r came on a connection whose key shares no
+// room here.
+func strangerRequest(r *http.Request) bool {
+	lc, ok := r.Context().Value(connKey{}).(*limitConn)
+	return ok && lc.stranger()
 }
 
 // requestNode is the authenticated node id: the key in the TLS client
@@ -329,16 +721,29 @@ type statusWriter struct {
 
 func (s *statusWriter) WriteHeader(code int) { s.code = code; s.ResponseWriter.WriteHeader(code) }
 
-// guard rate-limits per authenticated node and logs every request (never bodies).
 // InboundHandler, if the handler has it, is told of every request whose
 // TLS client key is known: the key and the local address it arrived on.
 type InboundHandler interface {
 	Inbound(from, local string)
 }
 
-func guard(lim *limiter, next http.Handler, in func(from, local string)) http.Handler {
+// guard rate-limits per authenticated node and logs every request (never
+// bodies). A key that shares no room here has its own buckets, so strangers can
+// never fill the members' table, and every response to one closes its
+// connection. Refusals are logged at Info only for members, a few a
+// minute each; the rest at Debug, so that a flood cannot fill the log.
+func guard(lims limiters, next http.Handler, in func(from, local string)) http.Handler {
+	said := newPullLimiter(logRatePerSec, logBurst)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start, from := time.Now(), requestNode(r)
+		strange := false
+		if lc, ok := r.Context().Value(connKey{}).(*limitConn); ok {
+			strange = lc.classify() // the rooms now, not at the handshake
+		}
+		if strange {
+			w.Header().Set("Connection", "close") // HTTP/2: a GOAWAY, then the connection ends when idle
+		}
+		lim := lims.of(strange)
 		if in != nil && from != "" {
 			local := ""
 			if a, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
@@ -363,8 +768,10 @@ func guard(lim *limiter, next http.Handler, in func(from, local string)) http.Ha
 			next.ServeHTTP(sw, r)
 		}
 		lvl := slog.LevelDebug
-		if sw.code != http.StatusOK {
-			lvl = slog.LevelInfo
+		if sw.code != http.StatusOK && !strange {
+			if ok, _ := said.take(from); ok {
+				lvl = slog.LevelInfo
+			}
 		}
 		path := r.URL.Path
 		if len(path) > 64 {
@@ -396,6 +803,25 @@ type limiter struct {
 }
 
 func newLimiter() *limiter { return &limiter{now: time.Now, m: map[string]*bucket{}} }
+
+// limiters keeps members' buckets apart from those of keys that share no
+// room here.
+type limiters struct{ member, stranger *limiter }
+
+func newLimiters() limiters { return limiters{member: newLimiter(), stranger: newLimiter()} }
+
+func (l limiters) of(stranger bool) *limiter {
+	if stranger {
+		return l.stranger
+	}
+	return l.member
+}
+
+// The log budget per member key for refused requests at Info.
+var (
+	logRatePerSec = 0.1
+	logBurst      = 5.0
+)
 
 func (l *limiter) allow(key string) bool {
 	l.mu.Lock()

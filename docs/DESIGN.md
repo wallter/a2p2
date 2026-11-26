@@ -223,6 +223,38 @@ A server holds a waiting pull at most 60 s; client and server deadlines
 exceed it by 30 s. A rotating anchor is first probed with a 10 s pull; failure moves on.
 Waiting pulls to one peer share one HTTP/2 connection.
 
+**Inbound connections.** A listener cannot know who connects until the TLS
+handshake proves the client's key, and any key completes one. So it does
+each handshake itself and counts connections in three pools. A
+connection in its handshake takes one of 64 shared slots and a slot of
+each group of its source: 8 for an IPv4 address or an IPv6 /64, 16 for a
+/56 and 32 for a /48. A source group that completed a member's handshake
+here in the last 24 hours may also use 16 slots kept for such groups. A
+connection with no slot is closed at once, and one whose handshake has
+not finished after 5 s is closed. Only once the handshake has finished,
+signature included, does the key move the connection to the members'
+pool (256, at most 16 of one key), when it is a member of a room held
+here, or to the strangers' pool (32, still counted against its source).
+With no room there the connection is closed. Membership is checked again
+for every request: a key that became a member moves to the members'
+pool, and a removed key is served as a stranger from then on. Every
+answer to a stranger closes its connection, and one lasts 15 s at most.
+Strangers have rate buckets of their own, so they cannot fill the
+members' table, and their refused requests are logged at Debug; a
+member's are logged at Info 5 at once, then one per 10 s
+(`TestOneSourceCannotHoldAllInboundSlots`,
+`TestACopiedMemberCertificateWithoutItsKeyTakesNoMemberSlot`,
+`TestAHandshakeFloodFromManySourcesDoesNotKeepOutAKnownMember`,
+`TestMembershipIsCheckedAgainForEveryRequestOnAConnection`,
+`TestRefusedPeerRequestsDoNotGrowLog`). A joiner, a removed machine and a
+member not yet known here (whose request carries the entries that admit
+it) are strangers until the room's log here names them; their requests
+are answered as before, only in the smaller pool, and a waiting pull
+started then is cut at 15 s. The join route limits each source by IPv4
+address or IPv6 /64, with separate budgets for opens and polls
+(PROTOCOL 5.3). What a flood from many source groups can still do is in
+SECURITY.md.
+
 **Cost (estimates).** About 130 transfers of about 2 KB deliver a 1 KiB
 message to 63 machines. Not yet measured: duplicate offers, 100 rooms,
 anchor load, and N1 behind a relay.
