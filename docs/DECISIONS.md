@@ -3109,6 +3109,28 @@ operator's terminal.
   naming the rule in the manifest already is that choice. How Claude Code
   parses `--allowedTools` is checked against its documentation, not a
   real run.
+- **After the second review.** Two reviewers found that the launcher
+  still used short ids as identity, and that `team stop` could report
+  what had not happened. The watcher, `status` and the report now take a
+  message as a member's, the lead's, the watcher's or the person's only
+  when its `from_node` is this machine's full key (saved in the roster as
+  `node`; a roster without it gets it from status) and the label before
+  `@` matches; a question to the person counts only when an addressee is
+  exactly `human@<full key>` or the `human` id status gives. Readiness
+  matches status's agents by label, since status lists this machine's
+  agents only. The lead's, the watcher's and the members' ids in the
+  kickoff and the roster use the id status gives, so they are written in
+  full when the short id is shared. `team stop` sends nothing when no
+  member it asks about is running and says so; it exits non-zero when no
+  supervisor answers in three seconds, then changes nothing on disk, and
+  when a member it asked about is still running after ten seconds.
+  `dangerous` is refused in a tool's name only, not in its rule. A
+  `model` with a leading space is not changed: it is always the value
+  after `--model` or `-m`, never read as an option. Still open: with a
+  0.2.3 or earlier `a2p2`, status names the person by the short id, so a
+  question to a twin machine's person still counts. A run whose
+  supervisor died stays unended in the roster; `status` says the
+  supervisor is not running.
 
 **Revisit if** a harness is started with its prompt on stdin, Claude Code
 changes how it splits `--allowedTools` or matches a rule, the daemon's

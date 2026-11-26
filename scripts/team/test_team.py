@@ -248,11 +248,16 @@ class TeamTest(TeamCase):
             r["supervisor_pid"] = bystander.pid
             with open(os.path.join(self.state, "roster.json"), "w") as f:
                 json.dump(r, f)
-            out = self.team("stop").stdout
-            self.assertIn("not live", out)
+            with open(os.path.join(self.state, "roster.json"), "rb") as f:
+                before = f.read()
+            r = self.team("stop", ok=False)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("no supervisor answered", r.stderr)
+            self.assertIn("Nothing was signalled and the roster is unchanged", r.stderr)
             self.assertIsNone(bystander.poll(), "stop signalled a pid read from disk")
-            self.assertEqual(self.roster()["stuck"]["state"], "lost")
-            self.assertTrue(self.roster_raw()["ended"])
+            with open(os.path.join(self.state, "roster.json"), "rb") as f:
+                self.assertEqual(f.read(), before, "an unanswered stop changed the roster")
+            self.assertFalse(self.roster_raw()["ended"])
         finally:
             bystander.kill()
             bystander.wait()
@@ -443,7 +448,9 @@ class TeamTest(TeamCase):
                      "Bash(git *)", "Bash(git * status)", "Bash( git *)", "Bash(git:* status)", "Bash(GIT:*)",
                      "Bash(Git -c a=b:*)", "Bash(Python3.11:*)", "Bash(/usr/bin/PYTHON3:*)",
                      # a trailing newline, a C1 control or a Unicode separator in an entry
-                     "Read\n", "Bash(git status\x85:*)", "Bash(git status\u2028Bash)", "Read\u200b"):
+                     "Read\n", "Bash(git status\x85:*)", "Bash(git status\u2028Bash)", "Read\u200b",
+                     # "dangerous" stays refused in a tool's name
+                     "dangerouslySkipPermissions", "DangerousTool(x)"):
             cases.append(([{"label": "c", "harness": "claude", "model": "haiku", "allowed_tools": [tool]}],
                           {"approve_a2p2_tools": True}, "skip Claude Code's permission checks"))
         open(os.path.join(self.dir, "empty.md"), "w").close()
@@ -749,7 +756,9 @@ class TeamSecurityTest(TeamCase):
     def test_scoped_tools_and_a_brief_that_starts_with_a_list_are_accepted(self):
         team = load_team()
         tools = ["Read", "Grep", "Bash(git status:*)", "Bash(git diff:*)", "Bash(npm run test:*)",
-                 "Bash(go test:*)", "Read(./src/**)", "WebFetch(domain:example.com)", "mcp__other-server__tool"]
+                 "Bash(go test:*)", "Read(./src/**)", "WebFetch(domain:example.com)", "mcp__other-server__tool",
+                 # "dangerous" in a rule is a path, not a way past the checks
+                 "Read(./notes/dangerous-ideas.md)"]
         self.write([{"label": "c", "harness": "claude", "model": "claude-haiku-4-5", "allowed_tools": tools,
                      "brief": "- read the kickoff\n- reply"}], approve_a2p2_tools=True)
         man = team.load_manifest(self.manifest)
@@ -864,8 +873,8 @@ class TeamSecurityTest(TeamCase):
             f.write(b"plain\r\nover\rwrite\n" + "تیم‌ما\n".encode() + b"last")
         x = {"label": "m", "id": "m@node", "harness": "command", "pid": 1, "state": "running", "exit": None,
              "wall_clock": 1, "launched": 1, "out": out, "err": os.path.join(self.dir, "missing.log")}
-        team.load_roster = lambda _man: {"members": [x], "ended": 1}
-        team.history = lambda _man: [{"from": "m@node", "created": "2026-01-01T00:00:00Z",
+        team.load_roster = lambda _man: {"members": [x], "ended": 1, "node": NODE}
+        team.history = lambda _man: [{"from": "m@node", "from_node": NODE, "created": "2026-01-01T00:00:00Z",
                                       "text": "\x1c hi \u0085\nتیم‌ما"}]
 
         def run(fn, n=0):
@@ -907,6 +916,228 @@ class TeamSecurityTest(TeamCase):
                 lines = body.splitlines(keepends=True)   # no \r in these bodies
                 self.assertEqual(got, lines[-n:])
                 self.assertLessEqual(f.read_bytes, len(b"".join(lines[-n:])) + 2 * 4096)
+
+
+NODE = "ab12cd34" + "0" * 56      # this machine
+TWIN = "ab12cd34" + "f" * 56      # another machine with the same short id
+OTHER = "99887766" + "1" * 56     # another machine
+
+
+def entry(eid, label, node, shown, to=(), age=0, text="hi", parent=None):
+    """A history entry as `a2p2 history --json` gives it: "from" with the
+    id as shown (short, or full when shared), "from_node" the full key."""
+    return {"id": eid, "kind": "message", "from": f"{label}@{shown}", "from_node": node,
+            "from_this_machine": node == NODE, "to": list(to), "parent": parent, "text": text,
+            "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age))}
+
+
+class TeamIdentityTest(TeamCase):
+    """The launcher tells this machine's members and person by full key and
+    exact id, not by the short id another machine can share (D65)."""
+
+    def observe(self, hist, st, silence=30, connected_ago=1):
+        """One observer poll over hist with status st; the posts it made."""
+        import types
+        team = load_team()
+        posts = []
+        x = {"label": "okay", "id": "okay@ab12cd34", "harness": "command", "server_harness": "fake",
+             "model": "", "state": "running", "launched": time.time() - 200,
+             "connected": time.time() - connected_ago, "silence": silence, "workdir": self.dir}
+        sup = types.SimpleNamespace(man={"poll": 1}, roster={"node": NODE, "members": [x]},
+                                    lock=team.threading.Lock(), save=lambda: None)
+        team.post = lambda _man, text: posts.append(text)
+        team.a2p2_json = lambda _man, *args: st
+        team.history = lambda _man, **_kw: hist
+        team.Observer(sup).poll()
+        return posts
+
+    def test_a_twin_machines_question_to_its_person_is_not_this_members(self):
+        # Another machine with the same short id posts as "okay" to its own
+        # person; this machine's member, written in full since the ids
+        # collide, asks this machine's person and another machine's person.
+        st = {"node": NODE, "human": "human@" + NODE, "agents": []}
+        hist = [entry("e-twin", "okay", TWIN, TWIN, to=["human@" + TWIN]),
+                entry("e-mine", "okay", NODE, NODE, to=["human@" + NODE]),
+                entry("e-theirs", "okay", NODE, NODE, to=["human@" + OTHER[:8]])]
+        posts = self.observe(hist, st)
+        self.assertEqual([p for p in posts if p.startswith("needs input")],
+                         ["needs input: okay asked the person a question (message e-mine)."])
+
+    def test_a_twin_machines_old_style_short_ids_are_not_this_members(self):
+        # A daemon that does not write shared ids in full (0.2.3) shows the
+        # twin's member under this machine's short id: from_node tells them
+        # apart, so its question and its activity are not this member's.
+        st = {"node": NODE, "human": "human@ab12cd34", "agents": []}
+        hist = [entry("e-twin", "okay", TWIN, "ab12cd34", to=["human@ab12cd34"])]
+        posts = self.observe(hist, st, silence=10, connected_ago=100)
+        self.assertFalse([p for p in posts if p.startswith("needs input")], posts)
+        self.assertEqual(len([p for p in posts if p.startswith("silent: okay")]), 1, posts)
+
+    def test_this_members_activity_written_with_its_full_id_counts(self):
+        # Once a twin appears, this machine's member is written okay@<full
+        # key>: it is still this member's, so it is not called silent.
+        st = {"node": NODE, "human": "human@" + NODE, "agents": []}
+        posts = self.observe([entry("e1", "okay", NODE, NODE)], st, silence=10, connected_ago=100)
+        self.assertFalse([p for p in posts if p.startswith("silent")], posts)
+
+    def test_honest_short_ids_still_work(self):
+        st = {"node": NODE, "human": "human@ab12cd34", "agents": []}
+        posts = self.observe([entry("e1", "okay", NODE, "ab12cd34", to=["human@ab12cd34"])], st,
+                             silence=10, connected_ago=100)
+        self.assertEqual(posts, ["needs input: okay asked the person a question (message e1)."])
+        team = load_team()
+        self.assertEqual(team.shown_id({"node": NODE, "human": "human@ab12cd34"}), "ab12cd34")
+        self.assertEqual(team.shown_id({"node": NODE, "human": "human@" + NODE}), NODE)
+
+    def test_report_and_status_count_this_machines_messages_only(self):
+        import argparse
+        import contextlib
+        import io
+        team = load_team()
+        x = {"label": "okay", "id": "okay@ab12cd34", "harness": "command", "model": "", "state": "done",
+             "exit": 0, "wall_clock": 1, "launched": time.time() - 100, "connected": time.time() - 99,
+             "pid": 1, "final": os.path.join(self.dir, "none"), "out": os.path.join(self.dir, "none"),
+             "err": os.path.join(self.dir, "none")}
+        roster = {"room": "crew", "kickoff": "k", "lead": "lead@ab12cd34", "watcher": "team@ab12cd34",
+                  "node": NODE, "started": time.time() - 100, "ended": time.time(), "members": [x]}
+        hist = [entry("t1", "okay", TWIN, "ab12cd34", to=["human@ab12cd34"], text="twin says"),
+                entry("t2", "human", TWIN, "ab12cd34", text="twin person"),
+                entry("t3", "lead", TWIN, "ab12cd34", text="twin lead"),
+                entry("m1", "okay", NODE, NODE, to=["human@" + NODE], text="DONE: mine", age=5),
+                entry("m2", "human", NODE, NODE, text="my person", age=5),
+                entry("m3", "lead", NODE, NODE, text="my lead", age=5)]
+        team.load_roster = lambda _man: roster
+        team.history = lambda _man, **_kw: hist
+        team.a2p2_json = lambda _man, *args: {"node": NODE, "human": "human@" + NODE, "rooms": []}
+        rep = team.build_report({"state": self.dir})
+        m = rep["members"][0]
+        self.assertEqual((m["messages_sent"], m["questions_to_person"], m["final_report"]), (1, 1, "DONE"))
+        self.assertEqual((rep["messages_from_person"], rep["messages_from_lead"]), (1, 1))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            team.cmd_status({"state": self.dir}, argparse.Namespace())
+        self.assertIn("DONE: mine", buf.getvalue())
+        self.assertNotIn("twin says", buf.getvalue())
+
+    def test_report_counts_only_this_machines_person_lead_watcher_and_inboxes(self):
+        team = load_team()
+        x = {"label": "okay", "id": "okay@ab12cd34", "harness": "command", "model": "", "state": "done",
+             "exit": 0, "wall_clock": 1, "launched": time.time() - 100, "connected": time.time() - 99,
+             "pid": 1, "final": os.path.join(self.dir, "none"), "out": os.path.join(self.dir, "none"),
+             "err": os.path.join(self.dir, "none")}
+        roster = {"room": "crew", "kickoff": "k", "lead": "lead@ab12cd34", "watcher": "team@ab12cd34",
+                  "node": NODE, "started": time.time() - 100, "ended": time.time(), "members": [x]}
+        hist = [
+            # This member asks the person of another machine and of the twin:
+            # neither is this machine's person.
+            entry("q1", "okay", NODE, NODE, to=["human@99887766"], age=5),
+            entry("q2", "okay", NODE, NODE, to=["human@" + OTHER], age=5),
+            entry("q3", "okay", NODE, NODE, to=["human@" + TWIN], age=5),
+            entry("q4", "okay", NODE, NODE, to=["human@" + NODE], age=5),
+            # A reply that names this member by its full id and one other
+            # inbox reaches one inbox; a reply to two others reaches two.
+            entry("r1", "okay", NODE, NODE, to=["okay@" + NODE, "lead@" + NODE], parent="k", age=5),
+            entry("r2", "okay", NODE, NODE, to=["lead@" + NODE, "okay@" + TWIN], parent="k", age=5),
+            # The twin's lead and watcher, written with the short id the
+            # roster holds; this machine's, written in full.
+            entry("t1", "lead", TWIN, "ab12cd34"),
+            entry("t2", "lead", TWIN, "ab12cd34"),
+            entry("t3", "team", TWIN, "ab12cd34"),
+            entry("t4", "team", TWIN, "ab12cd34"),
+            entry("m1", "lead", NODE, NODE, age=5),
+            entry("m2", "team", NODE, NODE, age=5)]
+        team.load_roster = lambda _man: roster
+        team.history = lambda _man, **_kw: hist
+        team.a2p2_json = lambda _man, *args: {"node": NODE, "human": "human@" + NODE, "rooms": []}
+        rep = team.build_report({"state": self.dir})
+        m = rep["members"][0]
+        self.assertEqual((m["messages_sent"], m["questions_to_person"], m["replies_to_more_than_one_inbox"]),
+                         (6, 1, 1))
+        self.assertEqual((rep["messages_from_lead"], rep["watcher_messages"]), (1, 1))
+
+
+class TeamStopTest(TeamCase):
+    """`team stop` says what happened and exits non-zero when it did not."""
+
+    def run_stop(self, members, answer=None, label=None):
+        """cmd_stop on a roster of members; answer(roster, request) plays
+        the supervisor, or none answers. Returns (stdout, Fail or None)."""
+        import argparse
+        import contextlib
+        import io
+        import threading
+        team = load_team()
+        team.ACK_WAIT, team.STOP_WAIT = 0.5, 0.5
+        man = {"state": self.state}
+        os.makedirs(team.control_dir(man))
+        team.save_roster(man, {"ended": None, "members": members})
+        stop = threading.Event()
+
+        def supervisor():
+            while not stop.is_set():
+                for name in os.listdir(team.control_dir(man)):
+                    if name.startswith("req-") and name.endswith(".json"):
+                        path = os.path.join(team.control_dir(man), name)
+                        with open(path) as f:
+                            req = json.load(f)
+                        os.remove(path)
+                        hit = answer(man, req)
+                        with open(os.path.join(team.control_dir(man), "ack-" + name[4:]), "w") as f:
+                            json.dump({"stopping": hit}, f)
+                        return
+                time.sleep(0.02)
+
+        t = threading.Thread(target=supervisor) if answer else None
+        if t:
+            t.start()
+        buf, err = io.StringIO(), None
+        try:
+            with contextlib.redirect_stdout(buf):
+                team.cmd_stop(man, argparse.Namespace(label=label))
+        except team.Fail as e:
+            err = e
+        finally:
+            stop.set()
+            if t:
+                t.join()
+        self.after = team.load_roster(man)
+        self.requests = [n for n in os.listdir(team.control_dir(man)) if n.startswith("req-")]
+        return buf.getvalue(), err
+
+    def test_a_stop_whose_member_is_still_running_after_its_wait_fails(self):
+        out, err = self.run_stop([{"label": "stuck", "state": "stopping"}], answer=lambda man, req: ["stuck"])
+        self.assertIsNotNone(err, out)
+        self.assertIn("still running after", str(err))
+        self.assertNotIn("stopped 1", out)
+
+    def test_a_stop_whose_member_ends_reports_it(self):
+        team = load_team()
+
+        def answer(man, req):
+            team.save_roster(man, {"ended": None, "members": [{"label": "stuck", "state": "stopped"}]})
+            return ["stuck"]
+        out, err = self.run_stop([{"label": "stuck", "state": "running"}], answer=answer)
+        self.assertIsNone(err)
+        self.assertIn("stopped 1 member(s): stuck", out)
+
+    def test_an_unanswered_stop_fails_and_leaves_the_roster_as_it_was(self):
+        # A supervisor that is busy, such as writing the report, or dead:
+        # the roster is not marked ended or lost, and stop exits non-zero.
+        members = [{"label": "stuck", "state": "running"}]
+        out, err = self.run_stop(members)
+        self.assertIsNotNone(err, out)
+        self.assertIn("no supervisor answered", str(err))
+        self.assertIn("stuck", str(err))
+        self.assertEqual(self.after, {"ended": None, "members": members})
+        self.assertEqual(self.requests, [], "an unanswered request was left behind")
+
+    def test_a_second_stop_says_no_member_is_running(self):
+        members = [{"label": "stuck", "state": "stopped"}, {"label": "okay", "state": "done"}]
+        out, err = self.run_stop(members)
+        self.assertIsNone(err)
+        self.assertIn("no member to stop: stuck is stopped, okay is done", out)
+        self.assertEqual(self.after, {"ended": None, "members": members})
+        self.assertEqual(self.requests, [])
 
 
 def main():

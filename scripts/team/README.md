@@ -53,9 +53,13 @@ Python 3 and nothing else.
   cannot move the cursor, recolour the terminal or reorder the line.
 - **`team stop [LABEL]`** asks the live supervisor, through a request file
   in the state directory that only the supervisor answers, to end one
-  member or all of them. If no supervisor answers within three seconds,
-  it says the run is not live, marks the roster ended and signals
-  nothing. It never signals a pid read from disk.
+  member or all of them, and waits up to ten seconds for them to end. It
+  exits non-zero when a member it asked about is still running then, and
+  when no supervisor answers within three seconds; in that case it
+  signals nothing and leaves the roster as it was, since a busy
+  supervisor may still be running. When no member it asks about is
+  running it says so and sends nothing. It never signals a pid read from
+  disk.
 - **`team logs LABEL [-n N] [--raw]`** prints a member's output and error
   logs, escaped by the same rules as message text, and their paths escaped
   too; a byte that is not UTF-8 is written `\x{hh}`, and a carriage return
@@ -72,6 +76,15 @@ Python 3 and nothing else.
   run it counts messages from the lead, the watcher and the person, and
   requests waiting for the person. The supervisor writes the report when
   the last member finishes.
+
+  The watcher, `status` and the report tell this machine's messages by
+  the author's full machine key (`from_node`), never by the 8-character
+  short id another machine can share. A question to the person counts
+  only when it is addressed to this machine's person by the exact id
+  `a2p2 status` gives (`human`), or by the full key. With an `a2p2` of
+  0.2.3 or earlier, which never writes a shared short id in full, a
+  question to another machine's person with the same short id still
+  counts.
 
 ## Readiness
 

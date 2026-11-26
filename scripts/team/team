@@ -60,11 +60,12 @@ KILL_GRACE = 5.0
 TICK = 0.1          # supervisor loop: deadlines, exits and stop requests
 HEARTBEAT_STALE = 3.0
 ACK_WAIT = 3.0
+STOP_WAIT = KILL_GRACE + 5   # team stop: how long the members it asked about may take to end
 
 # Profiles that keep the harness's own permission and sandbox controls.
 CLAUDE_MODES = ("", "default", "acceptEdits", "plan")
 CODEX_SANDBOXES = ("read-only", "workspace-write")
-CLAUDE_TOOLS_REFUSED = re.compile(r"^(\*|Bash|Bash\(\*\)|Bash\(:\*\))$|dangerous", re.I)
+CLAUDE_TOOLS_REFUSED = re.compile(r"^(\*|Bash|Bash\(\*\)|Bash\(:\*\))$", re.I)
 # One tool as Claude Code names it: a name, and for some tools one rule in
 # parentheses. The names are joined with "," into one --allowedTools value,
 # and Claude Code may also split that value at spaces, so "," anywhere and a
@@ -89,6 +90,10 @@ def claude_tool_problem(t):
             any(c != " " and (c.isspace() or hidden(ord(c))) for c in t):
         return "is not one scoped tool"
     name, _, rule = t.partition("(")
+    # "dangerous" is refused in a tool's name only: a rule is a path, a
+    # domain or a command, where the word is ordinary text.
+    if "dangerous" in name.lower():
+        return "is not one scoped tool"
     if name.lower() != "bash":
         return None
     rule = rule[:-1]
@@ -336,6 +341,60 @@ def history(man, since=None, page=200):
             break
         before = ents[0]["id"]
     return out
+
+
+# --------------------------------------------------------------- identity
+#
+# A short id is 8 hex characters of a machine's key, and another machine
+# in a room can have the same one (decision D65). The launcher therefore
+# tells this machine's messages by the author's full key (from_node), and
+# the person on this machine by the exact id the daemon gives it.
+
+def label_of(ident):
+    return (ident or "").partition("@")[0]
+
+
+def wrote(e, node, label):
+    """Whether entry e was written under label on this machine: its
+    author's full key is node and its label is label. "from" alone can
+    name another machine with the same short id."""
+    return bool(node) and e.get("from_node") == node and label_of(e.get("from")) == label
+
+
+def shown_id(st):
+    """This machine's id as the daemon writes it now: the short id, or the
+    full key when another machine it knows shares the short id."""
+    human = st.get("human")
+    if isinstance(human, str) and human.startswith("human@") and len(human) > len("human@"):
+        return human[len("human@"):]
+    return st["node"][:8]
+
+
+def person_ids(node, st):
+    """The exact ids that name the person on this machine: by its full
+    key, and as status writes it now. Another machine's person is
+    "human@" too, so a prefix is never enough."""
+    ids = {"human@" + node} if node else set()
+    if st and st.get("node") == node and isinstance(st.get("human"), str):
+        ids.add(st["human"])
+    return ids
+
+
+def to_person(e, ids):
+    return any(t in ids for t in e.get("to") or [])
+
+
+def status_or_none(man):
+    try:
+        return a2p2_json(man, "status")
+    except (Fail, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def run_node(r, st):
+    """This machine's full key: from the roster, or for a roster written
+    before it held one, from status."""
+    return r.get("node") or (st or {}).get("node") or ""
 
 
 def ts(iso_):
@@ -671,28 +730,28 @@ def cmd_up(man, args):
     # another user since, and the daemon checks only the home itself.
     require_private_path(man["home"], "a2p2_home")
     st = a2p2_json(man, "status")
-    node8 = st["node"][:8]
+    node, node8, me = st["node"], st["node"][:8], shown_id(st)
     if man["room"] not in [r["label"] for r in st.get("rooms", [])]:
         a2p2(man, "room", "create", man["room"])
     # An agent sees only room posts made after it registered, so register
     # every label (and the watcher) before the kickoff is posted.
     for label in [m["label"] for m in man["members"]] + [man["watcher"]]:
         a2p2(man, "inbox", "--as", label, "--room", man["room"], "--peek", "--json")
-    lead_id = f"{man['lead']}@{node8}"
+    lead_id = f"{man['lead']}@{me}"
     roster_line = ", ".join(f"{m['label']} ({m['harness']})" for m in man["members"])
     kickoff = man["kickoff"] or "Kickoff. Each member has its own brief."
     kickoff += (f"\n\nMembers: {roster_line}. Lead: {lead_id}. Reply to this message with your plan, "
                 "and later with your DONE: or BLOCKED: report.")
     # "--" ends the flags: a kickoff that starts with '-' is text, not an option.
     kickoff_id = a2p2(man, "send", "--as", man["lead"], "--room", man["room"], "--", kickoff).strip()
-    roster = {"room": man["room"], "home": man["home"], "node8": node8, "lead": lead_id,
-              "watcher": f"{man['watcher']}@{node8}", "kickoff": kickoff_id, "started": time.time(),
+    roster = {"room": man["room"], "home": man["home"], "node": node, "node8": node8, "lead": lead_id,
+              "watcher": f"{man['watcher']}@{me}", "kickoff": kickoff_id, "started": time.time(),
               "ended": None, "manifest": man["path"], "supervisor_pid": None, "members": []}
     for m in man["members"]:
         final = launch_spec(man, m, prompt_for(man, m, kickoff_id, lead_id), works[m["label"]])
         d = mdir(man, m["label"])
         roster["members"].append({
-            "label": m["label"], "id": f"{m['label']}@{node8}", "harness": m["harness"],
+            "label": m["label"], "id": f"{m['label']}@{me}", "harness": m["harness"],
             "server_harness": server_harness(m), "model": m["model"], "limit": m["limit"],
             "silence": m["silence"], "workdir": works[m["label"]], "out": os.path.join(d, "out.log"),
             "err": os.path.join(d, "err.log"), "final": final, "pid": None, "state": "pending",
@@ -972,9 +1031,10 @@ class Observer:
         name, this run's working directory, and a last-seen time at or after
         the launch time taken before the process started. A CLI call under
         the label keeps an earlier harness name and directory, so a label
-        reused from another run or directory does not count."""
+        reused from another run or directory does not count. Status lists
+        this machine's agents only, so the label names the agent."""
         for a in agents:
-            if a.get("id") != x["id"] or a.get("harness") != x["server_harness"] or not a.get("last_seen"):
+            if a.get("label") != x["label"] or a.get("harness") != x["server_harness"] or not a.get("last_seen"):
                 continue
             if not a.get("cwd") or os.path.realpath(a["cwd"]) != os.path.realpath(x["workdir"]):
                 continue
@@ -987,10 +1047,10 @@ class Observer:
         # Only exits that happened before the agents were read are
         # classified, so a registration just before the exit is not missed.
         exited = {x["label"] for x in sup.roster["members"] if x["state"] == "exited"}
-        try:
-            agents = a2p2_json(self.man, "status").get("agents", [])
-        except (Fail, ValueError, subprocess.SubprocessError):
-            agents = []
+        st = status_or_none(self.man)
+        agents = (st or {}).get("agents", [])
+        node = run_node(sup.roster, st)
+        person = person_ids(node, st)
         hist = history(self.man)
         now = time.time()
         for x in sup.roster["members"]:
@@ -1003,9 +1063,9 @@ class Observer:
                         x["state"] = "running"
                 post(self.man, f"started: {x['label']} ({x['harness']}{', ' + x['model'] if x['model'] else ''}); "
                                f"its a2p2 tool server connected as {x['id']} within {now - x['launched']:.0f}s.")
-            mine = [e for e in hist if e.get("from") == x["id"] and ts(e["created"]) >= x["launched"]]
+            mine = [e for e in hist if wrote(e, node, x["label"]) and ts(e["created"]) >= x["launched"]]
             for e in mine:
-                if e["id"] not in self.asked and any(t.startswith("human@") for t in e.get("to") or []):
+                if e["id"] not in self.asked and to_person(e, person):
                     self.asked.add(e["id"])
                     post(self.man, f"needs input: {x['label']} asked the person a question (message {e['id']}).")
             if x["label"] in exited:
@@ -1208,9 +1268,10 @@ def clean(s, n):
 def cmd_status(man, _args):
     r = load_roster(man)
     hist = history(man)
+    node = run_node(r, None if r.get("node") else status_or_none(man))
     rows = [("LABEL", "HARNESS", "PID", "STATE", "LAST ROOM MESSAGE", "ELAPSED")]
     for x in r["members"]:
-        mine = [e for e in hist if e.get("from") == x["id"]]
+        mine = [e for e in hist if wrote(e, node, x["label"])]
         last = f"{ago(ts(mine[-1]['created']))} ago: {clean(mine[-1].get('text'), 40)}" if mine else "-"
         el = x["wall_clock"] if x.get("wall_clock") is not None else \
             (time.time() - x["launched"] if x["launched"] else 0)
@@ -1223,13 +1284,25 @@ def cmd_status(man, _args):
         print("note: the supervisor is not running; states may be stale")
 
 
+def running(x):
+    """A member whose process the supervisor has not reaped, as far as the
+    roster says. "exited" is reaped and only waits to be classified."""
+    return x["state"] not in FINAL and x["state"] != "exited"
+
+
 def cmd_stop(man, args):
-    """Asks the live supervisor to stop members. Signals nothing itself."""
+    """Asks the live supervisor to stop members. Signals nothing itself and
+    changes nothing on disk but its request. Exits non-zero, through Fail,
+    when no supervisor answers or a member is still running at the end."""
     r = load_roster(man)
     if args.label and not any(x["label"] == args.label for x in r["members"]):
         raise Fail(f"no member {args.label!r}")
     if r.get("ended"):
         print("the run has already ended")
+        return
+    asked = [x for x in r["members"] if args.label is None or x["label"] == args.label]
+    if not any(running(x) for x in asked):
+        print("no member to stop: " + ", ".join(f"{x['label']} is {x['state']}" for x in asked))
         return
     nonce = uuid.uuid4().hex
     d = control_dir(man)
@@ -1246,25 +1319,34 @@ def cmd_stop(man, args):
             os.remove(req)
         except OSError:
             pass
+        # The roster is left as it is: a supervisor that is slow, stopped
+        # or writing the report may still run, and "ended" tells others it
+        # makes no further a2p2 call.
         r = load_roster(man)
-        for x in r["members"]:
-            if x["state"] not in FINAL:
-                x.update(state="lost", note="the supervisor was not running; nothing was signalled")
-        r["ended"] = time.time()
-        save_roster(man, r)
-        print("the run is not live: no supervisor answered. Nothing was signalled; "
-              "the roster is marked ended. Check for leftover processes yourself.")
-        return
+        live = [x["label"] for x in asked if running(x)]
+        beat = "recent" if supervisor_live(man) else "older than three seconds"
+        raise Fail(f"no supervisor answered within {ACK_WAIT:.0f}s (its heartbeat is {beat}). Nothing was "
+                   f"signalled and the roster is unchanged; it last recorded as running: {', '.join(live) or 'none'}. "
+                   "Check for leftover processes yourself.")
     with open(ack) as f:
         hit = json.load(f)["stopping"]
     os.remove(ack)
-    end = time.monotonic() + KILL_GRACE + 5
-    while time.monotonic() < end:
+    end = time.monotonic() + STOP_WAIT
+    while True:
         r = load_roster(man)
-        if all(x["state"] in FINAL for x in r["members"] if x["label"] in hit):
+        live = [x["label"] for x in r["members"]
+                if (args.label is None or x["label"] == args.label) and running(x)]
+        if not live or time.monotonic() >= end:
             break
         time.sleep(0.1)
-    print(f"stopped {len(hit)} member(s)" + (f": {', '.join(hit)}" if hit else ""))
+    done = [lb for lb in hit if lb not in live]
+    if live:
+        raise Fail(f"still running after {STOP_WAIT:.0f}s: {', '.join(live)}"
+                   + (f"; stopped {len(done)} member(s): {', '.join(done)}" if done else ""))
+    if done:
+        print(f"stopped {len(done)} member(s): {', '.join(done)}")
+    else:
+        print("no member to stop: each had ended, or was already being stopped and has ended since")
 
 
 def cmd_logs(man, args):
@@ -1326,15 +1408,19 @@ def scan_logs(x):
 def build_report(man, ended=None):
     r = load_roster(man)
     r["ended"] = r["ended"] or ended
+    st = status_or_none(man)
+    node = run_node(r, st)
+    person = person_ids(node, st)
     hist = [e for e in history(man, since=r["started"]) if ts(e["created"]) >= r["started"] - 1]
     msgs = [e for e in hist if e.get("kind", "message") == "message"]
     member_ids = {x["id"] for x in r["members"]}
     others = len(member_ids) + 1  # members and the lead; the watcher only posts
     members = []
     for x in r["members"]:
-        mine = [e for e in msgs if e.get("from") == x["id"]]
+        mine = [e for e in msgs if wrote(e, node, x["label"])]
+        own = {x["id"], f"{x['label']}@{node}"}
         multi = [e for e in mine if e.get("parent") and
-                 (len([t for t in (e.get("to") or []) if t != x["id"]]) > 1 or (not e.get("to") and others - 1 > 1))]
+                 (len([t for t in (e.get("to") or []) if t not in own]) > 1 or (not e.get("to") and others - 1 > 1))]
         finals = [e for e in mine if re.match(r"\s*(DONE|BLOCKED):", e.get("text") or "")]
         codes, empty = scan_logs(x)
         members.append({
@@ -1345,25 +1431,22 @@ def build_report(man, ended=None):
             "connected_within_s": round(x["connected"] - x["launched"], 1) if x["connected"] else None,
             "messages_sent": len(mine),
             "replies_to_more_than_one_inbox": len(multi),
-            "questions_to_person": len([e for e in mine if any(t.startswith("human@") for t in e.get("to") or [])]),
+            "questions_to_person": len([e for e in mine if to_person(e, person)]),
             "refusals_by_code": codes,
             "empty_inbox_polls_in_logs": empty,
             "final_report": (finals[-1]["text"].strip().split(":", 1)[0] if finals else None),
             "final_answer_file": x["final"] if os.path.exists(x["final"]) else None,
         })
-    try:
-        waiting = sum(rm.get("waiting", 0) for rm in a2p2_json(man, "status").get("rooms", []))
-    except (Fail, ValueError, subprocess.SubprocessError):
-        waiting = None
+    waiting = sum(rm.get("waiting", 0) for rm in st.get("rooms", [])) if st else None
     return {
         "room": r["room"], "kickoff": r["kickoff"], "lead": r["lead"],
         "started": iso(r["started"]), "ended": iso(r["ended"]),
         "wall_clock_s": round((r["ended"] or time.time()) - r["started"], 1),
         "members": members,
         "messages_in_room": len(msgs),
-        "messages_from_person": len([e for e in msgs if (e.get("from") or "").startswith("human@")]),
-        "messages_from_lead": len([e for e in msgs if e.get("from") == r["lead"]]),
-        "watcher_messages": len([e for e in msgs if e.get("from") == r["watcher"]]),
+        "messages_from_person": len([e for e in msgs if wrote(e, node, "human")]),
+        "messages_from_lead": len([e for e in msgs if wrote(e, node, label_of(r["lead"]))]),
+        "watcher_messages": len([e for e in msgs if wrote(e, node, label_of(r["watcher"]))]),
         "person_requests_waiting": waiting,
         "notes": "Refusals and empty inbox polls are counted from the harness logs and are only as "
                  "complete as those logs. Room-wide replies count as reaching more than one inbox "
