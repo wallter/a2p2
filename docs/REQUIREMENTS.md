@@ -82,7 +82,8 @@ there is no server.
 ### Delivery
 
 - **D1 Durable send.** Once `send` returns, the message survives a crash or
-  restart of the sending machine.
+  restart of the a2p2 process and of the operating system on the sending
+  machine. A sudden power loss is a limit on macOS (section 6).
 - **D2 Store and forward.** A message reaches a member machine that was
   offline when it was sent, from any member machine that has a copy, without
   the author being online.
@@ -275,6 +276,17 @@ there is no server.
 - **"May not read earlier history" is kept by the members, not by
   mathematics.** Members refuse to hand earlier messages to such a machine,
   but any member can still quote or forward what it holds.
+- **A sudden power loss can lose the last few sent messages on macOS.** The
+  database asks the operating system to write each send out, and on macOS
+  that does not make the drive empty its own cache; only a slower, separate
+  request does, and a2p2 does not make it. So if a Mac loses power or is
+  switched off hard, messages sent in the last moments before it may be
+  gone when it starts again. How long that window is has not been
+  measured. The database is built to stay consistent. A crash of a2p2 or of the operating system loses
+  nothing. On Linux the request does reach the drive; Windows is not
+  covered here. A message another member machine had already fetched is
+  not lost: that machine still holds it, and the repair of a machine's own
+  records (a lost disk, a restore) applies. Power loss has not been tested.
 - **A lost disk loses its copies.** A message survives if any other machine
   still has one. In a small room every member takes a copy as soon as it is
   in touch; the sender is shown which machines have reported one. If a disk
