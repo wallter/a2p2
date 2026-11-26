@@ -1176,8 +1176,11 @@ nothing) uses its own routes on loopback. Its address, the `ui` of
 long-lived token after the `#`). `POST /api/session` with `{"code"}` and
 the page's exact `Origin` answers `{"session","run"}`; a code unknown or
 expired, or traded before, is answered 401, and a second trade also
-ends the first trade's session. Every other route requires a session
-as a bearer token: `GET /api/state` (which also carries `run`, the
+ends the first trade's session. On Linux a trade from a connection whose
+client socket another user owns is answered 403 and leaves the code
+untouched. Every other route requires a session
+as a bearer token, and every answer to one carries the session's run in
+the `A2P2-Run` header: `GET /api/state` (which also carries `run`, the
 value given with the presenting session; each session has its own), `/api/history`, `/api/thread` and
 `/api/trace`, and `POST /api/send`, `/api/seen`, `/api/ack`,
 `/api/confirm` and `/api/notice-shown`. `GET /api/state` reads the status
@@ -1213,7 +1216,9 @@ approval step of `join` require a terminal on stdin. Without one, `join`
 prints the preview and stops. Without `--as`, `send`, `ack` and an
 `inbox` that marks entries seen act as the person only at a terminal or
 with `--person`; away from a terminal or in an agent's shell `register`
-then carries `unattended` (the command), which the daemon logs. In an
+then carries `unattended` (the command), which the daemon logs and
+counts: `status` then carries `unattended` `{"count","last","command"}`,
+the uses since the daemon started (absent when none). In an
 agent's shell the CLI registers as that
 harness instead (DESIGN 7). An empty `--as` is refused. `status --json`
 leaves out `ui`; `ui --print` gives it, at a terminal outside an agent's

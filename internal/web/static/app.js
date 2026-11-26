@@ -241,6 +241,7 @@ async function api(path, body) {
     let j = null;
     try { j = await r.json(); } catch (e) { /* non-JSON */ }
     if (r.status === 401) { showAuthFail(); throw new Error("unauthorized"); }
+    if (!fromRun(r)) throw new Error(signedOut || "request failed (" + r.status + ")");
     if (!r.ok) throw new Error((j && j.error) || "request failed (" + r.status + ")");
     if (isState && (!j || j.run !== run)) {
       showAuthFail("This page belongs to an earlier run of the a2p2 daemon, or something else answers on its port.");
@@ -263,9 +264,25 @@ async function checkRun(post) {
   if (signedOut) throw new Error(signedOut);
   if (!verified) throw new Error(NOT_CONNECTED);
 }
-// showAuthFail signs the page out: no further call is made.
+// fromRun reports whether an answer came from this page's daemon process:
+// the daemon gives every answer to a session the session's run in the
+// A2P2-Run header, which another listener on the port does not know.
+// Nothing in an answer without it is drawn. A success without it, or any
+// answer with another run, signs the page out; a failure without it (a 503
+// between two runs of the daemon) is only a failure.
+function fromRun(r) {
+  const h = r.headers.get("A2P2-Run");
+  if (h && h === run) return true;
+  if (!h && !r.ok) return false;
+  showAuthFail("This page belongs to an earlier run of the a2p2 daemon, or something else answers on its port.");
+  return false;
+}
+// showAuthFail signs the page out: no further call is made, and the tab
+// forgets its session, so a reload does not send it again.
 function showAuthFail(why) {
   signedOut = "signed out";
+  token = "";
+  try { sessionStorage.removeItem("a2p2.session"); sessionStorage.removeItem("a2p2.run"); } catch (e) { /* storage blocked */ }
   if (why) $("authwhy").textContent = why;
   $("connection").hidden = true; $("app").hidden = true; $("authfail").hidden = false;
 }
@@ -742,6 +759,7 @@ async function download(m, f, redraw) {
     await checkRun(true);
     const r = await fetch("/api/file?" + q, { headers: { Authorization: "Bearer " + token } });
     if (r.status === 401) { showAuthFail(); return; }
+    if (!fromRun(r)) throw new Error(signedOut || "request failed (" + r.status + ")");
     const ct = r.headers.get("Content-Type") || "";
     if (!r.ok || !ct.startsWith("application/octet-stream")) {
       let j = null;

@@ -127,7 +127,7 @@ func checkPrivate(_ os.FileInfo, home string) error {
 // checkAncestors does nothing on Windows: the directories above the home
 // are not checked there (an accepted limit, SECURITY.md). The home's own
 // access control list is (checkPrivate).
-func checkAncestors(string) error { return nil }
+func checkAncestors(string) ([]string, error) { return nil, nil }
 
 // resolveSID turns a SID as SDDL writes it (S-1-..., or a constant such
 // as LA, BA or SY) into its S-1-... form; ConvertStringSidToSid takes

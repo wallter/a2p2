@@ -35,6 +35,9 @@ var assets embed.FS
 
 const maxBody = 64 << 10
 
+// runHeader carries the presenting session's run on every API answer.
+const runHeader = "A2P2-Run"
+
 type server struct {
 	s  *node.Surface
 	ss *Sessions
@@ -109,12 +112,20 @@ func (sv *server) guard(next http.Handler) http.Handler {
 // allowed applies the checks every API route shares: a session as the
 // Bearer token, and for a POST a JSON content type and the body limit. It
 // answers a refusal itself and reports whether the request may go on.
+// Every answer to a session carries its run in the A2P2-Run header, so the
+// page refuses any answer, a history or a file as well as a state, that
+// another listener on the port gives.
 func (sv *server) allowed(w http.ResponseWriter, r *http.Request) bool {
 	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || !sv.ss.valid(got) {
+	run, valid := "", false
+	if ok {
+		run, valid = sv.ss.runOf(got)
+	}
+	if !valid {
 		writeJSON(w, 401, map[string]string{"error": "missing or invalid token; run `a2p2 ui` for a fresh link"})
 		return false
 	}
+	w.Header().Set(runHeader, run)
 	if r.Method == http.MethodPost {
 		if mt, _, _ := strings.Cut(r.Header.Get("Content-Type"), ";"); strings.TrimSpace(strings.ToLower(mt)) != "application/json" {
 			writeJSON(w, 415, map[string]string{"error": "content-type must be application/json"})

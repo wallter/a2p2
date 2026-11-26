@@ -17,7 +17,7 @@ func TestAHomeUnderADirectoryOthersCanChangeIsRefused(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("as root every directory is root's")
 	}
-	shared := filepath.Join(t.TempDir(), "shared")
+	shared := filepath.Join(reachableTemp(t), "shared")
 	if err := os.Mkdir(shared, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -38,14 +38,14 @@ func TestAHomeUnderADirectoryOthersCanChangeIsRefused(t *testing.T) {
 
 // The honest cases: a directory others can write with the sticky bit (as
 // /tmp), and a home reached through a link, still work. A directory
-// writable by this user's primary group works only when that group is
-// private to the user (named as the user is, as on most Linux systems); a
-// shared one, such as staff on macOS, holds other users and is refused.
+// writable by this user's primary group works: silently when that group is
+// private to the user (named as the user is, as on most Linux systems),
+// and with a warning when it may hold other users, as staff on macOS does.
 func TestAHomeUnderAStickyOrOwnGroupDirectoryWorks(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("as root every directory is root's")
 	}
-	base := t.TempDir()
+	base := reachableTemp(t)
 	sticky := filepath.Join(base, "tmp")
 	own := filepath.Join(sticky, "group")
 	if err := os.MkdirAll(own, 0o700); err != nil {
@@ -61,13 +61,11 @@ func TestAHomeUnderAStickyOrOwnGroupDirectoryWorks(t *testing.T) {
 		t.Fatal(err)
 	}
 	home := filepath.Join(own, ".a2p2")
-	err := PrepareHome(home)
-	if ownPrivateGroup() {
-		if err != nil {
-			t.Fatal(err)
-		}
-	} else if err == nil || !strings.Contains(err.Error(), "other users") {
-		t.Fatalf("a home under a directory a shared group can change: %v", err)
+	if err := PrepareHome(home); err != nil {
+		t.Fatalf("a home under a directory its own group can change: %v", err)
+	}
+	if w := HomeWarnings(home); ownPrivateGroup() != (len(w) == 0) {
+		t.Fatalf("private group %v, warnings %q", ownPrivateGroup(), w)
 	}
 	if err := os.Chmod(own, 0o700); err != nil {
 		t.Fatal(err)
@@ -120,7 +118,7 @@ func TestAHomeReachedThroughALinkIntoASharedDirectoryIsRefused(t *testing.T) {
 	}
 	t.Run("the link's target is under a shared directory", func(t *testing.T) {
 		// mine/work -> shared/x: the given path has mine, the resolved one shared.
-		base := t.TempDir()
+		base := reachableTemp(t)
 		mkdir(filepath.Join(base, "shared", "x", ".a2p2"), 0o700)
 		mkdir(filepath.Join(base, "shared"), 0o777)
 		mkdir(filepath.Join(base, "mine"), 0o700)
@@ -133,7 +131,7 @@ func TestAHomeReachedThroughALinkIntoASharedDirectoryIsRefused(t *testing.T) {
 	t.Run("a link in a chain is held by a shared directory", func(t *testing.T) {
 		// a/l1 -> b/l2 -> c/d: b is on neither the given nor the resolved path,
 		// and whoever can write b can point l2 elsewhere.
-		base := t.TempDir()
+		base := reachableTemp(t)
 		mkdir(filepath.Join(base, "c", "d", ".a2p2"), 0o700)
 		mkdir(filepath.Join(base, "b"), 0o777)
 		mkdir(filepath.Join(base, "a"), 0o700)
@@ -155,7 +153,7 @@ func TestAHomeReachedThroughALinkIntoASharedDirectoryIsRefused(t *testing.T) {
 	t.Run("a '..' after a link leads into a shared directory", func(t *testing.T) {
 		// mine/l -> shared/x/sub: mine/l/../.a2p2 is shared/x/.a2p2 to the
 		// kernel, while the path cleaned as text is mine/.a2p2.
-		base := t.TempDir()
+		base := reachableTemp(t)
 		mkdir(filepath.Join(base, "shared", "x", "sub"), 0o700)
 		mkdir(filepath.Join(base, "shared", "x", ".a2p2"), 0o700)
 		mkdir(filepath.Join(base, "shared"), 0o777)
@@ -178,6 +176,22 @@ func TestAHomeReachedThroughALinkIntoASharedDirectoryIsRefused(t *testing.T) {
 			t.Fatalf("a private target: %v", err)
 		}
 	})
+}
+
+// reachableTemp is a new directory that other users can search, with only
+// directories they can search above it (t.TempDir is 0700, and on macOS
+// it is under a 0700 directory too, so nothing in it counts).
+func reachableTemp(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(sockTemp(), "a2p2r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 // A loop of links above the home is an error, not a hang.

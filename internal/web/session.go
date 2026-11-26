@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -27,9 +28,12 @@ const (
 	// CodeLife is how long a link's code can be traded for a session.
 	CodeLife = 30 * time.Second
 	// maxCodes and maxSessions bound what a process keeps; past them the
-	// oldest goes first. A status call makes one code. A traded code is
+	// oldest goes first. Every status call makes one code (the CLI's
+	// connect, the MCP shim and hooks call it too), so maxCodes is set far
+	// above what a busy machine makes in CodeLife, so that a code printed
+	// with --print is not pushed out before it is used. A traded code is
 	// kept with its session, so traded codes are bounded by maxSessions.
-	maxCodes    = 64
+	maxCodes    = 1024
 	maxSessions = 32
 )
 
@@ -200,6 +204,17 @@ func (sv *server) session(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decode(r, &in); err != nil {
 		writeErr(w, err)
+		return
+	}
+	// Where the system says who is at the other end (Linux), another user
+	// is refused before the code is looked at, so the code stays good for
+	// the person's browser and the attempt ends nothing. Root is not
+	// refused: it can read the home anyway. Where the user is not known,
+	// the code alone decides (peeruid.go).
+	if uid, ok := peerOf(r); ok && uid != os.Getuid() && uid != 0 {
+		slog.Warn("another user of this computer tried to open the page with a link; refused", "uid", uid)
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "this link was opened by another user of this computer; " +
+			"only the user that runs this a2p2 daemon can open its page"})
 		return
 	}
 	tok, run, why := sv.ss.trade(in.Code)

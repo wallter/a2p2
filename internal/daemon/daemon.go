@@ -85,7 +85,20 @@ func CheckHome(home string) error {
 	if err := checkPrivate(fi, home); err != nil { // sys_unix.go, sys_windows.go
 		return err
 	}
-	return checkAncestors(home)
+	_, err = checkAncestors(home)
+	return err
+}
+
+// HomeWarnings are what CheckHome accepts but a person should know: a
+// directory above the home that a group this user is in can change, so
+// that anyone else in the group could replace the home. Status and doctor
+// print them and the daemon logs them at start. None when CheckHome fails.
+func HomeWarnings(home string) []string {
+	if CheckHome(home) != nil {
+		return nil
+	}
+	w, _ := checkAncestors(home)
+	return w
 }
 
 func LoadConfig(home string) (Config, error) {
@@ -236,6 +249,9 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	if err := PrepareHome(home); err != nil {
 		return err
 	}
+	for _, w := range HomeWarnings(home) {
+		slog.Warn(w)
+	}
 	// One daemon per home: hold an exclusive lock for the process lifetime.
 	lock, err := os.OpenFile(filepath.Join(home, "lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -307,6 +323,7 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	// local user may be answering on the usual one. The sessions last the
 	// process, never stored; a link carries a one-time code (web.Sessions).
 	sessions := web.NewSessions()
+	uses := &localapi.PersonUses{} // --person away from a terminal, counted for status
 	uiLn, err := net.Listen("tcp", uiAddr)
 	if err != nil {
 		host, _, _ := net.SplitHostPort(uiAddr)
@@ -348,7 +365,7 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	ready := o.Ready
 	for {
 		restart := make(chan struct{}, 1)
-		r := &run{home: home, version: version, cfg: cfg, id: id, st: st, o: o, cur: &cur, sessions: sessions,
+		r := &run{home: home, version: version, cfg: cfg, id: id, st: st, o: o, cur: &cur, sessions: sessions, uses: uses,
 			uiLink: uiLink, uiAddr: uiLn.Addr().String(), stop: stop, restart: restart, between: between}
 		again, err := r.serve(ctx, ready)
 		if err != nil || !again || ctx.Err() != nil {
@@ -375,6 +392,7 @@ type run struct {
 	o             RunOpts
 	cur           *atomic.Pointer[handlers]
 	sessions      *web.Sessions
+	uses          *localapi.PersonUses
 	uiLink        func() string // the page's address with a new one-time code
 	uiAddr        string
 	stop          func()
@@ -563,7 +581,7 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	r.cur.Store(&handlers{
 		ui: g.wrap(web.Handler(surf, r.sessions)),
 		api: g.wrap(localapi.Handler(surf, localapi.Info{
-			Version: r.version, UIURL: r.uiLink, PID: os.Getpid(), Stop: r.stop,
+			Version: r.version, UIURL: r.uiLink, PID: os.Getpid(), Stop: r.stop, Uses: r.uses,
 		})),
 	})
 	slog.Info("a2p2 daemon started", "node", core.ShortNode(m.ID), "name", r.cfg.Name, "home", r.home,

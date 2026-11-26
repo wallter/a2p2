@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	neturl "net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -134,29 +135,38 @@ func errorText(err error) string { return node.EscapeDisplay(err.Error()) }
 // printOnly. The address goes only to w, never to a log. It carries a
 // one-time code, which the page trades for a session (internal/web,
 // session.go); note, on stderr so that w holds the address alone, says
-// so. A daemon before 0.2.4 still running after an upgrade gives an
-// address with its long-lived token instead: that is never opened, since
-// opening puts it in the arguments of the browser, where other users can
-// read it; it is printed only for --print, with a note to restart the
-// daemon. daemonVersion is the running daemon's version.
-func showUI(w, note io.Writer, url, daemonVersion string, printOnly bool, open func(string)) error {
+// so. remote: the shell is over SSH, so nothing was opened and the note
+// says how to reach the page. A daemon before 0.2.4 still running after an
+// upgrade gives an address with its long-lived token instead: that is
+// neither opened nor printed, since it works for the daemon's whole run
+// and opening puts it in the arguments of the browser, where other users
+// can read it; the refusal says to restart the daemon. daemonVersion is the
+// running daemon's version. When open fails, the address is printed
+// already and the error says so.
+func showUI(w, note io.Writer, url, daemonVersion string, printOnly, remote bool, open func(string) error) error {
 	if !strings.Contains(url, "/#c=") {
-		restart := "the running a2p2 daemon (" + daemonVersion + ") is older than this a2p2 (" + version +
-			") and its address carries its long-lived token; run a2p2 stop, then a2p2 ui, for an address that works once"
-		if !printOnly {
-			return errors.New(restart + ". Nothing was opened: opening it would show the token to other users of this computer")
-		}
-		fmt.Fprintln(w, url)
-		fmt.Fprintln(note, "Note: "+restart+".")
-		return nil
+		return errors.New("the running a2p2 daemon (" + node.EscapeDisplay(daemonVersion) + ") is older than this a2p2 (" + version +
+			") and its address carries its long-lived token, so it was neither opened nor printed. " +
+			"Run a2p2 stop, then a2p2 ui, for an address that works once")
 	}
 	fmt.Fprintln(w, url)
 	fmt.Fprintln(note, "This address opens the page once, within 30 seconds. Run a2p2 ui again for a new one.")
 	if daemonVersion != version {
-		fmt.Fprintln(note, "The running a2p2 daemon is "+daemonVersion+" and this a2p2 is "+version+"; run a2p2 stop to start this one.")
+		fmt.Fprintln(note, "The running a2p2 daemon is "+node.EscapeDisplay(daemonVersion)+" and this a2p2 is "+version+"; run a2p2 stop to start this one.")
 	}
-	if !printOnly {
-		open(url)
+	if remote {
+		port := "PORT"
+		if u, err := neturl.Parse(url); err == nil && u.Port() != "" {
+			port = u.Port()
+		}
+		fmt.Fprintln(note, "This shell is over SSH, so no browser was opened on this computer. On your own computer, run "+
+			"ssh -L "+port+":127.0.0.1:"+port+" with this host, then open the address there.")
+	}
+	if printOnly {
+		return nil
+	}
+	if err := open(url); err != nil {
+		return fmt.Errorf("could not open a browser (%v); open the address printed above within 30 seconds", err)
 	}
 	return nil
 }
@@ -180,13 +190,17 @@ func newCmd(ctx context.Context, name string) *cmd {
 	c := &cmd{ctx: ctx, fs: flag.NewFlagSet(name, flag.ContinueOnError), home: daemon.Home()}
 	c.json = c.fs.Bool("json", false, "print JSON")
 	c.as = c.fs.String("as", "", "act as this agent label instead of the person")
-	c.person = c.fs.Bool("person", false, "act as the person without a terminal or in an agent's shell; the daemon log records it")
+	c.person = c.fs.Bool("person", false, "act as the person without a terminal or in an agent's shell; status counts it")
 	return c
 }
 
 // connectDaemon is daemon.Connect; tests replace it so that no test starts a
 // daemon.
 var connectDaemon = daemon.Connect
+
+// homeWarnings is daemon.HomeWarnings, printed by status and doctor; tests
+// replace it.
+var homeWarnings = daemon.HomeWarnings
 
 func (c *cmd) client() (*localapi.Client, error) {
 	if c.cl != nil {
@@ -711,6 +725,12 @@ func status(c *cmd) error {
 			fmt.Printf("         %d unknown files under blobs/ in the state directory, left alone: a2p2 did not write them\n", st.Files.Unknown)
 		}
 		fmt.Println("ui       run a2p2 ui to open the local page")
+		if u := st.Unattended; u != nil {
+			fmt.Println("person   " + personUseText(*u))
+		}
+		for _, w := range homeWarnings(c.home) {
+			fmt.Println("WARNING  " + node.EscapeDisplay(w))
+		}
 		fmt.Println("rooms")
 		// Labels come from the rooms' creators, perhaps on other
 		// machines: escaped, and compared as shown.
@@ -1335,6 +1355,14 @@ func noHarnessHint() string {
 		" (or " + strings.Join(harness.Names[1:], ", ") + "), then a2p2 doctor again."
 }
 
+// personUseText says how often a2p2 acted as the person with --person
+// where no person was seen typing (away from a terminal or in an agent's
+// shell), since the daemon started.
+func personUseText(u localapi.Unattended) string {
+	return fmt.Sprintf("--person used %d time(s) away from a terminal or in an agent's shell since the daemon started, last %s (a2p2 %s)",
+		u.Count, clock(u.Last), node.EscapeDisplay(u.Command))
+}
+
 // quarantineChecks is one failing doctor line per room set aside, with
 // what the person can do about it.
 func quarantineChecks(st localapi.Status) []harness.Check {
@@ -1359,6 +1387,11 @@ func runDoctor(c *cmd, w io.Writer, o harness.Options) error {
 	}
 	homeErr := daemon.PrepareHome(c.home)
 	add("state directory", homeErr, c.home, "fix the permissions shown above")
+	// Warnings pass: the home works, and the person decides.
+	var warns []harness.Check
+	for _, w := range homeWarnings(c.home) {
+		warns = append(warns, harness.Check{Name: "state directory", OK: true, Info: "warning: " + node.EscapeDisplay(w)})
+	}
 	if homeErr != nil {
 		// The daemon cannot be reached through an unsafe directory, so its
 		// line says it was not looked at rather than pointing at a log.
@@ -1370,6 +1403,9 @@ func runDoctor(c *cmd, w io.Writer, o harness.Options) error {
 			var st localapi.Status
 			err = cl.Call(c.ctx, "status", nil, &st)
 			add("local API", err, fmt.Sprintf("machine %s, %d room(s), %d agent(s)", short(st.Node), len(st.Rooms), len(st.Agents)), "")
+			if u := st.Unattended; u != nil {
+				warns = append(warns, harness.Check{Name: "person", OK: true, Info: "warning: " + personUseText(*u)})
+			}
 			if len(st.Listen) == 0 {
 				add("network", nil, "off: this machine only (a2p2 net on to enable)", "")
 			} else {
@@ -1386,6 +1422,7 @@ func runDoctor(c *cmd, w io.Writer, o harness.Options) error {
 		}
 	}
 	hs := harness.Doctor(o)
+	checks = append(checks, warns...)
 	checks = append(checks, hs...)
 	bad := 0
 	for _, ch := range checks {
@@ -1400,8 +1437,11 @@ func runDoctor(c *cmd, w io.Writer, o harness.Options) error {
 	} else {
 		for _, ch := range checks {
 			mark := "ok  "
-			if !ch.OK {
+			switch {
+			case !ch.OK:
 				mark = "FAIL"
+			case strings.HasPrefix(ch.Info, "warning: "):
+				mark = "warn"
 			}
 			fmt.Fprintf(w, "%s  %-28s %s\n", mark, ch.Name, ch.Info)
 			if ch.Fix != "" {
