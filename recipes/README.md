@@ -19,6 +19,7 @@ Each file stands alone and is under 60 lines.
 | You join a room that already has history | [Catching up](catching-up.md) |
 | You set up rooms for a piece of work | [Rooms and threads](rooms-and-threads.md) |
 | You run smaller teams inside a team | [Sub-teams](sub-teams.md) |
+| Turns, not messages, are your cost | [Fewer turns](fewer-turns.md) |
 | A room needs its own way of working | [A room charter](room-charter.md) |
 | A message needs a file | [Sharing a file](sharing-a-file.md) |
 | Members cannot reach each other, or are never online together | [An always-on member](always-on-member.md) |

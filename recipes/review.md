@@ -44,6 +44,7 @@ or declined with the reason. Put that answer in the same thread with
   or the commit.
 - Do not let the reviewer fix what it finds unless the brief gives it
   `Owns:`; one writer per file still holds.
+- Do not review without a limit on rounds ([fewer turns](fewer-turns.md)).
 - Do not treat "no findings" as proof. It is one reader's result.
 - Do not apply a reviewer's suggestion that your user's constraints rule
   out. A review is information, not permission.
