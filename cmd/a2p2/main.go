@@ -127,13 +127,35 @@ var errUsage = errors.New("usage")
 // address, a name) and no error of a2p2 spans lines.
 func errorText(err error) string { return node.EscapeDisplay(err.Error()) }
 
-// showUI prints the page's address, which carries its access token, and
-// opens it with open unless printOnly. The address goes only to w, never to a log.
-func showUI(w io.Writer, url string, printOnly bool, open func(string)) {
+// showUI prints the page's address and opens it with open unless
+// printOnly. The address goes only to w, never to a log. It carries a
+// one-time code, which the page trades for a session (internal/web,
+// session.go); note, on stderr so that w holds the address alone, says
+// so. A daemon before 0.2.4 still running after an upgrade gives an
+// address with its long-lived token instead: that is never opened, since
+// opening puts it in the arguments of the browser, where other users can
+// read it; it is printed only for --print, with a note to restart the
+// daemon. daemonVersion is the running daemon's version.
+func showUI(w, note io.Writer, url, daemonVersion string, printOnly bool, open func(string)) error {
+	if !strings.Contains(url, "/#c=") {
+		restart := "the running a2p2 daemon (" + daemonVersion + ") is older than this a2p2 (" + version +
+			") and its address carries its long-lived token; run a2p2 stop, then a2p2 ui, for an address that works once"
+		if !printOnly {
+			return errors.New(restart + ". Nothing was opened: opening it would show the token to other users of this computer")
+		}
+		fmt.Fprintln(w, url)
+		fmt.Fprintln(note, "Note: "+restart+".")
+		return nil
+	}
 	fmt.Fprintln(w, url)
+	fmt.Fprintln(note, "This address opens the page once, within 30 seconds. Run a2p2 ui again for a new one.")
+	if daemonVersion != version {
+		fmt.Fprintln(note, "The running a2p2 daemon is "+daemonVersion+" and this a2p2 is "+version+"; run a2p2 stop to start this one.")
+	}
 	if !printOnly {
 		open(url)
 	}
+	return nil
 }
 
 func usagef(format string, a ...any) error {
@@ -324,7 +346,7 @@ func run(ctx context.Context, name string, args []string) (err error) {
 	// Everything below talks to the daemon.
 	printOnly := new(bool)
 	if name == "ui" {
-		printOnly = c.fs.Bool("print", false, "print the address and open nothing")
+		printOnly = c.fs.Bool("print", false, "print the page's address, which works once within 30 seconds, and open nothing")
 	}
 	if err := c.fs.Parse(permute(c.fs, args)); err != nil {
 		return errUsage
@@ -341,8 +363,7 @@ func run(ctx context.Context, name string, args []string) (err error) {
 		if err := c.call("status", nil, &st, nil); err != nil {
 			return err
 		}
-		showUI(os.Stdout, st.UI, *printOnly, openURL) // openURL: tty_unix.go, tty_windows.go
-		return nil
+		return showUI(os.Stdout, os.Stderr, st.UI, st.Version, *printOnly, openURL) // openURL: tty_unix.go, tty_windows.go
 	case "trace":
 		if len(rest) != 1 {
 			return usagef("a2p2 trace ID")

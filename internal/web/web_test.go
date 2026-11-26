@@ -52,6 +52,15 @@ type env struct {
 	peer *env
 	st   *store.Store
 	seed byte
+	ss   *Sessions
+}
+
+// testSessions are a page's sessions with tok already signed in, so that
+// tests call the API as the page does after it traded a link's code.
+func testSessions() *Sessions {
+	ss := NewSessions()
+	ss.add(hashOf(tok), session{run: random(16)})
+	return ss
 }
 
 func open(t *testing.T, seed byte, peer *env) *env {
@@ -86,7 +95,8 @@ func openOn(t *testing.T, st *store.Store, seed byte, peer *env) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.srv = httptest.NewServer(Handler(e.s, tok))
+	e.ss = testSessions()
+	e.srv = httptest.NewServer(Handler(e.s, e.ss))
 	t.Cleanup(e.srv.Close)
 	return e
 }
@@ -116,7 +126,8 @@ func setupFiles(t *testing.T) (*env, string) {
 	if e.s, err = node.OpenSurface(ctx, m, rooms, node.SurfaceOpts{Name: "box"}); err != nil {
 		t.Fatal(err)
 	}
-	e.srv = httptest.NewServer(Handler(e.s, tok))
+	e.ss = testSessions()
+	e.srv = httptest.NewServer(Handler(e.s, e.ss))
 	t.Cleanup(e.srv.Close)
 	if _, err := e.s.CreateRoom(ctx, "team"); err != nil {
 		t.Fatal(err)

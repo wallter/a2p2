@@ -5,11 +5,24 @@ const $ = (id) => document.getElementById(id);
 // the server returns it only once. onscreen: key -> version of every entry as
 // rendered; only that is ever confirmed. qShown: the same for question cards.
 const S = { st: null, unread: [], questions: [], qKeys: new Set(), waiting: 0, alerts: [], requests: [], room: null, msgs: [], older: [], notes: [], more: true, reply: null, sigs: {}, toSig: "", gen: 0, shown: null, toRoom: null, outcome: "", notice: "", risky: new Set(), onscreen: new Map(), qShown: new Map(), notesShown: new Map(), boundary: "", toChosen: "" };
-let token = "";
-try { token = sessionStorage.getItem("a2p2.token") || ""; } catch (e) { /* storage blocked */ }
+// Sign-in (PROTOCOL 7). The address a2p2 ui opens carries a one-time code
+// (#c=...), which works once and for 30 seconds; the page trades it for a
+// session, kept in this tab only. run is a random value the daemon keeps
+// with that session alone and puts in each state the session reads: a
+// state with any other run signs the page out, since after the daemon
+// stops another local user may answer on its port.
+// verified is true only while the last state named that run; any
+// failed or foreign state clears it. A call other than the state is made
+// only while verified, and a POST or a download first asks for a fresh
+// state and goes out only if that state names the run, so what the person
+// types goes to another listener only if it took the port in the moment
+// between that check and the call. signedOut stops every call.
+let token = "", run = "", code = "", signedOut = "", verified = false;
+const NOT_CONNECTED = "Not connected to this machine's a2p2 daemon, so nothing was sent. The page retries on its own.";
+try { token = sessionStorage.getItem("a2p2.session") || ""; run = sessionStorage.getItem("a2p2.run") || ""; } catch (e) { /* storage blocked */ }
 if (location.hash.length > 1) {
-  token = decodeURIComponent(location.hash.slice(1));
-  try { sessionStorage.setItem("a2p2.token", token); } catch (e) { /* ignore */ }
+  const h = decodeURIComponent(location.hash.slice(1));
+  if (h.startsWith("c=")) code = h.slice(2);
 }
 history.replaceState(null, "", location.pathname + location.search);
 
@@ -214,20 +227,57 @@ function ago(t) {
 }
 
 async function api(path, body) {
+  if (signedOut) throw new Error(signedOut);
+  const isState = path === "/api/state";
+  if (!isState) await checkRun(body !== undefined);
   const opt = { headers: { Authorization: "Bearer " + token } };
   if (body !== undefined) {
     opt.method = "POST";
     opt.headers["Content-Type"] = "application/json";
     opt.body = JSON.stringify(body);
   }
-  const r = await fetch(path, opt);
+  try {
+    const r = await fetch(path, opt);
+    let j = null;
+    try { j = await r.json(); } catch (e) { /* non-JSON */ }
+    if (r.status === 401) { showAuthFail(); throw new Error("unauthorized"); }
+    if (!r.ok) throw new Error((j && j.error) || "request failed (" + r.status + ")");
+    if (isState && (!j || j.run !== run)) {
+      showAuthFail("This page belongs to an earlier run of the a2p2 daemon, or something else answers on its port.");
+      throw new Error(signedOut);
+    }
+    if (isState) verified = true;
+    return j;
+  } catch (e) {
+    if (isState) verified = false; // any failed state: unverified until one names the run again
+    throw e;
+  }
+}
+// checkRun throws unless the last state came from this page's daemon
+// process. For a POST or a download (post true) it first asks for a fresh
+// state. Nothing is sent when it throws.
+async function checkRun(post) {
+  if (post) {
+    try { await api("/api/state"); } catch (e) { /* verified is false now */ }
+  }
+  if (signedOut) throw new Error(signedOut);
+  if (!verified) throw new Error(NOT_CONNECTED);
+}
+// showAuthFail signs the page out: no further call is made.
+function showAuthFail(why) {
+  signedOut = "signed out";
+  if (why) $("authwhy").textContent = why;
+  $("connection").hidden = true; $("app").hidden = true; $("authfail").hidden = false;
+}
+// trade swaps the link's code for a session.
+async function trade() {
+  const r = await fetch("/api/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }) });
   let j = null;
   try { j = await r.json(); } catch (e) { /* non-JSON */ }
-  if (r.status === 401) { showAuthFail(); throw new Error("unauthorized"); }
-  if (!r.ok) throw new Error((j && j.error) || "request failed (" + r.status + ")");
-  return j;
+  if (!r.ok || !j || !j.session) { token = ""; showAuthFail((j && j.error) || "This link did not work (" + r.status + ")."); return; }
+  token = j.session; run = j.run || "";
+  try { sessionStorage.setItem("a2p2.session", token); sessionStorage.setItem("a2p2.run", run); } catch (e) { /* ignore */ }
 }
-function showAuthFail() { $("connection").hidden = true; $("app").hidden = true; $("authfail").hidden = false; }
 
 const rooms = () => (S.st && S.st.rooms) || [];
 const room = () => rooms().find((r) => r.id === S.room) || null;
@@ -669,6 +719,7 @@ async function download(m, f, redraw) {
   again();
   try {
     const q = "room=" + encodeURIComponent(m.room) + "&msg=" + encodeURIComponent(m.id) + "&sha=" + encodeURIComponent(f.sha256);
+    await checkRun(true);
     const r = await fetch("/api/file?" + q, { headers: { Authorization: "Bearer " + token } });
     if (r.status === 401) { showAuthFail(); return; }
     const ct = r.headers.get("Content-Type") || "";
@@ -881,7 +932,7 @@ async function refresh(force) {
     renderNotice(); renderSide(); renderRoomFiles(); renderNeeds(); renderHead(); renderStream(force);
     $("connection").hidden = true;
   } catch (e) {
-    if (e.message !== "unauthorized") {
+    if (e.message !== "unauthorized" && !signedOut) {
       const status = $("connection");
       const message = "Could not load the page data. Retrying. " + e.message;
       if (status.textContent !== message) status.textContent = message;
@@ -939,5 +990,12 @@ const desktop = matchMedia("(min-width: 64.001rem)");
 function setDetailsLayout() { document.querySelector(".machine-details").open = desktop.matches; }
 setDetailsLayout();
 desktop.addEventListener("change", setDetailsLayout);
-if (!token) showAuthFail();
-else { refresh(true); setInterval(refresh, 2000); }
+(async () => {
+  if (code) {
+    busy = true; // a refresh waits for the trade
+    try { await trade(); } catch (e) { token = ""; showAuthFail("This link did not work: " + e.message); } finally { busy = false; }
+  }
+  if (!token) { showAuthFail(); return; }
+  if (signedOut) return;
+  refresh(true); setInterval(refresh, 2000);
+})();

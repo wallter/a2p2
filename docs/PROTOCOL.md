@@ -1113,8 +1113,15 @@ and `room/join/accept` are kept out of the agent tools and hooks and every
 use is recorded, which is a guard rail and not a lock (REQUIREMENTS 6).
 
 The web page (`a2p2 ui`; `a2p2 ui --print` prints its address and opens
-nothing) uses its own routes on loopback, each requiring
-the page's token as a bearer token: `GET /api/state`, `/api/history`, `/api/thread` and
+nothing) uses its own routes on loopback. Its address, the `ui` of
+`status`, is `http://HOST:PORT/#c=CODE`: a new one-time code at each
+`status`, good once and for 30 seconds (a daemon before 0.2.4 put its
+long-lived token after the `#`). `POST /api/session` with `{"code"}` and
+the page's exact `Origin` answers `{"session","run"}`; a code unknown or
+expired, or traded before, is answered 401, and a second trade also
+ends the first trade's session. Every other route requires a session
+as a bearer token: `GET /api/state` (which also carries `run`, the
+value given with the presenting session; each session has its own), `/api/history`, `/api/thread` and
 `/api/trace`, and `POST /api/send`, `/api/seen`, `/api/ack`,
 `/api/confirm` and `/api/notice-shown`. `GET /api/state` reads the status
 as shown to a person, so it carries the one-time `notice` until the page

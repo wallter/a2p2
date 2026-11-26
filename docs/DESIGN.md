@@ -37,7 +37,29 @@ is refused. The socket file inherits that list. At each start the daemon
 also writes a new random key to `local.key` in the home and refuses every
 local API request without it in the `A2P2-Local-Key` header, so only a
 process that can read the home can call the daemon. On macOS and Linux no
-key is written or asked for.
+key is written or asked for, and a home under a directory that another
+user owns or can change (no sticky bit; group write only for the user's
+own private group), or reached through a link another user owns, is
+refused, by the daemon and by every client before it dials. The path is
+walked one name at a time, following each link from the directory that
+holds it.
+
+The loopback page has no long-lived secret in any address. Each `status`
+call (and so `a2p2 ui`) gives the page's address with a new one-time
+code (`#c=`), good once and for 30 seconds. The page trades it with `POST
+/api/session` for a session, kept in the tab's `sessionStorage`; sessions
+last the daemon process, across networking decisions, and are never
+stored. A code traded twice ends the session of its first trade, while
+that session lives. Each state the page reads carries `run`, a random
+value kept with that session alone, and the page stops at a state with another,
+since a tab left open after its daemon stopped may reach another user's
+listener on the same port. After a failed state it makes no other call
+until a state names its run, and it reads a fresh state before each POST
+and download. `a2p2 ui` does not open the long-lived token address of a
+daemon before 0.2.4. A daemon started by a client writes `daemon.log` in
+the home; the running daemon moves its last 10 MiB to `daemon.log.1`
+once it is over 10 MiB, checked at start and every 10 seconds, and
+empties it even if that copy fails.
 
 ## 2. Records
 

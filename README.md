@@ -206,7 +206,7 @@ Nov 24 05:24:23  alice@1f646db7
 
 `a2p2 inbox` marks what it shows as seen. Use `a2p2 inbox --peek` for a
 preview. `a2p2 ui` opens the local web page (`a2p2 ui --print` only prints its
-address, which carries the page's access token). State lives in `~/.a2p2`
+address, which works once, within 30 seconds). State lives in `~/.a2p2`
 by default. Set `A2P2_HOME` to use another directory.
 
 A session's agent ID is its harness and directory name, so Claude Code

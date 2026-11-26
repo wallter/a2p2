@@ -210,21 +210,53 @@ func TestFlagsAfterPositionalArgumentsAreParsed(t *testing.T) {
 	}
 }
 
+// F14: stdout holds the address alone, as before; stderr says that it
+// works once and for a short time.
 func TestUIPrintOnlyPrintsTheAddressAndOpensNothing(t *testing.T) {
-	const url = "http://127.0.0.1:7777/#token"
+	const url = "http://127.0.0.1:7777/#c=0123abcd"
 	for _, tc := range []struct {
 		printOnly bool
 		opened    bool
 	}{{true, false}, {false, true}} {
-		var out bytes.Buffer
+		var out, note bytes.Buffer
 		opened := false
-		showUI(&out, url, tc.printOnly, func(u string) { opened = u == url })
+		if err := showUI(&out, &note, url, version, tc.printOnly, func(u string) { opened = u == url }); err != nil {
+			t.Fatal(err)
+		}
 		if out.String() != url+"\n" {
 			t.Errorf("--print=%v printed %q", tc.printOnly, out.String())
+		}
+		if !strings.Contains(note.String(), "once, within 30 seconds") || strings.Contains(note.String(), "a2p2 stop") {
+			t.Errorf("note %q", note.String())
 		}
 		if opened != tc.opened {
 			t.Errorf("--print=%v: opened=%v, want %v", tc.printOnly, opened, tc.opened)
 		}
+	}
+}
+
+// F14, F72: after an upgrade, a daemon before 0.2.4 may still run, and its
+// address carries its long-lived token. a2p2 ui never opens that (the
+// browser's arguments show it to other users) and says to restart the
+// daemon; --print still prints it, with the same advice. A newer daemon
+// of another version is opened, with a note.
+func TestUIDoesNotOpenAnOldDaemonsTokenAddress(t *testing.T) {
+	const legacy = "http://127.0.0.1:7777/#0123456789abcdef"
+	var out, note bytes.Buffer
+	opened := false
+	err := showUI(&out, &note, legacy, "0.2.3", false, func(string) { opened = true })
+	if err == nil || opened || out.Len() != 0 || !strings.Contains(err.Error(), "a2p2 stop") || !strings.Contains(err.Error(), "0.2.3") {
+		t.Fatalf("opening an old daemon's address: err %v, opened %v, printed %q", err, opened, out.String())
+	}
+	out.Reset()
+	if err := showUI(&out, &note, legacy, "0.2.3", true, func(string) { opened = true }); err != nil || opened || out.String() != legacy+"\n" ||
+		!strings.Contains(note.String(), "long-lived token") {
+		t.Fatalf("--print of an old daemon's address: err %v, printed %q, note %q", err, out.String(), note.String())
+	}
+	note.Reset()
+	if err := showUI(io.Discard, &note, "http://127.0.0.1:7777/#c=ab", "9.9.9", false, func(string) { opened = true }); err != nil || !opened ||
+		!strings.Contains(note.String(), "9.9.9") {
+		t.Fatalf("another version's one-time address: err %v, opened %v, note %q", err, opened, note.String())
 	}
 }
 

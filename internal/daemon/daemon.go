@@ -71,6 +71,9 @@ func PrepareHome(home string) error {
 // CheckHome verifies an existing state directory without creating anything.
 // Clients call it before dialing the socket inside: a socket in a directory
 // someone else controls could be an impostor that reads what we send it.
+// The directories above it are checked too, since a user who can change one
+// could put another directory at the home's path later, while a client
+// that checked once keeps dialing the path.
 func CheckHome(home string) error {
 	fi, err := os.Lstat(home)
 	if err != nil {
@@ -79,7 +82,10 @@ func CheckHome(home string) error {
 	if !fi.IsDir() {
 		return fmt.Errorf("%s is not a directory (symlinks are not followed)", home)
 	}
-	return checkPrivate(fi, home) // sys_unix.go, sys_windows.go
+	if err := checkPrivate(fi, home); err != nil { // sys_unix.go, sys_windows.go
+		return err
+	}
+	return checkAncestors(home)
 }
 
 func LoadConfig(home string) (Config, error) {
@@ -102,11 +108,15 @@ func SaveConfig(home string, c Config) error {
 	return os.WriteFile(filepath.Join(home, "config.json"), append(b, '\n'), 0o600)
 }
 
+// uiReadTimeout bounds how long the page's server waits for a whole
+// request, body included, so that a local program cannot hold its
+// connections open by sending a body slowly. A variable for tests.
+var uiReadTimeout = 30 * time.Second
+
 func sockPath(home string) string { return filepath.Join(home, "sock") }
 
-// newToken returns a fresh random UI token. It is never stored or reused: a
-// browser tab left open keeps sending the old token to the old port, and
-// after the daemon stops another local user could be listening there.
+// newToken returns a fresh random key (the local key, localkey.go). It is
+// never reused across starts.
 func newToken() (string, error) {
 	var raw [24]byte
 	if _, err := rand.Read(raw[:]); err != nil {
@@ -217,7 +227,7 @@ func CheckUIAddr(addr string) error {
 }
 
 // RunWith is Run with test options. The home's lock, key, database, the
-// page's listener and token, and the local socket last the whole process.
+// page's listener and sessions, and the local socket last the whole process.
 // The machine itself (rooms, surfaces, pull and join, and networking) is a
 // run inside it, started again in place when a person records a
 // networking decision, so the decision applies at once whether or not the
@@ -265,6 +275,7 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
+	go keepLog(ctx, logPath(home), logMax, logEvery) // logfile.go
 	// The handlers of the current run; swapped when a run starts.
 	var cur atomic.Pointer[handlers]
 	// Between runs (start, stop, a networking decision being applied) the
@@ -291,22 +302,23 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	}()
 	base := func(net.Listener) context.Context { return ctx } // requests end when the daemon stops
 
-	// Web UI: loopback only (checked above), token required. If the port
-	// is taken, any port on the same address.
-	token, err := newToken()
-	if err != nil {
-		return err
-	}
+	// Web UI: loopback only (checked above), a session required. If the
+	// port is taken, any port on the same address, said in the log: another
+	// local user may be answering on the usual one. The sessions last the
+	// process, never stored; a link carries a one-time code (web.Sessions).
+	sessions := web.NewSessions()
 	uiLn, err := net.Listen("tcp", uiAddr)
 	if err != nil {
 		host, _, _ := net.SplitHostPort(uiAddr)
 		if uiLn, err = net.Listen("tcp", net.JoinHostPort(host, "0")); err != nil {
 			return fmt.Errorf("ui listener: %w", err)
 		}
+		slog.Warn("the page's address is taken, by another program or user; the page is on another port "+
+			"(a2p2 ui opens the right one)", "wanted", uiAddr, "ui", uiLn.Addr().String())
 	}
-	uiURL := fmt.Sprintf("http://%s/#%s", uiLn.Addr(), token)
+	uiLink := func() string { return sessions.Link(uiLn.Addr().String()) }
 	uiSrv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { cur.Load().ui.ServeHTTP(w, r) }),
-		ReadHeaderTimeout: 5 * time.Second, BaseContext: base}
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: uiReadTimeout, BaseContext: base}
 	servers = append(servers, uiSrv)
 	go uiSrv.Serve(uiLn)
 
@@ -336,8 +348,8 @@ func RunWith(ctx context.Context, home, version string, o RunOpts) (err error) {
 	ready := o.Ready
 	for {
 		restart := make(chan struct{}, 1)
-		r := &run{home: home, version: version, cfg: cfg, id: id, st: st, o: o, cur: &cur, token: token,
-			uiURL: uiURL, uiAddr: uiLn.Addr().String(), stop: stop, restart: restart, between: between}
+		r := &run{home: home, version: version, cfg: cfg, id: id, st: st, o: o, cur: &cur, sessions: sessions,
+			uiLink: uiLink, uiAddr: uiLn.Addr().String(), stop: stop, restart: restart, between: between}
 		again, err := r.serve(ctx, ready)
 		if err != nil || !again || ctx.Err() != nil {
 			return err
@@ -362,7 +374,8 @@ type run struct {
 	st            *store.Store
 	o             RunOpts
 	cur           *atomic.Pointer[handlers]
-	token, uiURL  string
+	sessions      *web.Sessions
+	uiLink        func() string // the page's address with a new one-time code
 	uiAddr        string
 	stop          func()
 	between       *handlers // served while no run is serving
@@ -548,9 +561,9 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	}
 	start(func() { prune(ctx, m) })
 	r.cur.Store(&handlers{
-		ui: g.wrap(web.Handler(surf, r.token)),
+		ui: g.wrap(web.Handler(surf, r.sessions)),
 		api: g.wrap(localapi.Handler(surf, localapi.Info{
-			Version: r.version, UIURL: func() string { return r.uiURL }, PID: os.Getpid(), Stop: r.stop,
+			Version: r.version, UIURL: r.uiLink, PID: os.Getpid(), Stop: r.stop,
 		})),
 	})
 	slog.Info("a2p2 daemon started", "node", core.ShortNode(m.ID), "name", r.cfg.Name, "home", r.home,
@@ -835,7 +848,8 @@ func Connect(ctx context.Context, home string) (*localapi.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	logf, err := os.OpenFile(filepath.Join(home, "daemon.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	// The daemon, under the home's lock, keeps the log's size (logfile.go).
+	logf, err := os.OpenFile(logPath(home), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
 	}

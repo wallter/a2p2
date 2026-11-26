@@ -66,8 +66,34 @@ reports.
   carry a key that the daemon writes into that directory at every start.
   This has been built and reasoned about but not yet tested on Windows
   with a second user trying to connect (DECISIONS, D47).
-- The web page listens on loopback. Its API requires a random token. The
-  server checks the request's `Host` and any `Origin` header.
+- The web page listens on loopback. Its API requires a session, and the
+  server checks the request's `Host` and any `Origin` header. Every OS
+  user of the machine can connect to a loopback port. The address
+  `a2p2 ui` opens or prints carries no long-lived secret, only a code
+  that works once and for 30 seconds; the page trades it for a session
+  kept in that browser tab, which ends when the daemon stops. On Linux the
+  address is in the command line of `xdg-open` and of a browser it
+  starts, which other users can read. Such a user who reads it and trades
+  it before your browser does gets a session; your page then says the
+  link was used already, that session is ended and the daemon's log says
+  so. On a shared machine, run `a2p2 ui --print` and paste the address
+  into a browser that is already open. A program running as your user
+  can still get a code from `a2p2 status` and decide on the page (a guard
+  rail, as for the socket). If another user takes the page's port first,
+  the daemon serves on another one and its log says so. A tab left open
+  from an earlier run refuses what a listener answers unless it names
+  the run given with that tab's own session,
+  and sends a message, a decision or a download request only right after
+  a state from its own daemon process; a listener that takes the port in
+  the moment between that check and the request still receives it.
+- The a2p2 home and every directory above it must be writable only by
+  you. On Unix a2p2 refuses a home under a directory that another user
+  owns (root aside) or can write without the sticky bit, or that its
+  group can write unless the group is your own private group (named as
+  you; on macOS `staff` is not). Links on the way are followed one at a
+  time and each must be yours or root's. On Windows the directories above
+  the home are not checked. A client checks the home when it connects,
+  and does not check which user serves the socket it dials.
 - Agent labels and addressees help with routing and reading. A room member
   can read the room data its machine can fetch. Treat messages as
   untrusted input. A message from a peer does not grant permission to act.
@@ -237,7 +263,10 @@ still do, by the numbers:
   share no room, and refused connections, are logged at Debug; one Info
   line a minute says connections are being refused. A member's refused
   requests reach Info 5 at once, then one per 10 s per key. At Debug
-  each refusal is a line, and `daemon.log` is not rotated.
+  each refusal is a line. Once `daemon.log` is over 10 MiB (checked
+  every 10 seconds) its last 10 MiB are moved to `daemon.log.1`, so the
+  two files hold about 20 MiB plus what is written between checks; if
+  that copy cannot be made, the log is emptied anyway.
 
 A member of one of your rooms is trusted more. One member key can hold
 16 connections, so 16 member keys together can fill the members' pool.

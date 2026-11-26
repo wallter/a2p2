@@ -2137,3 +2137,87 @@ would run the workflow, and the fixes need no protocol change.
 **Revisit if** an action is moved to a new major release, GitHub offers
 immutable releases or a required environment here, the attestation check
 can be done without `gh`, or a mixed-version chaos run is added.
+
+## D-NEW-I-daemon-token. A one-time code opens the page, the daemon log is rotated, and a home under a shared directory is refused (2026-11-25)
+
+The security review of 2026-11-25 found that the page's address carried
+its token for the daemon's whole run (F14). `a2p2 ui` hands that address
+to `xdg-open`, and a browser it starts keeps it in its command line,
+which other users of a Linux machine can read; every OS user can reach a
+loopback port, so such a user could read every room and decide requests
+on the page. It also found that `daemon.log` was never rotated while
+another machine can make the daemon write to it (F19), that a daemon
+whose page port was taken said nothing while a tab left open from an
+earlier run would draw whatever the new listener answered (F47), and that
+the home was checked only at its own path (F53). Why now: rooms between
+owners and shared machines are the use the project is built for.
+
+What changed:
+
+- **Page sign-in.** No new local API call: `status`'s `ui` is the page's
+  address with a new one-time code (`#c=`) at each call, good once and
+  for 30 seconds. The page trades it with `POST /api/session` (a new
+  page route, exact `Origin`, JSON) for a session kept in the tab's
+  `sessionStorage`. Sessions are in memory for the daemon process, across
+  networking decisions, at most 32; untraded codes at most 64, oldest
+  first. Both are looked up by their SHA-256. A traded code is kept apart
+  from the untraded ones for as long as its session lives, so a code
+  traded twice ends the first trade's session and logs a warning however
+  late the second trade comes, and a race won by another user is seen,
+  not silent. Once that session has ended (by a second trade, or pushed
+  out by 32 newer ones) a further trade is refused as unknown. The
+  long-lived page token is gone. A 0.2.3 CLI opens the new address and
+  works. The new CLI with a 0.2.3 daemon still running gets the old
+  address: `a2p2 ui` does not open it and says to run `a2p2 stop`;
+  `--print` prints it with the same advice on standard error. The page's
+  server also has a 30 second limit on reading a whole request.
+- **Run check.** `/api/state` carries `run`, a random value the daemon
+  keeps with the presenting session and gives with it. Each session has
+  its own, not derived from the token (a listener on the port receives
+  the token), so a user who traded a code, their own or the person's
+  first, learns no run of the person's sessions. The page signs itself
+  out at a state with another run. After any state that fails (a 503 between runs, a refused
+  connection) it makes no call but the state until a state names its run
+  again, and before each POST and each download it reads a fresh state.
+  So what the person types, and a decision, reach another user's listener
+  only if it took the port between that check and the request, one
+  loopback round trip. The run is no secret from the daemon's own user,
+  and the page still shows what it drew before the daemon stopped.
+- **Port taken.** The fallback to another port is logged at Warn.
+- **Log.** The running daemon, which holds the home's lock, is the only
+  one that rotates `daemon.log`: at start and every 10 seconds, once it is
+  over 10 MiB, its last 10 MiB are copied to `daemon.log.1` and the file
+  is cut, since the daemon writes it through an inherited handle opened
+  for appending. If the copy fails (a full disk) the file is cut anyway.
+  Lines written during the copy may be lost.
+- **Home.** On Unix, `CheckHome` (the daemon and every client) refuses a
+  home under a directory owned by another user than this one or root,
+  or one others can write without the sticky bit, or one its group can
+  write unless the group is this user's primary group and named as the
+  user (a private group). The path is walked one name at a time without
+  following links; a link must be this user's or root's, and its target
+  is walked from the directory that holds it, so every directory a lookup
+  passes through is checked, in a chain of links too. The path is walked
+  as given, not cleaned, so a `..` after a link goes where the kernel
+  goes.
+
+What it costs: an address printed with `--print` must be opened within
+30 seconds (stderr says so); opening one link in two tabs signs the first
+out; a home under a group-writable directory of another group now fails
+to start, with the directory named, and on macOS that includes one
+writable by `staff`, the primary group of every account. A user of the
+same machine who reads the code and trades it before the browser does
+still gets a session until the browser's trade ends it, and keeps it if
+the browser never trades the code.
+
+Still open: a client does not check which user serves the socket it
+dials (getpeereid, `SO_PEERCRED`); that needs a dial hook in
+`internal/localapi`. The home is checked when a client connects, not at
+every dial. The MCP shim does not warn when the daemon runs another
+version than it does (F72); `status` carries the daemon's version, and
+only `a2p2 ui` checks it so far. On Windows the directories above the
+home are not checked.
+
+**Revisit if** a browser can be handed an address without a command
+line on Linux, or the local API gains a call that makes codes only for
+`a2p2 ui`.
