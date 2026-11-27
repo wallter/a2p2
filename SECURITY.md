@@ -107,10 +107,11 @@ an invite.
   A name a member gave is looked up once, at each dial, and only the
   addresses it gives that pass are dialled, as literal addresses, so a
   name that changes between the check and the dial reaches nothing
-  else. Two exceptions are dialled as written: the addresses of an
-  invite you accepted (not one you only previewed), learned again from
-  the recorded join at every start; and a literal IP address where that
-  member's own key has completed a handshake.
+  else. One exception is dialled as written: the addresses of an invite
+  you accepted (not one you only previewed), learned again from the
+  recorded join at every start. An address where the member's own key
+  once completed a handshake is no exception: it is still the member's
+  word, and the rule applies to it.
 
   The same rule holds on every path that dials a member: pulls, file
   transfers, the dial-back requests this machine sends, and `a2p2 net
@@ -122,12 +123,15 @@ an invite.
   wrote it. So is an invite's address during a preview, when you ran the
   join with that invite; the preview puts nothing in the address book.
 
-  Addresses that never completed a handshake are dialled at most 2 a
-  second (8 at once) for the whole machine, and one every 2 seconds (4
-  at once) for each member. These budgets cover the pulls, file
-  transfers and dial-back requests to members. They do not cover a
-  verified address, a join or its preview, `net check`, or the dial-backs
-  this machine answers, which have limits of their own. An address the
+  IP addresses where the member's key never completed a handshake are
+  dialled at most 2 a second (8 at once) for the whole machine, and one
+  every 2 seconds (4 at once) for each member. A host name counts for
+  every address it gives, even one that has completed a handshake
+  before, since it may point elsewhere now. These budgets cover the
+  pulls, file transfers and dial-back requests to members. They do not
+  cover an IP address where the member's key completed a handshake, a
+  join or its preview, `net check`, or the dial-backs this machine
+  answers, which have limits of their own. An address the
   rule refuses costs nothing of any budget.
 
   What a member can still do: make this machine try a TLS handshake,
@@ -140,9 +144,14 @@ an invite.
   Changed from 0.2.3: a listener on a port below 1024 other than 443, and
   a plain link-local address (a direct cable or a bridge), are no longer
   learned from another machine's word, only from an invite. An address
-  an older version stored that the rule refuses is kept and not dialled;
-  `a2p2 status`, `a2p2 doctor` and `a2p2 net check` show it with why, and
-  it goes once it has failed for a day and 5 tries. Two machines on one
+  an older version stored that the rule refuses is kept and not dialled,
+  even one where the member's key completed a handshake, unless an
+  invite you accepted gave it; `a2p2 status`, `a2p2 doctor` and `a2p2 net
+  check` show it with why, and it goes once it has failed for a day and
+  5 tries. A member known only by such addresses is no longer dialled;
+  its own requests still carry messages both ways if it can reach you.
+  To have one dialled, ask that member's person for an invite and run
+  `a2p2 join` with it (a member can join again). Two machines on one
   computer still work through the invite's address: the one that joined
   dials the inviter, and a third reaches the others through the machine
   it joined, not directly.

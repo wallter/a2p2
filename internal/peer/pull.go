@@ -21,6 +21,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"sync"
@@ -321,26 +322,35 @@ func (c *PullClient) client(peer string) *http.Client {
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		// An address another machine gave is checked before anything is
 		// spent on it, and a name it gave is looked up here, once, and
-		// only the addresses found that pass are dialled (F5, F54).
+		// only the addresses found that pass are dialled (F5, F54). An
+		// address the rule refuses costs nothing. Each literal address
+		// dialled is charged to the dial budgets unless that literal itself
+		// completed a pinned handshake with peer. A name, verified or not,
+		// may resolve anywhere since: it is charged once before it is looked
+		// up (the lookup and its first address), and again for each further
+		// address it gives that did not complete a handshake.
 		given, refused := c.book.Rule(peer, addr)
 		if refused != "" {
 			return nil, node.ErrAddrRefused
 		}
-		if !c.verified(peer, addr) {
-			if ok, _ := c.peerDials.take(peer); !ok {
-				return nil, errDialBudget
-			}
-			if ok, _ := c.dials.take(""); !ok {
-				c.peerDials.give(peer) // not dialled: the peer's share is not spent
-				return nil, errDialBudget
-			}
+		_, perr := netip.ParseAddrPort(addr)
+		name := perr != nil
+		if name && !c.charge(peer) {
+			return nil, errDialBudget
 		}
 		targets, err := node.DialTargets(ctx, addr, given, c.Resolve)
 		if err != nil {
 			return nil, err
 		}
 		var last error
-		for _, t := range targets {
+		for i, t := range targets {
+			free := (name && i == 0) || c.verified(peer, t)
+			if !free && !c.charge(peer) {
+				if last == nil {
+					last = errDialBudget
+				}
+				return nil, last
+			}
 			conn, err := dialer.DialContext(ctx, network, t)
 			if err == nil {
 				return conn, nil
@@ -393,6 +403,19 @@ func (c *PullClient) dialled(peer, addr string) bool {
 // errDialBudget: the daemon's budget of dials to unverified addresses is
 // spent for now; the address is not tried and not counted as failing.
 var errDialBudget = errors.New("peer: dial budget for unverified addresses spent")
+
+// charge takes one dial from peer's budget and the machine's; false, and
+// nothing taken, when either is spent.
+func (c *PullClient) charge(peer string) bool {
+	if ok, _ := c.peerDials.take(peer); !ok {
+		return false
+	}
+	if ok, _ := c.dials.take(""); !ok {
+		c.peerDials.give(peer) // not dialled: the peer's share is not spent
+		return false
+	}
+	return true
+}
 
 // verified says whether addr of peer ever completed a pinned handshake.
 func (c *PullClient) verified(peer, addr string) bool {

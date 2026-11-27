@@ -1759,5 +1759,11 @@ func heldText(held []node.HeldAddr) string {
 	if len(held) > 1 {
 		n = fmt.Sprintf("%d addresses are", len(held))
 	}
-	return n + " held and not dialled, on another machine's word: " + strings.Join(parts, ", ")
+	return n + " held and not dialled, on another machine's word: " + strings.Join(parts, ", ") +
+		"; " + heldFix
 }
+
+// heldFix is what a person does about a held address they want dialled:
+// an invite this machine's person accepts is the only way an address the
+// rule refuses is dialled (D71), and a member may join again.
+const heldFix = "to have this machine dial one, ask that machine's person for an invite and run a2p2 join with it"

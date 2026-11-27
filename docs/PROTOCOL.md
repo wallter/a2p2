@@ -59,8 +59,9 @@ IPv4-translated); or a name that is not `localhost` and does not end in a
 number. Loopback is refused whoever lists it and however the peer
 connected. A name is looked up at the dial, once, and only the addresses
 it gives that pass the same rule are dialled. Addresses from a token the
-person pasted and accepted are dialled as given, and so is an IP address
-that completed a pinned handshake with the peer. The same rule applies
+person pasted and accepted are dialled as given, and only those: an
+address that completed a pinned handshake with the peer is still checked
+by the rule. The same rule applies
 to file transfers, dial-back requests and `net check` of members; an
 address a person types for `net check HOST:PORT` is dialled as typed.
 Nothing on the wire changed: an address the rule refuses is dropped, not

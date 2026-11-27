@@ -20,14 +20,12 @@ package node
 // invite, the joins recorded since) are dialled as given. Which addresses
 // were given is kept in memory only: an address loaded from the store
 // counts as another machine's until a person's invite gives it again
-// (Surface.SeedBook, at start), unless it is a literal address that
-// completed a pinned handshake with the node; so one a past version kept
-// that the rule refuses is held, not dialled (Held says why), and ages
-// out as a failing address does.
+// (Surface.SeedBook, at start), however often it completed a pinned
+// handshake; so one a past version kept that the rule refuses is held,
+// not dialled (Held says why), and ages out as a failing address does.
 
 import (
 	"context"
-	"net/netip"
 	"slices"
 	"sync"
 	"time"
@@ -179,9 +177,9 @@ func remoteAddrs(addrs []string) []string {
 // Rule is the one answer to "would this machine dial addr of node", for
 // pulls, dial-back requests, file transfers, net check and status. given:
 // dial it as written, because this machine's person gave it (an accepted
-// invite, Learn and Replace) or it is a literal IP address that completed
-// a pinned handshake with node (node's own key answered there, so a dial
-// reaches node and nothing else; a name could resolve elsewhere since).
+// invite, Learn and Replace). Nothing else makes an address given: not a
+// completed pinned handshake (Good), which says node's key answered there
+// once, not that this machine's person asked for it to be dialled.
 // refused: why it is not dialled at all (AddrRefusal); empty when it is.
 // A name that is not given passes here and is checked again, address by
 // address, when it is looked up (DialTargets).
@@ -192,16 +190,8 @@ func (b *AddrBook) Rule(node, addr string) (given bool, refused string) {
 }
 
 func (b *AddrBook) rule(node, addr string) (bool, string) {
-	e := b.m[node]
-	if e != nil {
-		if e.given[addr] {
-			return true, ""
-		}
-		if i := slices.IndexFunc(e.addrs, func(a store.PeerAddr) bool { return a.Addr == addr }); i >= 0 && e.addrs[i].Good {
-			if ap, err := netip.ParseAddrPort(addr); err == nil && ap.Addr().Zone() == "" {
-				return true, ""
-			}
-		}
+	if e := b.m[node]; e != nil && e.given[addr] {
+		return true, ""
 	}
 	return false, AddrRefusal(addr)
 }

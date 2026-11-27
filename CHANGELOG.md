@@ -234,11 +234,15 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   invite are dialled as given once the invite is accepted; a preview no
   longer marks them. An address `a2p2 net check HOST:PORT` is given is
   dialled as typed. Each member also gets a share of the unverified dial
-  budget. A listener on a port below 1024 other than 443, or on a plain
-  link-local address, is now learned only from an invite. An address an
-  older version stored that the rule refuses is shown by `a2p2 status`,
-  `a2p2 doctor` and `a2p2 net check`, not dialled, and dropped after a
-  day of failing.
+  budget, and a host name pays it for every address it gives, even a
+  name that answered before. A listener on a port below 1024 other than
+  443, or on a plain link-local address, is now learned only from an
+  invite. An address an older version stored that the rule refuses, even
+  one where the member's key answered, is shown by `a2p2 status`, `a2p2
+  doctor` and `a2p2 net check`, not dialled unless an accepted invite
+  gave it, and dropped after a day of failing. A member known only by
+  such addresses is no longer dialled: status and doctor say to join with
+  an invite from it, which makes its address dialled as given.
 - **A mute ends.** Since 0.1.0, a peer that answered `not_member` twice
   was left alone until either side's log changed. A listener that left
   the room and joined again could so stop a laptop pulling until a

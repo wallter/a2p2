@@ -1318,21 +1318,25 @@ widen who can be reached, none of them a service run by anyone else.
   addresses of an invite the person accepted, marked when the join is
   recorded and learned again from the recorded joins at every start
   (names, loopback and LAN addresses; a preview dials them but marks
-  nothing); and a literal IP address that completed a pinned handshake
-  with the member (its key answers there, so the dial reaches it and
-  nothing else). Which addresses an invite gave is kept in memory only:
-  any other stored address counts as another machine's word, so one an
-  older version kept that the rule refuses is held, not dialled, shown by
-  status, doctor and net check with why (`AddrBook.Held`), and goes as a
-  failing address does. Two machines on one computer work through the
+  nothing). Nothing else: an address that completed a pinned handshake
+  with the member is still another machine's word, since the key that
+  answered there says nothing about whether this machine's person asked
+  for it. Which addresses an invite gave is kept in memory only: any
+  other stored address counts as another machine's word, so one an older
+  version kept that the rule refuses, verified or not, is held, not
+  dialled, shown by status, doctor and net check with why
+  (`AddrBook.Held`; status and doctor say to join with an invite from
+  that machine to have it dialled), and goes as a failing address does. Two machines on one computer work through the
   invite: the joiner dials the inviter's address as given; the inviter
   never dials the joiner's loopback address and gets its messages from
   its requests; a third reaches the others through the machine it
-  joined. Dials to addresses never verified take a token of the
-  machine's budget (2 a second, burst 8) and of the peer's share (one
-  every 2 s, burst 4, given back when the machine's budget then
-  refuses), after the rule and before any name is looked up; an address
-  the rule refuses costs no token of these or of the requester's budget.
+  joined. Each literal address dialled takes a token of the machine's
+  budget (2 a second, burst 8) and of the peer's share (one every 2 s,
+  burst 4, given back when the machine's budget then refuses) unless
+  that very literal completed a pinned handshake with the peer; a name,
+  verified or not, is charged for every address it resolves to, the
+  first before it is looked up. An address the rule refuses costs no
+  token of these or of the requester's budget.
   These cover pulls, file transfers and dial-back requests; a verified
   address, a join and its preview, net check probes and the dial-backs
   answered here have their own limits. `net check` probes a member's

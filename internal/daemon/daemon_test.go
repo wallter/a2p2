@@ -868,10 +868,14 @@ func TestStopReleasesAHeldPullAtOnce(t *testing.T) {
 }
 
 // TestAMachineThatDoesNotListenReachesItsPeerAfterARestartFromStoredAddresses:
-// the daemon loads the address book from the database. A machine with
-// networking outbound (no listener) restarts with no join record left to
-// relearn its admin's address from; it still pulls from the admin, at the
-// address the book stored.
+// the daemon loads the address book from the database and marks again the
+// addresses of the invites its person accepted (the joins recorded,
+// Surface.SeedBook). A machine with networking outbound (no listener)
+// restarts and still pulls from its admin, at the address the invite gave
+// and the book stored. That address is on loopback (both daemons run on
+// this computer), which the rule never dials on another machine's word:
+// it is dialled because the recorded join says this machine's person gave
+// it, and status holds nothing back for the admin.
 func TestAMachineThatDoesNotListenReachesItsPeerAfterARestartFromStoredAddresses(t *testing.T) {
 	if testing.Short() {
 		t.Skip("starts daemons")
@@ -887,23 +891,80 @@ func TestAMachineThatDoesNotListenReachesItsPeerAfterARestartFromStoredAddresses
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored, err := db.PeerAddrs(context.Background())
-	db.Close()
+	ctx := context.Background()
+	stored, err := db.PeerAddrs(ctx)
 	if err != nil || !slices.ContainsFunc(stored, func(p store.PeerAddr) bool { return p.Node == a.node && p.Addr == a.ln.ln.Addr().String() }) {
+		db.Close()
 		t.Fatalf("stored addresses: %+v %v", stored, err)
 	}
-	raw, err := sql.Open("sqlite", filepath.Join(b.home, "a2p2.db"))
-	if err != nil {
-		t.Fatal(err)
+	joins, err := db.Joins(ctx, "")
+	db.Close()
+	if err != nil || !slices.ContainsFunc(joins, func(j store.Join) bool { return slices.Contains(j.Addrs, a.ln.ln.Addr().String()) }) {
+		t.Fatalf("no recorded join gives the admin's address: %+v %v", joins, err)
 	}
-	if _, err := raw.Exec("DELETE FROM joins"); err != nil {
-		t.Fatal(err)
-	}
-	raw.Close()
 	b.start()
+	st := call[localapi.Status](b, "status", localapi.Empty{})
+	for _, p := range st.Peers {
+		if p.Node == a.node && len(p.Held) > 0 {
+			t.Fatalf("the invite's address is held after the restart: %+v", p.Held)
+		}
+	}
 	msg := call[localapi.SendResp](a, "send", localapi.SendReq{Agent: ann, Room: room, Text: "after the restart", To: []string{bea}})
 	if es := inboxWait(b, bea); len(es) != 1 || es[0].ID != msg.ID {
 		t.Fatalf("after the restart: %+v", es)
+	}
+}
+
+// TestAStoredAddressTheRuleRefusesIsShownAsHeldInStatus: an address an
+// earlier version stored for a member, verified even, that the rule
+// refuses and no accepted invite gave (here on loopback, at a port of the
+// machine's own services) is loaded from the database, held and not
+// dialled, and the local API's status says so for that member, with why;
+// the invite's address is not held. The CLI's status and doctor lines
+// for it are TestStatusAndDoctorPrintTheHeldAddressesTheLocalAPIReports.
+func TestAStoredAddressTheRuleRefusesIsShownAsHeldInStatus(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts daemons")
+	}
+	a, b := newMachine(t, "alpha"), newMachine(t, "beta")
+	room := call[localapi.Room](a, "room/create", localapi.RoomReq{Room: "team"}).ID
+	join(t, a, b, room, localapi.InviteReq{}, false)
+	b.stop()
+	db, err := store.Open(filepath.Join(b.home, "a2p2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	stored, err := db.PeerAddrs(ctx)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	var rows []store.PeerAddr
+	for _, p := range stored {
+		if p.Node == a.node {
+			rows = append(rows, p)
+		}
+	}
+	refused := "127.0.0.1:6379"
+	rows = append(rows, store.PeerAddr{Node: a.node, Addr: refused, Source: store.AddrSelf, Seen: time.Now(), Good: true})
+	err = db.SetPeerAddrs(ctx, a.node, rows)
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.start()
+	st := call[localapi.Status](b, "status", localapi.Empty{})
+	i := slices.IndexFunc(st.Peers, func(p localapi.Peer) bool { return p.Node == a.node })
+	if i < 0 {
+		t.Fatalf("no peer %s in status: %+v", a.node, st.Peers)
+	}
+	p := st.Peers[i]
+	if len(p.Held) != 1 || p.Held[0].Addr != refused || !strings.Contains(p.Held[0].Why, "loopback") {
+		t.Fatalf("held for the admin: %+v (addresses %v)", p.Held, p.Addrs)
+	}
+	if !slices.Contains(p.Addrs, a.ln.ln.Addr().String()) || !slices.Contains(p.Addrs, refused) {
+		t.Fatalf("addresses kept for the admin: %v", p.Addrs)
 	}
 }
 

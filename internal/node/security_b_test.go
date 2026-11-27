@@ -604,22 +604,26 @@ func TestStoredAddressesTheRuleRefusesLoadAndCountAsAnotherMachinesWord(t *testi
 	if h := b.Held(wNode); len(h) != 1 || h[0].Addr != "127.0.0.1:22" || h[0].Why == "" {
 		t.Fatalf("held and not dialled: %+v", h)
 	}
-	// A literal address that completed a pinned handshake with the node
-	// is dialled (the node's key answers there); a name that did is still
-	// looked up and checked.
-	if err := st.SetPeerAddrs(ctx, wNode[:63]+"c", []store.PeerAddr{
-		{Node: wNode[:63] + "c", Addr: "127.0.0.1:7423", Source: store.AddrSelf, Seen: bookT0, Good: true},
-		{Node: wNode[:63] + "c", Addr: "hub.example:7423", Source: store.AddrSelf, Seen: bookT0, Good: true},
+	// A completed pinned handshake (Good) never overrides the rule: a
+	// verified loopback literal is refused and held like any other, and
+	// a verified name is still looked up and checked.
+	vNode := strings.Repeat("d", 64)
+	if err := st.SetPeerAddrs(ctx, vNode, []store.PeerAddr{
+		{Node: vNode, Addr: "127.0.0.1:7423", Source: store.AddrSelf, Seen: bookT0, Good: true},
+		{Node: vNode, Addr: "hub.example:7423", Source: store.AddrSelf, Seen: bookT0, Good: true},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if b, err = LoadAddrBook(ctx, st); err != nil {
 		t.Fatal(err)
 	}
-	if given, why := b.Rule(wNode[:63]+"c", "127.0.0.1:7423"); !given || why != "" {
-		t.Fatal("a verified literal address is not dialled after a restart")
+	if given, why := b.Rule(vNode, "127.0.0.1:7423"); given || why == "" {
+		t.Fatal("a verified loopback address is dialled after a restart")
 	}
-	if given, _ := b.Rule(wNode[:63]+"c", "hub.example:7423"); given {
+	if h := b.Held(vNode); len(h) != 1 || h[0].Addr != "127.0.0.1:7423" {
+		t.Fatalf("held for the verified rows: %+v", h)
+	}
+	if given, _ := b.Rule(vNode, "hub.example:7423"); given {
 		t.Fatal("a verified name is dialled unchecked")
 	}
 	b.Learn(wNode, []string{"127.0.0.1:22"}, time.Time{}) // the invite the person accepted names it

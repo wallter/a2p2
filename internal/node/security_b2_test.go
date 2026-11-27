@@ -10,7 +10,6 @@ import (
 	"errors"
 	"net/netip"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -63,10 +62,13 @@ func TestRequestsWithEntriesFromKeysThatAreNotMembersAreCappedInFlight(t *testin
 	}
 }
 
-// Admission under contention: one hostile source floods the listener
-// with requests that carry entries. It takes its source's share (2 at
-// once, one a second) and no more, so a machine that its own entries
-// admit, at another address, is served at once.
+// Admission under a flood: one hostile source sends request after
+// request that carries entries, each one served before the next (so the
+// cap on requests in flight never stops it), with the clock still. It
+// takes its source's share (2) and no more. Without the share it would
+// take the whole machine's budget (8) and the machine that its own
+// entries admit, at another address, would be refused 429; with it, that
+// machine is served at once.
 func TestAFloodFromOneSourceDoesNotKeepOutAMachineItsOwnEntriesAdmit(t *testing.T) {
 	ctx := context.Background()
 	a, b, net, room := pairWithHistory(t)
@@ -75,24 +77,17 @@ func TestAFloodFromOneSourceDoesNotKeepOutAMachineItsOwnEntriesAdmit(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	var wg sync.WaitGroup
-	var mu sync.Mutex
 	served := 0
-	for i := range 40 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			q := strangerOpening(room, heads)
-			q.Log.Entries = []json.RawMessage{json.RawMessage(ws[0])}
-			if _, err := b.x.Serve(WithSource(ctx, "203.0.113.5:5000"), junkNode(i), q); isNotMember(err) {
-				mu.Lock()
-				served++
-				mu.Unlock()
-			}
-		}()
+	for i := range 4 * strangerEntriesBurst {
+		q := strangerOpening(room, heads)
+		q.Log.Entries = []json.RawMessage{json.RawMessage(ws[0])}
+		if _, err := b.x.Serve(WithSource(ctx, "203.0.113.5:5000"), junkNode(i), q); isNotMember(err) {
+			served++
+		} else if pe := (*PullError)(nil); !errors.As(err, &pe) || pe.Code != CodeRateLimited {
+			t.Fatalf("request %d: %v", i, err)
+		}
 	}
-	wg.Wait()
-	if served > strangerSourceBurst {
+	if served != strangerSourceBurst {
 		t.Fatalf("one source had %d requests with entries checked, its share is %d", served, strangerSourceBurst)
 	}
 	c := newPNode(t, net, "c", newLNode(t, "c", a.clock))

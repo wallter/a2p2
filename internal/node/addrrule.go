@@ -23,9 +23,9 @@ package node
 // with a zone, an IPv6 form that embeds an IPv4 address (NAT64 and 6to4
 // when the embedded address is one of those; IPv4-compatible and
 // IPv4-translated always), a port below 1024 other than 443, and a name
-// that is localhost or ends in a number. One exception: a literal IP
-// address that completed a pinned handshake with that member, where its
-// key answered (AddrBook.Rule).
+// that is localhost or ends in a number. No exception: an address that
+// once completed a pinned handshake with that member is still another
+// machine's word, and is dialled only if this machine's person gave it.
 //
 // Every path that dials a member asks the same question: pulls and
 // dial-back requests (internal/peer PullClient), file transfers

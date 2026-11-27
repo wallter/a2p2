@@ -3356,9 +3356,13 @@ did not hold the line; this entry is the line as it now is.
     is recorded (`JoinAccept`) and again from the recorded joins at every
     start. Previewing an invite dials its addresses, since the person ran
     the join with it, but puts nothing in the book; a preview left there
-    leaves nothing;
-  - a literal IP address that completed a pinned handshake with that
-    member: its key answered there.
+    leaves nothing.
+
+  Nothing else is dialled as given. A completed pinned handshake (the
+  verified mark) never overrides the rule: it says the member's key
+  answered at that address once, not that this machine's person gave it,
+  and a member that answers at a loopback or link-local address of the
+  dialler's own computer is exactly what the rule is for.
 
   `net check` probes a member's address as the pulls would dial it, and
   reports one they would not dial as `not_tried`, with why; `reached`
@@ -3368,18 +3372,23 @@ did not hold the line; this entry is the line as it now is.
   asker's own source address, by `AddrRefusal` (it took any port from 1
   and loopback from a loopback source before), on at most two ports.
 
-  Budgets. Dials to addresses never verified take a token of the
-  machine's budget (2 a second, burst 8) and of the member's share (one
-  every 2 s, burst 4), after the rule and before a name is looked up; a
-  share's token is given back when the machine's budget then refuses.
-  They cover pulls, file transfers and dial-back requests to members. A
-  verified address, a join and its preview, `net check` and the
-  dial-backs answered here are outside them. An address the rule refuses
+  Budgets. Each literal address dialled takes a token of the machine's
+  budget (2 a second, burst 8) and of the member's share (one every 2 s,
+  burst 4) unless that very literal completed a pinned handshake with
+  the member. A name is charged for every address it resolves to, the
+  first token before it is looked up, even if the name was verified:
+  it may resolve anywhere since. A share's token is given back when the
+  machine's budget then refuses. They cover pulls, file transfers and
+  dial-back requests to members. A verified literal address, a join and
+  its preview, `net check` and the dial-backs answered here are outside
+  them. An address the rule refuses
   locally costs nothing: no dial token, and no token of the requester's
   budget (PROTOCOL 4.6).
 
-  Stored rows are not migrated or deleted. One the rule refuses is held,
-  not dialled; status, doctor and net check show it with why; each pull
+  Stored rows are not migrated or deleted. One the rule refuses and no
+  recorded join gave is held, not dialled, verified or not; status,
+  doctor and net check show it with why, and status and doctor say to
+  join with an invite from that machine to have it dialled; each pull
   that passes it counts a failure, so it goes after a day and 5 tries.
   The daemon starts as before.
 - **Mute (F22).** A peer refused twice was muted until either side's
@@ -3403,6 +3412,17 @@ did not hold the line; this entry is the line as it now is.
   - A listener on a port below 1024 other than 443, and a plain
     link-local address (a direct cable or a bridge), are no longer
     learned from another machine's word, only from an invite.
+  - An upgrading machine stops dialling a member it knows only at
+    addresses the rule refuses that no invite it accepted gave. Up to
+    0.2.3 that happens when the member is on the same computer or a
+    direct link and was learned from its own requests or another
+    member's `peers` (a third machine on one computer, a member that
+    moved its listener to a loopback-forwarded or low port, a
+    link-local cable), and only if this machine does not listen or the
+    member cannot reach it: otherwise the member's own requests still
+    carry everything both ways. Status and doctor show the address as
+    held with why; the person asks that member for an invite and joins
+    with it (a member may join again), which makes its address given.
   - Two machines on one computer work through what the person accepted:
     the joiner dials the inviter's invite address, the inviter gets the
     joiner's messages from its requests, and a third machine reaches the
