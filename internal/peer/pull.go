@@ -367,10 +367,19 @@ func (c *PullClient) Pull(ctx context.Context, peer string, req *node.PullReques
 	defer cancel()
 	hc := c.client(peer)
 	lastErr := errors.New("peer: no usable address")
+	tried := false
 	for _, addr := range c.book.Addrs(peer) {
 		if !c.usable(addr) {
 			continue
 		}
+		// Each attempt may reach the peer: one after the first pays the
+		// requester's budget again (node.PullAttempt).
+		if tried {
+			if err := node.PullAttempt(ctx); err != nil {
+				return nil, errors.Join(lastErr, err)
+			}
+		}
+		tried = true
 		u := url.URL{Scheme: "https", Host: addr, Path: pathPullV2}
 		hr, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(payload))
 		if err != nil {

@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -184,6 +185,73 @@ func TestServerDetailThatDoesNotFitIsAskedAgainAndTooLargeIsSkipped(t *testing.T
 	}
 	if !short {
 		t.Fatal("no response left detail out")
+	}
+}
+
+// [4.3 step 5] As above, with the detail starting in the middle of the
+// authors (where an exchange cut by its cap stopped): every chunk asked
+// for is in sorted order, as the server answers, so after a cut answer
+// the next request asks for exactly the authors left out, none is counted
+// too large, and every record is taken.
+func TestAfterARotatedStartACutDetailAnswerAsksAgainForExactlyTheAuthorsLeftOut(t *testing.T) {
+	a, b, net, room := pairWithHistory(t)
+	counts := make([]int, 16)
+	for i := range counts {
+		counts[i] = 10
+	}
+	byAuthor := epochAuthors(t, a, room, counts...)
+	var authors []string
+	for i := range counts {
+		seed := sha256.Sum256([]byte(fmt.Sprintf("fix3 %d", i)))
+		authors = append(authors, hex.EncodeToString(ed25519.NewKeyFromSeed(seed[:]).Public().(ed25519.PublicKey)))
+	}
+	slices.Sort(authors)
+	b.pull(room, a.lnode)
+	defer func(v int) { maxResponseBytes = v }(maxResponseBytes)
+	maxResponseBytes = 4 << 10
+	b.x.setResume(room, a.id, authors[9]) // a cut exchange stopped here
+	l := capture(net)
+	st, err := b.pullFrom(room, a, PullOpts{})
+	if err != nil {
+		t.Fatalf("pull: %+v %v", st, err)
+	}
+	if st.TooLarge != 0 {
+		t.Fatalf("an author counted too large: %+v", st)
+	}
+	for _, xs := range byAuthor {
+		for _, id := range xs {
+			if _, ok := b.held(room, id); !ok {
+				t.Fatalf("not all taken: %+v", st)
+			}
+		}
+	}
+	cut, rotated := false, false
+	for i, q := range l.reqs {
+		if q.Detail == nil {
+			continue
+		}
+		keys := slices.Sorted(maps.Keys(q.Detail))
+		if !rotated {
+			rotated = keys[0] == authors[9]
+		}
+		answered := l.resps[i].Detail
+		if len(answered) == 0 || len(answered) >= len(keys) || i+1 >= len(l.reqs) {
+			continue
+		}
+		cut = true
+		for _, k := range keys[:len(answered)] {
+			if _, ok := answered[k]; !ok {
+				t.Fatalf("the answer left out %s, one of the first %d in sorted order", k, len(answered))
+			}
+		}
+		// Next: the pages of those answered, or those left out.
+		next := slices.Sorted(maps.Keys(l.reqs[i+1].Detail))
+		if l.reqs[i+1].Detail != nil && !slices.Equal(next, keys[:len(answered)]) && !slices.Equal(next, keys[len(answered):]) {
+			t.Fatalf("after a cut answer to %d authors (%d answered) the next request asks for %v", len(keys), len(answered), next)
+		}
+	}
+	if !cut || !rotated {
+		t.Fatalf("no cut answer (%v) or no rotated start (%v): the test shows nothing", cut, rotated)
 	}
 }
 

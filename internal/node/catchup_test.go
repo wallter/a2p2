@@ -8,6 +8,7 @@ package node
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -149,5 +150,39 @@ func TestARejoinApprovalIsNotGatedOnCatchingUp(t *testing.T) {
 	}
 	if cf, err := a.r.Confirm(context.Background(), qs[0].ID, true); err != nil || cf.State != store.RequestApproved {
 		t.Fatalf("rejoin approval: %+v %v", cf, err)
+	}
+}
+
+// A restarted machine whose log is ahead of the peer it pulls from: the
+// exchange gives the peer the entries it lacks, every head the peer names
+// is accepted here, and the machine is caught up after one pull from a
+// member that was behind it.
+//
+// Requirements: T9
+func TestARestartedMachineAheadOfItsPeerIsCaughtUpAfterOnePull(t *testing.T) {
+	clock := lclock()
+	net := newMemNet()
+	a := newPNode(t, net, "a", newLNode(t, "a", clock))
+	b := newPNode(t, net, "b", newLNode(t, "b", clock))
+	d := newPNode(t, net, "d", newLNode(t, "d", clock))
+	room := a.create("team")
+	a.change(room, Change{Kind: core.EntryAdd, Target: b.id, Name: "bee", History: true})
+	a.change(room, Change{Kind: core.EntryAdd, Target: d.id, Name: "dee", History: true})
+	b.pin(room, a.lnode)
+	b.pull(room, a.lnode)
+	d.pin(room, a.lnode)
+	d.pull(room, a.lnode)
+	a.change(room, Change{Kind: core.EntryAdd, Target: junkNode(7), Name: "later", History: true})
+	b.mustPull(room, a, PullOpts{}) // b holds the later add; d does not
+	b.restartP()
+	if b.pulled(room) {
+		t.Fatal("caught up straight after a restart: the test shows nothing")
+	}
+	b.mustPull(room, d, PullOpts{})
+	if st := d.state(room); !slices.Contains(st.Members, junkNode(7)) {
+		t.Fatal("the exchange did not give d the entry it lacked")
+	}
+	if !b.pulled(room) {
+		t.Fatal("a machine ahead of its peer was not caught up after pulling from it")
 	}
 }

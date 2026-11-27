@@ -62,7 +62,8 @@ type Exchange struct {
 	addrs      []string
 	addrsNow   func() []string
 	after      func(time.Duration) <-chan time.Time
-	files      *Files // set by UseFiles: wants in answers, files after pulls
+	files      *Files      // set by UseFiles: wants in answers, files after pulls
+	budget     *pullBudget // the requester's tokens per peer (budget.go)
 
 	// In memory, per room and peer (PROTOCOL 4.5): refused, how the
 	// peer last refused this machine as not a member; heard, the log heads
@@ -72,6 +73,11 @@ type Exchange struct {
 	refused map[[2]string]*refusal
 	heard   map[[2]string][]string
 	seen    map[[2]string]seenSums
+	// resume is, per room and peer, the author whose detail an exchange
+	// that ended Capped was taking: the next one starts there (round);
+	// carries, what it and those before it in the run had sent (Pull).
+	resume  map[[2]string]string
+	carries map[[2]string]carried
 	// As a server, per room and peer: evidence, the held and refused log
 	// entries sent that the peer cannot list in its extra (sent once until
 	// its log heads change); pages, the streams of the last page and those
@@ -106,10 +112,11 @@ type Exchange struct {
 // NewExchange returns the exchange of the machine behind r over t.
 func NewExchange(r *Rooms, t PullTransport, o ExchangeOpts) *Exchange {
 	x := &Exchange{r: r, t: t, pageLimit: o.PageLimit, offerLimit: o.OfferLimit, refused: map[[2]string]*refusal{},
-		heard: map[[2]string][]string{}, seen: map[[2]string]seenSums{}, latest: map[[2]string]int64{},
+		heard: map[[2]string][]string{}, seen: map[[2]string]seenSums{}, resume: map[[2]string]string{}, carries: map[[2]string]carried{}, latest: map[[2]string]int64{},
 		evidence: map[[2]string]map[string]bool{}, pages: map[[2]string]*pageMemory{},
 		book: o.Book, addrs: slices.Clone(o.Addrs), addrsNow: o.AddrsNow, after: o.After, waiting: map[[2]string]chan struct{}{},
-		asked: map[[2]string]time.Time{}, nextHold: map[[2]string][]chan struct{}{}, closed: make(chan struct{})}
+		asked: map[[2]string]time.Time{}, nextHold: map[[2]string][]chan struct{}{}, closed: make(chan struct{}),
+		budget: newPullBudget(PullBudgetRate, PullBudgetBurst)}
 	if x.after == nil {
 		x.after = time.After
 	}
@@ -1086,10 +1093,14 @@ type PullOpts struct {
 	// of one offer (the scheduler halves it after a 413).
 	OfferLimit int
 	// WaitMS, above 0, makes the exchange's first request a waiting pull
-	// (PROTOCOL 4.4 step 9): the server holds a same answer up to it.
+	// (PROTOCOL 4.4 step 9) if it gives the peer nothing (no records, no
+	// log entries): the server holds a same answer up to it. A request
+	// that gives something never waits, so its answer comes at once.
 	WaitMS int64
-	// Stop, closed while that first request waits, abandons it: Pull
-	// returns ErrWaitStopped (a local change re-issues it with an offer).
+	// Stop, closed while that first request waits for its token or its
+	// answer, abandons it: Pull returns ErrWaitStopped (a local change
+	// re-issues it with an offer). A request that gives something is
+	// never abandoned for it.
 	Stop <-chan struct{}
 }
 
@@ -1105,15 +1116,21 @@ type PullStats struct {
 	Repaired  int  // texts repaired from pages
 	Entries   int  // responses whose log entries changed the room log
 	Offered   int  // records offered
+	Given     int  // log entries given
 	Same      int  // rounds answered same
 	SeenSame  int  // of them, to a request that carried seen
 	Closed    bool // the exchange ended with a same to a request without seen
 	Stalled   int  // continuations ended because they did not advance
 	TooLarge  int  // authors whose detail alone did not fit in a request
-	Capped    bool
+	Capped    bool // ended at pullRoundsPerPull rounds or pullMaxRequests requests
 
 	// heads are the log heads the peer advertised in its last response.
 	heads []string
+	// relog: the peer's last answer removed it here and its log has more
+	// (round): the next request only reads the rest of the log.
+	relog bool
+	// resume is the first author of the detail being taken (round).
+	resume string
 }
 
 // refusal is how a peer last refused this machine as not a member: full,
@@ -1157,7 +1174,17 @@ func (x *Exchange) Pull(ctx context.Context, room, peer string, o PullOpts) (Pul
 	if err != nil {
 		return st, err
 	}
-	sent := map[string]bool{} // records and log entries given to the peer in this exchange
+	// sent is the records and log entries given to the peer in this
+	// exchange, and in the run of exchanges cut by the cap before it, so
+	// st.Offered counts only records not offered before in that run.
+	sent := x.carried(room, peer, gen)
+	defer func() {
+		if st.Capped {
+			x.carry(room, peer, gen, sent)
+		} else {
+			x.carry(room, peer, gen, nil)
+		}
+	}()
 	if x.files != nil {
 		// what the exchange stored may end files here [F1], and the
 		// manifests of headers it brought are fetched now (PROTOCOL 10.2)
@@ -1171,6 +1198,13 @@ func (x *Exchange) Pull(ctx context.Context, room, peer string, o PullOpts) (Pul
 	for st.Rounds < pullRoundsPerPull {
 		st.Rounds++
 		progress, err := x.round(ctx, room, peer, gen, o, &st, sent)
+		if errors.Is(err, errPullCapped) {
+			// What was applied is kept; the next exchange goes on, its
+			// detail from where this one stopped.
+			st.Capped = true
+			x.setResume(room, peer, st.resume)
+			return st, nil
+		}
 		if err != nil {
 			return st, err
 		}
@@ -1222,6 +1256,7 @@ type prepared struct {
 	offered  map[string]bool // authors of the records offered
 	offerCut bool
 	logCut   bool
+	relog    bool // only reads the rest of the log of a peer removed here (prepare)
 }
 
 // prepare builds an opening request (with seen if useSeen and still
@@ -1232,9 +1267,15 @@ type prepared struct {
 // heads; nil: as last observed), evidence the peer could hold unlisted at
 // most once in the exchange; or after a refusal as refused says (the
 // accepted log from the start, then nothing; never an offer); all within
-// the request limit: detail first, then entries, then the offer.
+// the request limit: detail first, then entries, then the offer. With
+// relog, the peer's last answer removed it here and said its log has more
+// (round): the request goes to it although it is not a member and only
+// reads the rest of its log. It is an opening with the sum of an empty
+// summary and this machine's log heads and extra: no seen, addresses,
+// peers, entries, detail or offer, so the removed peer learns nothing
+// more of this machine.
 func (x *Exchange) prepare(ctx context.Context, room, peer string, gen int64, chunk []string, snap string, useSeen,
-	offer bool, offerLimit int, base map[string]store.Observation, sent map[string]bool, peerLog *store.PeerLog) (prepared, error) {
+	offer bool, offerLimit int, base map[string]store.Observation, sent map[string]bool, peerLog *store.PeerLog, relog bool) (prepared, error) {
 	r := x.r
 	var p prepared
 	r.mu.Lock()
@@ -1245,7 +1286,10 @@ func (x *Exchange) prepare(ctx context.Context, room, peer string, gen int64, ch
 	}
 	st := rl.st
 	if !slices.Contains(st.Members, peer) {
-		return p, ErrPeerNotMember
+		if !relog {
+			return p, ErrPeerNotMember
+		}
+		p.relog = true
 	}
 	heads, extra := rl.logHeads()
 	p.at, p.order = r.m.now(), x.next()
@@ -1263,6 +1307,11 @@ func (x *Exchange) prepare(ctx context.Context, room, peer string, gen int64, ch
 		var oldLog *store.PeerLog
 		p.old, oldLog = observedMap(obs)
 		q := &PullRequest{V: PullVersion, Room: room, Log: PullLog{Heads: heads, Extra: extra}}
+		if p.relog {
+			q.Sum = sumOf(nil)
+			p.req, p.base = q, jsonSize(q)
+			return nil
+		}
 		if snap == "" {
 			q.Sum = own.sum()
 			if s, ok := x.seenOf(key, gen); useSeen && ok && s.own == q.Sum {
@@ -1601,6 +1650,65 @@ func (x *Exchange) setSeen(key [2]string, s *seenSums) {
 	}
 }
 
+// setResume records where the detail of the next exchange with peer
+// starts ("" from the first author).
+func (x *Exchange) setResume(room, peer, author string) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if author == "" {
+		delete(x.resume, [2]string{room, peer})
+	} else {
+		x.resume[[2]string{room, peer}] = author
+	}
+}
+
+// carried is what a run of exchanges with peer cut by the cap has sent it
+// so far (a new map when none is under way for this generation).
+type carried struct {
+	gen  int64
+	sent map[string]bool
+}
+
+func (x *Exchange) carried(room, peer string, gen int64) map[string]bool {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	k := [2]string{room, peer}
+	c, ok := x.carries[k]
+	delete(x.carries, k) // the exchange owns it now
+	if ok && c.gen == gen {
+		return c.sent
+	}
+	return map[string]bool{}
+}
+
+// carry keeps sent for the next exchange with peer (nil: the run ended).
+func (x *Exchange) carry(room, peer string, gen int64, sent map[string]bool) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if sent == nil {
+		delete(x.carries, [2]string{room, peer})
+	} else {
+		x.carries[[2]string{room, peer}] = carried{gen: gen, sent: sent}
+	}
+}
+
+// resumed is differ, sorted, turned to start at the author an exchange
+// that ended Capped was taking, so a difference that persists early in the
+// order cannot keep later authors from their turn.
+// It is returned in two parts, each sorted (from there, then before it),
+// to be packed apart: the server answers a chunk's detail in sorted
+// order, and the round reads a cut answer by that order.
+func (x *Exchange) resumed(room, peer string, differ []string) (from, before []string) {
+	x.mu.Lock()
+	at := x.resume[[2]string{room, peer}]
+	x.mu.Unlock()
+	if at == "" {
+		return differ, nil
+	}
+	i, _ := slices.BinarySearch(differ, at)
+	return differ[i:], differ[:i]
+}
+
 // chunks packs differ into detail requests of at most MaxDetailAuthors
 // authors whose detail fits in one request beside a request of size base;
 // an author whose detail alone does not fit is left out (too_large, 4.3).
@@ -1647,13 +1755,33 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 	digest, detail, baseDetail := map[string]string{}, map[string]string{}, map[string]string{}
 	learned := map[string][]store.StreamDetail{}
 	send := func(chunk []string, snap string, useSeen bool) (prepared, *PullResponse, error) {
-		p, err := x.prepare(ctx, room, peer, gen, chunk, snap, useSeen, o.Offer, o.OfferLimit, base, sent, peerLog)
+		// An exchange sends at most pullMaxRequests. Every request is
+		// admitted by the peer's budget first, a slot and then a token;
+		// only then is it prepared, so the membership check is the one at
+		// dispatch and writes made while waiting go in it.
+		if st.Requests >= pullMaxRequests {
+			return prepared{}, nil, errPullCapped
+		}
+		var stop <-chan struct{}
+		if o.WaitMS > 0 && st.Requests == 0 && snap == "" {
+			stop = o.Stop
+		}
+		ticket, err := x.budget.admit(ctx, peer, stop)
 		if err != nil {
+			return prepared{}, nil, err
+		}
+		p, err := x.prepare(ctx, room, peer, gen, chunk, snap, useSeen, o.Offer, o.OfferLimit, base, sent, peerLog, st.relog)
+		if err != nil {
+			ticket.cancel()
 			return p, nil, err
 		}
-		waiting := o.WaitMS > 0 && st.Requests == 0 && snap == ""
+		waiting := o.WaitMS > 0 && st.Requests == 0 && snap == "" && !p.relog &&
+			len(p.req.Offer) == 0 && len(p.req.Log.Entries) == 0
 		if waiting {
 			p.req.WaitMS = min(o.WaitMS, MaxWaitMS)
+			// Held at the peer once it has it: the slot goes back then, at
+			// the latest.
+			ticket.admitAfter(pullAdmitAfter)
 		}
 		if base == nil {
 			base = p.old
@@ -1670,12 +1798,15 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 		}
 		st.Requests++
 		st.Offered += len(p.req.Offer)
+		st.Given += len(p.req.Log.Entries)
 		var resp *PullResponse
+		tctx := context.WithValue(ctx, attemptKey{}, ticket) // further addresses pay too (PullAttempt)
 		if waiting && o.Stop != nil {
-			resp, err = x.pullStoppable(ctx, peer, p.req, o.Stop)
+			resp, err = x.pullStoppable(tctx, peer, p.req, o.Stop)
 		} else {
-			resp, err = x.t.Pull(ctx, peer, p.req)
+			resp, err = x.t.Pull(tctx, peer, p.req)
 		}
+		ticket.done()
 		if aerr := x.answered(ctx, room, peer, gen, p.req, err); aerr != nil {
 			return p, nil, errors.Join(err, aerr)
 		}
@@ -1705,10 +1836,6 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 		if a.stored+a.repaired > 0 {
 			x.r.m.wakes.touch(room)
 		}
-		x.learnPeers(room, peer, resp.Peers)
-		if x.files != nil {
-			x.files.answerWants(room, peer, resp.Want)
-		}
 		st.Responses++
 		st.Stored += a.stored
 		st.Repaired += a.repaired
@@ -1716,7 +1843,20 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 			st.Entries++
 		}
 		if a.gone {
-			return a, false, ErrPeerNotMember
+			// Its entries removed the peer here. If more follow, they may
+			// admit it again (a batch that does is taken, Exchange.apply):
+			// the log goes on, and nothing else of the answer is taken.
+			if !a.entries || !resp.Log.More {
+				return a, false, ErrPeerNotMember
+			}
+			st.relog, progress = true, true
+			return a, true, nil
+		}
+		st.relog = false
+		// Only from a member: a refused answer leaves nothing behind.
+		x.learnPeers(room, peer, resp.Peers)
+		if x.files != nil {
+			x.files.answerWants(room, peer, resp.Want)
 		}
 		moved := a.entries || a.stored+a.repaired > 0
 		if len(p.req.Log.Entries) > 0 && !resp.Same && p.heads != nil && !sameSet(p.heads, resp.Log.Heads) {
@@ -1758,6 +1898,22 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 		}
 	}
 
+	// relogged reads the rest of the log of a peer whose answer removed
+	// it here, until a page admits it again (the round is over: the next
+	// one starts afresh) or one does not (ErrPeerNotMember).
+	relogged := func() (bool, error) {
+		for st.relog {
+			p, resp, err := send(nil, "", false)
+			if err != nil {
+				return false, err
+			}
+			if _, _, err := apply(p, resp); err != nil {
+				return false, err
+			}
+		}
+		return true, nil
+	}
+
 	st.Closed = false
 	p, resp, err := send(nil, "", st.Rounds == 1)
 	if err != nil {
@@ -1767,13 +1923,20 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 	if err != nil {
 		return false, err
 	}
+	if st.relog {
+		return relogged()
+	}
 	if resp.Same {
 		same(p)
 		return progress, nil
 	}
 	open := resp
 	fresh := a.entries // the room log changed: Admitted may have
-	// The opening again while its log or offer was cut.
+	// The opening again while its log or offer was cut. A page can move
+	// nothing because another member delivered the same entries while it
+	// was on the way: the opening goes on until pullQuietPages running
+	// moved nothing.
+	quiet := 0
 	for resp.Log.More || p.logCut || p.offerCut {
 		var moved bool
 		if p, resp, err = send(nil, "", false); err != nil {
@@ -1782,12 +1945,15 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 		if a, moved, err = apply(p, resp); err != nil {
 			return false, err
 		}
+		if st.relog {
+			return relogged()
+		}
 		if resp.Same {
 			same(p)
 			return progress, nil
 		}
 		open, fresh = resp, fresh || a.entries
-		if !moved {
+		if quiet = quietAfter(quiet, moved); quiet >= pullQuietPages {
 			st.Stalled++
 			clean = false
 			break
@@ -1810,7 +1976,10 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 		clean = false
 		return x.refuse(ctx, room, peer, gen, CodeTooLarge, n)
 	}
-	queue, big := chunks(own, p.base, differ(takes, own.digests, open.Digests))
+	from, before := x.resumed(room, peer, differ(takes, own.digests, open.Digests))
+	queue, big := chunks(own, p.base, from)
+	q2, b2 := chunks(own, p.base, before)
+	queue, big = append(queue, q2...), append(big, b2...)
 	if len(big) > 0 {
 		if err := tooLarge(len(big)); err != nil {
 			return false, err
@@ -1820,13 +1989,18 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 		active := queue[0]
 		queue = queue[1:]
 		blocked := map[streamKey]bool{}
+		quiet := 0
 		for len(active) > 0 {
 			var moved bool
+			st.resume = active[0]
 			if p, resp, err = send(active, open.Sum, false); err != nil {
 				return false, err
 			}
 			if a, moved, err = apply(p, resp); err != nil {
 				return false, err
+			}
+			if st.relog {
+				return relogged()
 			}
 			// Detail the response left out is asked for again; an author
 			// whose detail alone did not fit is skipped (4.3 step 5).
@@ -1854,13 +2028,15 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 					blocked[k], grew = true, true
 				}
 			}
-			if !moved && !grew {
+			if quiet = quietAfter(quiet, moved || grew); quiet >= pullQuietPages {
 				st.Stalled++
 				clean = false
 				break
 			}
 		}
 	}
+	st.resume = ""
+	x.setResume(room, peer, "")
 	if !progress && o.Offer && len(learned) > 0 {
 		ok, err := x.offerable(ctx, room, peer, gen, learned, sent)
 		if err != nil {
@@ -1875,6 +2051,21 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 	}
 	return progress, nil
 }
+
+// pullQuietPages is how many continuations running may move nothing
+// before the request chain ends (round).
+const pullQuietPages = 2
+
+// quietAfter counts a continuation that moved nothing, or ends the count.
+func quietAfter(quiet int, moved bool) int {
+	if moved {
+		return 0
+	}
+	return quiet + 1
+}
+
+// errPullCapped: the exchange has sent pullMaxRequests (Pull).
+var errPullCapped = errors.New("pull: request cap of the exchange reached")
 
 func mustJSON(v any) []byte {
 	b, _ := json.Marshal(v)
@@ -1984,6 +2175,10 @@ type appliedResp struct {
 	observed         bool // what the peer said it holds was stored
 }
 
+// errPeerGone: the answering peer is not a member here and its answer's
+// entries do not make it one (Exchange.apply); nothing of it is stored.
+var errPeerGone = errors.New("pull: the answering peer is not a member here")
+
 // apply applies one response to the request p in one transaction: its log
 // entries, then, if the peer is still a member here, its page and what the
 // peer said it holds, dated when p was built (PROTOCOL 4.4): equal to
@@ -2000,7 +2195,15 @@ func (x *Exchange) apply(ctx context.Context, room, peer string, gen int64, p pr
 	now := r.m.now()
 	var a appliedResp
 	refused := map[string]int{}
+	// T4, as Exchange.serve and Rooms.receiveJoin: a peer's log entries
+	// count only if it is a member here before them or they make it one.
+	// One removed while its answer was on the way gets nothing stored: the
+	// batch is refused and the room's state rolls back.
+	wasMember := slices.Contains(rl.st.Members, peer)
 	commit := func(ctx context.Context, b *store.LogBatch, st members.State, look func(string) *core.VerifiedEntry) (int64, error) {
+		if !wasMember && !slices.Contains(st.Members, peer) {
+			return 0, errPeerGone
+		}
 		a = appliedResp{entries: b != nil}
 		var n int64
 		_, err := r.m.st.Exchange(ctx, room, gen, func(tx *store.Tx) error {
@@ -2052,6 +2255,9 @@ func (x *Exchange) apply(ctx context.Context, room, peer string, gen int64, p pr
 		return n, err
 	}
 	res, err := r.ingestWith(ctx, rl, gen, rawBytes(resp.Log.Entries), nil, commit)
+	if errors.Is(err, errPeerGone) {
+		return appliedResp{gone: true}, nil
+	}
 	if err != nil {
 		return appliedResp{}, err
 	}

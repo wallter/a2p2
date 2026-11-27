@@ -11,17 +11,29 @@ package node
 //     short wait (10 s). The transport tries each of a member's addresses
 //     in turn (N2).
 //   - A local write or newly stored records: the waiting pulls of the room
-//     are abandoned and issued again at once, with offers.
+//     are abandoned and issued again at once, with offers. A request that
+//     carries an offer or log entries does not wait and is never abandoned:
+//     changes made while it is on the way mark the room (the count of its
+//     touches) and go in the next request, which follows at once.
+//   - Budget: every request to a peer takes a token of its bucket first,
+//     for all rooms and both anchors (budget.go): at most 930 a minute to
+//     one peer, three quarters of the listener's limit, and at most 3
+//     requests that do not wait in flight to it.
 //   - Failure: back off 1 s doubling to 5 min, with ±20 % jitter, and move
 //     on to the next member. 403 twice running (the exchange resends its
 //     whole log after the first) stops pulling the room from that peer
 //     until this machine's log of the room changes or a request from the
 //     peer, a current member, shows changed log heads (the Exchange keeps
 //     that state; refusalOf); 413 halves the offer; 429 and 503 wait their
-//     Retry-After. A waiting pull answered same well before its wait, with
-//     nothing stored here, counts as a failure for back-off: against a
-//     peer that answers at once, after 1 s doubling to 5 min, one request
-//     per room per 4 to 6 min.
+//     Retry-After.
+//   - Spins: an exchange that gave the peer nothing new from here, stored
+//     nothing here and did not wait (a same well before its wait, or a
+//     lasting difference whose round was not clean) counts as a failure
+//     for back-off: against a peer that answers at once, after 1 s
+//     doubling to 5 min, one request per room per 4 to 6 min while the
+//     room is quiet. An exchange that offered changes made since the last
+//     one and stored nothing here neither counts nor ends the count; while
+//     the room keeps changing, the budget bounds those.
 //
 // Clock, timers, jitter and transport are injected, so tests are
 // deterministic. Peers' addresses are the Exchange's AddrBook; Run keeps
@@ -245,7 +257,7 @@ func (s *Scheduler) anchor(ctx context.Context, room string, gen int64, slot int
 	// last exchange that could carry an offer and ran; until one has run
 	// for every touch, the next request offers.
 	var offered uint64
-	first, probed := true, false
+	first, probed, again := true, false, false
 	cur := ""
 	for ctx.Err() == nil {
 		// Taken before anything is looked at: a write after this point
@@ -269,6 +281,10 @@ func (s *Scheduler) anchor(ctx context.Context, room string, gen int64, slot int
 		if !probed {
 			wait = s.o.Probe
 		}
+		if again {
+			wait = 0 // goes on from a cut exchange: no wait
+		}
+		again = false
 		offer := first || seq != offered
 		began := s.o.Now()
 		st, err := s.x.Pull(ctx, room, peer, PullOpts{Offer: offer, OfferLimit: s.offerOf(room, peer),
@@ -276,18 +292,38 @@ func (s *Scheduler) anchor(ctx context.Context, room string, gen int64, slot int
 		switch {
 		case ctx.Err() != nil:
 			return
+		case err == nil && st.Capped && (st.Stored+st.Repaired+st.Entries > 0 || st.Offered > 0):
+			// Cut by the exchange's cap having moved on: something stored
+			// here, or records offered that no exchange of this run of cut
+			// ones had offered (Pull carries what was sent). The next one
+			// follows at once, paid for by the budget, offering again,
+			// with the same peer and no wait.
+			s.succeeded(room, peer)
+			s.spun(room, peer, false)
+			again = true
+		case err == nil && st.Capped:
+			// Cut by the cap with nothing new on either side (a peer that
+			// says it holds nothing and changes its digest after every
+			// offer): a spin, backed off as a failure; the writes are still
+			// to offer when it ends.
+			s.succeeded(room, peer)
+			s.spun(room, peer, true)
 		case err == nil:
-			if offer {
+			if offer && !st.Capped {
 				first, offered = false, seq
 			}
 			s.succeeded(room, peer)
 			// Progress is what was stored here; what was sent proves
 			// nothing. An exchange that stored nothing and did not wait
 			// (a same well before its wait, or a lasting difference whose
-			// round was not clean) is backed off as a failure.
+			// round was not clean) is backed off as a failure, unless it
+			// gave the peer changes made since the last one: those are
+			// this machine's to deliver, and the budget bounds them.
 			stored := st.Stored+st.Repaired+st.Entries > 0
 			early := s.o.Now().Sub(began) < wait/2
-			s.spun(room, peer, !stored && (st.Same == 0 || early))
+			if gave := offer && st.Offered+st.Given > 0; stored || !gave {
+				s.spun(room, peer, !stored && (st.Same == 0 || early))
+			}
 			if slot == slotRotating {
 				if probed {
 					s.rotate(room) // the end of a wait
