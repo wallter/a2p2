@@ -302,7 +302,8 @@ const (
 
 // SweepFiles applies [F1], the staging rules of [F6] and [F8], and [F11]
 // to room in one transaction, as this machine (self) at now, then runs the
-// deletion queue. It reports how many rows it dropped.
+// deletion queue. It reports how many rows it dropped, a staged send it
+// decided (expired, voided or replaced) counting as one.
 func (s *Store) SweepFiles(ctx context.Context, room, self string, now time.Time) (int, error) {
 	return s.sweepFiles(ctx, room, self, now, false)
 }
@@ -645,6 +646,7 @@ func sweepTx(tx *sql.Tx, room, self string, now time.Time, aside bool) (int, err
 		if err := trash(tx, stageDirRel(q.ID), "stage", "", q.ID, "", 0, "", now); err != nil {
 			return 0, err
 		}
+		dropped++ // a decided send: its writer's inbox lists it, and its stage is queued for deletion
 	}
 	return dropped, nil
 }

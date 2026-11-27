@@ -297,7 +297,13 @@ func (m *Machine) Showed(ctx context.Context, room, agent string, es []Entry, in
 			rows = append(rows, store.Shown{Key: store.TextMarkKey(e.ID), Version: e.Version, Msg: e.ID})
 		}
 	}
-	return m.st.ShowAt(ctx, agent, room, gen, rows)
+	err := m.st.ShowAt(ctx, agent, room, gen, rows)
+	if err == nil && inbox && len(rows) > 0 {
+		// A receipt lets its message through the agent's level (keptOut):
+		// another session of agent waiting in room looks again now.
+		m.wakes.touchInbox(room, agent)
+	}
+	return err
 }
 
 // InboxPeek is agent's inbox as Inbox lists it now, at most limit entries

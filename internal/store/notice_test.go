@@ -18,7 +18,7 @@ func loadV02(t *testing.T) string {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "a2p2.db")
-	db, err := sql.Open("sqlite", "file:"+path)
+	db, err := sql.Open("sqlite", fileURI(path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestMigrationTenRemovesTheV02DataAndTheNoticeIsShownOnceEver(t *testing.T) 
 		t.Run(tc.name, func(t *testing.T) {
 			path := loadV02(t)
 			if tc.strip != "" {
-				db, err := sql.Open("sqlite", "file:"+path)
+				db, err := sql.Open("sqlite", fileURI(path))
 				if err != nil {
 					t.Fatal(err)
 				}

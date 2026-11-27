@@ -2,10 +2,12 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -123,6 +125,101 @@ func TestADatabaseThatAnOlderVersionPutBesideTheHomeIsNotHiddenByANewOne(t *test
 	defer st.Close()
 	if got, err := st.PeerAddrs(ctx); err != nil || len(got) != 1 {
 		t.Fatalf("after the move: %+v %v", got, err)
+	}
+}
+
+// [store] What 0.2.3 opened for a path: SQLite's reading of it unescaped.
+func TestTheMisplacedPathIsSQLitesReadingOfThePathUnescaped(t *testing.T) {
+	for in, want := range map[string]string{
+		"/x/a#b/a2p2.db":   "/x/a",
+		"/x/a?b/a2p2.db":   "/x/a",
+		"/x/a%23b/a2p2.db": "/x/a#b/a2p2.db",
+		"/x/a%00b/a2p2.db": "/x/a",
+		"/x/a%zz/a2p2.db":  "/x/a%zz/a2p2.db",
+	} {
+		got, _ := misplacedPath(filepath.FromSlash(in))
+		if got != filepath.FromSlash(want) {
+			t.Errorf("misplacedPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// [store] Only an a2p2 database at the misplaced path stops the open: not
+// another program's SQLite database there, nor a link to one; a link to
+// an a2p2 database does, and so does one at the path cut at a %00.
+func TestOnlyAnA2P2DatabaseAtTheMisplacedPathStopsTheOpen(t *testing.T) {
+	ctx := context.Background()
+	unrelated := func(t *testing.T, path string) {
+		db, err := sql.Open("sqlite", fileURI(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if _, err := db.ExecContext(ctx, `CREATE TABLE notes (t TEXT); PRAGMA user_version = 3`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ours := func(t *testing.T, path string) {
+		st, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.Close()
+	}
+	for _, c := range []struct {
+		name, home string
+		make       func(t *testing.T, parent string) // what is at parent/a
+		refused    bool
+	}{
+		{"another program's SQLite database", "a#b", func(t *testing.T, p string) { unrelated(t, filepath.Join(p, "a")) }, false},
+		{"a link to another program's database", "a#b", func(t *testing.T, p string) {
+			unrelated(t, filepath.Join(p, "other.db"))
+			if err := os.Symlink(filepath.Join(p, "other.db"), filepath.Join(p, "a")); err != nil {
+				t.Skip(err)
+			}
+		}, false},
+		{"an a2p2 database", "a#b", func(t *testing.T, p string) { ours(t, filepath.Join(p, "a")) }, true},
+		{"a link to an a2p2 database", "a?b", func(t *testing.T, p string) {
+			ours(t, filepath.Join(p, "real.db"))
+			if err := os.Symlink(filepath.Join(p, "real.db"), filepath.Join(p, "a")); err != nil {
+				t.Skip(err)
+			}
+		}, true},
+		{"an a2p2 database at the path cut at %00", "a%00b", func(t *testing.T, p string) { ours(t, filepath.Join(p, "a")) }, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && strings.ContainsAny(c.home, "?") {
+				t.Skip("not a file name on Windows")
+			}
+			parent := t.TempDir()
+			c.make(t, parent)
+			home := filepath.Join(parent, c.home)
+			if err := os.Mkdir(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(home, "a2p2.db")
+			st, err := Open(path)
+			if c.refused {
+				if err == nil {
+					st.Close()
+					t.Fatal("opened a new database beside an a2p2 database at the misplaced path")
+				}
+				old := filepath.Join(parent, "a")
+				for _, s := range []string{strconv.Quote(old), strconv.Quote(path), strconv.Quote(old + "-wal"), "must not exist"} {
+					if !strings.Contains(err.Error(), s) {
+						t.Fatalf("the refusal does not say %s: %v", s, err)
+					}
+				}
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("a new database was made: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("refused for %s: %v", c.name, err)
+			}
+			st.Close()
+		})
 	}
 }
 

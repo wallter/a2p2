@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/wallter/a2p2/internal/core"
+	"github.com/wallter/a2p2/internal/store"
 )
 
 // The databases in testdata/releases/<tag>/ were written by that tagged
@@ -64,7 +65,7 @@ func compatVersion(t *testing.T, b []byte) int {
 // compatDBVersion reads user_version of the database file at path.
 func compatDBVersion(t *testing.T, path string) int {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+path)
+	db, err := sql.Open("sqlite", store.FileURI(path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +88,7 @@ func openReleaseMachine(t *testing.T, dir, name string, clock *time.Time) (*lnod
 	}
 	was := compatVersion(t, b)
 	path := filepath.Join(t.TempDir(), "a2p2.db")
-	db, err := sql.Open("sqlite", "file:"+path)
+	db, err := sql.Open("sqlite", store.FileURI(path))
 	if err != nil {
 		t.Fatal(err)
 	}

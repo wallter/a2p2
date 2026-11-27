@@ -138,6 +138,10 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
+// FileURI is fileURI, for tests and benchmarks that open a database file
+// of their own: append "?" and parameters to it.
+func FileURI(path string) string { return fileURI(path) }
+
 // fileURI is path as an SQLite URI filename (sqlite.org/uri.html), with
 // every byte but letters, digits, "-._~", '/' and ':' percent-escaped, so
 // that SQLite opens exactly path ('?', '#' and '%' have a meaning in a
@@ -169,8 +173,9 @@ func fileURI(path string) string {
 }
 
 // misplacedPath is where a2p2 0.2.3 and earlier opened path, which they
-// gave SQLite unescaped: cut at the first '?' or '#', each %XX decoded.
-// ok is false if that is path itself.
+// gave SQLite unescaped, as SQLite's URI parser read it: cut at the first
+// '?' or '#', each %XX decoded, and cut at a %00 (SQLite ignores the rest
+// of the path there). ok is false if that is path itself.
 func misplacedPath(path string) (string, bool) {
 	p := filepath.ToSlash(path)
 	if i := strings.IndexAny(p, "?#"); i >= 0 {
@@ -179,7 +184,11 @@ func misplacedPath(path string) (string, bool) {
 	var b strings.Builder
 	for i := 0; i < len(p); i++ {
 		if p[i] == '%' && i+2 < len(p) && isHex(p[i+1]) && isHex(p[i+2]) {
-			b.WriteByte(unhex(p[i+1])<<4 | unhex(p[i+2]))
+			c := unhex(p[i+1])<<4 | unhex(p[i+2])
+			if c == 0 {
+				break
+			}
+			b.WriteByte(c)
 			i += 2
 			continue
 		}
@@ -203,9 +212,11 @@ func unhex(c byte) byte {
 	return c - 'a' + 10
 }
 
-// checkMisplaced refuses to create a new database at path when an older
-// a2p2 kept this home's database elsewhere (misplacedPath) and an SQLite
-// database is there: opening would start an empty node and hide it.
+// checkMisplaced refuses to create a new database at path when there is
+// none yet and an a2p2 database is where an older a2p2 opened path
+// (misplacedPath): opening would start an empty node beside it. Anything
+// else there (no file, a directory, another program's file or SQLite
+// database) does not stop the open.
 func checkMisplaced(path string) error {
 	old, ok := misplacedPath(path)
 	if !ok {
@@ -214,18 +225,50 @@ func checkMisplaced(path string) error {
 	if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	f, err := os.Open(old)
+	version, ok := isA2P2Database(old)
+	if !ok {
+		return nil
+	}
+	return fmt.Errorf("%q is an a2p2 database (schema version %d), at the path a2p2 0.2.3 and earlier opened "+
+		"for %q: they cut a path at its '?' or '#' and decoded its '%%'. If it is this home's, stop a2p2 and "+
+		"move it, with its %q and %q files if they exist, to %q (and %q, %q), which must not exist yet; then start "+
+		"again. If it is not, move it away from %q",
+		old, version, path, old+"-wal", old+"-shm", path, path+"-wal", path+"-shm", old)
+}
+
+// isA2P2Database reports whether the file at path (a link is followed, as
+// SQLite did) is an SQLite database with this store's marks: a schema
+// version it sets, and its tables meta, rooms and agents. It opens it
+// read-only and changes nothing in it.
+func isA2P2Database(path string) (int, bool) {
+	fi, err := os.Stat(path)
+	if err != nil || !fi.Mode().IsRegular() {
+		return 0, false
+	}
+	f, err := os.Open(path)
 	if err != nil {
-		return nil
+		return 0, false
 	}
-	defer f.Close()
 	head := make([]byte, 16)
-	if _, err := io.ReadFull(f, head); err != nil || string(head) != "SQLite format 3\x00" {
-		return nil
+	_, err = io.ReadFull(f, head)
+	f.Close()
+	if err != nil || string(head) != "SQLite format 3\x00" {
+		return 0, false
 	}
-	return fmt.Errorf("this home's database is at %s, where a2p2 0.2.3 and earlier put it "+
-		"(they cut the path %s at its '?' or '#', or decoded its '%%'): stop a2p2, move %s to %s "+
-		"and any %s-wal and %s-shm to %s-wal and %s-shm, then start again", old, path, old, path, old, old, path, path)
+	db, err := sql.Open("sqlite", fileURI(path)+"?mode=ro")
+	if err != nil {
+		return 0, false
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	var v, n int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v < 1 {
+		return 0, false
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('meta', 'rooms', 'agents')`).Scan(&n); err != nil || n != 3 {
+		return 0, false
+	}
+	return v, true
 }
 
 func (s *Store) Close() error { return s.db.Close() }

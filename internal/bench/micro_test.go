@@ -119,7 +119,7 @@ func BenchmarkSQLiteCommit(b *testing.B) {
 		b.Run(sync, func(b *testing.B) {
 			dir := tmpHome(b)
 			defer os.RemoveAll(dir)
-			dsn := "file:" + filepath.Join(dir, "x.db") + "?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=synchronous(" + sync + ")&_pragma=busy_timeout(5000)&_pragma=secure_delete(1)"
+			dsn := store.FileURI(filepath.Join(dir, "x.db")) + "?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=synchronous(" + sync + ")&_pragma=busy_timeout(5000)&_pragma=secure_delete(1)"
 			db, err := sql.Open("sqlite", dsn)
 			if err != nil {
 				b.Fatal(err)

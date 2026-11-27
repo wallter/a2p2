@@ -618,7 +618,7 @@ func TestTwoWritersOverOneDatabaseNeverShareAVersion(t *testing.T) {
 func TestInboxRunsWhileAnotherWriterHoldsTheLock(t *testing.T) {
 	r := newRig(t)
 	r.send("alice", Draft{})
-	db, err := sql.Open("sqlite", "file:"+r.path+"?_pragma=busy_timeout(100)")
+	db, err := sql.Open("sqlite", store.FileURI(r.path)+"?_pragma=busy_timeout(100)")
 	if err != nil {
 		t.Fatal(err)
 	}

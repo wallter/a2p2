@@ -551,7 +551,7 @@ func loadV02(t *testing.T, home string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(home, "a2p2.db"))
+	db, err := sql.Open("sqlite", store.FileURI(filepath.Join(home, "a2p2.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -606,7 +606,7 @@ func TestV02NoticeFromASchemaOneFileIsShownOnceEverThroughStatus(t *testing.T) {
 	}
 	// The v0.2 data is gone from the file itself, the agent stays.
 	m.stop()
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(m.home, "a2p2.db"))
+	db, err := sql.Open("sqlite", store.FileURI(filepath.Join(m.home, "a2p2.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

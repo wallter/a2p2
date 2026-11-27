@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand/v2"
 	"sync"
@@ -20,7 +19,11 @@ import (
 // a plain look (Surface.inbox, which keeps no receipt) is made for every
 // waiter. A call must return exactly when that look shows something, with
 // what it shows, before the next write and without a fallback look; and
-// it must not return while the look shows nothing.
+// it must not return while the look shows nothing. Before each write,
+// every call has registered and finished a look that showed it nothing,
+// so no write can slip in before a registration. Every operation must
+// succeed (the driver makes only valid ones), and each kind must happen a
+// minimum number of times across the schedules.
 
 // randWaiter is one agent's waiting Inbox call, of one room or of all.
 type randWaiter struct {
@@ -48,11 +51,28 @@ func (w *randWaiter) stop() {
 	<-w.done
 }
 
+// armed reports whether w's call has a waiter registered whose look ended
+// (it has its levels): it waits.
+func (w *randWaiter) armed(s *Surface) bool {
+	k := &s.m.wakes
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for _, xs := range k.inbox {
+		for x := range xs {
+			if x.agent == w.label && x.levels != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // randSent is a message the driver sent: replies, replaces, withdrawals
 // and handled reports pick from them.
 type randSent struct {
 	id, author string
 	ask        bool
+	gone       bool // withdrawn
 }
 
 const (
@@ -60,17 +80,42 @@ const (
 	randSteps     = 40
 )
 
+// randKinds are the operations, each of which must happen at least
+// randMin times across the schedules (a waiting call returning too).
+var randKinds = []string{"post", "post @everyone", "send", "reply", "thread reply", "replace", "withdraw",
+	"ask", "ack", "level all", "level addressed", "level none", "level one room", "returned"}
+
+const randMin = 15
+
 // [wake] Waiting inbox calls agree with a plain look after every write.
 func TestWaitingInboxesAgreeWithALookAfterEveryWriteOnRandomSchedules(t *testing.T) {
-	for seed := uint64(1); seed <= randSchedules; seed++ {
-		t.Run(fmt.Sprintf("seed%d", seed), func(t *testing.T) {
-			t.Parallel()
-			runWaitSchedule(t, seed)
-		})
+	var mu sync.Mutex
+	done := map[string]int{}
+	count := func(kind string) {
+		mu.Lock()
+		done[kind]++
+		mu.Unlock()
 	}
+	t.Run("schedules", func(t *testing.T) {
+		for seed := uint64(1); seed <= randSchedules; seed++ {
+			t.Run(fmt.Sprintf("seed%d", seed), func(t *testing.T) {
+				t.Parallel()
+				runWaitSchedule(t, seed, count)
+			})
+		}
+	})
+	if t.Failed() {
+		return
+	}
+	for _, k := range randKinds {
+		if done[k] < randMin {
+			t.Errorf("%q happened %d times in %d schedules, want at least %d", k, done[k], randSchedules, randMin)
+		}
+	}
+	t.Logf("operations done: %v", done)
 }
 
-func runWaitSchedule(t *testing.T, seed uint64) {
+func runWaitSchedule(t *testing.T, seed uint64, count func(string)) {
 	e := newSurf(t)
 	ctx := context.Background()
 	rng := rand.New(rand.NewPCG(seed, 0x5eed))
@@ -112,27 +157,54 @@ func runWaitSchedule(t *testing.T, seed uint64) {
 		}
 	}()
 
-	var sent []randSent
-	var log []string // the schedule, for a failure
+	var sent []*randSent
+	shown := map[string]map[string]bool{} // agent -> messages a waiting call returned to it
+	handled := map[string]bool{}          // agent+id reported handled
+	var log []string                      // the schedule, for a failure
 	fail := func(format string, args ...any) {
 		t.Helper()
 		t.Fatalf("seed %d, after %v: %s", seed, log, fmt.Sprintf(format, args...))
 	}
-	okErr := func(what string, err error) {
+	must := func(kind, what string, err error) {
 		t.Helper()
-		var ue *UserError
-		if err != nil && !errors.As(err, &ue) {
+		log = append(log, what)
+		if err != nil {
 			fail("%s: %v", what, err)
 		}
+		count(kind)
 	}
 	pick := func(xs []string) string { return xs[rng.IntN(len(xs))] }
-	send := func(in SendInput, what string) {
+	live := func(f func(*randSent) bool) *randSent {
+		var c []*randSent
+		for _, s := range sent {
+			if !s.gone && f(s) {
+				c = append(c, s)
+			}
+		}
+		if len(c) == 0 {
+			return nil
+		}
+		return c[rng.IntN(len(c))]
+	}
+	send := func(kind string, in SendInput, what string) {
 		t.Helper()
 		s, err := e.s.Send(ctx, in)
-		okErr(what, err)
-		log = append(log, what)
-		if err == nil && in.Replaces == "" {
-			sent = append(sent, randSent{id: s.ID, author: in.Agent, ask: in.AskHandled})
+		must(kind, what, err)
+		if in.Replaces == "" {
+			sent = append(sent, &randSent{id: s.ID, author: in.Agent, ask: in.AskHandled})
+		}
+	}
+	// armAll waits until every call waits: registered, its look done.
+	armAll := func() {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for _, w := range ws {
+			for !w.armed(e.s) {
+				if time.Now().After(deadline) {
+					fail("%s's inbox call never started to wait", w.label)
+				}
+				time.Sleep(200 * time.Microsecond)
+			}
 		}
 	}
 	// noReturn fails if a call returned while the plain look showed it
@@ -191,9 +263,18 @@ func runWaitSchedule(t *testing.T, seed uint64) {
 				}
 			}
 			fmu.Unlock()
+			if try == 0 {
+				count("returned")
+			}
 			reads := make([]store.Read, 0, len(r.v.Entries))
 			for _, x := range r.v.Entries {
 				reads = append(reads, store.Read{Key: x.Key, Version: x.Version})
+				if x.Kind == EntryMessage {
+					if shown[w.agent] == nil {
+						shown[w.agent] = map[string]bool{}
+					}
+					shown[w.agent][x.ID] = true
+				}
 			}
 			if try == 0 && len(reads) > 1 && rng.IntN(3) == 0 {
 				reads = reads[:len(reads)/2] // some stay, and are shown again at once
@@ -208,47 +289,74 @@ func runWaitSchedule(t *testing.T, seed uint64) {
 	}
 
 	for step := 0; step < randSteps; step++ {
+		armAll()
 		noReturn()
 		from := pick(everyone)
 		room := pick(rooms)
-		switch op := rng.IntN(12); {
+		switch op := rng.IntN(13); {
 		case op < 3:
-			text := fmt.Sprintf("post %d", step)
-			if rng.IntN(4) == 0 {
-				text = "@everyone " + text
+			text, kind := fmt.Sprintf("post %d", step), "post"
+			if rng.IntN(3) == 0 {
+				text, kind = "@everyone "+text, "post @everyone"
 			}
-			send(SendInput{Agent: from, Room: room, Text: text}, fmt.Sprintf("%s posts %q in %s", from, text, room[:6]))
+			send(kind, SendInput{Agent: from, Room: room, Text: text}, fmt.Sprintf("%s posts %q in %s", from, text, room[:6]))
 		case op < 5:
 			to := []string{pick(everyone)}
 			if rng.IntN(2) == 0 {
 				to = append(to, pick(everyone))
 			}
-			send(SendInput{Agent: from, Room: room, Text: fmt.Sprintf("to %v %d", to, step), To: to},
+			send("send", SendInput{Agent: from, Room: room, Text: fmt.Sprintf("to %v %d", to, step), To: to},
 				fmt.Sprintf("%s sends to %v in %s", from, to, room[:6]))
-		case op == 5 && len(sent) > 0:
-			p := sent[rng.IntN(len(sent))]
-			send(SendInput{Agent: from, Text: fmt.Sprintf("reply %d", step), ReplyTo: p.id, Thread: rng.IntN(2) == 0},
-				fmt.Sprintf("%s replies to %s", from, p.id[:6]))
-		case op == 6 && len(sent) > 0:
-			p := sent[rng.IntN(len(sent))]
-			send(SendInput{Agent: p.author, Replaces: p.id, Text: fmt.Sprintf("edited %d", step)},
-				fmt.Sprintf("%s replaces %s", p.author, p.id[:6]))
-		case op == 7 && len(sent) > 0:
-			p := sent[rng.IntN(len(sent))]
-			send(SendInput{Agent: p.author, Replaces: p.id, Text: " "}, fmt.Sprintf("%s withdraws %s", p.author, p.id[:6]))
-		case op == 8:
-			send(SendInput{Agent: from, Room: room, Text: fmt.Sprintf("who handles %d?", step), AskHandled: true},
-				fmt.Sprintf("%s asks in %s", from, room[:6]))
-		case op == 9 && len(sent) > 0:
-			p := sent[rng.IntN(len(sent))]
-			for _, q := range sent { // a question asked, if any
-				if q.ask && rng.IntN(2) == 0 {
-					p = q
+		case op == 5:
+			if p := live(func(*randSent) bool { return true }); p != nil {
+				thread := rng.IntN(2) == 0
+				kind := "reply"
+				if thread {
+					kind = "thread reply"
 				}
+				send(kind, SendInput{Agent: from, Text: fmt.Sprintf("reply %d", step), ReplyTo: p.id, Thread: thread},
+					fmt.Sprintf("%s replies to %s (thread %v)", from, p.id[:6], thread))
 			}
-			_, err := e.s.Ack(ctx, from, p.id)
-			okErr("ack", err)
-			log = append(log, fmt.Sprintf("%s acks %s (ask %v, err %v)", from, p.id[:6], p.ask, err != nil))
+		case op == 6:
+			if p := live(func(*randSent) bool { return true }); p != nil {
+				send("replace", SendInput{Agent: p.author, Replaces: p.id, Text: fmt.Sprintf("edited %d", step)},
+					fmt.Sprintf("%s replaces %s", p.author, p.id[:6]))
+			}
+		case op == 7:
+			if p := live(func(*randSent) bool { return true }); p != nil {
+				send("withdraw", SendInput{Agent: p.author, Replaces: p.id, Text: " "}, fmt.Sprintf("%s withdraws %s", p.author, p.id[:6]))
+				p.gone = true
+			}
+		case op == 8:
+			send("ask", SendInput{Agent: from, Room: room, Text: fmt.Sprintf("who handles %d?", step), AskHandled: true},
+				fmt.Sprintf("%s asks in %s", from, room[:6]))
+		case op == 9 || op == 10:
+			// A question that a waiter was shown, not its own and not yet
+			// reported: that waiter reports it handled.
+			var a string
+			p := live(func(s *randSent) bool {
+				if !s.ask {
+					return false
+				}
+				for _, w := range ws {
+					if shown[w.agent][s.id] && w.agent != s.author && !handled[w.agent+s.id] {
+						a = w.agent
+						return true
+					}
+				}
+				return false
+			})
+			if p != nil {
+				for _, w := range ws { // the candidate chosen may not be the last a set
+					if shown[w.agent][p.id] && w.agent != p.author && !handled[w.agent+p.id] {
+						a = w.agent
+						break
+					}
+				}
+				_, err := e.s.Ack(ctx, a, p.id)
+				must("ack", fmt.Sprintf("%s acks %s", a, p.id[:6]), err)
+				handled[a+p.id] = true
+			}
 		default:
 			a := pick(leveled)
 			l := []string{store.LevelAll, store.LevelAddressed, store.LevelNone}[rng.IntN(3)]
@@ -257,14 +365,17 @@ func runWaitSchedule(t *testing.T, seed uint64) {
 				r = room
 			}
 			_, err := e.s.Levels(ctx, a, r, l)
-			okErr("level", err)
-			log = append(log, fmt.Sprintf("%s level %s in %q", a, l, r))
+			must("level "+l, fmt.Sprintf("%s level %s in %q", a, l, r), err)
+			if r != "" {
+				count("level one room")
+			}
 		}
 		since := time.Now()
 		for _, w := range ws {
 			settle(w, since)
 		}
 	}
+	armAll()
 	time.Sleep(50 * time.Millisecond)
 	noReturn()
 }

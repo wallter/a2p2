@@ -758,7 +758,7 @@ func TestExpiryAndConfirmationLookupsUseIndexesAndViewsDoNotWrite(t *testing.T) 
 	plan(`SELECT key, version, msg FROM reads WHERE agent = 'a' AND room = 'r' AND msg = 'm' ORDER BY key`, "reads_msg")
 
 	wantOutcome(t, put(t, s, mk(t, testKey("a"), core.RecordFields{}), t0), OutcomeStored)
-	other, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(50)")
+	other, err := sql.Open("sqlite", fileURI(path)+"?_pragma=busy_timeout(50)")
 	if err != nil {
 		t.Fatal(err)
 	}

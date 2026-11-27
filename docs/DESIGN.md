@@ -376,12 +376,16 @@ level lets it in (an addressee, or anyone at level `all`, or anyone at
 `addressed` for a post marked for everyone); a handled report wakes its
 writer, the only inbox it changes. A waiter whose look has not yet told
 it its levels is woken by any message relevant to it. A level set wakes
-only that agent's waiters, which look again at the new level. Every other
-change of the room wakes every waiter of the room: a replace or withdraw,
-a record or log entry pulled from a peer, a send with files and its
-approval, decline or failure, a file that became available, a membership
-or access change, a pruning pass, a room joined, created, left or set
-aside. Some changes are announced by nothing and are left to the
+only that agent's waiters, which look again at the new level, and so does
+an inbox receipt (a listing's `Showed`), which lets its message through
+the level for every session of that agent. Every other change of the
+room wakes every waiter of the room: a replace or withdraw, a record or
+log entry pulled from a peer, a send with files and its approval,
+decline or failure, a file sweep that changed anything (among them a
+staged send it declined as expired or failed as voided or replaced, after
+a pull, a fetch or the periodic pass), a file that became available, a
+membership or access change, a pruning pass, a room joined, created, left
+or set aside. Some changes are announced by nothing and are left to the
 fallback: a waiting inbox looks again at least once a second, so it sees
 them within about a second (plus the time its look waits for the
 database). These are an entry expiring by the clock before the pruning

@@ -365,7 +365,7 @@ func TestAPartAnOlderBinaryLeftUnderALapsedWantGoes(t *testing.T) {
 	}
 	// as 0.2.3 lapsed it: lapsed_at set, the part left
 	lapsed := b.clock.Add(time.Minute)
-	db, err := sql.Open("sqlite", "file:"+b.path+"?_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", store.FileURI(b.path)+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}
