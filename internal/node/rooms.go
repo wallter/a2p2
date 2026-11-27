@@ -14,6 +14,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/wallter/a2p2/internal/core"
 	"github.com/wallter/a2p2/internal/members"
@@ -120,6 +121,9 @@ type Rooms struct {
 	pubs map[string]*publication
 	// files, set by NewFiles, is the machine's attachment part (nil: none).
 	files *Files
+	// reached, set by NewExchange before any request is served, is per
+	// peer when room was last exchanged with (OnlyReached; nil: none).
+	reached func(room string) map[string]time.Time
 	// quarantined, under smu, holds the rooms whose stored log did not
 	// load or replay, by room id. Such a room is not in rooms: it is not
 	// served or pulled, writes to it are refused (setAsideErr), and

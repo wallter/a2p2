@@ -395,6 +395,9 @@ type (
 		Deadline     string `json:"deadline,omitempty"`
 		// Text says exactly what approving it does.
 		Text string `json:"text"`
+		// Warning, when set, is said beside text before deciding; it is
+		// not part of what is approved.
+		Warning string `json:"warning,omitempty"`
 		// For kind send_files (PROTOCOL 10.6): the agent that asked, the
 		// effective recipients (to, or ["everyone"] with members, the
 		// room's member count; for a replacement, its message's), the
@@ -916,7 +919,7 @@ func roomsOf(rs []node.RoomInfo) []Room {
 func RequestOf(q node.RequestView) Request {
 	out := Request{ID: q.ID, Kind: q.Kind, Action: q.Action, Room: q.Room, RoomLabel: q.RoomLabel, Node: q.Machine,
 		Fingerprint: q.Fingerprint, Name: q.Name, NameFrom: q.NameFrom, RecordedName: q.RecordedName, Role: q.Role, History: q.History, Seconding: q.Seconding,
-		Created: Time(q.Created), Deadline: Time(q.Deadline), Text: q.Text}
+		Created: Time(q.Created), Deadline: Time(q.Deadline), Text: q.Text, Warning: q.Warning}
 	if s := q.Send; s != nil {
 		out.Agent, out.To, out.ReplyTo, out.TextLine, out.Terms = s.Agent, s.To, s.Parent, s.TextLine, s.Terms
 		out.ReplyAuthor, out.Body = s.ParentAuthor, s.Body

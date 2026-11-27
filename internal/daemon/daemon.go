@@ -523,6 +523,12 @@ func (r *run) serve(parent context.Context, ready func()) (again bool, err error
 	if err != nil {
 		return false, err
 	}
+	// The addresses of invites accepted here, marked as this machine's
+	// person's before anything is dialled: an address loaded from the
+	// store counts as another machine's word until then (node.AddrBook).
+	if err := surf.SeedBook(parent); err != nil {
+		slog.Warn("reading the joins recorded here", "err", err) // their addresses are learned at the next resume
+	}
 
 	ctx, stop := context.WithCancel(parent)
 	defer stop()

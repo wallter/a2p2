@@ -208,6 +208,38 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Security
 
+- **A key that is not a member no longer leaves state behind on a
+  listener.** Since 0.1.0, a pull from any key, member or not, was
+  recorded in memory, and its requests waited for the lock every room
+  shares. Any host that reaches the peer port could grow the daemon's
+  memory with fresh keys and slow members' pulls. Now such a request is
+  refused before the lock, and nothing of it is kept. One that carries
+  log entries is checked within a budget of 4 a second for the machine.
+  What is kept of a peer that is no longer a member goes within 10
+  minutes. So do the stream hints of a removed or silent member (hints
+  are new since 0.2.3).
+- **Members no longer choose what this machine dials.** Since 0.1.0, any
+  member could give addresses for itself or for other members: loopback
+  ports, link-local and cloud metadata addresses, well-known ports, and
+  names that resolve to these. This machine then dialled them with a TLS
+  handshake. Now these are kept and dialled only if they could be a
+  member's. LAN, VPN, overlay and public addresses stay, and loopback
+  only for a member on this computer. A name is looked up once and only
+  the addresses that pass are dialled. Addresses from an invite are
+  dialled as given. Each member also gets a share of the unverified dial
+  budget.
+- **A mute ends.** Since 0.1.0, a peer that answered `not_member` twice
+  was left alone until either side's log changed. A listener that left
+  the room and joined again could so stop a laptop pulling until a
+  restart. Now the mute lasts 5 minutes, doubling up to an hour.
+- **Strangers are not recorded as connected in.** Since 0.2.0, requests
+  from keys that share no room counted, and enough of them pushed
+  members out of what `a2p2 status` reports.
+- **A warning before removing the only member reached.** Proposing or
+  confirming the removal of the only member this machine exchanged with
+  in the last hour now says so in `a2p2 confirm`, on the page and in the
+  local API.
+
 - **A join can no longer write into a room this machine already holds
   from a machine that is not a member.** Since 0.1.0, a removed admin, or
   any machine holding a copy of the room, could send a member an invite.

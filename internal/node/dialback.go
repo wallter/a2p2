@@ -217,10 +217,13 @@ func (r *Rooms) SharesRoom(node string) bool {
 	if node == r.m.ID {
 		return false
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, rl := range r.rooms {
-		if slices.Contains(rl.st.Members, node) {
+	// The membership as last published (State), under its leaf lock: this
+	// runs for every handshake and request, so it does not wait for the
+	// rooms lock (F18).
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	for _, st := range r.states {
+		if slices.Contains(st.Members, node) {
 			return true
 		}
 	}

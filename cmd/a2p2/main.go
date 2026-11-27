@@ -1048,6 +1048,9 @@ func printTerms(w io.Writer, q localapi.Request) {
 	if q.Deadline != "" {
 		fmt.Fprintf(w, "  Invite expires %s\n", clock(q.Deadline))
 	}
+	if q.Warning != "" { // the daemon's words, with a name from another machine: escaped again here
+		fmt.Fprintf(w, "  WARNING: %s\n", node.EscapeDisplay(q.Warning))
+	}
 }
 
 // previewText is the invite a person accepts or not. The room's label was

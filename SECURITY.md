@@ -29,7 +29,15 @@ an invite.
   delivery. That member can leave out an author's messages without any
   sign, and a removal of that member never reaches the others while it is
   the only path. Rooms shared between owners should have a listener from
-  each owner.
+  each owner. `a2p2 confirm` and the page warn before you remove the only
+  member this machine has exchanged with in the last hour (kept in
+  memory, so not in the first hour after a restart).
+- A member that answers `not_member` twice running is left alone for 5
+  minutes, then asked again with the whole log; each further mute in the
+  same run of refusals lasts twice as long, up to an hour. A listener
+  that left the room and joined again, or a hostile one, can so delay
+  this machine's pulls through it by up to an hour at a time, not stop
+  them until a restart.
 - A pull's answer counts by the same rule as a request: its log entries
   are kept only if the answering machine is a member here before or after
   them, so one removed while its answer was on the way stores nothing. The
@@ -71,6 +79,30 @@ an invite.
 - Advertised addresses, including VPN and office network addresses, go
   to every member of your rooms and every holder of an invite. `a2p2 net
   on` says so, and `a2p2 status` lists them.
+- A member chooses the addresses it gives for itself and the ones it
+  lists for other members. This machine keeps and dials them only if they
+  could be a member's: LAN, VPN and overlay addresses (private IPv4,
+  `100.64.0.0/10`, unique-local IPv6) and host names stay, since that is
+  how members on one network find each other. Never kept or dialled on
+  a member's word: loopback addresses (unless that member itself
+  connected over loopback, so it is on this computer), link-local
+  addresses (`169.254.0.0/16`, `fe80::/10`, so no cloud metadata
+  address), unspecified, `0.0.0.0/8`, multicast and broadcast addresses,
+  ports below 1024 other than 443, `localhost`, and names that end in a
+  number. A name is looked up once per connection and only the addresses
+  it gives that pass are dialled, so a name that changes between the
+  check and the dial reaches nothing else. A member can still make this
+  machine try a TLS handshake, which sends no request, with any host on
+  a private network or the internet at a port of 1024 or more or 443, and
+  learn something from when this machine later reaches it; and a name it
+  gives is looked up by your resolver, which tells whoever runs that
+  name's DNS that your machine is awake. Addresses that never completed
+  a handshake are dialled at most 2 a second (8 at once) for the whole
+  machine and half a second each (4 at once) per member. Addresses from
+  an invite you accepted are dialled as given, and so is an IP address
+  where the member's own key has answered a handshake. An address an
+  older version stored that these rules refuse is kept but not dialled,
+  and goes after 5 failed tries over a day.
 - An admin can sign entries that wait for a second admin, and each other
   admin's machine asks its person about them: at most 32 at a time per
   room. One signing admin gets more than four of them only from places no
@@ -192,9 +224,10 @@ an invite.
   expires minutes after it arrives.
 - What a peer reports it holds is unsigned. It can make this machine list
   up to 32 streams per author that are not there as still being fetched,
-  until it stops reporting them. It can raise a hint another peer set,
-  but not erase it: when it lowers or drops the stream, the other peer's
-  last report stands.
+  until it stops reporting them, is removed, or sends nothing for a day;
+  within 10 minutes of either of the last two they go. It can raise a
+  hint another peer set, but not erase it: when it lowers or drops the
+  stream, the other peer's last report stands.
 - The unread notice a hook prints holds a count and up to five sender
   labels, never message text. The sending agent chooses its label. Every
   machine accepts only 1 to 64 characters of letters, digits, `.`, `_` and
@@ -429,7 +462,8 @@ daemon and the CLI make these connections and no others:
 
 - To the other members of your rooms, only while networking is on or
   outbound only (`a2p2 net on`, which a person confirms at a terminal):
-  pulls and file transfers, pinned to each member's key. When you accept
+  pulls and file transfers, pinned to each member's key, at the addresses
+  members give that pass the rules under "A member of your rooms". When you accept
   an invite, a2p2 connects to the addresses in the invite you pasted,
   before the machine is a member. A member can also ask this machine to
   connect back to the address the member's own request came from, on at
@@ -441,7 +475,9 @@ daemon and the CLI make these connections and no others:
 - To an address you name: `a2p2 net check HOST:PORT` and `a2p2 net check
   --invite` make a TCP connection and a TLS handshake from the CLI under
   a throwaway key, whatever the networking state, and send no request.
-- A host name in an address is looked up by your system's resolver.
+- A host name in an address is looked up by your system's resolver: one
+  from an invite you accepted, and one a member gave, which is looked up
+  once per connection and checked as above.
 - A file an agent names for a send is read through your file systems. A
   path that names another host or an automount point, or a link on the
   way that leads to one, is refused before it is looked up. A share you
@@ -461,8 +497,14 @@ While networking is on, any host that can reach the peer port can open
 connections and complete a TLS handshake under a key it makes up. Such a
 key shares no room with you, so it reads nothing and joins nothing
 without an invite and your approval. A connection is placed in a pool
-only after its handshake has proved the client's key. What a host can
-still do, by the numbers:
+only after its handshake has proved the client's key. A pull for a room
+from a key that is not a member of it keeps nothing in memory and is
+refused without waiting for any room; one that carries log entries
+(only a machine those entries admit sends one honestly) is checked
+under the rooms lock, at most 8 at once and 4 a second for the whole
+machine, and stores nothing unless they admit it. Its requests are not
+recorded as connected in, so they cannot push members out of what
+`a2p2 status` reports. What a host can still do, by the numbers:
 
 - Hold a few connection slots. One IPv4 address or one IPv6 /64 gets at
   most 8 connections that are not members' connections, one IPv6 /56 at

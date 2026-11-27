@@ -13,9 +13,21 @@ package node
 // ones that do not; one that has failed for 24 hours over at least 5
 // attempts is dropped. Only nodes that are members of a room this machine
 // is in are kept (Keep).
+//
+// Addresses from other machines (Heard, Listed) are kept only if
+// RemoteAddrOK holds, and checked again when dialled (DialPolicy,
+// DialTargets); addresses this machine's person gave (Learn and Replace:
+// an invite, the joins recorded since) are dialled as given. Which
+// addresses were given, and which nodes connected in over loopback, is
+// kept in memory only: an address loaded from the store counts as another
+// machine's until a person's invite gives it again (Surface.SeedBook, at
+// start), unless it is a literal address that completed a pinned
+// handshake with the node; so one a past version kept that the rule
+// refuses is not dialled, and ages out as a failing address does.
 
 import (
 	"context"
+	"net/netip"
 	"slices"
 	"sync"
 	"time"
@@ -45,6 +57,11 @@ type AddrBook struct {
 type bookEntry struct {
 	addrs []store.PeerAddr // in the order they are tried
 	seen  time.Time        // when the node was last heard from
+	// given are the addresses this machine's person gave (Learn,
+	// Replace); local, the node's own request reached this machine over
+	// loopback in this run (Heard). In memory only.
+	given map[string]bool
+	local bool
 }
 
 // DialAddr is one address to try, and whether it ever completed a pinned
@@ -120,21 +137,90 @@ func order(as []store.PeerAddr) {
 	slices.SortStableFunc(as, func(x, y store.PeerAddr) int { return rank(x) - rank(y) })
 }
 
-// Learn adds addresses a third party listed for node (peers in a
-// response): only into free slots.
+// Learn adds addresses this machine's person gave for node, as a third
+// party's (an invite names the admin machine's): only into free slots,
+// dialled as given.
 func (b *AddrBook) Learn(node string, addrs []string, seen time.Time) {
-	b.add(node, addrs, store.AddrPeer, seen)
+	b.add(node, addrs, store.AddrPeer, seen, true, false)
 }
 
-// Replace sets the addresses node gave for itself in its own
-// authenticated request: what it no longer lists of its own is dropped,
-// and its own take slots before third parties'.
+// Replace sets addresses for node as its own, dialled as given: what it
+// no longer lists of its own is dropped, and its own take slots before
+// third parties'. For addresses this machine was given; another
+// machine's word goes through Heard.
 func (b *AddrBook) Replace(node string, addrs []string, seen time.Time) {
-	b.add(node, addrs, store.AddrSelf, seen)
+	b.add(node, addrs, store.AddrSelf, seen, true, false)
 }
 
-func (b *AddrBook) add(node string, addrs []string, source string, seen time.Time) {
+// Heard sets the addresses node gave for itself in its own authenticated
+// request, as Replace does, keeping only those RemoteAddrOK accepts;
+// loopback: the request came over loopback, so node is on this machine.
+// A list of which none is kept still replaces node's own earlier list.
+func (b *AddrBook) Heard(node string, addrs []string, seen time.Time, loopback bool) {
 	if len(addrs) == 0 {
+		return
+	}
+	b.add(node, remoteAddrs(addrs, loopback), store.AddrSelf, seen, false, true)
+	if loopback {
+		b.mu.Lock()
+		if e := b.m[node]; e != nil {
+			e.local = true
+		}
+		b.mu.Unlock()
+	}
+}
+
+// Listed adds addresses a member listed for another member (peers in a
+// response), as Learn does, keeping only those RemoteAddrOK accepts;
+// loopback: the member that listed them is on this machine (it was
+// reached over loopback), so a loopback address it lists is one of this
+// machine's, which it could reach itself.
+func (b *AddrBook) Listed(node string, addrs []string, seen time.Time, loopback bool) {
+	b.add(node, remoteAddrs(addrs, loopback), store.AddrPeer, seen, false, false)
+	if loopback && slices.ContainsFunc(addrs, isLoopbackAddr) {
+		b.mu.Lock()
+		if e := b.m[node]; e != nil && slices.ContainsFunc(e.addrs, func(a store.PeerAddr) bool { return isLoopbackAddr(a.Addr) }) {
+			e.local = true
+		}
+		b.mu.Unlock()
+	}
+}
+
+func remoteAddrs(addrs []string, loopback bool) []string {
+	var out []string
+	for _, a := range addrs {
+		if RemoteAddrOK(a, loopback) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// DialPolicy says how to dial addr of node: given, this machine's person
+// gave it, or it is a literal IP address that completed a pinned
+// handshake with node (so node's own key answers there, and a dial
+// reaches node and nothing else; a name could resolve elsewhere since);
+// loopback, node is on this computer as far as this run knows.
+func (b *AddrBook) DialPolicy(node, addr string) (given, loopback bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	e := b.m[node]
+	if e == nil {
+		return false, false
+	}
+	given = e.given[addr]
+	if i := slices.IndexFunc(e.addrs, func(a store.PeerAddr) bool { return a.Addr == addr }); i >= 0 && e.addrs[i].Good {
+		if ap, err := netip.ParseAddrPort(addr); err == nil && ap.Addr().Zone() == "" {
+			given = true
+		}
+	}
+	return given, e.local
+}
+
+// add puts addrs for node from source; given marks them as this
+// machine's person's. empty: an empty addrs still replaces node's own.
+func (b *AddrBook) add(node string, addrs []string, source string, seen time.Time, given, empty bool) {
+	if len(addrs) == 0 && !empty {
 		return
 	}
 	b.mu.Lock()
@@ -146,6 +232,9 @@ func (b *AddrBook) add(node string, addrs []string, source string, seen time.Tim
 		e = &bookEntry{}
 		b.m[node] = e
 	}
+	if given && e.given == nil {
+		e.given = map[string]bool{}
+	}
 	before := slices.Clone(e.addrs)
 	if source == store.AddrSelf {
 		// Its own word replaces its own earlier word.
@@ -156,6 +245,9 @@ func (b *AddrBook) add(node string, addrs []string, source string, seen time.Tim
 	for _, a := range addrs {
 		if a == "" || len(a) > MaxAddrBytes {
 			continue
+		}
+		if given {
+			e.given[a] = true
 		}
 		if i := slices.IndexFunc(e.addrs, func(p store.PeerAddr) bool { return p.Addr == a }); i >= 0 {
 			if source == store.AddrSelf {
@@ -183,6 +275,7 @@ func (b *AddrBook) add(node string, addrs []string, source string, seen time.Tim
 		}
 	}
 	order(e.addrs)
+	e.trim()
 	if seen.After(e.seen) {
 		e.seen = seen
 	}
@@ -288,14 +381,26 @@ func (b *AddrBook) Failed(node, addr string, at time.Time) {
 		e.addrs = append(e.addrs, a)
 	}
 	order(e.addrs)
+	e.trim()
 	rows := slices.Clone(e.addrs)
 	b.mu.Unlock()
 	b.save(node, rows)
 }
 
+// trim forgets which addresses were given once they are no longer kept.
+func (e *bookEntry) trim() {
+	for a := range e.given {
+		if !slices.ContainsFunc(e.addrs, func(p store.PeerAddr) bool { return p.Addr == a }) {
+			delete(e.given, a)
+		}
+	}
+}
+
 // peers lists, for a response, the nodes of members with addresses, most
-// recently heard from first, at most MaxPeersListed.
-func (b *AddrBook) peers(members []string) []PullPeer {
+// recently heard from first, at most MaxPeersListed; of each, only the
+// addresses the asker would keep (Listed). loopback: the asker connected
+// over loopback.
+func (b *AddrBook) peers(members []string, loopback bool) []PullPeer {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var out []PullPeer
@@ -307,7 +412,12 @@ func (b *AddrBook) peers(members []string) []PullPeer {
 		}
 		p := PullPeer{Node: n}
 		for _, a := range e.addrs {
-			p.Addrs = append(p.Addrs, a.Addr)
+			if RemoteAddrOK(a.Addr, loopback) { // what the asker would keep (Listed)
+				p.Addrs = append(p.Addrs, a.Addr)
+			}
+		}
+		if len(p.Addrs) == 0 {
+			continue
 		}
 		if !e.seen.IsZero() {
 			p.Seen = e.seen.UTC().Format(timeFormat)

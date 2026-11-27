@@ -45,9 +45,12 @@ var (
 	pullTLSTimeout        = 5 * time.Second
 	pullIdleTimeout       = 120 * time.Second
 	// Dials to addresses that never completed a pinned handshake, for the
-	// whole daemon (one PullClient).
-	pullDialRate  = 2.0
-	pullDialBurst = 8.0
+	// whole daemon (one PullClient), and for each peer within that, so one
+	// member's addresses cannot spend it all.
+	pullDialRate      = 2.0
+	pullDialBurst     = 8.0
+	pullPeerDialRate  = 0.5
+	pullPeerDialBurst = 4.0
 )
 
 // PullHandler serves the pull exchange (node.Exchange) on /p/v2/pull.
@@ -125,7 +128,9 @@ func (s *pullServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(node.WithHoldNotice(r.Context(), leave))
 	defer cancel()
 	defer context.AfterFunc(s.closing, cancel)()
-	resp, err := s.h.Serve(ctx, from, q)
+	// The source, so a member on this machine may give loopback addresses
+	// for itself (node.RemoteAddrOK).
+	resp, err := s.h.Serve(node.WithSource(ctx, r.RemoteAddr), from, q)
 	if err != nil {
 		var pe *node.PullError
 		switch {
@@ -239,9 +244,14 @@ type PullClient struct {
 	err   error
 	book  *node.AddrBook
 	dials *pullLimiter // to addresses never verified, for every peer
+	// peerDials is that budget per peer.
+	peerDials *pullLimiter
 	// Usable, if set, says whether an address is worth dialling from here
 	// (a unique-local IPv6 address of another site is not); set before use.
 	Usable func(addr string) bool
+	// Resolve looks up a name another machine gave (node.DialTargets); nil:
+	// the system's resolver. Set before use.
+	Resolve node.Resolver
 
 	mu      sync.Mutex
 	clients map[string]*http.Client
@@ -253,7 +263,7 @@ var _ node.PullTransport = (*PullClient)(nil)
 func NewPullClient(id *Identity, book *node.AddrBook) *PullClient {
 	cert, err := selfSigned(id)
 	return &PullClient{cert: cert, err: err, book: book, dials: newPullLimiter(pullDialRate, pullDialBurst),
-		clients: map[string]*http.Client{}}
+		peerDials: newPullLimiter(pullPeerDialRate, pullPeerDialBurst), clients: map[string]*http.Client{}}
 }
 
 // Close closes idle connections.
@@ -300,12 +310,37 @@ func (c *PullClient) client(peer string) *http.Client {
 	protos.SetHTTP2(true)
 	dialer := &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		// An address another machine gave is checked before anything is
+		// spent on it, and a name it gave is looked up here, once, and
+		// only the addresses found that pass are dialled (F5, F54).
+		given, loopback := c.book.DialPolicy(peer, addr)
+		if !given && !node.RemoteAddrOK(addr, loopback) {
+			return nil, node.ErrAddrRefused
+		}
 		if !c.verified(peer, addr) {
+			if ok, _ := c.peerDials.take(peer); !ok {
+				return nil, errDialBudget
+			}
 			if ok, _ := c.dials.take(""); !ok {
 				return nil, errDialBudget
 			}
 		}
-		return dialer.DialContext(ctx, network, addr)
+		targets, err := node.DialTargets(ctx, addr, given, loopback, c.Resolve)
+		if err != nil {
+			return nil, err
+		}
+		var last error
+		for _, t := range targets {
+			conn, err := dialer.DialContext(ctx, network, t)
+			if err == nil {
+				return conn, nil
+			}
+			last = err
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		return nil, last
 	}
 	hc := &http.Client{
 		Transport: &http.Transport{
@@ -401,7 +436,11 @@ func (c *PullClient) Pull(ctx context.Context, peer string, req *node.PullReques
 			continue // unreachable, or another key at this address: the next one
 		}
 		c.book.Worked(peer, addr)
-		return readPull(resp)
+		r, err := readPull(resp)
+		if r != nil {
+			r.Via = addr // where the peer was reached: on loopback, it is on this machine
+		}
+		return r, err
 	}
 	return nil, lastErr
 }

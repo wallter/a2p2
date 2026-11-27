@@ -379,3 +379,69 @@ func TestReceiptsOfAReadBeforeALeaveAndARejoinAreNotWritten(t *testing.T) {
 		t.Fatalf("receipts %v of the current generation", got)
 	}
 }
+
+func observeDetail(t *testing.T, s *Store, peer, author string, known map[string]int64, at time.Time) {
+	t.Helper()
+	var d []StreamDetail
+	for e, c := range known {
+		d = append(d, StreamDetail{E: e, C: c})
+	}
+	if _, err := s.Exchange(context.Background(), testRoom, 0, func(tx *Tx) error {
+		if err := tx.ObservePart(testRoom, peer, at, []Observation{{Author: author, Detail: d}}); err != nil {
+			return err
+		}
+		return tx.NoteKnown(testRoom, peer, author, known, at)
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func dropReports(t *testing.T, s *Store, members []string, before time.Time) {
+	t.Helper()
+	if _, err := s.Exchange(context.Background(), testRoom, 0, func(tx *Tx) error {
+		return tx.DropReports(testRoom, members, before)
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// F9: hints are unsigned, so they last only while a member keeps making
+// them. DropReports forgets a peer no longer a member (its observed rows
+// and the streams only its reports keep) and the hints of a member not
+// observed since a time; a member observed lately keeps its hints, a held
+// stream keeps its row, and another peer's report of the same stream
+// takes the hint over.
+func TestHintsOfAPeerNoLongerAMemberOrSilentGoAndAMembersStay(t *testing.T) {
+	s, _ := openTest(t)
+	a := testKey("a")
+	author := nodeOf(a)
+	gone, stale, live := nodeOf(testKey("gone")), nodeOf(testKey("stale")), nodeOf(testKey("live"))
+	m1 := mk(t, a, core.RecordFields{})
+	wantOutcome(t, put(t, s, m1, t0), OutcomeStored)
+	observeDetail(t, s, gone, author, map[string]int64{"00000000000000e1": 3, epochN(1): 2, epochN(2): 2}, t0)
+	observeDetail(t, s, stale, author, map[string]int64{epochN(3): 2}, t0)
+	observeDetail(t, s, live, author, map[string]int64{epochN(4): 2, epochN(2): 1}, t0.Add(48*time.Hour))
+	dropReports(t, s, []string{author, stale, live}, t0.Add(24*time.Hour))
+	got := map[string]Stream{}
+	for _, st := range streamsOf(t, s) {
+		got[st.Epoch] = st
+	}
+	if h := got["00000000000000e1"]; h.Contig != 1 || h.Known != 0 {
+		t.Errorf("held stream %+v, want contig 1 known 0", h)
+	}
+	for _, e := range []string{epochN(1), epochN(3)} {
+		if _, ok := got[e]; ok {
+			t.Errorf("hint %s kept", e)
+		}
+	}
+	if h, ok := got[epochN(2)]; !ok || h.Known != 1 {
+		t.Errorf("a live member's report of a stream %+v, want known 1", h)
+	}
+	if _, ok := got[epochN(4)]; !ok {
+		t.Error("a live member's hint went")
+	}
+	var obs []Observation
+	if err := s.View(context.Background(), func(rd *Reader) (err error) { obs, err = rd.Observed(testRoom, gone); return err }); err != nil || len(obs) != 0 {
+		t.Fatalf("observed rows of a peer no longer a member: %+v %v", obs, err)
+	}
+}

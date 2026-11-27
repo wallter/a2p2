@@ -46,7 +46,21 @@ node (`peer_addrs`, section 8) and tried most recent success first. At most
 8 per node; an address a node reports for itself takes a slot before one
 heard from a third party; one that has failed for 24 hours and at least 5
 attempts is dropped. Dials to addresses that have never completed a pinned
-handshake share one budget for the daemon (2 a second, burst 8).
+handshake share one budget for the daemon (2 a second, burst 8), and each
+peer has a share of it (one every 2 s, burst 4).
+
+An address in a peer's `addrs` or in `peers` is kept and dialled only if
+it is `host:port` as in a token, with a port of 1024 or more or 443, and
+its host is either an IP address that is not unspecified, in `0.0.0.0/8`,
+multicast, broadcast, link-local or zoned, or a name that is not
+`localhost` and does not end in a number. A loopback address is kept only
+from a peer on the same computer: its request came over loopback, or the
+peer that lists it answered over loopback. A name is looked up at the
+dial, once, and only the addresses it gives that pass the same rule are
+dialled. Addresses from a token the person pasted are dialled as given,
+and so is an IP address that completed a pinned handshake with the peer.
+Nothing on the wire changed: an address the rule refuses is dropped, not
+refused, so a peer of any version that sends one is answered as before.
 
 ## 1. Record header
 
@@ -432,8 +446,18 @@ Requester on any 403 from a peer it believes is a member: forget what it
 had observed of that peer's log; the next attempt sends its accepted log
 from the start, once, with no offer. If that is refused too, later attempts
 carry neither entries nor offers until its own accepted log changes or a
-request from that peer shows different log heads. A server that is behind catches up through its own
-pulls, where `log.more` pages without limit.
+request from that peer shows different log heads, or 5 minutes pass:
+then it is asked again as after a first 403, and a further 403 in the same
+run of refusals leaves it twice as long, up to an hour. A server that is
+behind catches up through its own pulls, where `log.more` pages without
+limit.
+
+A server checks membership before it keeps anything of a request: one
+from a key that is not a member of the room, without `log.entries`, is
+answered 403 at step 4 at once, by the membership as last decided; one
+with `log.entries` goes through step 4, within a budget of 8 at once and 4
+a second for the whole server (429 `rate_limited` past it). Nothing of
+either is kept: not its heads, its addresses or a refusal count.
 
 ### 4.5 Status codes
 

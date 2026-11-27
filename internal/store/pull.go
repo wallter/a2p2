@@ -463,6 +463,79 @@ func (t *Tx) dropHints(room, peer string, keep map[string]bool) error {
 	return nil
 }
 
+// DropReports forgets, in room, what peers not in members reported (their
+// observed rows) and the stream hints only their reports keep, and the
+// hints of a member not observed since before (a report sets them
+// again). A hint is an unsigned claim (F9): it lasts while a member keeps
+// making it, and no longer.
+func (t *Tx) DropReports(room string, members []string, before time.Time) error {
+	member := map[string]bool{}
+	for _, m := range members {
+		member[m] = true
+	}
+	last := map[string]int64{}
+	rows, err := t.tx.Query(`SELECT peer, max(at) FROM observed WHERE room = ? GROUP BY peer`, room)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var p string
+		var at int64
+		if err := rows.Scan(&p, &at); err != nil {
+			rows.Close()
+			return err
+		}
+		last[p] = at
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, p := range sortedKeys(last) {
+		if !member[p] {
+			if _, err := t.tx.Exec(`DELETE FROM observed WHERE room = ? AND peer = ?`, room, p); err != nil {
+				return err
+			}
+		}
+	}
+	rows, err = t.tx.Query(`SELECT DISTINCT known_from FROM streams WHERE room = ? AND known_from <> ''`, room)
+	if err != nil {
+		return err
+	}
+	var hinting []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			rows.Close()
+			return err
+		}
+		hinting = append(hinting, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	sort.Strings(hinting)
+	for _, p := range hinting {
+		if at, ok := last[p]; member[p] && ok && at >= ms(before) {
+			continue
+		}
+		if err := t.dropHints(room, p, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Observe replaces what peer reported in room with obs, an observation
 // dated at: every author row not in obs is deleted (the peer no longer
 // takes it), except the log row when obs has none. A detail is stored as

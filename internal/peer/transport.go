@@ -862,7 +862,7 @@ func guard(lims limiters, next http.Handler, in func(from, local string)) http.H
 			w.Header().Set("Connection", "close") // HTTP/2: a GOAWAY, then the connection ends when idle
 		}
 		lim := lims.of(strange)
-		if in != nil && from != "" {
+		if in != nil && from != "" && !strange { // a stranger's keys never push a member out of the record (F25)
 			local := ""
 			if a, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
 				local = a.String()

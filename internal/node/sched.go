@@ -23,9 +23,10 @@ package node
 //     on to the next member. 403 twice running (the exchange resends its
 //     whole log after the first) stops pulling the room from that peer
 //     until this machine's log of the room changes or a request from the
-//     peer, a current member, shows changed log heads (the Exchange keeps
-//     that state; refusalOf); 413 halves the offer; 429 and 503 wait their
-//     Retry-After.
+//     peer, a current member, shows changed log heads, or for 5 minutes,
+//     doubling at each further mute of one run of refusals to an hour
+//     (the Exchange keeps that state; refusalOf); 413 halves the offer;
+//     429 and 503 wait their Retry-After.
 //   - Spins: an exchange that gave the peer nothing new from here, stored
 //     nothing here and did not wait (a same well before its wait, or a
 //     lasting difference whose round was not clean) counts as a failure
@@ -37,7 +38,8 @@ package node
 //
 // Clock, timers, jitter and transport are injected, so tests are
 // deterministic. Peers' addresses are the Exchange's AddrBook; Run keeps
-// it to the members of the rooms held. The daemon starts one Scheduler
+// it, and what the Exchange keeps per peer (tidy), to the members of the
+// rooms held, as rooms come and go and every 10 minutes. The daemon starts one Scheduler
 // (internal/daemon) unless networking is off.
 
 import (
@@ -176,8 +178,10 @@ func (s *Scheduler) Run(ctx context.Context) {
 			}()
 		}
 		s.x.keepBook()
+		s.x.tidy(ctx) // and what the exchange keeps of peers no longer members
 		select {
 		case <-wake:
+		case <-s.o.After(tidyEvery): // removals do not change the rooms held
 		case <-ctx.Done():
 			return
 		}

@@ -347,6 +347,21 @@ for well under a millisecond plus its transaction's commit at 1,000 to
 100,000 records. A per-room lock would add little, because the store's
 single connection serialises every transaction anyway.
 
+A request from a key that is not a member of the room, by the membership
+last published (`Rooms.State`, a leaf lock), and that carries no log
+entries is refused `not_member` before the rooms lock and before
+anything is kept of it; one with log entries, which only a machine those
+entries admit sends honestly (T4), is decided under the lock, within a
+budget of 8 at once and 4 a second for the machine. `SharesRoom`, which
+the listener asks per handshake and per request, reads the same
+published membership. The exchange keeps its per-peer state (heads
+heard, evidence sent, pages, refusals, seen sums, last exchanges) only
+for members, and the scheduler drops what it kept of a peer no longer a
+member, with that peer's observed reports and the stream hints only its
+reports keep, when the rooms held change and every 10 minutes
+(`Exchange.tidy`). A member's hints also go once nothing was observed of
+it for a day; its next report sets them again (F3, F9, F18, F20).
+
 Measured with `TestPullSizesInASixtyFourMachineRoomAfterThirtyDaysOfDailyRestarts`
 (skipped unless `A2P2_MODEL_DEEP=1`; the log lines say "64 machines", but
 no 64 machines run). Two real nodes, `a` and `b`, in one process, joined
@@ -370,6 +385,7 @@ of a network.
 | Local write or new records | Abandon the waiting pulls and issue them again at once, with offers; a request on the way that carries an offer is not cancelled by a newer write, and what changed meanwhile goes in the next request |
 | A peer holds what we lack | Pull from it at once; repeat while `more` |
 | Failure | Back off 1 s doubling to 5 min with jitter; next member |
+| `not_member` twice running | Leave the peer until either side's log heads change, or for 5 min, doubling at each further mute of one run of refusals to 1 h; then ask again with the whole log (F22) |
 
 A server holds a waiting pull at most 60 s; client and server deadlines
 exceed it by 30 s. A rotating anchor is first probed with a 10 s pull; failure moves on.
@@ -1274,6 +1290,35 @@ widen who can be reached, none of them a service run by anyone else.
   members passed on (not its own word) stays in a book, tried last, until
   it has failed for a day and five attempts; and a machine that stops
   listening altogether is still dialled at its last list until then.
+- **What is dialled on another machine's word** (`internal/node/addrrule.go`,
+  F5 and F54 of the 2026-11-25 review). An address a member gives for
+  itself in its own request, or lists for another member in a response,
+  is its free choice, so it is kept only if it could be a member's
+  (`RemoteAddrOK`): a port of 1024 or more, or 443; an IP address that is
+  not unspecified, in `0.0.0.0/8`, multicast, broadcast or link-local, and
+  has no zone; or a host name that is not `localhost` and does not end in
+  a number. A loopback address is kept only from a member on this
+  computer: its request came over loopback, or the member that lists it
+  was reached over loopback (two daemons on one computer, as the demo
+  runs). Private ranges stay, since members on one LAN, VPN or overlay
+  network find each other by them. The same rule runs again at every dial
+  (`DialTargets`): a name is looked up there, once, and only the
+  addresses it gives that pass are dialled, as literal addresses, so a
+  name cannot be checked as one address and dialled as another. Addresses
+  from an invite the person accepted (and the joins recorded since,
+  learned again at every start) are dialled as given: names, loopback
+  and LAN addresses; so is a literal IP address that completed a pinned
+  handshake with the member (its key answers there, so the dial reaches
+  it and nothing else). Which addresses an invite gave, and which members
+  were on loopback, is kept in memory only: any other stored address
+  counts as another machine's word until the invite gives it again, so
+  one an older version kept that the rule refuses is not dialled and goes
+  as a failing address does. Dials to addresses never verified take a token of the
+  machine's budget (2 a second, burst 8) and of the peer's (one every 2
+  s, burst 4), after the rule and before any name is looked up. The
+  budget does not cover a verified address, a join's dials to an
+  invite's addresses, net check probes or dial-backs, which have their
+  own limits.
 - **The address others see is shown, never advertised.** The dial-back
   answer carries the IP address the responder saw the request come from
   (`saw`). `net check` shows it ("members see this machine as") and
