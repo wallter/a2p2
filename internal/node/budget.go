@@ -6,52 +6,64 @@ import (
 	"time"
 )
 
-// The requester's budget (PROTOCOL 4.6, DESIGN 4): every pull request this
+// The requester's budget (PROTOCOL 4.6, DESIGN 4). Every pull request this
 // machine sends a peer, for every room and both anchors, opening,
-// continuing, closing or waiting, first takes a token of that peer's
-// bucket. It refills PullBudgetRate a second up to PullBudgetBurst, so at
-// most PullBudgetBurst + 60·PullBudgetRate = 930 requests reach one peer in
-// any minute, 900 a minute sustained. That is three quarters of the
-// listener's limit per peer (internal/peer: 20 a second, burst 40, the
-// same in every version), a 25 % margin on rate and burst, so an honest
-// requester draws no 429 for its rate, whatever its rooms and their
-// changes. The burst covers a whole exchange of one message after idle
-// (an opening with the offer, the closing opening) and the next waiting
-// pull many times over; under sustained writing a request waits at most
-// 1/PullBudgetRate (about 67 ms) for its token once the burst is spent,
-// and writes made meanwhile go in the same request.
+// continuing, closing or waiting, is admitted in this order: a slot of the
+// peer's requests in flight, then a token of its bucket, then it is
+// prepared (membership checked again, writes made meanwhile included) and
+// sent. Each further address the transport tries takes a token too
+// (PullAttempt).
 //
-// And at most PullBudgetSlots requests that do not wait are in flight to
-// one peer at once, below the listener's 4 concurrent requests per peer
-// (a request counts there until it enters a hold): rooms starting
-// exchanges together queue for a slot instead of drawing a 429.
+// The bucket refills PullBudgetRate a second up to PullBudgetBurst, so at
+// most PullBudgetBurst + 60·PullBudgetRate = 930 requests reach one peer in
+// any minute, 900 a minute sustained, from one run of the daemon (a
+// restart or a networking change starts a full bucket). That is three
+// quarters of the listener's limit per peer (internal/peer: 20 a second,
+// burst 40, the same in every version), a 25 % margin on rate and burst,
+// so an honest requester draws no 429 for its rate. Only a request that
+// holds a slot reserves a token, so requests queued for a slot hold none
+// and cannot leave together when slots free.
+//
+// At most PullBudgetSlots requests to one peer are in flight and not yet
+// admitted at once, below the listener's 4 concurrent requests per peer (a
+// request counts there until it is answered or enters a hold). A request
+// that does not wait keeps its slot until its answer arrives; a waiting
+// pull until its answer arrives or pullAdmitAfter has passed, by when the
+// listener has held it. Slots and tokens are handed out in the order
+// asked (a Go channel's senders and the reservations queue in order), so a
+// room waits behind at most the requests already queued, two per room
+// sharing the peer (one per anchor, an exchange sending one at a time).
 const (
 	PullBudgetRate  = 15.0
 	PullBudgetBurst = 30.0
 	PullBudgetSlots = 3
+	// pullAdmitAfter is how long a waiting pull keeps its slot at most.
+	pullAdmitAfter = time.Second
 	// pullMaxRequests bounds the requests of one exchange (Exchange.Pull):
 	// a catch-up of 16,000 log entries or 32,000 records at the page
 	// limits fits in one; a longer one ends Capped and the next exchange
 	// goes on from where it stopped, paid for by the budget.
 	pullMaxRequests = 64
-	// pullBudgetKeys bounds the buckets kept; full ones are dropped first.
+	// pullBudgetKeys bounds the buckets kept. Buckets are made only for
+	// peers this machine pulls from (members of rooms it holds); one full
+	// and unused is dropped to make room, and with none such, peers beyond
+	// the cap share one overflow bucket, its tokens and its slots.
 	pullBudgetKeys = 1024
 )
 
-// pullBudget is the token buckets of the peers this machine pulls from.
-// Tokens are reserved in the order asked (a reservation may leave the
-// bucket below zero and waits until it is paid), so the rooms and anchors
-// that share a peer take turns.
+// pullBudget is the buckets of the peers this machine pulls from.
 type pullBudget struct {
 	mu          sync.Mutex
 	rate, burst float64
 	m           map[string]*budgetBucket
+	overflow    *budgetBucket
 }
 
 type budgetBucket struct {
-	slots  chan struct{} // requests in flight that do not wait (enter)
-	tokens float64
+	slots  chan struct{} // requests in flight and not yet admitted
+	tokens float64       // below zero: reservations not yet paid
 	last   time.Time
+	users  int   // admissions under way or in flight: never dropped while above 0
 	taken  int64 // tokens taken and kept, for tests
 }
 
@@ -59,13 +71,39 @@ func newPullBudget(rate, burst float64) *pullBudget {
 	return &pullBudget{rate: rate, burst: burst, m: map[string]*budgetBucket{}}
 }
 
-// reserve takes a token of peer's bucket and says how long to wait before
-// using it.
-func (b *pullBudget) reserve(peer string) time.Duration {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	now := time.Now()
-	k := b.bucket(peer, now)
+func (b *pullBudget) fresh(now time.Time) *budgetBucket {
+	return &budgetBucket{tokens: b.burst, last: now, slots: make(chan struct{}, PullBudgetSlots)}
+}
+
+// use is peer's bucket, counted as in use until done; b.mu is held.
+func (b *pullBudget) use(peer string, now time.Time) *budgetBucket {
+	k := b.m[peer]
+	if k == nil {
+		if len(b.m) >= pullBudgetKeys {
+			for id, o := range b.m {
+				if o.users == 0 && len(o.slots) == 0 && o.tokens+now.Sub(o.last).Seconds()*b.rate >= b.burst {
+					delete(b.m, id)
+					break
+				}
+			}
+		}
+		if len(b.m) >= pullBudgetKeys {
+			if b.overflow == nil {
+				b.overflow = b.fresh(now)
+			}
+			k = b.overflow
+		} else {
+			k = b.fresh(now)
+			b.m[peer] = k
+		}
+	}
+	k.users++
+	return k
+}
+
+// reserve takes a token of k and says how long to wait before using it;
+// b.mu is held.
+func (b *pullBudget) reserve(k *budgetBucket, now time.Time) time.Duration {
 	k.tokens = min(b.burst, k.tokens+now.Sub(k.last).Seconds()*b.rate)
 	k.last = now
 	k.tokens--
@@ -76,33 +114,32 @@ func (b *pullBudget) reserve(peer string) time.Duration {
 	return time.Duration(-k.tokens / b.rate * float64(time.Second))
 }
 
-// bucket is peer's bucket, made full if there is none; b.mu is held.
-// Buckets that are full again are dropped first when there are too many
-// (a request in flight keeps its own slots channel).
-func (b *pullBudget) bucket(peer string, now time.Time) *budgetBucket {
-	k := b.m[peer]
-	if k == nil {
-		if len(b.m) >= pullBudgetKeys {
-			for id, o := range b.m {
-				if o.tokens+now.Sub(o.last).Seconds()*b.rate >= b.burst {
-					delete(b.m, id)
-				}
-			}
-		}
-		k = &budgetBucket{tokens: b.burst, last: now, slots: make(chan struct{}, PullBudgetSlots)}
-		b.m[peer] = k
-	}
-	return k
+// refund gives back a token of k reserved and not used; b.mu is held.
+func (b *pullBudget) refund(k *budgetBucket) {
+	k.tokens = min(b.burst, k.tokens+1)
+	k.taken--
 }
 
-// refund gives back a token reserved and not used.
-func (b *pullBudget) refund(peer string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if k := b.m[peer]; k != nil {
-		k.tokens = min(b.burst, k.tokens+1)
-		k.taken--
+// pay waits d for a token reserved of k; a cancellation refunds it.
+func (b *pullBudget) pay(ctx context.Context, k *budgetBucket, d time.Duration, stop <-chan struct{}) error {
+	if d <= 0 {
+		return nil
 	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	var err error
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		err = ctx.Err()
+	case <-stop:
+		err = ErrWaitStopped
+	}
+	b.mu.Lock()
+	b.refund(k)
+	b.mu.Unlock()
+	return err
 }
 
 // takenBy is the tokens of peer's bucket taken and kept.
@@ -115,39 +152,98 @@ func (b *pullBudget) takenBy(peer string) int64 {
 	return 0
 }
 
-// take waits for a token of peer's bucket. Waiting ends with ctx (the
-// room left, the daemon stopping), or with ErrWaitStopped if stop closes
-// first; either way the token goes back.
-func (b *pullBudget) take(ctx context.Context, peer string, stop <-chan struct{}) error {
-	d := b.reserve(peer)
-	if d <= 0 {
-		return nil
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-t.C:
-		return nil
-	case <-ctx.Done():
-		b.refund(peer)
-		return ctx.Err()
-	case <-stop:
-		b.refund(peer)
-		return ErrWaitStopped
-	}
+// RequestsCharged is the tokens of peer's budget this exchange has taken
+// and kept: one for each request or wire attempt that went out (for tests
+// and diagnostics).
+func (x *Exchange) RequestsCharged(peer string) int64 { return x.budget.takenBy(peer) }
+
+// pullTicket is one admitted request: a slot and a token of its peer.
+type pullTicket struct {
+	b       *pullBudget
+	k       *budgetBucket
+	release sync.Once
+	ended   sync.Once
 }
 
-// enter waits for a slot of peer's requests in flight, for a request that
-// does not wait; the release it returns gives the slot back. Waiting ends
-// with ctx.
-func (b *pullBudget) enter(ctx context.Context, peer string) (func(), error) {
+// admit waits for a slot of peer's requests in flight, then for a token.
+// Waiting ends with ctx (the room left, the daemon stopping), or with
+// ErrWaitStopped if stop closes first; either way nothing is charged.
+func (b *pullBudget) admit(ctx context.Context, peer string, stop <-chan struct{}) (*pullTicket, error) {
 	b.mu.Lock()
-	slots := b.bucket(peer, time.Now()).slots
+	k := b.use(peer, time.Now())
 	b.mu.Unlock()
+	t := &pullTicket{b: b, k: k}
 	select {
-	case slots <- struct{}{}:
-		return func() { <-slots }, nil
+	case k.slots <- struct{}{}:
 	case <-ctx.Done():
+		t.end()
 		return nil, ctx.Err()
+	case <-stop:
+		t.end()
+		return nil, ErrWaitStopped
 	}
+	b.mu.Lock()
+	d := b.reserve(k, time.Now())
+	b.mu.Unlock()
+	if err := b.pay(ctx, k, d, stop); err != nil {
+		t.admitted()
+		t.end()
+		return nil, err
+	}
+	return t, nil
+}
+
+// admitted gives the slot back (once).
+func (t *pullTicket) admitted() { t.release.Do(func() { <-t.k.slots }) }
+
+// admitAfter gives the slot back after d, unless admitted first.
+func (t *pullTicket) admitAfter(d time.Duration) {
+	time.AfterFunc(d, t.admitted)
+}
+
+// cancel undoes a ticket whose request was never sent: the token goes
+// back, and the slot.
+func (t *pullTicket) cancel() {
+	t.b.mu.Lock()
+	t.b.refund(t.k)
+	t.b.mu.Unlock()
+	t.admitted()
+	t.end()
+}
+
+// done ends a ticket whose request was sent and answered or failed.
+func (t *pullTicket) done() {
+	t.admitted()
+	t.end()
+}
+
+// end stops counting the bucket as in use (once).
+func (t *pullTicket) end() {
+	t.ended.Do(func() {
+		t.b.mu.Lock()
+		t.k.users--
+		t.b.mu.Unlock()
+	})
+}
+
+// attempt takes a token for a further wire attempt of the ticket's request
+// (another address of the peer); the slot is already held.
+func (t *pullTicket) attempt(ctx context.Context) error {
+	t.b.mu.Lock()
+	d := t.b.reserve(t.k, time.Now())
+	t.b.mu.Unlock()
+	return t.b.pay(ctx, t.k, d, nil)
+}
+
+type attemptKey struct{}
+
+// PullAttempt is called by a transport before each attempt of one request
+// after the first (another address of the peer): it waits for a token of
+// the peer's budget, so every attempt that may reach the wire is charged.
+// For a context that is not a request's, it does nothing.
+func PullAttempt(ctx context.Context) error {
+	if t, ok := ctx.Value(attemptKey{}).(*pullTicket); ok {
+		return t.attempt(ctx)
+	}
+	return nil
 }

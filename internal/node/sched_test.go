@@ -57,8 +57,10 @@ type recNet struct {
 	// refuse, if set and it returns an error, refuses a request with it
 	// before it reaches the server.
 	refuse func(from, to string, q *PullRequest) error
-	// inflight and peak count, per requester and peer, requests without
-	// wait_ms sent and not yet answered, and the most at once.
+	// inflight and peak count, per requester and peer, requests sent and
+	// not yet admitted as the listener counts them (internal/peer: until
+	// answered, or for one with wait_ms until it is held, here when it
+	// arrives), and the most at once.
 	inflight, peak map[[2]string]int
 }
 
@@ -76,18 +78,20 @@ func (l *recLink) Pull(ctx context.Context, peer string, q *PullRequest) (*PullR
 	over := l.n.limit > 0 && len(l.n.log) > l.n.limit
 	delay, refuse := l.n.oneWay, l.n.refuse
 	k := [2]string{l.from, peer}
-	if q.WaitMS == 0 {
-		if l.n.inflight == nil {
-			l.n.inflight, l.n.peak = map[[2]string]int{}, map[[2]string]int{}
-		}
-		l.n.inflight[k]++
-		l.n.peak[k] = max(l.n.peak[k], l.n.inflight[k])
-		defer func() {
+	if l.n.inflight == nil {
+		l.n.inflight, l.n.peak = map[[2]string]int{}, map[[2]string]int{}
+	}
+	l.n.inflight[k]++
+	l.n.peak[k] = max(l.n.peak[k], l.n.inflight[k])
+	var once sync.Once
+	admitted := func() {
+		once.Do(func() {
 			l.n.mu.Lock()
 			l.n.inflight[k]--
 			l.n.mu.Unlock()
-		}()
+		})
 	}
+	defer admitted()
 	l.n.mu.Unlock()
 	if over {
 		<-ctx.Done()
@@ -106,6 +110,9 @@ func (l *recLink) Pull(ctx context.Context, peer string, q *PullRequest) (*PullR
 	}
 	if err := leg(); err != nil {
 		return nil, err
+	}
+	if q.WaitMS > 0 {
+		admitted() // held at the peer
 	}
 	if refuse != nil {
 		if err := refuse(l.from, peer, q); err != nil {

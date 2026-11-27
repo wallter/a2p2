@@ -419,10 +419,14 @@ step 4, the server's `log.entries` count only if it is a member here before
 them or they make it one; otherwise nothing of the response is stored, not
 even the addresses in `peers` or the wants of 10.4, and the exchange ends.
 If they remove it and `log.more` is set, only the entries are kept and the
-next request asks for the rest of the log, with no offer; a page that
-admits the server again is taken as usual. Send the next request at once
-while differing authors are not covered, or `more`, `log.more` or its own
-offer was cut, each after a token of the requester's budget (4.6).
+next request only reads the rest of the log: an opening whose `sum` is that
+of an empty summary, with `log.heads` and `log.extra` and nothing else (no
+`seen`, `addrs`, `peers`, `log.entries`, `detail` or offer). If that page
+admits the server again it is taken as usual and the exchange starts a new
+round; if not, nothing of it is stored and the exchange ends. Send the next
+request at once while differing authors are not covered, or `more`,
+`log.more` or its own offer was cut, each admitted by the requester's
+budget (4.6).
 
 Requester on any 403 from a peer it believes is a member: forget what it
 had observed of that peer's log; the next attempt sends its accepted log
@@ -456,8 +460,8 @@ Error body: `{"error":"<code>","detail":"<≤ 200 bytes>"}`.
 | Probe of a rotating anchor | 10 s |
 | Back-off | 1 s doubling to 5 min, ±20 % jitter |
 | Per peer | one waiting pull per room (a new one releases the old); 4 other concurrent (a request counts until it enters a hold); 20 per s, burst 40 |
-| Requester budget | every request to one peer, of every room and anchor (openings, continuations, closing rounds, waiting pulls), first takes a token of that peer's bucket: 15 a second, burst 30, so at most 30 + 60 × 15 = 930 requests to one peer in any minute and 900 a minute sustained, a 25 % margin on the per-peer rate and burst above. Tokens are handed out in the order asked; waiting for one ends when the room is left or the daemon stops. At most 3 requests without `wait_ms` are in flight to one peer at once, below its 4 concurrent. An exchange sends at most 64 requests |
-| Requester batching | a request that carries an offer or log entries carries no `wait_ms` and is never abandoned; changes made while it is on the way, or while it waits for a token, go in the next request, which follows as soon as the answer is back. A waiting pull carries nothing and is abandoned for a local change |
+| Requester budget | every pull request to one peer, of every room and anchor (openings, continuations, closing rounds, waiting pulls), is admitted by that peer's budget in this order: a slot (at most 3 requests in flight and not yet admitted, below its 4 concurrent: one without `wait_ms` until answered, a waiting pull until answered or 1 s has passed), then a token of its bucket (15 a second, burst 30), then it is prepared, membership checked again; each further address one request tries takes another token. So at most 30 + 60 × 15 = 930 pull requests reach one peer in any minute, 900 a minute sustained, a 25 % margin on the per-peer rate and burst above, within one run of the daemon: a restart or a networking change starts full buckets. Slots and tokens go in the order asked; waiting ends when the room is left or the daemon stops, and costs nothing. Buckets are kept for at most 1,024 peers; past that, while none is full and unused, the others share one bucket. The budget covers pull requests only: joins (5.3), file transfers (10), dial-back (4.7) and dials to unverified addresses (section 0) have their own limits. An exchange sends at most 64 requests; one cut there is taken up by the next at once |
+| Requester batching | a request that carries an offer or log entries carries no `wait_ms` and is not cancelled by a newer write (leaving the room and shutdown still cancel it; its timeout is 30 s, a waiting pull's `wait_ms` + 30 s); changes made while it is on the way, or while it waits for admission, go in the next request, which follows as soon as the answer is back. A waiting pull carries nothing and is abandoned for a local change |
 | Requester spins | an exchange that gave the server nothing new, stored nothing on the requester's side and did not wait (`same` well before its wait, or a round that was not clean) counts as a failure for back-off. One that offered records or log entries changed since the last exchange and stored nothing on the requester's side neither counts nor ends the count; the budget bounds those while the room changes, the back-off once it is quiet |
 | Inbound connections | 256 of members of a room held here, at most 16 of one key; 32 of other keys ("strangers"); 64 still in the TLS handshake, and 16 more for source groups (IPv4 address or IPv6 /64) that completed a member's handshake in the last 24 h, at most 4 of them for one group |
 | Per source, outside the members' pool | 8 per IPv4 address or IPv6 /64, 16 per /56, 32 per /48, in the shared handshake slots or of strangers; a connection with no slot is closed at once. The 16 kept slots are not counted here; one there that does not prove a member's key is closed and its group is no longer known |

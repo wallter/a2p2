@@ -7,9 +7,12 @@ package node
 import (
 	"context"
 	"errors"
+	"reflect"
 	"slices"
+	"sync"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/wallter/a2p2/internal/core"
 	"github.com/wallter/a2p2/internal/store"
@@ -169,6 +172,151 @@ func TestAPullWhoseLogRemovesThePeerTakesNothingAfterThePageThatRemovesIt(t *tes
 		}
 		if got, want := len(offerOf(t, b, room)), before+MaxLogEntries; got != want {
 			t.Fatalf("b holds %d log entries, want %d (up to the first page)", got, want)
+		}
+	})
+}
+
+// requestsFrom records every request from src that reaches a server, as the
+// server got it.
+func requestsFrom(net *recNet, src string) func() []PullRequest {
+	var mu sync.Mutex
+	var qs []PullRequest
+	net.memNet.mu.Lock()
+	net.lose = func(from, _ string, q *PullRequest, _ *PullResponse) bool {
+		if from == src {
+			mu.Lock()
+			qs = append(qs, *q)
+			mu.Unlock()
+		}
+		return false
+	}
+	net.memNet.mu.Unlock()
+	return func() []PullRequest {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(qs)
+	}
+}
+
+// The log this machine lacks removes the peer, then a whole page of other
+// entries (the intervening page), then admits it again. The page that
+// removes it is taken; the request after it, to a peer no longer a member,
+// carries only the read: the sum of an empty summary and this machine's
+// log heads and extra, with no seen, addresses, peers, log entries, detail
+// or offer, although this machine has an address and a record the peer
+// lacks. The intervening page, from a non-member, is not taken, so the
+// re-admission is not reached through it; the pull ends "not a member".
+// The rest of the log then comes from another member, and the next pull
+// from the peer, a member again, takes its record.
+//
+// Requirements: T4, T5
+func TestARemovedPeerIsSentOnlyTheReadAndAnInterveningPageIsNotTaken(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
+		net := newRecNet()
+		z, a, b := newSNode(t, "z", net), newSNode(t, "a", net), newSNode(t, "b", net)
+		b.x.addrs = []string{"192.0.2.7:4100"}
+		room := sgroup(t, z, a, b)
+		if _, err := b.x.Pull(ctx, room, a.id, PullOpts{}); err != nil {
+			t.Fatal(err)
+		}
+		before := len(offerOf(t, z, room))
+		change(t, z, room, Change{Kind: core.EntryRemove, Target: a.id})
+		for i := range 2*MaxLogEntries + 44 {
+			change(t, z, room, Change{Kind: core.EntryAdd, Target: junkNode(100 + i), Name: "filler", History: true})
+		}
+		change(t, z, room, Change{Kind: core.EntryAdd, Target: a.id, Name: "again", History: true})
+		whole := offerOf(t, z, room)
+		if _, err := a.r.Receive(ctx, room, 0, whole...); err != nil {
+			t.Fatal(err)
+		}
+		fromA := a.send(room, "after the re-admission")
+		mine := b.send(room, "b's own, which a lacks")
+		got := requestsFrom(net, b.id)
+		_, err := b.x.Pull(ctx, room, a.id, PullOpts{Offer: true})
+		if !errors.Is(err, ErrPeerNotMember) {
+			t.Fatalf("pull: %v, want ErrPeerNotMember", err)
+		}
+		qs := got()
+		if len(qs) != 2 {
+			t.Fatalf("%d requests, want the opening and one read", len(qs))
+		}
+		if q := qs[0]; len(q.Offer) == 0 || len(q.Addrs) == 0 {
+			t.Fatalf("the opening carried no offer or addresses: the test shows nothing (%+v)", q)
+		}
+		heads, extra := func() ([]string, []string) {
+			b.r.mu.Lock()
+			defer b.r.mu.Unlock()
+			return b.r.rooms[room].logHeads()
+		}()
+		want := PullRequest{V: PullVersion, Room: room, Sum: sumOf(nil), Log: PullLog{Heads: heads, Extra: extra}}
+		if q := qs[1]; !reflect.DeepEqual(q, want) {
+			t.Fatalf("the request to the removed peer:\n got %+v\nwant %+v", q, want)
+		}
+		if n := len(offerOf(t, b, room)); n != before+MaxLogEntries {
+			t.Fatalf("b holds %d log entries, want %d: the intervening page was taken", n, before+MaxLogEntries)
+		}
+		if st, _ := b.r.State(room); slices.Contains(st.Members, a.id) {
+			t.Fatal("a is a member at b through a page it sent as a non-member")
+		}
+		for range 4 { // the rest of the log from z, a page at a time
+			if _, err := b.x.Pull(ctx, room, z.id, PullOpts{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if n := len(offerOf(t, b, room)); n != len(whole) {
+			t.Fatalf("b holds %d log entries after pulling from z, want %d", n, len(whole))
+		}
+		if _, err := b.x.Pull(ctx, room, a.id, PullOpts{Offer: true}); err != nil {
+			t.Fatal(err)
+		}
+		if !b.holds(room, fromA) || !a.holds(room, mine) {
+			t.Fatal("after the re-admission the records did not cross")
+		}
+	})
+}
+
+// A request waiting for a slot of the peer's budget when the peer is
+// removed here is never sent: membership is checked when it is prepared,
+// after the slot and the token, and the token goes back.
+//
+// Requirements: T5, N1
+func TestARequestQueuedWhenItsPeerIsRemovedIsNeverSent(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
+		net := newRecNet()
+		z, a, b := newSNode(t, "z", net), newSNode(t, "a", net), newSNode(t, "b", net)
+		room := sgroup(t, z, a, b)
+		b.send(room, "an offer for a")
+		var held []*pullTicket
+		for range PullBudgetSlots {
+			tk, err := b.x.budget.admit(ctx, a.id, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			held = append(held, tk)
+		}
+		done := make(chan error, 1)
+		go func() {
+			_, err := b.x.Pull(ctx, room, a.id, PullOpts{Offer: true})
+			done <- err
+		}()
+		synctest.Wait()
+		change(t, z, room, Change{Kind: core.EntryRemove, Target: a.id})
+		if _, err := b.r.Receive(ctx, room, 0, offerOf(t, z, room)...); err != nil {
+			t.Fatal(err)
+		}
+		for _, tk := range held {
+			tk.done()
+		}
+		if err := <-done; !errors.Is(err, ErrPeerNotMember) {
+			t.Fatalf("pull: %v, want ErrPeerNotMember", err)
+		}
+		if n, _ := requests(net.sent(), b.id, a.id, time.Time{}, time.Now().Add(time.Hour)); n != 0 {
+			t.Fatalf("%d requests sent to the removed peer", n)
+		}
+		if got := b.x.budget.takenBy(a.id); got != int64(PullBudgetSlots) {
+			t.Fatalf("%d tokens kept, want %d (the queued request's went back)", got, PullBudgetSlots)
 		}
 	})
 }

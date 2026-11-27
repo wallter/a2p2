@@ -497,8 +497,8 @@ func (c hostile) run(t *testing.T) (minute, all int, tokens int64) {
 	return minute, all, tokens
 }
 
-// check fails unless the minute stayed within ceiling and no request went
-// to h without a token.
+// check fails unless the minute stayed within ceiling and every request
+// that went to h took exactly one token, kept.
 func (c hostile) check(t *testing.T, ceiling int) {
 	t.Helper()
 	minute, all, tokens := c.run(t)
@@ -506,8 +506,8 @@ func (c hostile) check(t *testing.T, ceiling int) {
 	if minute > ceiling {
 		t.Fatalf("%d requests in a minute, ceiling %d", minute, ceiling)
 	}
-	if int64(all) > tokens {
-		t.Fatalf("%d requests to the peer, %d tokens taken", all, tokens)
+	if int64(all) != tokens {
+		t.Fatalf("%d requests to the peer, %d tokens taken and kept", all, tokens)
 	}
 }
 
@@ -808,6 +808,183 @@ func TestRoomsStartingTogetherKeepFewerRequestsInFlightThanTheListenerAllows(t *
 		t.Logf("most requests in flight from a to b at once: %d; worst delay %v", peak, worst)
 		if peak > PullBudgetSlots || peak >= 4 {
 			t.Fatalf("%d requests in flight to one peer, at most %d (the listener allows 4)", peak, PullBudgetSlots)
+		}
+	})
+}
+
+// An outbound-only machine writes a backlog larger than one exchange can
+// carry (its offers cut to 2 records a request, 300 records: some 150
+// requests against the cap of pullMaxRequests) and then nothing more. The
+// exchange that ends Capped does not count the writes as offered, the
+// next follows at once, and every record arrives. Before, the next
+// exchange offered nothing and the rest waited for a later write.
+//
+// Requirements: D2, N1
+func TestABacklogLargerThanOneExchangeArrivesWithNoLaterWrite(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		net := newRecNet()
+		net.oneWay = 5 * time.Millisecond
+		a, b := newSNode(t, "a", net), newSNode(t, "b", net)
+		b.x.offerLimit = 2
+		room := sgroup(t, a, b)
+		net.memNet.mu.Lock()
+		net.noInbound[b.id] = true
+		net.memNet.mu.Unlock()
+		schedule(t, net, a, b)
+		net.run(t, time.Minute)
+		start := net.clock.Now()
+		var ids []string
+		for range 300 {
+			ids = append(ids, b.send(room, "backlog"))
+		}
+		for _, id := range ids {
+			awaitAt(t, net, a, room, id, start, time.Minute, "a record of the backlog")
+		}
+		reqs, offers := requests(net.sent(), b.id, a.id, start, net.clock.Now())
+		t.Logf("all at a after %v, %d requests, %d with offers", net.clock.Now().Sub(start), reqs, offers)
+		if offers <= pullMaxRequests {
+			t.Fatalf("%d requests with offers: the backlog fitted in one exchange, the test shows nothing", offers)
+		}
+	})
+}
+
+// The detail of an exchange that ended Capped starts, in the next one, at
+// the author it was taking, and wraps round: an early author that differs
+// for ever cannot keep later ones from their turn.
+//
+// Requirements: N1
+func TestTheNextExchangeTakesDetailFromWhereACappedOneStopped(t *testing.T) {
+	x := &Exchange{resume: map[[2]string]string{}}
+	differ := []string{"a1", "b2", "c3", "d4"}
+	if got := x.resumed("r", "p", differ); !slices.Equal(got, differ) {
+		t.Fatalf("with nothing to resume: %v", got)
+	}
+	x.setResume("r", "p", "c3")
+	if got, want := x.resumed("r", "p", differ), []string{"c3", "d4", "a1", "b2"}; !slices.Equal(got, want) {
+		t.Fatalf("resumed: %v, want %v", got, want)
+	}
+	if got, want := x.resumed("r", "p", []string{"a1", "d4"}), []string{"d4", "a1"}; !slices.Equal(got, want) {
+		t.Fatalf("resumed past an author no longer differing: %v, want %v", got, want)
+	}
+	if got := x.resumed("r", "q", differ); !slices.Equal(got, differ) {
+		t.Fatalf("another peer: %v", got)
+	}
+	x.setResume("r", "p", "")
+	if got := x.resumed("r", "p", differ); !slices.Equal(got, differ) {
+		t.Fatalf("after a round that ended: %v", got)
+	}
+}
+
+// A star: one listening hub and four outbound-only spokes in one room,
+// 5 ms each way, each spoke writing every 500 ms (staggered) for a minute,
+// 8 messages a second in the room. Every message reaches every machine,
+// a spoke's through the hub, and no spoke sends the hub more than the
+// budget (budgetCeiling in the minute). The spokes run near the ceiling:
+// each pays for the messages it receives (the released wait and the page)
+// as well as those it sends; the budget, not the listener's limit, paces
+// them, and delivery goes on by batching. The worst spoke-to-spoke delay
+// is logged; a bound of 5 s fails only a stall.
+//
+// Requirements: D2, N1
+func TestAStarOfFourOutboundOnlySpokesDeliversEverythingWithinTheBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		net := newRecNet()
+		net.oneWay = 5 * time.Millisecond
+		hub := newSNode(t, "hub", net)
+		var spokes []*snode
+		for i := range 4 {
+			spokes = append(spokes, newSNode(t, fmt.Sprintf("s%d", i), net))
+		}
+		room := sgroup(t, hub, spokes...)
+		net.memNet.mu.Lock()
+		for _, s := range spokes {
+			net.noInbound[s.id] = true
+		}
+		net.memNet.mu.Unlock()
+		schedule(t, net, append([]*snode{hub}, spokes...)...)
+		net.run(t, time.Minute)
+		type sentTo struct {
+			p  pending
+			to *snode
+		}
+		var ps []sentTo
+		start := net.clock.Now()
+		worst := time.Duration(0)
+		check := func() {
+			now := net.clock.Now()
+			rest := ps[:0]
+			for _, x := range ps {
+				took := now.Sub(x.p.at)
+				if x.to.holds(room, x.p.id) {
+					worst = max(worst, took)
+					continue
+				}
+				if took > 5*time.Second {
+					t.Fatalf("a message sent at %v not at %s after %v", x.p.at.Sub(start), x.to.name, took)
+				}
+				rest = append(rest, x)
+			}
+			ps = rest
+		}
+		step := 125 * time.Millisecond // one spoke writes each step, each every 500 ms
+		for i := 0; net.clock.Now().Sub(start) < time.Minute; i++ {
+			w := spokes[i%len(spokes)]
+			id := w.send(room, "spoke")
+			for _, r := range spokes {
+				if r != w {
+					ps = append(ps, sentTo{pending{id, net.clock.Now()}, r})
+				}
+			}
+			for range 5 {
+				net.run(t, step/5)
+				check()
+			}
+		}
+		for len(ps) > 0 {
+			net.run(t, 10*time.Millisecond)
+			check()
+		}
+		for _, s := range spokes {
+			n, offers := requests(net.sent(), s.id, hub.id, start, start.Add(time.Minute))
+			t.Logf("%s: %d requests to the hub in the minute (%d with offers)", s.name, n, offers)
+			if n > budgetCeiling {
+				t.Fatalf("%s sent the hub %d requests in a minute, ceiling %d", s.name, n, budgetCeiling)
+			}
+		}
+		t.Logf("worst spoke-to-spoke delay %v", worst)
+	})
+}
+
+// A restart starts with full buckets: the budget is in memory, so a
+// restarted daemon (a new Exchange) may send a peer its burst at once even
+// if the last run had just spent it. That is the boundary of the stated
+// bound: at most burst + 60·rate in any minute of one run of the daemon.
+//
+// Requirements: N1
+func TestARestartStartsTheBudgetFull(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		net := newRecNet()
+		a := newSNode(t, "a", net)
+		ctx := context.Background()
+		admitAll := func(x *Exchange) (at time.Duration) {
+			start := time.Now()
+			for range int(PullBudgetBurst) {
+				tk, err := x.budget.admit(ctx, "peer", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tk.done()
+			}
+			return time.Since(start)
+		}
+		admitAll(a.x)
+		took := admitAll(a.x)
+		if took < time.Duration(PullBudgetBurst-1)*tokenGap {
+			t.Fatalf("a spent bucket admitted its burst again in %v", took)
+		}
+		restarted := NewExchange(a.r, net.link(a.id), ExchangeOpts{After: net.clock.After})
+		if took := admitAll(restarted); took != 0 {
+			t.Fatalf("after a restart the burst took %v, want at once", took)
 		}
 	})
 }

@@ -288,8 +288,13 @@ func (s *Scheduler) anchor(ctx context.Context, room string, gen int64, slot int
 		switch {
 		case ctx.Err() != nil:
 			return
+		case err == nil && st.Capped && (st.Stored+st.Repaired+st.Entries > 0 || st.Offered+st.Given > 0):
+			// Cut by the exchange's cap with work under way: the next one
+			// follows at once, paid for by the budget, offering again, and
+			// with the same peer.
+			s.succeeded(room, peer)
 		case err == nil:
-			if offer {
+			if offer && !st.Capped {
 				first, offered = false, seq
 			}
 			s.succeeded(room, peer)
