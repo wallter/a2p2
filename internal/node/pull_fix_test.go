@@ -598,15 +598,32 @@ func TestAnOlderObservationNeverReplacesALaterOne(t *testing.T) {
 // it hold no text and are not wanted; nb and w list only what is above.
 // The digest line includes x.
 func TestStreamDetailCarriesTheTextlessFloor(t *testing.T) {
-	d := streamDetail("e", 9, []int64{1, 2, 3, 5, 7}, []int64{7})
+	d := streamDetail("e", 9, 0, []int64{1, 2, 3, 5, 7}, []int64{7})
 	if d.X != 3 || !slices.Equal(d.NB, []int64{5, 7}) || !slices.Equal(d.W, []int64{7}) {
 		t.Fatalf("detail: %+v", d)
 	}
-	if all := streamDetail("e", 4, []int64{1, 2, 3, 4}, nil); all.X != 4 || all.NB != nil {
+	if all := streamDetail("e", 4, 0, []int64{1, 2, 3, 4}, nil); all.X != 4 || all.NB != nil {
 		t.Fatalf("fully textless: %+v", all)
 	}
-	if w := streamDetail("e", 4, []int64{1, 2}, []int64{1}); w.X != 0 || !slices.Equal(w.NB, []int64{1, 2}) {
+	if w := streamDetail("e", 4, 0, []int64{1, 2}, []int64{1}); w.X != 0 || !slices.Equal(w.NB, []int64{1, 2}) {
 		t.Fatalf("wanted first: %+v", w)
+	}
+	// The store gives a run of positions from 1 as a floor: the same details.
+	for _, c := range []struct {
+		floor        int64
+		noBody, want []int64
+		flat         []int64
+	}{
+		{3, []int64{5, 7}, []int64{7}, []int64{1, 2, 3, 5, 7}},
+		{2, []int64{3, 4}, nil, []int64{1, 2, 3, 4}},
+		{2, nil, []int64{1}, []int64{1, 2}},
+		{4, []int64{6}, []int64{3, 6}, []int64{1, 2, 3, 4, 6}},
+		{1, nil, nil, []int64{1}},
+	} {
+		got, flat := streamDetail("e", 9, c.floor, c.noBody, c.want), streamDetail("e", 9, 0, c.flat, c.want)
+		if got.X != flat.X || !slices.Equal(got.NB, flat.NB) || !slices.Equal(got.W, flat.W) {
+			t.Fatalf("floor %d: %+v, listed %+v", c.floor, got, flat)
+		}
 	}
 	if got := digestOf([]store.StreamDetail{d}); got != digestOf([]store.StreamDetail{{E: "e", C: 9, X: 3, NB: []int64{5, 7}, W: []int64{7}}}) {
 		t.Fatal("digest")

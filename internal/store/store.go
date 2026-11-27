@@ -90,6 +90,9 @@ type Store struct {
 	// waits for Rooms.mu: a gate's prepare reads Rooms.State, which takes
 	// only smu; and a deletion run from under Rooms.mu (a leave) may wait
 	// for fileMu, since no holder of fileMu waits for Rooms.mu.
+	// texts.mu (the summary cache, summary.go) is a leaf too, taken inside
+	// a transaction; a transaction that wrote records holds it across its
+	// commit, which waits for nothing but the disk.
 	root   string
 	fileMu sync.Mutex
 	// unknownFiles counts what the last start left under blobs/ because
@@ -104,6 +107,10 @@ type Store struct {
 	stageMu, resMu            sync.Mutex
 	staging                   map[string]stageRes
 	roomBudget, machineBudget int64
+	// texts is, per room, its records without live text as of the last
+	// commit, for Reader.Summary (summary.go). Its lock is a leaf, held
+	// across the commit of a transaction that wrote records.
+	texts textCache
 }
 
 // Changes is the number of write transactions begun committing. Read it
@@ -331,12 +338,27 @@ func (s *Store) tx(ctx context.Context, fn func(*sql.Tx) error) error {
 	if h := txHook; h != nil {
 		defer h(true, time.Now())
 	}
+	ts := &txState{s: s, write: true}
+	txStates.Store(tx, ts)
+	defer txStates.Delete(tx)
 	if err := fn(tx); err != nil {
 		tx.Rollback()
 		return err
 	}
 	s.changes.Add(1)
-	return tx.Commit()
+	if len(ts.notes) == 0 && len(ts.drop) == 0 {
+		return tx.Commit()
+	}
+	// The notes reach the cache before any read can see what they say:
+	// a read asks the cache under its lock, held from before the commit.
+	s.texts.mu.Lock()
+	defer s.texts.mu.Unlock()
+	if err := tx.Commit(); err != nil {
+		s.texts.dropped() // committed or not: read again
+		return err
+	}
+	s.texts.committed(ts)
+	return nil
 }
 
 // txHook, when set, is told of every transaction once it ends: whether it

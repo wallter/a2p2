@@ -61,6 +61,47 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Fixed
 
+- **Serving and making a pull no longer gets slower as a room's history
+  grows.** Every pull request served or made worked out the machine's
+  summary of the room by reading every record of it, under the lock that
+  covers every room on the machine. A held pull did the same again after
+  each write. The store now keeps, per room in memory, the positions held
+  without text, kept up to date by the writes as they commit and safe
+  against a read whose request is cancelled while it runs. A summary then
+  reads the room's streams and the few live texts past retention that
+  pruning has not marked yet, and asks for pruning when it finds one. The
+  database and the wire are unchanged; the cache assumes, as the daemon's
+  home lock ensures, that no other process writes the database. A page or
+  offer also reads each stream at most one more record than it can carry
+  at a time, and wanted text one record at a time, instead of the rest of
+  the stream, and a record received from a peer reads the room's streams
+  only when this machine's history permission needs them. Measured in process on an Apple Silicon laptop
+  (`go test -tags bench -run TestBenchPullHistory ./internal/node/`: two
+  machines over the in-memory network, synthetic authors, one stream
+  each, 200 B texts; CPU per request on the serving machine, two runs
+  each, the second in brackets, in ms):
+
+  | records, authors | idle opening (`same`) | opening after one new record | detail with a page of 1 | catch-up page |
+  |---|---|---|---|---|
+  | 1,000, 5 | 0.52 (0.52) → 0.16 (0.16) | 0.41 (0.42) → 0.06 (0.05) | 0.85 (0.82) → 0.20 (0.21) | 1.75 (1.78) → 1.11 (1.08) |
+  | 10,000, 5 | 12 (13) → 0.16 (0.16) | 14 (14) → 0.05 (0.07) | 23 (28) → 0.20 (0.21) | 37 (40) → 6.29 (6.45) |
+  | 50,000, 5 | 62 (66) → 0.18 (0.17) | 66 (72) → 0.07 (0.07) | 131 (131) → 0.22 (0.23) | 146 (142) → 7.01 (6.76) |
+  | 100,000, 5 | 129 (146) → 0.18 (0.18) | 130 (131) → 0.07 (0.07) | 316 (275) → 0.24 (0.24) | 374 (296) → 7.78 (7.68) |
+  | 1,000, 50 | 3.98 (2.05) → 0.96 (0.97) | 2.63 (1.41) → 0.20 (0.21) | 5.04 (2.64) → 1.11 (0.91) | 4.83 (2.58) → 1.12 (1.09) |
+  | 10,000, 50 | 21 (11) → 0.99 (1.00) | 20 (9.79) → 0.30 (0.20) | 38 (19) → 1.04 (1.12) | 40 (21) → 1.92 (2.25) |
+  | 50,000, 50 | 109 (70) → 0.96 (0.97) | 113 (67) → 0.31 (0.34) | 217 (134) → 1.10 (1.09) | 214 (134) → 2.43 (2.54) |
+  | 100,000, 50 | 159 (147) → 0.95 (0.93) | 151 (145) → 0.29 (0.31) | 298 (290) → 1.16 (1.08) | 289 (292) → 2.47 (2.15) |
+
+  On the requesting side, preparing an idle opening went from 0.36 ms
+  to 0.05 ms at 1,000 records and 5 authors and from 158 to 0.06 ms at
+  100,000, and a catch-up costs 85 to 105 ms of CPU per request on
+  both sides together at 100,000 (it was 610 to 875).
+  Four peers' idle openings served at once rose from 2.4 to about 23,000
+  a second at 100,000 records. What still grows with history: the streams
+  of a room (restarts start new ones), the positions without text other
+  than a run from the first, which the detail lists on the wire, and the
+  catch-up page, which reads up to its limit of each stream it covers.
+
 - **Many agents waiting in one room no longer slow every send down.** A
   message this machine writes now wakes only the waiting inboxes it can
   show something to (its addressees, or the agents whose level lets a

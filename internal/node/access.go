@@ -91,10 +91,7 @@ func (r *Rooms) recordPlan(st members.State, look func(string) *core.VerifiedEnt
 			}
 			return p, nil
 		}
-		v := r.m.newView(rd, f.Room, now)
-		if err := v.load(); err != nil {
-			return p, err
-		}
+		v := r.m.newView(rd, f.Room, now) // loaded only if perm needs it (textAccess)
 		var err error
 		if p.Text, err = textAccess(v, perm, author, f, id); err != nil {
 			return p, err
@@ -176,6 +173,16 @@ func textAccess(v *roomView, perm members.Permission, author string, f core.Reco
 		return store.TextReadable, nil
 	case perm.Closed:
 		return store.TextHidden, nil
+	}
+	// The view may be lazy (recordPlan, summarize). Loading it gives
+	// descends the streams' first records, to follow a frontier head's
+	// stream back through its links. Defensive, and no test reaches a
+	// case that needs it: a record before a held head arrives before that
+	// head (links and prev place every ancestor first), so it is decided
+	// undecided then and decided again, with a loaded view, by access()
+	// when the head is placed; and repair acts only on missing text.
+	if err := v.ensure(); err != nil {
+		return store.TextHidden, err
 	}
 	x := &rec{f: f, id: id, author: author}
 	undecided := false

@@ -146,7 +146,9 @@ type summary struct {
 // summarize builds this machine's summary of v's room under membership st.
 // A missing text is wanted only if this machine's permission lets it hold
 // it now: undecided text (a frontier head not held) is not asked for, so
-// no page slot goes on text that would not be taken.
+// no page slot goes on text that would not be taken. v is loaded only if
+// some text is missing (roomView.ensure): the summary itself comes from
+// the store's (Reader.Summary).
 func (r *Rooms) summarize(v *roomView, st members.State) (summary, error) {
 	s := summary{authors: slices.Sorted(slices.Values(st.Admitted)), detail: map[string][]store.StreamDetail{},
 		digests: map[string]string{}}
@@ -159,10 +161,24 @@ func (r *Rooms) summarize(v *roomView, st members.State) (summary, error) {
 		if _, ok := slices.BinarySearch(s.authors, row.Author); !ok {
 			continue
 		}
+		if row.PastRetention {
+			// Live text counted expired by the clock: ask for the pruning
+			// pass that marks it so durably, as reading it would (keep).
+			r.m.pruneDue.Store(true)
+		}
 		var wanted []int64
 		for i, n := range row.Missing {
 			if !member && row.Author != r.m.ID {
 				break
+			}
+			// Defensive, and no test needs it: v.get reads the record
+			// itself, and what loading the view adds here is the room's
+			// member list (v.hidden), which cannot hide an author of rows
+			// already filtered by st.Admitted, and the streams' first
+			// records, which textAccess loads for itself. Kept so that a
+			// later use of v below does not meet an unloaded view.
+			if err := v.ensure(); err != nil {
+				return s, err
 			}
 			x, err := v.get(row.MissingIDs[i])
 			if err != nil {
@@ -181,7 +197,7 @@ func (r *Rooms) summarize(v *roomView, st members.State) (summary, error) {
 				wanted = append(wanted, n)
 			}
 		}
-		s.detail[row.Author] = append(s.detail[row.Author], streamDetail(row.Epoch, row.Contig, row.NoBody, wanted))
+		s.detail[row.Author] = append(s.detail[row.Author], streamDetail(row.Epoch, row.Contig, row.Floor, row.NoBody, wanted))
 	}
 	for a, d := range s.detail {
 		s.digests[a] = digestOf(d)
@@ -189,11 +205,47 @@ func (r *Rooms) summarize(v *roomView, st members.State) (summary, error) {
 	return s, nil
 }
 
+// viewLazy is Machine.view with the room's streams read only when fn
+// first needs them (ensure): what a summary that holds no missing text
+// never does (summarize).
+func (m *Machine) viewLazy(ctx context.Context, room string, fn func(*roomView) error) error {
+	now := m.now()
+	return m.st.View(ctx, func(rd *store.Reader) error {
+		v := m.newView(rd, room, now)
+		defer func() {
+			if v.expiredByClock {
+				m.pruneDue.Store(true)
+			}
+		}()
+		return fn(v)
+	})
+}
+
+// ensure loads v if it was made without (viewLazy, or newView alone). A
+// loaded view of a held room has its generation, which is never 0; a view
+// of a room not held is loaded again, which reads the same.
+func (v *roomView) ensure() error {
+	if v.gen != 0 {
+		return nil
+	}
+	return v.load()
+}
+
 // streamDetail is one stream's detail from the positions held without
-// text (ascending) and those wanted: the floor x is the longest run from 1
-// of positions without text and not wanted; nb and w list what is above it.
-func streamDetail(epoch string, c int64, noBody, wanted []int64) store.StreamDetail {
+// text, 1 to floor and noBody (ascending, above floor), and those wanted
+// (ascending): the floor x is the longest run from 1 of positions without
+// text and not wanted; nb and w list what is above it.
+func streamDetail(epoch string, c, floor int64, noBody, wanted []int64) store.StreamDetail {
 	d := store.StreamDetail{E: epoch, C: c, W: wanted}
+	if len(wanted) > 0 && wanted[0] <= floor {
+		d.X = wanted[0] - 1
+		for n := d.X + 1; n <= floor; n++ {
+			d.NB = append(d.NB, n)
+		}
+		d.NB = append(d.NB, noBody...)
+		return d
+	}
+	d.X = floor
 	i := 0
 	for i < len(noBody) && noBody[i] == d.X+1 && (len(wanted) == 0 || wanted[0] != noBody[i]) {
 		d.X++
@@ -251,6 +303,9 @@ func (it pageItem) wire() []byte {
 // maxBytes of wire objects, and whether it cut.
 func (x *Exchange) buildPage(v *roomView, readable func(*rec) (bool, error), want map[string][]store.StreamDetail,
 	authors []string, skip map[string]bool, blocked map[streamKey]bool, limit, maxBytes int) ([]pageItem, bool, error) {
+	if err := v.ensure(); err != nil {
+		return nil, false, err
+	}
 	reqC := func(k streamKey) int64 {
 		for _, s := range want[k.author] {
 			if s.E == k.epoch {
@@ -281,6 +336,28 @@ func (x *Exchange) buildPage(v *roomView, readable func(*rec) (bool, error), wan
 		}
 		return readable(h)
 	}
+	// Every read of a stream here is bounded: atMost(k, n, upto) reads
+	// positions n to upto of k, at most, and only when n is not read yet;
+	// v.at would read the rest of the stream.
+	atMost := func(k streamKey, n, upto int64) (*rec, error) {
+		if n < 1 || n > v.contig[k] {
+			return nil, nil
+		}
+		if h := v.byPos[k][n]; h != nil {
+			return h, nil
+		}
+		if lo, ok := v.loaded[k]; ok && n >= lo {
+			return nil, nil // read already, from lo on: not held
+		}
+		hs, err := v.rd.RecordsFromN(v.room, k.author, k.epoch, n, int(max(upto, n)-n+1))
+		if err != nil {
+			return nil, err
+		}
+		for _, h := range hs {
+			v.keep(h)
+		}
+		return v.byPos[k][n], nil
+	}
 	var out []pageItem
 	for _, k := range streams {
 		for _, s := range want[k.author] {
@@ -288,7 +365,7 @@ func (x *Exchange) buildPage(v *roomView, readable func(*rec) (bool, error), wan
 				continue
 			}
 			for _, n := range s.W {
-				h, err := v.at(k, n)
+				h, err := atMost(k, n, n)
 				if err != nil {
 					return nil, false, err
 				}
@@ -305,11 +382,19 @@ func (x *Exchange) buildPage(v *roomView, readable func(*rec) (bool, error), wan
 			}
 		}
 	}
+	// At most limit records of a stream can be in the page, so no more are
+	// read: the first limit+1 of each stream that are not in skip (one
+	// more, to tell that the page is cut) give the page and the cut the
+	// whole stream would, since a record past them could only follow them
+	// in the page. They are read limit+1 at a time, so a stream costs the
+	// page's limit plus the records of it skip holds, which were sent
+	// earlier in the exchange, never the rest of the stream.
 	per := map[streamKey][]pageItem{}
 	inPage := map[string]bool{}
 	for _, k := range streams {
-		for n := reqC(k) + 1; n <= v.contig[k]; n++ {
-			h, err := v.at(k, n)
+		from := reqC(k) + 1
+		for n := from; n <= v.contig[k] && len(per[k]) <= limit; n++ {
+			h, err := atMost(k, n, n+int64(limit))
 			if err != nil {
 				return nil, false, err
 			}
@@ -850,10 +935,7 @@ func (x *Exchange) serve(ctx context.Context, peer string, q *PullRequest) (*bui
 			if err != nil {
 				return err
 			}
-			v := r.m.newView(tx.Reader(), rl.id, now)
-			if err := v.load(); err != nil {
-				return err
-			}
+			v := r.m.newView(tx.Reader(), rl.id, now) // loaded only if summarize needs it
 			own, err := r.summarize(v, st)
 			if err != nil {
 				return err
@@ -955,7 +1037,7 @@ func (x *Exchange) respond(ctx context.Context, rl *roomLog, peer string, q *Pul
 	own := sv.own
 	if q.Sum != "" {
 		if !sv.ok || sv.ver != b.ver {
-			if err := r.m.view(ctx, rl.id, func(v *roomView) (err error) {
+			if err := r.m.viewLazy(ctx, rl.id, func(v *roomView) (err error) {
 				own, err = r.summarize(v, st)
 				return err
 			}); err != nil {
@@ -1294,7 +1376,7 @@ func (x *Exchange) prepare(ctx context.Context, room, peer string, gen int64, ch
 	heads, extra := rl.logHeads()
 	p.at, p.order = r.m.now(), x.next()
 	key := [2]string{room, peer}
-	err := r.m.view(ctx, room, func(v *roomView) error {
+	err := r.m.viewLazy(ctx, room, func(v *roomView) error { // loaded by summarize or buildPage if they need it
 		own, err := r.summarize(v, st)
 		if err != nil {
 			return err
@@ -1435,7 +1517,7 @@ func (x *Exchange) ownSummary(ctx context.Context, room string, gen int64) (summ
 		return summary{}, ErrStaleGeneration
 	}
 	var own summary
-	err := r.m.view(ctx, room, func(v *roomView) (err error) {
+	err := r.m.viewLazy(ctx, room, func(v *roomView) (err error) {
 		own, err = r.summarize(v, rl.st)
 		return err
 	})
