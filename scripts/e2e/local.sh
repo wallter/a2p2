@@ -112,7 +112,7 @@ for h in $which; do
         if called "$dir" "$t"; then ok "called $t"; else bad "never called $t" "$out"; fi
       done
     fi
-    hist=$("$bin" history -n 200 --json)
+    hist=$("$bin" history --as checker -n 200 --json)
     check() { printf '%s' "$hist" | python3 -c "import json,sys; e=json.load(sys.stdin)['entries']; sys.exit(0 if $1 else 1)"; }
     if check "any(x.get('parent')=='$mid' and x['from'].startswith('$label@') for x in e)"; then ok "replied to the checker"; else bad "no reply to the checker" "$out"; fi
     if "$bin" trace "$mid" --json | grep -q "\"$label@"; then ok "reported it handled"; else bad "not reported handled" "$("$bin" trace "$mid")"; fi

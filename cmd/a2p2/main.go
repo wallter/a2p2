@@ -175,6 +175,23 @@ func usagef(format string, a ...any) error {
 	return fmt.Errorf("%w: %s", errUsage, fmt.Sprintf(format, a...))
 }
 
+// waitSeconds checks a --wait given in seconds against what the daemon
+// allows, and says so in the flag's terms, not in the local API's field.
+func waitSeconds(sec int) (int64, error) {
+	if sec < 0 || sec > int(node.MaxWait/time.Second) {
+		return 0, &localapi.Error{User: true, Msg: fmt.Sprintf("--wait takes 0 to %d seconds, not %d", int(node.MaxWait/time.Second), sec)}
+	}
+	return int64(sec) * 1000, nil
+}
+
+// notNegative checks a count flag, so that the error names the flag typed.
+func notNegative(flagName string, n int) error {
+	if n < 0 {
+		return &localapi.Error{User: true, Msg: fmt.Sprintf("%s must not be negative, not %d", flagName, n)}
+	}
+	return nil
+}
+
 // cmd bundles what most subcommands need.
 type cmd struct {
 	ctx    context.Context
@@ -1243,8 +1260,12 @@ func alerts(c *cmd, args []string) error {
 	if err := c.fs.Parse(permute(c.fs, args)); err != nil {
 		return errUsage
 	}
+	waitMS, err := waitSeconds(*wait)
+	if err != nil {
+		return err
+	}
 	var res localapi.AlertsResp
-	return c.call("alerts", localapi.WaitReq{WaitMS: int64(*wait) * 1000}, &res, func() {
+	return c.call("alerts", localapi.WaitReq{WaitMS: waitMS}, &res, func() {
 		if len(res.Alerts) == 0 {
 			fmt.Println("No alerts.")
 		}
@@ -1599,11 +1620,15 @@ func fetch(c *cmd, args []string) error {
 	if err := c.fs.Parse(permute(c.fs, args)); err != nil || c.fs.NArg() != 1 {
 		return usagef("a2p2 fetch SHA256 [--room R] [--message ID] [--wait SECONDS]")
 	}
+	waitMS, err := waitSeconds(*wait)
+	if err != nil {
+		return err
+	}
 	me, err := c.who("fetch", false)
 	if err != nil {
 		return err
 	}
-	req := localapi.FetchReq{Agent: me, Room: *roomName, SHA256: c.fs.Arg(0), Message: *msg, WaitMS: int64(*wait) * 1000}
+	req := localapi.FetchReq{Agent: me, Room: *roomName, SHA256: c.fs.Arg(0), Message: *msg, WaitMS: waitMS}
 	var r localapi.FetchResp
 	return c.call("fetch", req, &r, func() { printFetch(os.Stdout, os.Stderr, r) })
 }
@@ -1645,6 +1670,13 @@ func inbox(c *cmd, args []string) error {
 	if err := c.fs.Parse(args); err != nil {
 		return errUsage
 	}
+	waitMS, err := waitSeconds(*wait)
+	if err != nil {
+		return err
+	}
+	if err := notNegative("--limit", *limit); err != nil {
+		return err
+	}
 	// Reading marks the entries seen, which takes a question from the
 	// person's list; --peek, --thread and --levels mark nothing.
 	marks := *level != "" || !*peek && *thread == "" && !*levels
@@ -1673,7 +1705,7 @@ func inbox(c *cmd, args []string) error {
 		})
 	}
 	var res localapi.InboxResp
-	raw, err := cl.CallRaw(c.ctx, "inbox", localapi.InboxReq{Agent: me, Room: *roomName, Limit: *limit, WaitMS: int64(*wait) * 1000}, &res)
+	raw, err := cl.CallRaw(c.ctx, "inbox", localapi.InboxReq{Agent: me, Room: *roomName, Limit: *limit, WaitMS: waitMS}, &res)
 	if err != nil {
 		return err
 	}
@@ -1716,6 +1748,9 @@ func history(c *cmd, args []string) error {
 	skipped := c.fs.Bool("skipped", false, "only what the acting agent's level kept out of its inbox (every room unless --room)")
 	if err := c.fs.Parse(args); err != nil {
 		return errUsage
+	}
+	if err := notNegative("-n", *n); err != nil {
+		return err
 	}
 	// As the acting agent: entries its level kept out are marked, and it
 	// may then report one it was shown handled.
