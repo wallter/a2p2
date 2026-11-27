@@ -134,6 +134,10 @@ const (
 type InboxView struct {
 	Entries []Entry
 	Waiting []Wait
+	// More (Surface.InboxPage): the entries the inbox holds now that this
+	// read left out, by its limit or its byte budget. They stay unread,
+	// with no receipt.
+	More int
 	// levels is the agent's reading level in each room the look read
 	// (what wakes a waiting Inbox: touchWrite).
 	levels map[string]string

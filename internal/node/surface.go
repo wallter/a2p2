@@ -915,10 +915,19 @@ func (s *Surface) rooms(ctx context.Context) ([]store.LogRoom, error) {
 }
 
 // Inbox shows agent what it has not confirmed, in room or in every room,
-// oldest first, at most limit entries, waiting up to wait for one. It keeps
-// a receipt of each entry it returns, which Seen requires (Machine.Showed),
-// and marks nothing seen: Seen confirms.
+// oldest first, at most limit entries, waiting up to wait for one: InboxPage
+// with no byte budget.
 func (s *Surface) Inbox(ctx context.Context, agent, room string, limit int, wait time.Duration) (InboxView, error) {
+	return s.InboxPage(ctx, agent, room, InboxOpts{Limit: limit, Wait: wait})
+}
+
+// InboxPage shows agent what it has not confirmed, in room or in every
+// room, oldest first: at most o.Limit entries and, with o.MaxBytes, what
+// that budget holds (FitPage), waiting up to o.Wait for one. It keeps a
+// receipt of each entry it returns, which Seen requires (Machine.Showed),
+// and marks nothing seen: Seen confirms. What the page leaves out gets no
+// receipt and is counted in More; the next read offers it again.
+func (s *Surface) InboxPage(ctx context.Context, agent, room string, o InboxOpts) (InboxView, error) {
 	label, err := s.label(agent)
 	if err != nil {
 		return InboxView{}, err
@@ -928,6 +937,7 @@ func (s *Surface) Inbox(ctx context.Context, agent, room string, limit int, wait
 			return InboxView{}, err
 		}
 	}
+	limit, wait := o.Limit, o.Wait
 	switch {
 	case limit < 0:
 		return InboxView{}, userErr("limit must not be negative")
@@ -939,6 +949,9 @@ func (s *Surface) Inbox(ctx context.Context, agent, room string, limit int, wait
 	if wait < 0 || wait > MaxWait {
 		return InboxView{}, userErr("wait is 0 to 120 seconds")
 	}
+	if err := o.check(); err != nil {
+		return InboxView{}, err
+	}
 	deadline := time.Now().Add(wait)
 	for {
 		// Registered before the look, so that a change committed after it
@@ -947,8 +960,8 @@ func (s *Surface) Inbox(ctx context.Context, agent, room string, limit int, wait
 		v, err := s.inbox(ctx, label, room)
 		if err != nil || len(v.Entries) > 0 || wait == 0 {
 			s.m.wakes.doneInbox(x)
-			if len(v.Entries) > limit {
-				v.Entries = v.Entries[:limit]
+			if err == nil {
+				v, err = o.page(v, limit)
 			}
 			if err == nil {
 				err = s.showed(ctx, label, withoutRequests(v.Entries), true)

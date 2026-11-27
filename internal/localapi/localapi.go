@@ -153,6 +153,14 @@ type (
 		Room   string `json:"room,omitempty"`
 		Limit  int    `json:"limit,omitempty"`
 		WaitMS int64  `json:"wait_ms,omitempty"`
+		// MaxBytes (512 to 40,000; 0: none): the entries returned, oldest
+		// first, are what fits that many bytes of the MCP inbox tool's
+		// result (ToolInboxSize), Reserve of them taken by what the caller
+		// adds itself (the tool's levels). The rest is not returned and
+		// keeps no receipt (D70). Daemons before 0.2.4 ignore both, and
+		// answer without max_bytes.
+		MaxBytes int `json:"max_bytes,omitempty"`
+		Reserve  int `json:"reserve,omitempty"`
 	}
 	Entry struct {
 		Key       string `json:"key"`
@@ -219,6 +227,11 @@ type (
 	InboxResp struct {
 		Entries []Entry `json:"entries"`
 		Waiting []Wait  `json:"waiting"`
+		// More: entries still unread that the limit or max_bytes left
+		// out; the next call offers them. MaxBytes: the budget applied,
+		// as asked (absent from a daemon before 0.2.4, which ignores it).
+		More     int `json:"more,omitempty"`
+		MaxBytes int `json:"max_bytes,omitempty"`
 	}
 	Entries struct {
 		Entries []Entry `json:"entries"`
@@ -1036,8 +1049,21 @@ func Handler(s *node.Surface, info Info) http.Handler {
 		if err != nil {
 			return InboxResp{}, err
 		}
-		v, err := s.Inbox(ctx, r.Agent, r.Room, r.Limit, wait)
-		out := InboxResp{Entries: entriesOf(v.Entries), Waiting: []Wait{}}
+		if r.Reserve < 0 {
+			return InboxResp{}, userErr("reserve must not be negative")
+		}
+		o := node.InboxOpts{Limit: r.Limit, Wait: wait, MaxBytes: r.MaxBytes}
+		if r.MaxBytes != 0 {
+			local := s.LocalRoom()
+			o.Size = func(page []node.Entry, waiting []node.Wait, more int) int {
+				return ToolInboxSize(entriesOf(page), len(waiting), more, local) + r.Reserve
+			}
+		}
+		v, err := s.InboxPage(ctx, r.Agent, r.Room, o)
+		out := InboxResp{Entries: entriesOf(v.Entries), Waiting: []Wait{}, More: v.More}
+		if err == nil {
+			out.MaxBytes = r.MaxBytes
+		}
 		for _, w := range v.Waiting {
 			out.Waiting = append(out.Waiting, Wait{Room: w.Room, Author: w.Author, Have: w.Have, Known: w.Known,
 				Since: Time(w.Since), Reason: w.Reason})
