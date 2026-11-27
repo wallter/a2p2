@@ -5,6 +5,7 @@ D6, D9, N1). Python 3 standard library only.
     chaos.py run   [--nodes 3] [--duration 90] [--seed 1] [--settle 420]
                    [--out DIR] [--sabotage isolate] [--keep]
     chaos.py check DIR [--drop NODE:AUTHOR] [--corrupt] [--unverify KIND] [--empty]
+                       [--add-field NAME] [--flip-local]
 
 `run` builds the static Linux binary into an image tagged for this run,
 starts one daemon per container (its own home volume, one user-defined
@@ -31,7 +32,8 @@ it fails when it should: --drop NODE:AUTHOR deletes AUTHOR's records from
 NODE's copy; --corrupt changes one message's text the same way on every
 member; --unverify KIND marks every fault of that kind as not applied;
 --empty removes every send, read and record (a run in which nothing got
-through).
+through); --add-field NAME gives one entry a field the checker does not
+know; --flip-local makes one entry's from_this_machine wrong.
 """
 
 import argparse
@@ -789,9 +791,54 @@ def history(cl, nm):
         before = page[0]["id"]
 
 
+# The fields of an entry (localapi.Entry, what `history --json` and
+# `inbox --json` return), each either the same on every member once the
+# room has settled, or a description of the reading machine. A field in
+# neither list stops the checker: a new field must be placed here, so it
+# can neither break the comparison nor silently drop out of it.
+# TestChaosCheckerKnowsEveryEntryField (internal/localapi) keeps the two
+# lists equal to the struct's JSON names.
+ENTRY_SHARED = (
+    "key", "version", "edited", "kind", "id", "room", "from", "from_node", "changed_by", "to",
+    "author_removed", "ask_handled", "parent", "thread", "parent_state", "created", "text",
+    "choices", "files",
+)
+# from and to are written with the short machine id unless id_shared, so
+# they are shared only while every member knows the same machines (true
+# here: one room, ids that differ in their first bytes). files is
+# compared without each file's state on this machine.
+ENTRY_LOCAL = (
+    "room_label",         # the room's label as shown here, told apart from this machine's other rooms
+    "from_this_machine",  # the author is the reading machine; checked against from_node instead
+    "id_shared",          # another machine known here has the same short id
+    "late",               # this agent confirmed a later record of the author; checked on its own
+    "skipped",            # this agent's level kept it out of its inbox
+    "text_cut",           # this read's byte budget cut the text
+    "files_pending",      # this machine does not hold the file list yet
+    "files_note",         # why this machine will not get the file list
+    "request", "state", "reason",  # this agent's own send with files
+)
+
+
+class UnknownField(Exception):
+    pass
+
+
+def unknown_fields(e):
+    return sorted(set(e) - set(ENTRY_SHARED) - set(ENTRY_LOCAL))
+
+
 def record_key(e):
-    """A record as every member should hold it: every field."""
-    return json.dumps(e, sort_keys=True)
+    """A record as every member should hold it: the shared fields of the
+    entry. Raises UnknownField for a field in neither list."""
+    unknown = unknown_fields(e)
+    if unknown:
+        raise UnknownField("entry field(s) %s are neither shared nor local: place each in ENTRY_SHARED or "
+                           "ENTRY_LOCAL in scripts/chaos/chaos.py" % ", ".join(unknown))
+    k = {f: e[f] for f in ENTRY_SHARED if f in e}
+    if "files" in k:
+        k["files"] = [{x: f[x] for x in f if x != "state"} for f in k["files"]]
+    return json.dumps(k, sort_keys=True)
 
 
 def settle(cl, book, me, timeout, log):
@@ -806,7 +853,11 @@ def settle(cl, book, me, timeout, log):
                 res = drain(cl, book, nm, me[nm])
         hs = {nm: history(cl, nm) for nm in cl.names}
         if all(h is not None for h in hs.values()):
-            sets = {nm: {record_key(e) for e in h} for nm, h in hs.items()}
+            try:
+                sets = {nm: {record_key(e) for e in h} for nm, h in hs.items()}
+            except UnknownField as e:
+                log("settling stopped: %s" % e)  # the checker reports it from the snapshot
+                return None
             keys = {nm: {e["key"] for e in h} for nm, h in hs.items()}
             same = len({frozenset(s) for s in sets.values()}) == 1
             missing = {nm: len(expected - k) for nm, k in keys.items()}
@@ -946,7 +997,25 @@ def evaluate(snap):
     if not nodes_ok:
         return v, inc
 
-    # 1. The same records on every member, every field.
+    # 0. Every field of every entry read is one the checker knows how to
+    # compare (ENTRY_SHARED) or knows describes the reading machine
+    # (ENTRY_LOCAL); from_this_machine names the reading machine.
+    unknown = collections.Counter()
+    for nm in nodes:
+        wrong = []
+        for e in (hist.get(nm) or []) + snap["drains"].get(nm, []):
+            unknown.update(unknown_fields(e))
+            if bool(e.get("from_this_machine")) != (e.get("from_node") == snap["node_ids"][nm]):
+                wrong.append(e.get("key"))
+        if wrong:
+            v.append("%s: %d entries say from_this_machine wrongly for their author, e.g. %s" % (
+                nm, len(wrong), wrong[:3]))
+    if unknown:
+        v.append("entries carry field(s) the checker does not know, so it cannot compare them: %s; place each "
+                 "in ENTRY_SHARED or ENTRY_LOCAL in scripts/chaos/chaos.py" % ", ".join(sorted(unknown)))
+        return v, inc
+    # 1. The same records on every member, every field that is the same on
+    # every machine (ENTRY_SHARED).
     sets = {nm: {record_key(e) for e in hist[nm]} for nm in nodes_ok}
     union = set().union(*sets.values())
     for nm in nodes_ok:
@@ -1318,6 +1387,15 @@ def cmd_check(o):
         snap["history"] = {nm: [] for nm in snap["nodes"]}
         snap["drains"], snap["traces"], snap["db_secrets"] = {}, {}, {}
         print("removed every send, read and record: a run in which nothing got through")
+    if o.add_field:
+        nm = snap["nodes"][-1]
+        snap["history"][nm][0][o.add_field] = True
+        print("added field %s to one entry of %s's copy" % (o.add_field, nm))
+    if o.flip_local:
+        nm = snap["nodes"][0]
+        e = snap["history"][nm][0]
+        e["from_this_machine"] = not e.get("from_this_machine")
+        print("flipped from_this_machine of %s in %s's copy" % (e["key"], nm))
     violations, inconclusive = evaluate(snap)
     for title, xs in (("violations", violations), ("inconclusive", inconclusive)):
         print("%s: %d" % (title, len(xs)))
@@ -1345,6 +1423,8 @@ def main():
     c.add_argument("--corrupt", action="store_true", help="change one message's text on every member first")
     c.add_argument("--unverify", choices=FAULTS, help="mark every fault of this kind as not applied first")
     c.add_argument("--empty", action="store_true", help="remove every send, read and record first")
+    c.add_argument("--add-field", metavar="NAME", help="add a field the checker does not know to one entry first")
+    c.add_argument("--flip-local", action="store_true", help="make one entry's from_this_machine wrong first")
     o = p.parse_args()
     sys.exit(cmd_run(o) if o.cmd == "run" else cmd_check(o))
 
