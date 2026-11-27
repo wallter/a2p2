@@ -31,6 +31,7 @@ type fakeUDP struct {
 	conn   *net.UDPConn
 	mu     sync.Mutex
 	got    [][]byte
+	at     []time.Time // when each request in got arrived
 	answer func(q []byte) []byte
 	delay  time.Duration
 }
@@ -53,6 +54,7 @@ func newFakeUDP(t *testing.T, answer func(q []byte) []byte) *fakeUDP {
 			q := append([]byte(nil), buf[:n]...)
 			f.mu.Lock()
 			f.got = append(f.got, q)
+			f.at = append(f.at, time.Now())
 			delay, answer := f.delay, f.answer
 			f.mu.Unlock()
 			go func() {
@@ -67,6 +69,15 @@ func newFakeUDP(t *testing.T, answer func(q []byte) []byte) *fakeUDP {
 }
 
 func (f *fakeUDP) port() uint16 { return uint16(f.conn.LocalAddr().(*net.UDPAddr).Port) }
+
+// arrivals is when each request arrived, as requests lists them: a gap
+// between two is the keeper's own wait, whatever delay a loaded machine
+// adds before the test looks.
+func (f *fakeUDP) arrivals() []time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]time.Time(nil), f.at...)
+}
 
 func (f *fakeUDP) requests() [][]byte {
 	f.mu.Lock()
@@ -452,18 +463,63 @@ func TestUPnPFollowsNoURLThatIsNotTheGateway(t *testing.T) {
 
 // record is the real record file in a test's directory, for this
 // test network's router (loopback).
-func record(t *testing.T) *File {
-	return &File{Path: filepath.Join(t.TempDir(), "portmap.json"), Gateway: loop}
+func record(t *testing.T) *testRecord {
+	r := &testRecord{File: File{Path: filepath.Join(t.TempDir(), "portmap.json"), Gateway: loop}}
+	t.Cleanup(func() {
+		if n := r.saveErrs.Load(); n != 0 {
+			t.Errorf("%d writes of the record failed (a Keeper ignores them, and the record then keeps what was removed)", n)
+		}
+	})
+	return r
+}
+
+// testRecord is a File that a test reads while a Keeper writes it. On
+// Windows a file that is open cannot be removed or replaced, so a read
+// that overlaps a write makes the write fail, and a Keeper, which treats
+// a failed write after a removal as harmless (the record then keeps a
+// handle that a later run deletes again), leaves the old record. The
+// mutex keeps the two apart in this process; a failed write fails the
+// test at its end instead of showing up as a record that is not empty.
+type testRecord struct {
+	File
+	mu       sync.Mutex
+	saveErrs atomic.Int32
+}
+
+func (r *testRecord) Load() ([]Mapping, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.File.Load()
+}
+
+func (r *testRecord) Save(held []Mapping) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	err := r.File.Save(held)
+	if err != nil {
+		r.saveErrs.Add(1)
+	}
+	return err
 }
 
 // get is what the file holds now, read back from disk.
-func get(t *testing.T, f *File) []Mapping {
+func get(t *testing.T, f *testRecord) []Mapping {
 	t.Helper()
 	ms, err := f.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	return ms
+}
+
+// restoreTiming puts the package's timing variables back when the test
+// and everything it started have ended. A cleanup, not a defer: a defer
+// runs when the test function returns, before the cleanup that stops a
+// Keeper, so a test that failed with its Keeper running would write the
+// variables while the Keeper read them.
+func restoreTiming(t *testing.T) {
+	l, w, ra := Lifetime, minWait, retryAfter
+	t.Cleanup(func() { Lifetime, minWait, retryAfter = l, w, ra })
 }
 
 // runKeeper starts k and returns its stop. The stop is also a cleanup of
@@ -496,7 +552,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // keeper takes it, removes the one it replaced, renews at half of a
 // one-second lease, and removes the last at the end.
 func TestAKeeperFollowsARouterThatLosesTheMappingAndRemovesItAtTheEnd(t *testing.T) {
-	defer func(d time.Duration) { minWait = d }(minWait)
+	restoreTiming(t)
 	minWait = time.Millisecond
 	r := &pcpRouter{extIP: netip.MustParseAddr("203.0.113.7"), extPort: 40000, step: 1, grant: 1, maps: map[string]uint16{}}
 	gw := newFakeUDP(t, r.answer)
@@ -562,7 +618,7 @@ func TestTheMappingIsRecordedBeforeTheRouterIsAsked(t *testing.T) {
 
 // noteTo records each request in f as a Keeper does, and nothing after:
 // the process dies once the router has answered.
-func noteTo(f *File) Note {
+func noteTo(f *testRecord) Note {
 	var held []Mapping
 	return func(m Mapping, asking bool) error {
 		held = slices.DeleteFunc(held, func(x Mapping) bool { return x.Key() == m.Key() })
@@ -752,7 +808,7 @@ func TestAMalformedUPnPFaultDrivesNoFallbackAndNoCleanup(t *testing.T) {
 // is reported, kept in the record file and done by the next run, which
 // here only cleans up. Against a PCP router on loopback.
 func TestAFailedRenewalKeepsTheMappingAndAFailedRemovalIsReportedAndRetried(t *testing.T) {
-	defer func(d, w time.Duration) { retryAfter, minWait = d, w }(retryAfter, minWait)
+	restoreTiming(t)
 	retryAfter, minWait = 10*time.Millisecond, time.Millisecond
 	// A four-second lease, renewed at two: the failed renewal (PCP and
 	// UPnP each unanswered, 3*testTry apiece) ends well inside it.

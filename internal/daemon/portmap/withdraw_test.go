@@ -69,7 +69,7 @@ func (s *states) list() []State {
 // be used withdraws the mapping given out, and a later renewal with no
 // answer does not give it out again, while its lease still runs.
 func TestAWithdrawnMappingIsNotGivenOutAgainByARenewalWithNoAnswer(t *testing.T) {
-	defer func(l, w time.Duration) { Lifetime, minWait = l, w }(Lifetime, minWait)
+	restoreTiming(t)
 	Lifetime, minWait = 400*time.Millisecond, time.Millisecond
 	for _, unusable := range []struct {
 		name string
@@ -110,7 +110,7 @@ func TestAWithdrawnMappingIsNotGivenOutAgainByARenewalWithNoAnswer(t *testing.T)
 // mapping given out until its lease runs out (a short drop of the
 // network), and one usable grant after a withdrawal gives it out again.
 func TestARenewalWithNoAnswerKeepsTheMappingAndAUsableGrantGivesItOutAgain(t *testing.T) {
-	defer func(l, w time.Duration) { Lifetime, minWait = l, w }(Lifetime, minWait)
+	restoreTiming(t)
 	Lifetime, minWait = 400*time.Millisecond, time.Millisecond
 	s := &scripted{step: func(i int) (Mapping, error) {
 		switch i {
@@ -138,7 +138,7 @@ func TestARenewalWithNoAnswerKeepsTheMappingAndAUsableGrantGivesItOutAgain(t *te
 // a router that does not answer is asked again only retryAfter later, not
 // every minWait.
 func TestARouterThatStopsAnsweringIsNotAskedEveryMinWaitOnceTheLeaseRanOut(t *testing.T) {
-	defer func(l, w, ra time.Duration) { Lifetime, minWait, retryAfter = l, w, ra }(Lifetime, minWait, retryAfter)
+	restoreTiming(t)
 	Lifetime, minWait, retryAfter = 100*time.Millisecond, time.Millisecond, time.Hour
 	s := &scripted{step: func(i int) (Mapping, error) {
 		if i == 0 {
@@ -161,7 +161,7 @@ func TestARouterThatStopsAnsweringIsNotAskedEveryMinWaitOnceTheLeaseRanOut(t *te
 // remove says so, even when no mapping was given out at the end (here it
 // was withdrawn), so the end of a run (a2p2 stop, a2p2 net off) logs it.
 func TestAKeeperThatEndsReportsWhatItCouldNotRemoveWithNoMappingGivenOut(t *testing.T) {
-	defer func(l, w time.Duration) { Lifetime, minWait = l, w }(Lifetime, minWait)
+	restoreTiming(t)
 	Lifetime, minWait = 2*time.Second, time.Millisecond
 	r := &pcpRouter{extIP: netip.MustParseAddr("203.0.113.7"), extPort: 40001, maps: map[string]uint16{}}
 	gw := newFakeUDP(t, r.answer)
