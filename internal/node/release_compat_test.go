@@ -43,7 +43,7 @@ type compatMachine struct {
 // compatReleases are the tagged releases whose databases must be in
 // testdata/releases. A release is added here when its databases are
 // committed (docs/RELEASING.md); a missing one fails the test.
-var compatReleases = []string{"v0.2.0", "v0.2.1", "v0.2.2", "v0.2.3"}
+var compatReleases = []string{"v0.2.0", "v0.2.1", "v0.2.2", "v0.2.3", "v0.3.0"}
 
 var compatUserVersion = regexp.MustCompile(`(?m)^PRAGMA user_version = ([0-9]+);$`)
 
