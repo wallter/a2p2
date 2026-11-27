@@ -793,7 +793,7 @@ type inboxIn struct {
 	Peek        bool   `json:"peek,omitempty" jsonschema:"counts and first lines"`
 	Skipped     bool   `json:"skipped,omitempty" jsonschema:"what your level kept out"`
 	Fetch       string `json:"fetch,omitempty" jsonschema:"file sha256: download, verified"`
-	MaxBytes    int    `json:"max_bytes,omitempty" jsonschema:"512-40000 result bytes (default 24000)"`
+	MaxBytes    int    `json:"max_bytes,omitempty" jsonschema:"512-32000 result bytes (0: default 18000)"`
 }
 
 // maxRecent bounds inbox's recent.
@@ -856,8 +856,8 @@ func (sh *shim) inbox(ctx context.Context, in inboxIn) (string, error) {
 	if in.Level != "" && in.Level != store.LevelAll && in.Level != store.LevelAddressed && in.Level != store.LevelNone {
 		return "", inputError("level is all, addressed or none")
 	}
-	if in.MaxBytes != 0 && (in.MaxBytes < node.MinInboxBytes || in.MaxBytes > node.MaxInboxBytes) {
-		return "", inputError("max_bytes must be between 512 and 40000")
+	if in.MaxBytes != 0 && in.MaxBytes < node.MinInboxBytes {
+		return "", inputError(fmt.Sprintf("max_bytes must be between %d and %d, or 0 (or left out) for the default, %d", node.MinInboxBytes, node.MaxInboxBytes, node.DefaultInboxBytes))
 	}
 	if in.MaxBytes != 0 && (in.Fetch != "" || in.Peek || in.Thread != "" || in.Recent > 0 || in.Skipped) {
 		// They mark nothing seen, so a result a harness cuts loses nothing:
@@ -954,6 +954,19 @@ func (sh *shim) budgetedDaemon(ctx context.Context) (bool, error) {
 // oldDaemonNote is what a read says when the daemon ignored max_bytes.
 const oldDaemonNote = "The a2p2 daemon is older than this tool, so max_bytes was not applied to this read. Run a2p2 stop to start the new daemon."
 
+// ceilingNote is what a read says when its max_bytes was above the
+// ceiling, which earlier builds allowed up to 40,000 (D72): the read is
+// done at the ceiling, less the note's own bytes, rather than refused.
+var ceilingNote = fmt.Sprintf("max_bytes above %d was read as %d, the most one result holds.", node.MaxInboxBytes, node.MaxInboxBytes)
+
+// ceilingNoteBytes is what ceilingNote adds to a result: the field, its
+// name and its quoted text.
+var ceilingNoteBytes = func() int {
+	s, _ := localapi.ToolJSON(localapi.ToolInbox{Note: ceilingNote})
+	e, _ := localapi.ToolJSON(localapi.ToolInbox{})
+	return len(s) - len(e)
+}()
+
 // read is inbox reading unread messages. The daemon returns, oldest
 // first, what fits the budget with the levels the call sets, keeping a
 // receipt of exactly that, and the shim confirms what it returned. A
@@ -963,8 +976,14 @@ const oldDaemonNote = "The a2p2 daemon is older than this tool, so max_bytes was
 // applied (D70); the level was set first (inbox).
 func (sh *shim) read(ctx context.Context, in inboxIn, levels []localapi.RoomLevel) (string, error) {
 	budget := in.MaxBytes
-	if budget == 0 {
+	clamped := budget > node.MaxInboxBytes
+	switch {
+	case budget == 0:
 		budget = node.DefaultInboxBytes
+	case clamped:
+		// The note is not measured by the daemon, so its bytes come out
+		// of the budget and the result stays within the ceiling.
+		budget = node.MaxInboxBytes - ceilingNoteBytes
 	}
 	var res localapi.InboxResp
 	var agent string
@@ -998,8 +1017,11 @@ func (sh *shim) read(ctx context.Context, in inboxIn, levels []localapi.RoomLeve
 	local := sh.localRoom(ctx)
 	out := localapi.ToolInboxOf(res.Entries, len(res.Waiting), more, levels, local)
 	out.Waited = in.WaitSeconds > 0 && len(res.Entries) == 0
-	if old {
+	switch {
+	case old:
 		out.Note = oldDaemonNote
+	case clamped:
+		out.Note = ceilingNote
 	}
 	if len(res.Entries) > 0 {
 		seen := localapi.SeenReq{Agent: agent}

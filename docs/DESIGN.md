@@ -69,8 +69,11 @@ other than the daemon's own or root; where no single socket is found,
 and on other systems, the code alone decides. `a2p2 ui` neither
 opens nor prints the long-lived token address of a daemon before 0.2.4,
 takes no `--json`, and over SSH (`SSH_CONNECTION` set) opens nothing and
-names the port to forward. A daemon started by a client writes `daemon.log` in
-the home; the running daemon moves its last 10 MiB to `daemon.log.1`
+names the port to forward. A daemon started by a client for an absolute
+home (the default) runs in its home, not in the client's working
+directory, so it holds no one's directory while it runs; a relative home
+is passed as given and the daemon keeps the client's directory, which
+that home is relative to (D72). It writes `daemon.log` in the home; the running daemon moves its last 10 MiB to `daemon.log.1`
 once it is over 10 MiB, checked at start and every 10 seconds, and
 empties it even if that copy fails.
 
@@ -729,8 +732,10 @@ arrive. Leaving a room deletes its receipts.
 **Pages under a byte budget (D70).** One inbox read returns its entries
 oldest first, at most `limit` (50; at most 200) and, when the reader gives
 a byte budget, only those whose result fits it: the MCP inbox tool always
-gives one (`max_bytes`, 512 to 40,000, 24,000 when not given), the CLI and
-other local API callers none unless they ask. The budget counts the
+gives one (`max_bytes`, 512 to 32,000, 18,000 when absent or 0; D72), the
+CLI and other local API callers none unless they ask. The tool reads a
+larger `max_bytes` as 32,000 and its result's `note` says so; the local
+API refuses one. The budget counts the
 whole result the model reads, envelope and `levels` included:
 `Surface.InboxPage` takes the caller's measure (the local API passes
 `localapi.ToolInboxSize`, the shim's own rendering of that result) and
@@ -746,12 +751,16 @@ needs, and nothing is shown, marked or set; an entry larger than any
 budget (a text of characters written as escapes shows up to about seven
 times its 16 KiB) is returned alone at the ceiling with its text cut
 between characters to fit, and `text_cut` saying how much was left out.
-So no result exceeds 40,000 bytes. A daemon before 0.2.4 ignores the
+Every other field of an entry, at its largest, renders under the
+ceiling (27,527 bytes measured), so that cut always fits and no entry holds the
+queue. So no result exceeds 32,000 bytes. A daemon before 0.2.4 ignores the
 budget and has kept receipts of its whole page; the MCP server then
 returns that page whole, as 0.2.3 did, with a note that the budget was
 not applied. The budget never counts tokens and knows nothing of how full
 a model's context is; the recipes tell an agent short of context to ask
-for less. The delivery model needs no change: a page is a listing of the
+for less. A harness may still set a result aside or cut it after the
+daemon has recorded the page as seen: the sizes make that rarer (D72),
+not impossible. The delivery model needs no change: a page is a listing of the
 first entries, which the differential tests compare as such (`opPage`,
 cut by `InboxOpts.page`).
 
@@ -904,7 +913,7 @@ read alike their own way (D58). `room create` refuses `local` in
 any case. Nothing here changes what is stored or accepted (D65).
 
 A2 is checked by a proxy, compact definition bytes divided by four and
-rounded up: 3,992 bytes, 998 of the 1,000 allowed. The server also sends a short `instructions` text (at most 300 bytes) in its `initialize` and `server/discover` results, outside that count (D54). `TestToolsGolden` checks
+rounded up: 3,995 bytes, 999 of the 1,000 allowed. The server also sends a short `instructions` text (at most 300 bytes) in its `initialize` and `server/discover` results, outside that count (D54). `TestToolsGolden` checks
 the definitions match the protocol, and `TestToolDefinitionsFitTheTokenBudget`
 enforces the 4,000-byte limit. The count by each model family's own
 tokenizer has not been measured.

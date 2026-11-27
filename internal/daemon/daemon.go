@@ -761,8 +761,7 @@ func Connect(ctx context.Context, home string) (*localapi.Client, error) {
 		return nil, err
 	}
 	defer logf.Close()
-	cmd := exec.Command(exe, "daemon")
-	cmd.Env = append(os.Environ(), "A2P2_HOME="+home)
+	cmd := daemonCmd(exe, home)
 	cmd.Stdout, cmd.Stderr = logf, logf
 	if cmd, err = startDetached(cmd); err != nil { // survive the caller's terminal
 
@@ -777,6 +776,25 @@ func Connect(ctx context.Context, home string) (*localapi.Client, error) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return nil, fmt.Errorf("the a2p2 daemon did not start; see %s", filepath.Join(home, "daemon.log"))
+}
+
+// daemonCmd is the command that starts the daemon of home. With an
+// absolute home (the default, and the normal case) it runs in its home,
+// not in the directory of whoever started it, so that it holds no
+// directory someone may want to remove or unmount for as long as it runs.
+// A relative home names a place from the caller's working directory, so
+// the daemon keeps that directory, as it always has: no path is rewritten,
+// since an absolute spelling could pass the socket path limit or, through
+// a symlinked directory and "..", name another directory than the one the
+// client resolves (D72). The environment is the caller's, with A2P2_HOME
+// as given.
+func daemonCmd(exe, home string) *exec.Cmd {
+	cmd := exec.Command(exe, "daemon")
+	if filepath.IsAbs(home) {
+		cmd.Dir = home
+	}
+	cmd.Env = append(os.Environ(), "A2P2_HOME="+home)
+	return cmd
 }
 
 // WaitStopped waits up to d for the daemon of home to have exited: its

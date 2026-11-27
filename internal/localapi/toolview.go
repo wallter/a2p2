@@ -182,7 +182,8 @@ type ToolInbox struct {
 	Levels         []ToolLevel `json:"levels,omitempty"`
 	LevelsUnlisted int         `json:"levels_unlisted,omitempty"`
 	// Note: the daemon is older than the tool, and the budget was not
-	// applied (the shim's read).
+	// applied; or max_bytes was above the ceiling and was read as it
+	// (the shim's read).
 	Note string `json:"note,omitempty"`
 }
 

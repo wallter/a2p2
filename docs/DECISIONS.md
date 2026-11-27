@@ -3454,3 +3454,114 @@ did not hold the line; this entry is the line as it now is.
 **Revisit if** members need addresses this rule refuses (a well-known
 port other than 443, a link-local overlay), the rooms lock is split, or
 the dial budget proves too tight for rooms with many listeners.
+
+## D72. The inbox's byte sizes follow measured tokens: 18,000 by default, 32,000 at most (2026-11-27)
+
+D70 sized the inbox budget at 2.5 to 4 bytes a token, an estimate with no
+tokenizer run. Inbox results were then measured in Claude Code 2.1.332
+with its default model, tokens taken from the usage of each API call in
+its stream-json output. Each cell was run once (n=1):
+
+| Result | Bytes | Tokens | Bytes a token |
+|---|---|---|---|
+| 50 short entries (282 bytes each) | 14,759 | about 7,190 | 2.05 |
+| a page of 39 entries of about 600 bytes | 23,922 | about 9,370 | 2.55 |
+| short entries, `max_bytes` 18,000 and 21,000 | 17,910 and 20,809 | about 8,700 and 9,990 | 2.06 and 2.08 |
+| one 16 KB English entry | 16,405 | about 4,770 | 3.44 |
+| one 16 KB log entry (timestamps, sha256 hex) | 16,544 | about 10,750 | 1.54 |
+
+With Claude Code's output limit set to 10,000 tokens as a stand-in for
+its warning, the pages of 17,910 and 20,809 bytes stayed inline. A page at
+the default of 24,000 (23,710 characters, about 11,500 tokens computed)
+was saved to a file in place of being shown, and the model read none of
+it; the MCP server had already marked every entry on it seen. At the
+normal file limit of 25,000 tokens, a 40,000-byte page of log-like text
+(about 26,000 tokens, computed) would be saved the same way. The warning
+itself is text in Claude Code's interface and did not appear in headless
+output, so that it uses the same count is inferred. Codex passed
+`max_bytes` 40,000 on its own, from the schema, in 4 of 4 MCP runs.
+
+- **The sizes.** `max_bytes` is 512 to 32,000, and the tool applies
+  18,000 when it is absent or 0: a caller written against a schema
+  without the field sends neither. 1 to 511 and negative values are
+  refused.
+  - 18,000 bytes is about 8,800 tokens of short entries at 2.05 bytes a
+    token, under the warning; at 1.54 it is about 11,700, past the
+    warning and well under the file limit.
+  - 32,000 bytes is about 20,800 tokens at 1.54, under the 25,000-token
+    file limit, and under its 50,000 characters.
+  - The default still holds one plain 16 KiB text: measured with the
+    tool's rendering, such an entry is 16,726 bytes, and 16,790 as a reply
+    to one addressee. Fifty one-line messages still fit one page; 1 KB
+    messages come about fifteen to a call.
+- **No entry blocks a reader.** D70's rule stays, at the new ceiling: an
+  oldest entry that alone does not fit is refused naming the size it
+  needs, or, when it needs more than the ceiling, naming the ceiling; at
+  the ceiling it comes alone with its text cut between characters and
+  `text_cut` saying so. A text can render far past any budget (16,372 DEL
+  characters come to 114,926 bytes), so the cut is what makes it
+  readable. The cut fails only if the entry without its text did not fit,
+  which D70 did not test. `TestAnEntryAtItsLargestBesidesItsTextFitsTheCeiling`
+  now does, with values that pass the checks a received record, manifest
+  and room log pass: 32 addressees and the author written with full keys,
+  8 distinct choices of 200 bytes, mostly DEL, which grows most, 8 file
+  names of the characters a name may hold that are written longest,
+  clipped at 128 characters as shown, a room label of 64 bytes with the
+  33 bytes a label shared by two rooms gains, and `text_cut` and `more`
+  at their longest. That is 27,527 bytes. So at 32,000 the cut always
+  fits, and an entry is either returned whole or cut with `text_cut`,
+  never confirmed otherwise. Levels a read sets are left out of that sum:
+  when they and the entry do not fit, the refusal says to set the level
+  in a call of its own, which changes nothing.
+- **Every view returned is sized.** A wait that ended with nothing
+  returned its last look unmeasured, and what it shows (streams still
+  fetching, `more`, the levels set) can grow while it waits. It is now
+  measured like any page, and refused as a too small budget is when it
+  does not fit; nothing is confirmed.
+- **A request above the ceiling** is read at the ceiling, and the result's
+  `note` says "max_bytes above 32000 was read as 32000, the most one
+  result holds." The note's bytes come out of the budget, so the result
+  stays within 32,000. D70 refused such a value with `invalid_request`,
+  and its test asserted that for 40,001. That is changed, for the MCP
+  tool only, because 40,000 was valid in every earlier build and a model
+  takes it from habit or from older text; a refusal costs it a turn and
+  then a retry, while a clamp gives it a page that is safe to show. A
+  silent clamp would leave it believing it got what it asked; the note
+  costs 77 bytes of one page. A message too large for any budget,
+  asked for that way, is refused naming 32,000 (the budget applied is a
+  little less), and comes cut at 32,000. Below 512 is still refused:
+  raising it would break the bound a reader short of context asked for.
+  The local API still refuses a value outside its range: its callers are
+  code, the MCP server clamps before it, and an MCP server of an earlier
+  build would get a refusal that names the range.
+- **Definitions.** The parameter now says "512-32000 result bytes (0:
+  default 18000)"; the definitions go from 3,992 to 3,995 bytes.
+- **The daemon's working directory.** A command that starts the daemon
+  for an absolute home, the default, starts it in its home, so it holds
+  no one's directory while it runs. A relative home is passed as given,
+  with no directory set: it names a place from the caller's directory,
+  and an absolute spelling could pass the socket path limit, or through
+  a symlinked directory and "..", name another directory than the one
+  the client resolves. No path is rewritten.
+- **Raised and declined.**
+  - A new MCP server against a daemon built from main between D70 and
+    D72 can strand an oversized entry. D70 was never released: such
+    daemons are development builds of one day. One must be restarted
+    (`a2p2 stop`); no feature name changes for it.
+  - The fallback for a daemon without the feature (0.2.3 and earlier)
+    returns its page unbounded and confirms it. That is D70's decision,
+    since cutting on the client left receipts for text the model never
+    got. It lasts only until the daemon restarts, and its `note` says to
+    run `a2p2 stop`, so it stands.
+- **Still open.** A harness can set a tool result aside in a file, or cut
+  it, after a2p2 has recorded the page as seen. The model then never reads
+  messages that count as read. A byte cap makes this rarer but cannot rule
+  it out, because how many tokens a byte costs depends on the text: the
+  lowest measured is 1.54 bytes a token, for log-like and hex text, and
+  text that tokenizes worse is possible. The candidate fix is D70's open
+  design, confirming a page only when the same session next calls a tool.
+  It is not built.
+
+**Revisit if** a ratio below 1.5 bytes a token is measured for real
+messages, a harness's warning or file limit changes, Codex's default
+output limit proves lower, or the confirm-on-next-call design is built.

@@ -310,3 +310,78 @@ func TestMessagesThatExpireBetweenPagesComeAsExpiredInTheNextPages(t *testing.T)
 		t.Fatalf("%d expired, want %d: the first page held two", expired, len(sent)-2)
 	}
 }
+
+// growingSize is pageSize plus extra bytes once the read has started to
+// wait: a field of the result (streams still fetching, more) that grows
+// while it waits.
+func growingSize(e *surfEnv, extra int) func(InboxView) int {
+	grown := false
+	e.s.waiting = func() { grown = true }
+	return func(v InboxView) int {
+		if grown {
+			return pageSize(v) + extra
+		}
+		return pageSize(v)
+	}
+}
+
+// [U4, D72] A wait that ends with nothing returns a view sized like any
+// other: when what it shows grew past max_bytes while it waited, the read
+// is refused as a too small budget is, not answered over the budget.
+func TestAWaitThatEndsWithNothingStaysWithinItsBudget(t *testing.T) {
+	ctx := context.Background()
+	e := newSurf(t)
+	alice := e.agent("alice")
+	o := InboxOpts{Wait: 150 * time.Millisecond, MaxBytes: MinInboxBytes, Size: growingSize(e, 400)}
+	_, err := e.s.InboxPage(ctx, alice, "", o)
+	if msg := refusedFor(t, err); !strings.Contains(msg, "before any message") {
+		t.Fatalf("refusal %q", msg)
+	}
+	e.s.waiting = nil
+	if v, err := e.s.InboxPage(ctx, alice, "", InboxOpts{Wait: 50 * time.Millisecond, MaxBytes: MinInboxBytes, Size: pageSize}); err != nil || len(v.Entries) != 0 {
+		t.Fatalf("a wait within its budget: %d %v", len(v.Entries), err)
+	}
+}
+
+// [U2, U4, D72] A read that sets a level fits at first, then waits, and
+// what it shows grows past max_bytes while it waits: it is refused, saying
+// the level was set, and returns nothing over the budget.
+func TestAReadThatSetsALevelAndWaitsStaysWithinItsBudget(t *testing.T) {
+	ctx := context.Background()
+	e := newSurf(t)
+	alice := e.agent("alice")
+	o := InboxOpts{Level: store.LevelAddressed, Wait: 150 * time.Millisecond, MaxBytes: 600, Size: growingSize(e, 400)}
+	_, err := e.s.InboxPage(ctx, alice, "", o)
+	if msg := refusedFor(t, err); !strings.Contains(msg, "the level was set") {
+		t.Fatalf("refusal %q", msg)
+	}
+}
+
+// [U2, U4, D72] The list of rooms a read sets fits alone, but with it the
+// oldest entry fits no budget even cut to nothing: the refusal says to set
+// the level in a call of its own, and changes nothing; the read without
+// the level then returns the entry.
+func TestLevelsThatLeaveNoRoomForTheFirstEntrySayToSetTheLevelAlone(t *testing.T) {
+	ctx := context.Background()
+	e := newSurf(t)
+	alice, bob := e.agent("alice"), e.agent("bob")
+	big := e.send(SendInput{Agent: bob, To: []string{alice}, Text: strings.Repeat("b", 16000)})
+	size := func(v InboxView) int {
+		n := pageSize(v)
+		if len(v.LevelsSet) > 0 {
+			n += MaxInboxBytes - 400
+		}
+		return n
+	}
+	_, err := e.s.InboxPage(ctx, alice, "", InboxOpts{Level: store.LevelAddressed, MaxBytes: MaxInboxBytes, Size: size})
+	if msg := refusedFor(t, err); !strings.Contains(msg, "a call of its own") || !strings.Contains(msg, "nothing was changed") {
+		t.Fatalf("refusal %q", msg)
+	}
+	if ls, err := e.s.Levels(ctx, alice, "", ""); err != nil || ls[0].Level != store.LevelAll {
+		t.Fatalf("level after a refused read: %+v %v", ls, err)
+	}
+	v, err := e.s.InboxPage(ctx, alice, "", InboxOpts{MaxBytes: MaxInboxBytes, Size: size})
+	if err != nil || len(v.Entries) != 1 || v.Entries[0].ID != big.ID || v.Entries[0].TextCut != 0 {
+		t.Fatalf("without the level: %d %v", len(v.Entries), err)
+	}
+}
