@@ -117,7 +117,8 @@ type Surface struct {
 	// look Inbox takes: how many rooms it walked and when it began.
 	scanned func(rooms int, began time.Time)
 	// fallback, if set (tests), is called when a waiting Inbox looks again
-	// because its wait timed out, not because a wake came.
+	// because its wait timed out, not because a wake came; at is when the
+	// wait ended, before its waiter was taken off the lists.
 	fallback func(label string, at time.Time)
 }
 
@@ -959,6 +960,7 @@ func (s *Surface) Inbox(ctx context.Context, agent, room string, limit int, wait
 			s.waiting()
 		}
 		ok := waitAny(ctx, []<-chan struct{}{x.ch}, deadline)
+		ended := time.Now()
 		s.m.wakes.doneInbox(x)
 		if !ok {
 			return v, ctx.Err()
@@ -966,8 +968,8 @@ func (s *Surface) Inbox(ctx context.Context, agent, room string, limit int, wait
 		if s.fallback != nil {
 			select {
 			case <-x.ch:
-			default: // the fallback look: no wake came
-				s.fallback(label, time.Now())
+			default: // the fallback look: no wake came by ended
+				s.fallback(label, ended)
 			}
 		}
 	}

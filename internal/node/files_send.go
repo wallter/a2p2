@@ -479,6 +479,9 @@ func (f *Files) confirmSend(ctx context.Context, q store.Request, approve bool) 
 			}
 			return Confirmation{}, err
 		}
+		// The writer's inbox lists the decision (requestEntries): a
+		// waiting Inbox of it looks again now, not at its fallback.
+		f.m.wakes.touch(q.Room)
 		return Confirmation{ID: q.ID, State: state, Reason: reason}, nil
 	}
 	if !approve {

@@ -374,17 +374,21 @@ message or handled report this machine writes wakes only the waiters it
 can show something to: a message wakes the agents it is relevant to whose
 level lets it in (an addressee, or anyone at level `all`, or anyone at
 `addressed` for a post marked for everyone); a handled report wakes its
-writer. Every other change of the room (a replace or withdraw, a record
-or log entry pulled from a peer, a send with files, a level set) wakes
-every waiter of the room, and a waiter still looks again at least once a
-second. A look that showed an agent nothing is kept in memory per agent
-and room: the next look walks on from where it stopped while only quiet
-writes came between (local messages and handled reports at the next
-position, and Seen or receipts; `store.Quiet`, read inside the
-transaction), and does not read the room at all for a second when, in
-addition, none of them could show the agent anything. Seen starts its
-walks there too. Nothing of this is stored or moves a cursor: a restart
-walks from the cursors again, and reading semantics are unchanged.
+writer, the only inbox it changes. A waiter whose look has not yet told
+it its levels is woken by any message relevant to it. A level set wakes
+only that agent's waiters, which look again at the new level. Every other
+change of the room wakes every waiter of the room: a replace or withdraw,
+a record or log entry pulled from a peer, a send with files and its
+approval, decline or failure, a file that became available, a membership
+or access change, a pruning pass, a room joined, created, left or set
+aside. Some changes are announced by nothing and are left to the
+fallback: a waiting inbox looks again at least once a second, so it sees
+them within about a second (plus the time its look waits for the
+database). These are an entry expiring by the clock before the pruning
+pass removes it, a gap hint changing what a walk waits for, and a file
+list marked invalid or failed, which only changes how an entry already
+shown is described. Inbox and Seen always walk from the cursors: no look
+is remembered.
 
 **Not modelled: the reply tool's addressees.** Without `to`, the `reply`
 tool addresses the parent's author and every agent of a current member that

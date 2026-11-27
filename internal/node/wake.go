@@ -40,66 +40,6 @@ type roomWakes struct {
 	inbox map[string]map[*inboxWaiter]bool
 	// woke counts the inbox waiters woken (tests).
 	woke uint64
-	// looks is, per room and agent, where the agent's last look that
-	// found nothing got to (lookMemo, reading.go), and how many writes
-	// since might show it something.
-	looks map[string]map[string]*lookState
-}
-
-// lookState is one agent's looks in one room. narrow counts the touches
-// of the room since the agent first looked, except records this machine
-// wrote that cannot show it anything (mayShow, with the memo's level).
-type lookState struct {
-	narrow uint64
-	memo   *lookMemo
-}
-
-// lookAt returns agent's narrow count in room and its memo (nil: none),
-// to be read before a look's transaction begins.
-func (w *roomWakes) lookAt(room, agent string) (uint64, *lookMemo) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.looks == nil {
-		w.looks = map[string]map[string]*lookState{}
-	}
-	if w.looks[room] == nil {
-		w.looks[room] = map[string]*lookState{}
-	}
-	st := w.looks[room][agent]
-	if st == nil {
-		st = &lookState{}
-		w.looks[room][agent] = st
-	}
-	return st.narrow, st.memo
-}
-
-// keepLook keeps memo as agent's in room.
-func (w *roomWakes) keepLook(room, agent string, memo *lookMemo) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if st := w.looks[room][agent]; st != nil {
-		st.memo = memo
-	}
-}
-
-// dirty raises the narrow count of every agent's looks in room that
-// match (nil: all), and of every room for room roomSet. The caller
-// holds mu.
-func (w *roomWakes) dirty(room string, match func(agent string, memo *lookMemo) bool) {
-	mark := func(as map[string]*lookState) {
-		for a, st := range as {
-			if match == nil || match(a, st.memo) {
-				st.narrow++
-			}
-		}
-	}
-	if room != roomSet {
-		mark(w.looks[room])
-		return
-	}
-	for _, as := range w.looks {
-		mark(as)
-	}
 }
 
 // inboxWaiter is one Inbox call between its look and the next. Its
@@ -149,7 +89,6 @@ func (w *roomWakes) touch(rooms ...string) {
 	for _, room := range rooms {
 		w.bump(room)
 		w.wakeInbox(room, nil)
-		w.dirty(room, nil)
 	}
 }
 
@@ -180,7 +119,6 @@ func (w *roomWakes) touchAll() {
 			w.close(x)
 		}
 	}
-	w.dirty(roomSet, nil)
 }
 
 // touchWrite is touch(room) after this machine (self) wrote the record
@@ -195,12 +133,6 @@ func (w *roomWakes) touchWrite(room, self string, f core.RecordFields) {
 		l, known := x.levels[room]
 		return mayShow(self, f, x.agent, l, known)
 	})
-	w.dirty(room, func(agent string, memo *lookMemo) bool {
-		if memo == nil { // a look under way: its level is not known here
-			return mayShow(self, f, agent, "", false)
-		}
-		return mayShow(self, f, agent, memo.level, true)
-	})
 }
 
 // touchInbox wakes the inbox waiters of agent in room ("" every agent),
@@ -209,7 +141,6 @@ func (w *roomWakes) touchInbox(room, agent string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.wakeInbox(room, func(x *inboxWaiter) bool { return agent == "" || x.agent == agent })
-	w.dirty(room, func(a string, _ *lookMemo) bool { return agent == "" || a == agent })
 }
 
 // wakeInbox closes the inbox waiters of room, and of every room, that

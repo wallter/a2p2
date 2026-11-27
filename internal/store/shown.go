@@ -64,22 +64,21 @@ func (s *Store) ShowAt(ctx context.Context, agent, room string, gen int64, rows 
 	if len(rows) == 0 {
 		return nil
 	}
-	// One agent's reading state in one room: quiet (Quiet).
-	return s.txQuiet(ctx, func(tx *sql.Tx) (bool, error) {
+	return s.tx(ctx, func(tx *sql.Tx) error {
 		switch err := checkGen(tx, room, gen); {
 		case errors.Is(err, ErrLeft), errors.Is(err, ErrNotFound), errors.Is(err, ErrStaleGeneration):
-			return true, nil
+			return nil
 		case err != nil:
-			return false, err
+			return err
 		}
 		for _, r := range rows {
 			if _, err := tx.Exec(`INSERT INTO shown (agent, room, key, version, msg) VALUES (?,?,?,?,?)
 				ON CONFLICT (agent, room, key) DO UPDATE SET version = excluded.version, msg = excluded.msg`,
 				agent, room, r.Key, r.Version, r.Msg); err != nil {
-				return false, err
+				return err
 			}
 		}
-		return true, nil
+		return nil
 	})
 }
 

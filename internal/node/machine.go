@@ -252,12 +252,6 @@ type Machine struct {
 	// wakes is touched for a room after each write that can change its
 	// summary or log (wake.go).
 	wakes roomWakes
-
-	// inboxWalked, if set (tests), is told how each Inbox read a room and
-	// how many positions its walk passed (walkSkipped and the others).
-	inboxWalked func(room, how string, positions int)
-	// lookFresh, if set (tests), replaces the constant lookFresh.
-	lookFresh time.Duration
 }
 
 // readFront is this machine's reading frontier in a room: per author, the

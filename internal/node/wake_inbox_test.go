@@ -8,38 +8,96 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wallter/a2p2/internal/core"
 	"github.com/wallter/a2p2/internal/store"
 )
 
 // Tests of how a waiting Inbox is woken (wake.go: inboxWaiter, touchWrite,
-// mayShow). A wake that ends a wait must come from the write, not from the
-// one-second fallback look: each test that needs that checks the time.
+// mayShow). Each asserts on the wake channel itself: after a write has
+// returned, the waiter registered for the look is closed or it is not.
+// touchWrite runs before the write returns, so this needs no timing.
 
-// waitInbox starts agent's Inbox of room ("" every room) waiting up to
-// wait, and returns once it waits; the result arrives on the channel.
 type inboxResult struct {
 	v   InboxView
 	err error
 	at  time.Time
 }
 
-func (e *surfEnv) waitingInbox(agent, room string, wait time.Duration) <-chan inboxResult {
+// armedInbox is a waiting Surface.Inbox call and the waiter registered for
+// its current look.
+type armedInbox struct {
+	x  *inboxWaiter
+	ch <-chan inboxResult
+}
+
+// woken reports whether the waiter was closed, at once.
+func (a *armedInbox) woken() bool { return isClosed(a.x) }
+
+func isClosed(x *inboxWaiter) bool {
+	select {
+	case <-x.ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// waiterAfter returns agent's inbox waiter once it is registered and its
+// look has given it levels (it waits), other than prev.
+func (e *surfEnv) waiterAfter(agent string, prev *inboxWaiter) *inboxWaiter {
 	e.t.Helper()
-	ready := make(chan struct{})
-	var once sync.Once
-	e.s.waiting = func() { once.Do(func() { close(ready) }) }
+	label, err := e.s.label(agent)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	w := &e.s.m.wakes
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		w.mu.Lock()
+		for _, xs := range w.inbox {
+			for x := range xs {
+				if x.agent == label && x != prev && x.levels != nil {
+					w.mu.Unlock()
+					return x
+				}
+			}
+		}
+		w.mu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	e.t.Fatalf("no waiting inbox of %s", agent)
+	return nil
+}
+
+// arm starts agent's Inbox of room ("" every room) waiting a minute and
+// returns it once it waits. The call is ended when the test ends.
+func (e *surfEnv) arm(agent, room string) *armedInbox {
+	e.t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
 	out := make(chan inboxResult, 1)
+	done := make(chan struct{})
 	go func() {
-		v, err := e.s.Inbox(context.Background(), agent, room, 0, wait)
+		defer close(done)
+		v, err := e.s.Inbox(ctx, agent, room, 0, time.Minute)
 		out <- inboxResult{v, err, time.Now()}
 	}()
+	e.t.Cleanup(func() { cancel(); <-done })
+	return &armedInbox{x: e.waiterAfter(agent, nil), ch: out}
+}
+
+// result is the call's result, which must come (it was woken with entries).
+func (a *armedInbox) result(t *testing.T) []Entry {
+	t.Helper()
 	select {
-	case <-ready:
+	case r := <-a.ch:
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		return r.v.Entries
 	case <-time.After(10 * time.Second):
-		e.t.Fatal("the inbox did not start to wait")
+		t.Fatal("the waiting inbox did not return")
 	}
-	e.s.waiting = nil
-	return out
+	return nil
 }
 
 // looks counts the looks the surface's Inbox takes from now.
@@ -49,23 +107,11 @@ func (e *surfEnv) looks() *atomic.Int64 {
 	return &n
 }
 
-// woken returns the entries of a waiting inbox, failing unless they come
-// within 700 ms of sent (a wake, not the fallback look).
-func woken(t *testing.T, ch <-chan inboxResult, sent time.Time) []Entry {
+func onlyEntry(t *testing.T, es []Entry, id string) {
 	t.Helper()
-	select {
-	case r := <-ch:
-		if r.err != nil {
-			t.Fatal(r.err)
-		}
-		if d := r.at.Sub(sent); len(r.v.Entries) > 0 && d > 700*time.Millisecond {
-			t.Fatalf("returned %v after the write: the fallback look, not a wake", d)
-		}
-		return r.v.Entries
-	case <-time.After(10 * time.Second):
-		t.Fatal("the waiting inbox did not return")
+	if len(es) != 1 || es[0].ID != id {
+		t.Fatalf("entries = %+v, want only %s", es, id)
 	}
-	return nil
 }
 
 // [wake] A record that cannot show a waiting inbox anything does not wake
@@ -79,7 +125,7 @@ func TestAWaitingInboxIsNotWokenByTrafficItCannotSee(t *testing.T) {
 	e.read(carol)
 	looks := e.looks()
 	woke := e.s.m.wakes.inboxWoken()
-	ch := e.waitingInbox(bob, "", 20*time.Second)
+	a := e.arm(bob, "")
 	for i := 0; i < 20; i++ {
 		e.send(SendInput{Agent: alice, Text: fmt.Sprintf("to carol %d", i), To: []string{carol}})
 		e.send(SendInput{Agent: bob, Text: fmt.Sprintf("bob's own %d", i)})
@@ -87,75 +133,76 @@ func TestAWaitingInboxIsNotWokenByTrafficItCannotSee(t *testing.T) {
 	if _, err := e.s.Ack(ctx, carol, q.ID); err != nil {
 		t.Fatal(err)
 	}
+	if a.woken() {
+		t.Fatal("bob's inbox was woken by traffic it cannot see")
+	}
 	if n := e.s.m.wakes.inboxWoken() - woke; n != 0 {
 		t.Fatalf("%d waiters woken by traffic bob cannot see", n)
 	}
 	if n := looks.Load(); n != 1 {
 		t.Fatalf("bob's inbox looked %d times, want 1", n)
 	}
-	sent := time.Now()
 	m := e.send(SendInput{Agent: alice, Text: "for bob", To: []string{bob}})
-	es := woken(t, ch, sent)
-	if len(es) != 1 || es[0].ID != m.ID {
-		t.Fatalf("entries = %+v", es)
+	if !a.woken() {
+		t.Fatal("a message to bob did not wake his inbox")
 	}
+	onlyEntry(t, a.result(t), m.ID)
 }
 
 // [wake] At level addressed a room-wide post does not wake the waiter; a
 // post marked for everyone does, and so does a room-wide post at level all.
 func TestAWaitingInboxAtLevelAddressedIsWokenOnlyByWhatTheLevelLetsIn(t *testing.T) {
 	e := newSurf(t)
-	ctx := context.Background()
 	alice, bob, carol := e.agent("alice"), e.agent("bob"), e.agent("carol")
-	if _, err := e.s.Levels(ctx, bob, "", store.LevelAddressed); err != nil {
-		t.Fatal(err)
-	}
-	woke := e.s.m.wakes.inboxWoken()
-	ch := e.waitingInbox(bob, "", 20*time.Second)
-	cw := e.waitingInbox(carol, "", 20*time.Second)
-	sent := time.Now()
+	e.level(bob, "", store.LevelAddressed)
+	b, c := e.arm(bob, ""), e.arm(carol, "")
 	plain := e.send(SendInput{Agent: alice, Text: "room-wide, not marked"})
-	if es := woken(t, cw, sent); len(es) != 1 || es[0].ID != plain.ID {
-		t.Fatalf("carol at level all: %+v", es)
+	if b.woken() || !c.woken() {
+		t.Fatalf("a room-wide post: bob (addressed) woken %v, carol (all) woken %v", b.woken(), c.woken())
 	}
-	if n := e.s.m.wakes.inboxWoken() - woke; n != 1 {
-		t.Fatalf("%d waiters woken by a room-wide post, want 1 (carol)", n)
-	}
-	sent = time.Now()
+	onlyEntry(t, c.result(t), plain.ID)
 	marked := e.send(SendInput{Agent: alice, Text: "@everyone stop"})
-	if es := woken(t, ch, sent); len(es) != 1 || es[0].ID != marked.ID {
-		t.Fatalf("bob at level addressed: %+v", es)
+	if !b.woken() {
+		t.Fatal("a post marked for everyone did not wake bob at level addressed")
 	}
+	onlyEntry(t, b.result(t), marked.ID)
 }
 
 // [wake] A level raised from addressed to all while the inbox waits wakes
-// it, and the room-wide posts that follow reach it at once. The post held
-// before the change stays out (skipped, U3), as without waiting.
+// it at once (touchInbox), and the next room-wide post wakes it too. The
+// post held before the change stays out (skipped, U3), as without waiting.
 func TestALevelChangedFromAddressedToAllWhileWaitingTakesEffectAtOnce(t *testing.T) {
 	e := newSurf(t)
-	ctx := context.Background()
 	alice, bob := e.agent("alice"), e.agent("bob")
-	if _, err := e.s.Levels(ctx, bob, "", store.LevelAddressed); err != nil {
-		t.Fatal(err)
-	}
-	looks := e.looks()
-	ch := e.waitingInbox(bob, "", 20*time.Second)
+	e.level(bob, "", store.LevelAddressed)
+	a := e.arm(bob, "")
 	before := e.send(SendInput{Agent: alice, Text: "before the change"})
-	if _, err := e.s.Levels(ctx, bob, "", store.LevelAll); err != nil {
-		t.Fatal(err)
+	if a.woken() {
+		t.Fatal("a room-wide post woke bob at level addressed")
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for looks.Load() < 2 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+	e.level(bob, "", store.LevelAll)
+	if !a.woken() {
+		t.Fatal("the level change did not wake bob's waiting inbox")
 	}
-	if n := looks.Load(); n < 2 {
-		t.Fatalf("the level change did not wake the inbox (%d looks)", n)
-	}
-	sent := time.Now()
+	again := e.waiterAfter(bob, a.x) // the look at the new level found nothing
 	after := e.send(SendInput{Agent: alice, Text: "after the change"})
-	es := woken(t, ch, sent)
+	if !isClosed(again) {
+		t.Fatal("a room-wide post at the new level did not wake bob")
+	}
+	es := a.result(t)
 	if len(es) != 1 || es[0].ID != after.ID {
 		t.Fatalf("entries = %+v (the post before the change, %s, is skipped)", es, before.ID)
+	}
+}
+
+// [wake] A level change wakes only that agent's waiters.
+func TestALevelChangeWakesOnlyThatAgentsWaitingInbox(t *testing.T) {
+	e := newSurf(t)
+	bob, carol := e.agent("bob"), e.agent("carol")
+	b, c := e.arm(bob, ""), e.arm(carol, "")
+	e.level(bob, "", store.LevelAddressed)
+	if !b.woken() || c.woken() {
+		t.Fatalf("bob's level change: bob woken %v, carol woken %v", b.woken(), c.woken())
 	}
 }
 
@@ -166,19 +213,119 @@ func TestAWaitingInboxIsWokenByAReplacementAndAWithdrawal(t *testing.T) {
 	alice, bob := e.agent("alice"), e.agent("bob")
 	m := e.send(SendInput{Agent: alice, Text: "v1", To: []string{bob}})
 	e.read(bob)
-	ch := e.waitingInbox(bob, "", 20*time.Second)
-	sent := time.Now()
+	a := e.arm(bob, "")
 	e.send(SendInput{Agent: alice, Replaces: m.ID, Text: "v2"})
-	es := woken(t, ch, sent)
-	if len(es) != 1 || es[0].Kind != EntryReplaced || es[0].Text != "v2" {
+	if !a.woken() {
+		t.Fatal("a replacement did not wake bob")
+	}
+	if es := a.result(t); len(es) != 1 || es[0].Kind != EntryReplaced || es[0].Text != "v2" {
 		t.Fatalf("entries = %+v", es)
 	}
 	e.read(bob)
-	ch = e.waitingInbox(bob, "", 20*time.Second)
-	sent = time.Now()
+	a = e.arm(bob, "")
 	e.send(SendInput{Agent: alice, Replaces: m.ID, Text: " "})
-	if es := woken(t, ch, sent); len(es) != 1 || es[0].Kind != EntryWithdrawn {
+	if !a.woken() {
+		t.Fatal("a withdrawal did not wake bob")
+	}
+	if es := a.result(t); len(es) != 1 || es[0].Kind != EntryWithdrawn {
 		t.Fatalf("entries = %+v", es)
+	}
+}
+
+// [wake] A handled report wakes its writer's waiting inbox, whose earlier
+// entry it can change, and no one else's: not the asker's, which sees the
+// report in the thread, and not a bystander's.
+func TestAHandledReportWakesItsWriterAndNoOneElse(t *testing.T) {
+	e := newSurf(t)
+	ctx := context.Background()
+	alice, bob, carol := e.agent("alice"), e.agent("bob"), e.agent("carol")
+	q := e.send(SendInput{Agent: alice, Text: "who handles this?", AskHandled: true})
+	e.read(bob)
+	e.read(carol)
+	wa, wb, wc := e.arm(alice, ""), e.arm(bob, ""), e.arm(carol, "")
+	if _, err := e.s.Ack(ctx, carol, q.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !wc.woken() || wa.woken() || wb.woken() {
+		t.Fatalf("carol's handled report: carol woken %v, alice %v, bob %v", wc.woken(), wa.woken(), wb.woken())
+	}
+}
+
+// [wake] A reply to the thread at level addressed wakes the waiters that
+// posted in the thread (the reply addresses them), not another waiter at
+// level addressed.
+func TestAThreadReplyWakesAWaiterAtLevelAddressedThatPostedInTheThread(t *testing.T) {
+	e := newSurf(t)
+	alice, bob, carol, dave := e.agent("alice"), e.agent("bob"), e.agent("carol"), e.agent("dave")
+	root := e.send(SendInput{Agent: alice, Text: "root"})
+	e.send(SendInput{Agent: bob, Text: "bob joins", ReplyTo: root.ID})
+	e.read(bob)
+	e.read(carol)
+	e.level(bob, "", store.LevelAddressed)
+	e.level(carol, "", store.LevelAddressed)
+	b, c := e.arm(bob, ""), e.arm(carol, "")
+	r := e.send(SendInput{Agent: dave, Text: "to the thread", ReplyTo: root.ID, Thread: true})
+	if !b.woken() || c.woken() {
+		t.Fatalf("a thread reply: bob (in the thread) woken %v, carol (not) woken %v", b.woken(), c.woken())
+	}
+	onlyEntry(t, b.result(t), r.ID)
+}
+
+// [wake] A message to the person wakes the person's waiting mailbox and
+// not an agent's; a post by the person wakes the agents it can show
+// something to and not the person's own mailbox.
+func TestAMessageToThePersonWakesTheHumanMailboxOnly(t *testing.T) {
+	e := newSurf(t)
+	alice, bob := e.agent("alice"), e.agent("bob")
+	h, b := e.arm(e.s.HumanID(), ""), e.arm(bob, "")
+	m := e.send(SendInput{Agent: alice, Text: "look", To: []string{HumanLabel}})
+	if !h.woken() || b.woken() {
+		t.Fatalf("a message to the person: human woken %v, bob woken %v", h.woken(), b.woken())
+	}
+	onlyEntry(t, h.result(t), m.ID)
+	e.read(e.s.HumanID())
+	h = e.arm(e.s.HumanID(), "")
+	p := e.send(SendInput{Agent: e.s.HumanID(), Text: "from the person", To: []string{bob}})
+	if !b.woken() || h.woken() {
+		t.Fatalf("a post by the person: bob woken %v, human woken %v", b.woken(), h.woken())
+	}
+	onlyEntry(t, b.result(t), p.ID)
+}
+
+// [wake] An inbox waiting on one named room is woken by a write it can see
+// there and not by one in another room; an inbox waiting on every room is
+// woken by a write in a second room, and by a room created while it waits.
+func TestAWaitingInboxOfOneRoomOrEveryRoomIsWokenByTheRightRoom(t *testing.T) {
+	e := newSurf(t)
+	ctx := context.Background()
+	alice, bob, carol := e.agent("alice"), e.agent("bob"), e.agent("carol")
+	team, err := e.s.CreateRoom(ctx, "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := e.arm(bob, team.ID) // bob waits on team only
+	c := e.arm(carol, "")    // carol on every room
+	e.send(SendInput{Agent: alice, Text: "local, to bob", To: []string{bob}})
+	if b.woken() || c.woken() {
+		t.Fatalf("a local message to bob: bob (on team) woken %v, carol woken %v", b.woken(), c.woken())
+	}
+	m := e.send(SendInput{Agent: alice, Room: team.ID, Text: "team, to bob", To: []string{bob}})
+	if !b.woken() || c.woken() {
+		t.Fatalf("a team message to bob: bob woken %v, carol woken %v", b.woken(), c.woken())
+	}
+	onlyEntry(t, b.result(t), m.ID)
+	n := e.send(SendInput{Agent: alice, Room: team.ID, Text: "team, to carol", To: []string{carol}})
+	if !c.woken() {
+		t.Fatal("a message to carol in a second room did not wake her inbox of every room")
+	}
+	onlyEntry(t, c.result(t), n.ID)
+	e.read(carol)
+	c = e.arm(carol, "")
+	if _, err := e.s.CreateRoom(ctx, "later"); err != nil {
+		t.Fatal(err)
+	}
+	if !c.woken() {
+		t.Fatal("a room created while carol waits did not wake her inbox of every room")
 	}
 }
 
@@ -186,61 +333,172 @@ func TestAWaitingInboxIsWokenByAReplacementAndAWithdrawal(t *testing.T) {
 // and a message to it reaches it and wakes none of them.
 func TestAnAgentRegisteredWhileOthersWaitGetsItsMessagesAndWakesNoOne(t *testing.T) {
 	e := newSurf(t)
-	ctx := context.Background()
 	alice, bob := e.agent("alice"), e.agent("bob")
-	ch := e.waitingInbox(bob, "", 3*time.Second)
+	b := e.arm(bob, "")
 	woke := e.s.m.wakes.inboxWoken()
 	dave := e.agent("dave")
-	dw := e.waitingInbox(dave, "", 20*time.Second)
-	sent := time.Now()
+	d := e.arm(dave, "")
 	m := e.send(SendInput{Agent: alice, Text: "welcome", To: []string{dave}})
-	if es := woken(t, dw, sent); len(es) != 1 || es[0].ID != m.ID {
-		t.Fatalf("dave: %+v", es)
+	if !d.woken() || b.woken() {
+		t.Fatalf("dave woken %v, bob woken %v", d.woken(), b.woken())
 	}
+	onlyEntry(t, d.result(t), m.ID)
 	if n := e.s.m.wakes.inboxWoken() - woke; n != 1 {
 		t.Fatalf("%d waiters woken, want 1 (dave)", n)
 	}
-	if r := <-ch; r.err != nil || len(r.v.Entries) != 0 {
-		t.Fatalf("bob: %+v %v", r.v, r.err)
+}
+
+// [wake] No lost wake-up at the worst moment: a write is committed after
+// the look has read the room and before the waiter knows the level the
+// look read. The waiter registered before the look, so the write closes
+// it; with the level not yet known, a write it may not show wakes it too.
+func TestAMessageCommittedBetweenTheLookAndTheWaitWakesTheInbox(t *testing.T) {
+	e := newSurf(t)
+	ctx := context.Background()
+	alice, bob := e.agent("alice"), e.agent("bob")
+	label, _ := e.s.label(bob)
+	// waiterOf is bob's waiter, registered and not yet given levels.
+	waiterOf := func() *inboxWaiter {
+		w := &e.s.m.wakes
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		for _, xs := range w.inbox {
+			for x := range xs {
+				if x.agent == label {
+					return x
+				}
+			}
+		}
+		return nil
 	}
-	if _, err := e.s.Inbox(ctx, dave, "", 0, 0); err != nil {
-		t.Fatal(err)
+	for _, c := range []struct {
+		name  string
+		level string
+		in    SendInput
+		shows bool
+	}{
+		{"a message to bob", store.LevelAll, SendInput{Agent: alice, Text: "between", To: []string{bob}}, true},
+		{"a room-wide post at level addressed", store.LevelAddressed, SendInput{Agent: alice, Text: "between, room-wide"}, false},
+	} {
+		e.level(bob, "", c.level)
+		var once sync.Once
+		var id string
+		e.s.scanned = func(int, time.Time) {
+			once.Do(func() { // the first look's transactions are over
+				x := waiterOf()
+				if x == nil || x.levels != nil {
+					t.Errorf("%s: bob's waiter is %+v at the end of the look", c.name, x)
+					return
+				}
+				m, err := e.s.Send(ctx, c.in)
+				if err != nil {
+					t.Error(err)
+				}
+				id = m.ID
+				if !isClosed(x) {
+					t.Errorf("%s between the look and the wait did not wake the waiter", c.name)
+				}
+			})
+		}
+		wait := 20 * time.Second
+		if !c.shows {
+			wait = 300 * time.Millisecond
+		}
+		v, err := e.s.Inbox(ctx, bob, "", 0, wait)
+		e.s.scanned = nil
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.shows {
+			onlyEntry(t, v.Entries, id)
+			e.read(bob)
+		} else if len(v.Entries) != 0 {
+			t.Fatalf("%s: %+v", c.name, v.Entries)
+		}
 	}
 }
 
-// [wake] No lost wake-up at the worst moment: a message for the waiter is
-// committed after its look has read the room and before it starts to wait.
-// The waiter registered before the look, so the write wakes it at once.
-func TestAMessageCommittedBetweenTheLookAndTheWaitWakesTheInbox(t *testing.T) {
+// [wake] A level change racing a send never leaves a waiting inbox to the
+// fallback look: whichever commits first, the waiter is woken, and when a
+// plain look made after both shows the post, the call returns it with no
+// fallback look after both returned. Run with the race detector.
+func TestALevelChangeRacingASendNeverLeavesTheWaiterOnTheFallback(t *testing.T) {
 	e := newSurf(t)
+	ctx := context.Background()
 	alice, bob := e.agent("alice"), e.agent("bob")
-	var once sync.Once
-	var sent time.Time
-	var id string
-	e.s.scanned = func(int, time.Time) {
-		once.Do(func() { // the first look's transactions are over
-			sent = time.Now()
-			m, err := e.s.Send(context.Background(), SendInput{Agent: alice, Text: "between", To: []string{bob}})
-			if err != nil {
+	label, _ := e.s.label(bob)
+	var fmu sync.Mutex
+	var fell []time.Time
+	e.s.fallback = func(l string, at time.Time) {
+		if l == label {
+			fmu.Lock()
+			fell = append(fell, at)
+			fmu.Unlock()
+		}
+	}
+	shown := 0
+	for i := 0; i < 30; i++ {
+		e.level(bob, "", store.LevelAddressed)
+		e.read(bob)
+		a := e.arm(bob, "")
+		var wg sync.WaitGroup
+		wg.Add(2)
+		// Either may go first: half the rounds give the send a head start
+		// of up to 2 ms, the other half the level change.
+		lag := time.Duration(i/2%5) * 500 * time.Microsecond
+		go func() {
+			defer wg.Done()
+			if i%2 == 0 {
+				time.Sleep(lag)
+			}
+			if _, err := e.s.Levels(ctx, bob, "", store.LevelAll); err != nil {
 				t.Error(err)
 			}
-			id = m.ID
-		})
+		}()
+		go func() {
+			defer wg.Done()
+			if i%2 == 1 {
+				time.Sleep(lag)
+			}
+			if _, err := e.s.Send(ctx, SendInput{Agent: alice, Text: fmt.Sprintf("room-wide %d", i)}); err != nil {
+				t.Error(err)
+			}
+		}()
+		wg.Wait()
+		both := time.Now()
+		if !a.woken() {
+			t.Fatalf("round %d: the waiter was not woken", i)
+		}
+		want, err := e.s.inbox(ctx, label, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(want.Entries) == 0 {
+			continue // the post came first and stays out (U3)
+		}
+		shown++
+		es := a.result(t)
+		if len(es) != len(want.Entries) || es[0].Key != want.Entries[0].Key {
+			t.Fatalf("round %d: %+v, a plain look shows %+v", i, es, want.Entries)
+		}
+		fmu.Lock()
+		for _, at := range fell {
+			if at.After(both) {
+				t.Fatalf("round %d: a fallback look at %v after both returned", i, at.Sub(both))
+			}
+		}
+		fmu.Unlock()
 	}
-	v, err := e.s.Inbox(context.Background(), bob, "", 0, 20*time.Second)
-	if err != nil || len(v.Entries) != 1 || v.Entries[0].ID != id {
-		t.Fatalf("%+v %v", v, err)
-	}
-	if d := time.Since(sent); d > 700*time.Millisecond {
-		t.Fatalf("returned %v after the write: the fallback look, not a wake", d)
-	}
+	t.Logf("the post was shown in %d of 30 rounds", shown)
 }
 
 // [wake] No lost wake-up under concurrent senders and waiters: every
 // message reaches its addressee, each waiter loops inbox (waiting) and
-// seen, and none of them needs the one-second fallback to see a message
-// (a wait that ends by the fallback while a message for it is held is
-// counted). Run with the race detector.
+// seen, and no waiter's wait ends unwoken (by the fallback look or at its
+// deadline) after a message it is later shown was sent: such a wait was
+// waiting when the message committed, and should have been woken. The
+// send's return is the reference, so no allowance for timing. Run with
+// the race detector.
 func TestNoLostWakeUpWithManyConcurrentSendersAndWaiters(t *testing.T) {
 	e := newSurf(t)
 	ctx := context.Background()
@@ -249,9 +507,7 @@ func TestNoLostWakeUpWithManyConcurrentSendersAndWaiters(t *testing.T) {
 	for i := range ws {
 		ws[i] = e.agent(fmt.Sprintf("w%d", i))
 		if i%3 == 0 { // some at level addressed: messages to them still wake them
-			if _, err := e.s.Levels(ctx, ws[i], "", store.LevelAddressed); err != nil {
-				t.Fatal(err)
-			}
+			e.level(ws[i], "", store.LevelAddressed)
 		}
 	}
 	ss := make([]string, senders)
@@ -261,14 +517,15 @@ func TestNoLostWakeUpWithManyConcurrentSendersAndWaiters(t *testing.T) {
 	want := make([]atomic.Int64, waiters)
 	got := make([]atomic.Int64, waiters)
 	var late atomic.Int64
-	// fell is when each waiter's last fallback look began: a message it
-	// then finds that was written well before had no wake (a lost one).
-	var fmu sync.Mutex
-	fell := map[string]time.Time{}
+	// sentAt is when each send returned: its wake was done by then.
+	var sentAt sync.Map
+	// unwoken is, per waiter, when each wait ended with no wake.
+	var umu sync.Mutex
+	unwoken := map[string][]time.Time{}
 	e.s.fallback = func(label string, at time.Time) {
-		fmu.Lock()
-		fell[label] = at
-		fmu.Unlock()
+		umu.Lock()
+		unwoken[label] = append(unwoken[label], at)
+		umu.Unlock()
 	}
 	var wg sync.WaitGroup
 	done := make(chan struct{})
@@ -276,6 +533,7 @@ func TestNoLostWakeUpWithManyConcurrentSendersAndWaiters(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			label := fmt.Sprintf("w%d", i)
 			for {
 				select {
 				case <-done:
@@ -284,33 +542,34 @@ func TestNoLostWakeUpWithManyConcurrentSendersAndWaiters(t *testing.T) {
 					}
 				default:
 				}
-				label := fmt.Sprintf("w%d", i)
-				fmu.Lock()
-				delete(fell, label)
-				fmu.Unlock()
 				v, err := e.s.Inbox(ctx, ws[i], "", 0, 2*time.Second)
 				if err != nil {
 					t.Error(err)
 					return
 				}
-				fmu.Lock()
-				at, ok := fell[label]
-				fmu.Unlock()
-				for _, x := range v.Entries {
-					if ok && x.Created.Before(at.Add(-300*time.Millisecond)) {
-						late.Add(1)
-					}
+				if len(v.Entries) == 0 {
+					continue // the deadline, which ends a wait by the timer: counted as a fallback
 				}
+				umu.Lock()
+				ends := unwoken[label]
+				umu.Unlock()
 				var rs []store.Read
 				for _, x := range v.Entries {
+					if s, ok := sentAt.Load(x.ID); ok {
+						for _, u := range ends {
+							if u.After(s.(time.Time)) {
+								late.Add(1)
+								t.Logf("%s: %s sent, then a wait ended unwoken %v later", label, x.ID, u.Sub(s.(time.Time)))
+								break
+							}
+						}
+					}
 					rs = append(rs, store.Read{Key: x.Key, Version: x.Version})
 					got[i].Add(1)
 				}
-				if len(rs) > 0 {
-					if _, err := e.s.Seen(ctx, ws[i], rs); err != nil {
-						t.Error(err)
-						return
-					}
+				if _, err := e.s.Seen(ctx, ws[i], rs); err != nil {
+					t.Error(err)
+					return
 				}
 			}
 		}()
@@ -323,20 +582,24 @@ func TestNoLostWakeUpWithManyConcurrentSendersAndWaiters(t *testing.T) {
 			for j := 0; j < each; j++ {
 				to := (k*each + j) % waiters
 				want[to].Add(1)
-				if _, err := e.s.Send(ctx, SendInput{Agent: ss[k], Text: fmt.Sprintf("m %d %d", k, j), To: []string{ws[to]}}); err != nil {
+				m, err := e.s.Send(ctx, SendInput{Agent: ss[k], Text: fmt.Sprintf("m %d %d", k, j), To: []string{ws[to]}})
+				if err != nil {
 					t.Error(err)
 					return
 				}
+				sentAt.Store(m.ID, time.Now())
 				if j%5 == 0 { // room-wide traffic too: it wakes only waiters at level all
-					if _, err := e.s.Send(ctx, SendInput{Agent: ss[k], Text: "room-wide"}); err != nil {
-						t.Error(err)
-						return
-					}
 					for i := range ws {
 						if i%3 != 0 {
 							want[i].Add(1)
 						}
 					}
+					m, err := e.s.Send(ctx, SendInput{Agent: ss[k], Text: "room-wide"})
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					sentAt.Store(m.ID, time.Now())
 				}
 			}
 		}()
@@ -359,6 +622,23 @@ func TestNoLostWakeUpWithManyConcurrentSendersAndWaiters(t *testing.T) {
 		}
 	}
 	if n := late.Load(); n > 0 {
-		t.Fatalf("%d waits saw their message only after the fallback look", n)
+		t.Fatalf("%d messages were shown only after a wait that ended unwoken", n)
+	}
+}
+
+// BenchmarkATouchWriteScansTwoHundredWaiters is the cost of one narrow
+// wake with 200 inbox waiters in the room, none of them woken: the scan
+// that touchWrite does under the wakes' mutex.
+func BenchmarkATouchWriteScansTwoHundredWaiters(b *testing.B) {
+	var w roomWakes
+	for i := 0; i < 200; i++ {
+		x := w.waitInbox(fmt.Sprintf("a%d", i), "")
+		w.setLevels(x, map[string]string{"room": store.LevelAll})
+	}
+	f := core.RecordFields{Kind: core.KindMessage, Agent: "sender", Text: "to someone else",
+		To: []core.Addressee{{Node: "self", Agent: "nobody"}}}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		w.touchWrite("room", "self", f)
 	}
 }

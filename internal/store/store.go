@@ -13,7 +13,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,8 +77,6 @@ type Store struct {
 	// before its commit. With one connection, a read that starts after
 	// changes was read sees every write counted by then (see Changes).
 	changes atomic.Int64
-	// quiet counts the write transactions that were quiet (Quiet).
-	quiet atomic.Int64
 	// root is the directory under which attachments live (files.go):
 	// the database's own directory. fileMu serialises putting bytes at a
 	// path with the deletion queue's run.
@@ -112,7 +114,10 @@ func (s *Store) Changes() int64 { return s.changes.Load() }
 
 // Open opens (creating and migrating if needed) the database at path.
 func Open(path string) (*Store, error) {
-	dsn := "file:" + path + "?_txlock=immediate" +
+	if err := checkMisplaced(path); err != nil {
+		return nil, err
+	}
+	dsn := fileURI(path) + "?_txlock=immediate" +
 		"&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)" +
 		"&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)" +
 		// Dropped text (withdrawn, expired, voided) is overwritten in the
@@ -131,6 +136,96 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("migrate %s: %w", path, err)
 	}
 	return s, nil
+}
+
+// fileURI is path as an SQLite URI filename (sqlite.org/uri.html), with
+// every byte but letters, digits, "-._~", '/' and ':' percent-escaped, so
+// that SQLite opens exactly path ('?', '#' and '%' have a meaning in a
+// URI) and the driver reads only our parameters. An absolute path takes
+// an empty authority, file:///dir/file, and on Windows the documented
+// form file:///C:/dir/file; a relative one stays relative, file:dir/file.
+func fileURI(path string) string {
+	p := filepath.ToSlash(path)
+	if filepath.VolumeName(path) != "" && !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	var b strings.Builder
+	b.WriteString("file:")
+	if strings.HasPrefix(p, "/") {
+		b.WriteString("//")
+	}
+	const hex = "0123456789ABCDEF"
+	for i := 0; i < len(p); i++ {
+		switch c := p[i]; {
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9', strings.IndexByte("-._~/:", c) >= 0:
+			b.WriteByte(c)
+		default:
+			b.WriteByte('%')
+			b.WriteByte(hex[c>>4])
+			b.WriteByte(hex[c&15])
+		}
+	}
+	return b.String()
+}
+
+// misplacedPath is where a2p2 0.2.3 and earlier opened path, which they
+// gave SQLite unescaped: cut at the first '?' or '#', each %XX decoded.
+// ok is false if that is path itself.
+func misplacedPath(path string) (string, bool) {
+	p := filepath.ToSlash(path)
+	if i := strings.IndexAny(p, "?#"); i >= 0 {
+		p = p[:i]
+	}
+	var b strings.Builder
+	for i := 0; i < len(p); i++ {
+		if p[i] == '%' && i+2 < len(p) && isHex(p[i+1]) && isHex(p[i+2]) {
+			b.WriteByte(unhex(p[i+1])<<4 | unhex(p[i+2]))
+			i += 2
+			continue
+		}
+		b.WriteByte(p[i])
+	}
+	old := filepath.FromSlash(b.String())
+	return old, old != path
+}
+
+func isHex(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
+}
+
+func unhex(c byte) byte {
+	switch {
+	case c <= '9':
+		return c - '0'
+	case c <= 'F':
+		return c - 'A' + 10
+	}
+	return c - 'a' + 10
+}
+
+// checkMisplaced refuses to create a new database at path when an older
+// a2p2 kept this home's database elsewhere (misplacedPath) and an SQLite
+// database is there: opening would start an empty node and hide it.
+func checkMisplaced(path string) error {
+	old, ok := misplacedPath(path)
+	if !ok {
+		return nil
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	f, err := os.Open(old)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	head := make([]byte, 16)
+	if _, err := io.ReadFull(f, head); err != nil || string(head) != "SQLite format 3\x00" {
+		return nil
+	}
+	return fmt.Errorf("this home's database is at %s, where a2p2 0.2.3 and earlier put it "+
+		"(they cut the path %s at its '?' or '#', or decoded its '%%'): stop a2p2, move %s to %s "+
+		"and any %s-wal and %s-shm to %s-wal and %s-shm, then start again", old, path, old, path, old, old, path, path)
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -186,14 +281,6 @@ func (s *Store) Check(ctx context.Context) error {
 }
 
 func (s *Store) tx(ctx context.Context, fn func(*sql.Tx) error) error {
-	return s.txQuiet(ctx, func(tx *sql.Tx) (bool, error) { return false, fn(tx) })
-}
-
-// txQuiet is tx for a write that may be quiet (see Quiet): fn says whether
-// what it wrote is. The quiet count is raised after changes, inside the
-// transaction, so that a reader of Quiet then Changes never counts a write
-// quiet that was not.
-func (s *Store) txQuiet(ctx context.Context, fn func(*sql.Tx) (bool, error)) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -201,28 +288,13 @@ func (s *Store) txQuiet(ctx context.Context, fn func(*sql.Tx) (bool, error)) err
 	if h := txHook; h != nil {
 		defer h(true, time.Now())
 	}
-	quiet, err := fn(tx)
-	if err != nil {
+	if err := fn(tx); err != nil {
 		tx.Rollback()
 		return err
 	}
 	s.changes.Add(1)
-	if quiet {
-		s.quiet.Add(1)
-	}
 	return tx.Commit()
 }
-
-// Quiet is the number of write transactions counted by Changes that were
-// quiet: each stored only one record of this machine of kind message or
-// handled, at the next position of its stream (Write), or changed only one
-// agent's reading state in one room (Seen, ShowAt). Such a write never
-// changes what reading decides at a position held before it, for any
-// agent, so a reader that read Changes and Quiet inside an earlier read
-// transaction can tell, inside a later one, that only quiet writes came
-// between (both grew by the same amount). Read Quiet before Changes
-// outside a transaction.
-func (s *Store) Quiet() int64 { return s.quiet.Load() }
 
 // txHook, when set, is told of every transaction once it ends: whether it
 // could write, and when it began (it holds the one connection from then).
