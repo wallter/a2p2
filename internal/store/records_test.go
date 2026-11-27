@@ -812,7 +812,7 @@ func TestRegisteringAnAgentStartsItsCursorsAtTheCurrentEnd(t *testing.T) {
 	}
 }
 
-// D-NEW-prereg: registering starts a cursor just before the first message
+// D73: registering starts a cursor just before the first message
 // held that is addressed to the new agent on this machine, with Early
 // there and Start at the current end; a message to the same label on
 // another machine, a room-wide one and one to another label move nothing.

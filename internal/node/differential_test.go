@@ -10,7 +10,7 @@ package node
 //
 // Registering an agent mid-schedule runs on both sides (the model's
 // Register): its time begins at the current end, except for messages
-// addressed to it (D-NEW-prereg).
+// addressed to it (D73).
 //
 // What the model does not have is checked against invariants instead:
 // records the model

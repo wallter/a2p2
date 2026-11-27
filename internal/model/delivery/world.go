@@ -161,7 +161,7 @@ func (w *World) Admit(id MachineID, by MachineID, history bool, agents ...string
 // history from before is not unread for it, except that every message held
 // then that is addressed to it, however old, is in its time (inTime): the
 // cursor of that stream starts just before the first one, and early there
-// (D-NEW-prereg). The label is durable state like the rest of the agent's
+// (D73). The label is durable state like the rest of the agent's
 // reading: a restore to before the registration takes it back.
 func (w *World) Register(id MachineID, agent string) error {
 	m, err := w.awake(id)

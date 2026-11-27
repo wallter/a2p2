@@ -38,7 +38,7 @@
    a header, lists the replies naming it, the parent marked missing (D10).
 8. A newcomer reads from the admitter's positions; without history, earlier
    records come as headers only.
-8a. An agent registered later (`Register`, added 2026-11-27, D-NEW-prereg)
+8a. An agent registered later (`Register`, added 2026-11-27, D73)
    starts at the end of every stream held, except that every message held
    then and addressed to it, however old, is in its time: its cursor
    starts just before the first one, and `early` marks where. A message

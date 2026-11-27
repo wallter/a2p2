@@ -67,7 +67,7 @@ CREATE TABLE read_heads (
   PRIMARY KEY (agent, room, author, record));
 `
 
-// schemaEarly is migration 15 (D-NEW-prereg): cursors.early, where an
+// schemaEarly is migration 15 (D73): cursors.early, where an
 // agent's time began for messages addressed to it. NULL, which every row
 // from before has and every cursor but a registration's gets, means start.
 const schemaEarly = `
@@ -173,7 +173,7 @@ type Stream struct {
 // Pos is resolved for the agent; Start is where its time began. Early, at
 // or below Start, is where its time began for messages addressed to it: a
 // position above Early and at or below Start is in the agent's time only
-// if it holds a message addressed to the agent (Register; D-NEW-prereg).
+// if it holds a message addressed to the agent (Register; D73).
 // Early is Start for every cursor but a registration's.
 type Cursor struct {
 	Author string
@@ -268,7 +268,7 @@ func (s *Store) AddRoom(ctx context.Context, id, label, createID string, now tim
 // every room, so room-wide history from before it arrived is not unread
 // for it (v0.2's behaviour). A message held now that is addressed to this
 // agent (agent on node, this machine), however long before it was sent,
-// is unread for it all the same (D-NEW-prereg): in that message's stream
+// is unread for it all the same (D73): in that message's stream
 // the cursor starts just before the first such message, with Early there.
 // It reports whether the agent is new.
 func (s *Store) Register(ctx context.Context, node, agent string, now time.Time) (bool, error) {
@@ -314,7 +314,7 @@ func (s *Store) Register(ctx context.Context, node, agent string, now time.Time)
 
 // seedAddressed moves agent's cursors in room, just seeded by Register,
 // back to just before the first message held that is addressed to it,
-// stream by stream, and sets Early there (D-NEW-prereg). It reads the
+// stream by stream, and sets Early there (D73). It reads the
 // header of every message held in the room once, at registration: a
 // message's addressees are in its signed header, so no text is needed.
 func seedAddressed(tx *sql.Tx, node, agent, room string) error {

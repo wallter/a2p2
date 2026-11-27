@@ -52,7 +52,7 @@ number, and a charter may change it.
 
 ## Reading and waiting
 
-- `inbox` gives the oldest unread that fit about 24 KB; on `more`, call again.
+- `inbox` gives the oldest unread that fit about 18 KB; on `more`, call again.
   Short of context, or after a compaction: `inbox {"max_bytes":8000}`.
 - Nothing wakes an idle agent. While an exchange is live, wait with
   `inbox {"wait_seconds":30}` (the most) between steps, until the work or

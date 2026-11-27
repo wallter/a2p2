@@ -1040,7 +1040,13 @@ func (s *Surface) InboxPage(ctx context.Context, agent, room string, o InboxOpts
 		ended := time.Now()
 		s.m.wakes.doneInbox(x)
 		if !ok {
-			return v, ctx.Err()
+			if err := ctx.Err(); err != nil {
+				return v, err
+			}
+			// The wait ended with nothing: the view returned is sized
+			// too, since what it shows (streams still fetching, more)
+			// may have grown while it waited.
+			return o.page(v, limit, set != nil)
 		}
 		if s.fallback != nil {
 			select {

@@ -19,12 +19,12 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Changed
 
-- **The MCP `inbox` returns at most 24,000 bytes by default, and marks seen
-  only what it returned (D70).** A new `max_bytes` argument (512 to 40,000)
-  sets how many bytes of result a reader wants; without it the tool now
-  applies 24,000, so a large backlog comes in more calls than before (1 KB
-  messages about twenty to a call instead of fifty; fifty short messages
-  still fit one). The daemon picks the entries, oldest first, and keeps
+- **The MCP `inbox` returns at most 18,000 bytes by default, and marks seen
+  only what it returned (D70, D72).** A new `max_bytes` argument (512 to
+  32,000) sets how many bytes of result a reader wants; without it the tool
+  now applies 18,000, so a large backlog comes in more calls than before
+  (1 KB messages about fifteen to a call instead of fifty; fifty one-line
+  messages still fit one). The daemon picks the entries, oldest first, and keeps
   receipts for those only: what did not fit is neither returned nor marked
   seen, and the result's new `more` says how many of those held when the
   daemon looked are still unread, so the agent calls again. The budget
@@ -32,8 +32,8 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   refused for its budget sets no level. An oldest message too large for
   the budget is refused (`too_large`) with at least the `max_bytes` it
   needs, and nothing is marked; one too large for any budget is returned
-  alone at 40,000 with its text cut to fit and `text_cut` saying so, so no
-  result is over 40,000 bytes. `max_bytes` with `peek`, `recent`,
+  alone at 32,000 with its text cut to fit and `text_cut` saying so, so no
+  result is over 32,000 bytes. `max_bytes` with `peek`, `recent`,
   `skipped`, `thread` or `fetch` is refused. On a daemon before 0.2.4 the
   MCP server reads as before, with no budget, and its result's `note` says
   to run `a2p2 stop` to start the new daemon. The local page and the CLI
@@ -43,7 +43,17 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   limit left some out. The result is marked seen before the model reads
   it, as before, so a harness that cuts a result can still lose
   messages. The `whoami`, `inbox` and `ack` descriptions were
-  shortened to pay for the argument: the definitions are 3,992 bytes.
+  shortened to pay for the argument: the definitions are 3,995 bytes.
+- **The inbox's byte sizes are lower: 18,000 by default and 32,000 at
+  most (D72).** An absent or 0 `max_bytes` is the default; 1 to 511 and
+  negative values are refused. A wait that ends with nothing, and a read that set a level and
+  then waited, are now held to the budget too. Earlier builds of this unreleased change used 24,000 and
+  40,000, sized at about 4 bytes a token. Inbox results measured in Claude
+  Code came to 1.5 to 3.4 bytes a token, about 2 for ordinary entries, so
+  a default page could pass its 10,000-token warning, and a page it saves
+  to a file instead of showing had already been marked seen. A `max_bytes`
+  above 32,000 is now read as 32,000, and the result's `note` says so,
+  rather than refused; the local API still refuses one.
 - **Docs: the durability limit on macOS is stated.** `send` survives a crash
   of a2p2 or of the operating system, but on macOS a sudden power loss can
   lose the last few sent messages, because the database's sync does not
@@ -73,8 +83,31 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   as expired. `send` (and the MCP send, reply and ask_human results) now
   names addressees on this machine that have not registered yet; the
   CLI prints that on stderr. An agent registered before this version
-  keeps its place. The database gains a column (migration 15), so an
-  older a2p2 will not open it.
+  keeps its place. The database gains a column (migration 15): once this
+  version has opened a home, 0.2.3 and earlier refuse it ("upgrade
+  a2p2"). To be able to go back, copy the home before upgrading
+  ([installing](docs/INSTALL.md#going-back-to-an-older-version)).
+- **`--wait` and the count flags are checked by the CLI and the error names
+  the flag.** `a2p2 inbox --wait 600` said `wait_ms is 0 to 120000`, a field
+  of the local API in milliseconds, while the flag takes seconds. `inbox`,
+  `alerts` and `fetch` now say `--wait takes 0 to 120 seconds, not 600`
+  before anything is registered, and a negative `inbox --limit` or `history
+  -n` names the flag typed. Present since 0.1.0.
+- **`make e2e` no longer shows the agent-shell notice for a command that was
+  given `--as`.** The CLI never printed it for such a command (a test now
+  says so, in a shell with `CLAUDECODE` and `AI_AGENT` set). The notice came
+  from the scripts' own `history` call, which had no `--as` and so acted as
+  the agent of the working directory, as D66 says; the scripts now pass
+  `--as`. The notice itself, for a command with neither `--as` nor
+  `--person`, is unchanged and has been in the code since after 0.2.3.
+- **A daemon that a command starts no longer keeps that command's working
+  directory.** Since 0.1.0 the daemon started by the first CLI command or
+  MCP server ran in whatever directory that was, for as long as it ran:
+  it held a temporary worktree or project directory that someone may want
+  to remove, and could keep a volume from being unmounted. With an
+  absolute `A2P2_HOME`, the default, it now runs in its home. A relative
+  `A2P2_HOME` is relative to that directory, so it is kept there, as
+  before.
 - **Serving and making a pull no longer gets slower as a room's history
   grows.** Every pull request served or made worked out the machine's
   summary of the room by reading every record of it, under the lock that
@@ -165,8 +198,8 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   first inbox page of 50 plus its Seen, with the whole history unread,
   took 2.1 s at 1,000 messages and 75 s at 10,000, now 73 ms and 0.40 s;
   that still grows with the unread backlog. Results and their order are
-  unchanged, and the database schema is not touched, so 0.2.0 to 0.2.3
-  can still open the database.
+  unchanged, and this change does not touch the database schema (the
+  release does: migration 15, above).
 - **A machine no longer backs itself off from its peer by sending, and
   every request to a peer comes out of one budget.** Since 0.1.0, the
   exchange that carried a machine's new messages to a peer as an offer

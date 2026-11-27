@@ -338,7 +338,7 @@ func NewMachine(st *store.Store, key ed25519.PrivateKey, o MachineOpts) *Machine
 // cursors start at the current end of every stream in every room, so what
 // was written to the room before it arrived is not unread for it; a
 // message held then that is addressed to it is unread all the same
-// (store.Register, D-NEW-prereg). It reports whether the agent is new.
+// (store.Register, D73). It reports whether the agent is new.
 func (m *Machine) Register(ctx context.Context, agent string) (bool, error) {
 	if err := checkAgent(agent); err != nil {
 		return false, err
@@ -430,7 +430,7 @@ type Sent struct {
 	ToOmitted int
 	// NotRegistered: the addressees on this machine that have never
 	// registered here (Surface.Send). Each reads the message when it first
-	// registers (D-NEW-prereg). Nothing is said of other machines' agents:
+	// registers (D73). Nothing is said of other machines' agents:
 	// this machine cannot know them.
 	NotRegistered []core.Addressee
 }

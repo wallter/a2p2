@@ -1,6 +1,6 @@
 package node
 
-// D-NEW-prereg: a message addressed to an agent before the agent first
+// D73: a message addressed to an agent before the agent first
 // registers is unread for it when it does; room-wide history from before
 // is not.
 

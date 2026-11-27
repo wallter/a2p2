@@ -156,7 +156,7 @@ type (
 		Room   string `json:"room,omitempty"`
 		Limit  int    `json:"limit,omitempty"`
 		WaitMS int64  `json:"wait_ms,omitempty"`
-		// MaxBytes (512 to 40,000; 0: none): the MCP inbox tool's result
+		// MaxBytes (512 to 32,000; 0: none): the MCP inbox tool's result
 		// for this answer (ToolInboxSize) stays within that many bytes.
 		// The entries returned, oldest first, are what fits; the rest is
 		// not returned and keeps no receipt; an oldest entry that fits no

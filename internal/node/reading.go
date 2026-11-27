@@ -1082,7 +1082,7 @@ func changedBy(msg, r *rec) string {
 // inTime says whether message r is in the agent's time: after where its
 // time began in r's stream, or, for a message addressed to it, after where
 // its time began for those (an agent registered after a brief was sent to
-// it reads the brief; D-NEW-prereg). The model's inTime is the same.
+// it reads the brief; D73). The model's inTime is the same.
 func (g *agentState) inTime(r *rec, self string) bool {
 	k := r.stream()
 	if r.f.Seq > g.start[k] {

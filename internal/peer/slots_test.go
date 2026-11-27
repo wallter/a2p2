@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -450,8 +451,18 @@ func TestARefusedConnectionIsClosedWithoutWritingAnAlert(t *testing.T) {
 
 // closedBeforeAnswer says whether err is what a client sees when the
 // server closed its connection before answering: end of file, a reset or a
-// broken pipe.
+// broken pipe, or net/http's own name for the first of these when it was
+// read before the request was written: the client's transport reads a
+// connection while it waits for its request, sees the close, and reports
+// "http: server closed idle connection", an unexported error with no
+// errors.Is form, so it is matched by its text, on its own, not as a
+// substring of other errors. It occurs on a fresh connection that the server
+// closed after the handshake (observed: Reused=false), keep-alives or not.
 func closedBeforeAnswer(err error) bool {
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.Err != nil && ue.Err.Error() == "http: server closed idle connection" {
+		return true
+	}
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
 }
@@ -492,6 +503,9 @@ func TestRefusedPeerRequestsDoNotGrowLog(t *testing.T) {
 	h := &memberH{}
 	addr := serveFrom(t, newID(t), h, "198.51.100.7")[0]
 	stranger := keyClient(t, newID(t))
+	// One dial per request: a stranger's connection is closed after each
+	// answer, so nothing here depends on reuse.
+	stranger.Transport.(*http.Transport).DisableKeepAlives = true
 	member := keyClient(t, h.add(newID(t)))
 	codes := map[string]int{}
 	// A stranger's connection is closed after each answer and its slot is

@@ -51,8 +51,8 @@ func readPage(t *testing.T, cs *mcp.ClientSession, args map[string]any) (page, s
 	t.Helper()
 	s := ok(t, cs, "inbox", args)
 	max := node.DefaultInboxBytes
-	if m, ok := args["max_bytes"].(int); ok {
-		max = m
+	if m, ok := args["max_bytes"].(int); ok && m != 0 {
+		max = min(m, node.MaxInboxBytes)
 	}
 	if len(s) > max {
 		t.Fatalf("result is %d bytes, over max_bytes %d", len(s), max)
@@ -264,7 +264,7 @@ func TestAnOldestMessageTooLargeForTheBudgetIsRefusedWithTheSizeItNeeds(t *testi
 	hidden := bob.send(localapi.SendReq{Text: strings.Repeat("\u200b", 5400)})
 	bob.send(localapi.SendReq{Text: "after the hidden one"})
 	ref = refusal(t, a, "inbox", nil)
-	if ref.Code != node.ErrorTooLarge || !strings.Contains(ref.Error, "more than any max_bytes holds") || !strings.Contains(ref.Error, "max_bytes 40000") {
+	if ref.Code != node.ErrorTooLarge || !strings.Contains(ref.Error, "more than any max_bytes holds") || !strings.Contains(ref.Error, fmt.Sprintf("max_bytes %d", node.MaxInboxBytes)) {
 		t.Fatalf("refusal %+v", ref)
 	}
 	s = ok(t, a, "inbox", map[string]any{"max_bytes": node.MaxInboxBytes})
@@ -304,7 +304,7 @@ func TestLimitAndMaxBytesTogetherWhicheverBindsFirst(t *testing.T) {
 }
 
 // [U4] Without max_bytes the inbox tool applies the default: a backlog of
-// 1 KB messages comes in pages of about twenty, not the limit's fifty.
+// 1 KB messages comes in pages of about fifteen, not the limit's fifty.
 func TestTheDefaultBudgetAppliesWhenMaxBytesIsAbsent(t *testing.T) {
 	c := startDaemon(t)
 	bob := newWriter(t, c, "bob")
@@ -314,7 +314,7 @@ func TestTheDefaultBudgetAppliesWhenMaxBytesIsAbsent(t *testing.T) {
 		bob.send(localapi.SendReq{Text: strings.Repeat("y", 1000)})
 	}
 	p, s := readPage(t, a, map[string]any{})
-	if len(p.Messages) < 15 || len(p.Messages) >= 50 || p.More != 60-len(p.Messages) || len(s) > node.DefaultInboxBytes {
+	if len(p.Messages) < 10 || len(p.Messages) >= 50 || p.More != 60-len(p.Messages) || len(s) > node.DefaultInboxBytes {
 		t.Fatalf("default page: %d messages, more %d, %d bytes", len(p.Messages), p.More, len(s))
 	}
 	// The local API applies no budget unless asked: an older shim reads as
@@ -328,7 +328,7 @@ func TestTheDefaultBudgetAppliesWhenMaxBytesIsAbsent(t *testing.T) {
 	}
 }
 
-// [U4] max_bytes is refused out of its range, and with the views that mark
+// [U4] max_bytes is refused below its range, and with the views that mark
 // nothing seen (peek, recent, skipped, thread, fetch), which do not take
 // it; a level set with a read counts its levels in the budget.
 func TestMaxBytesIsCheckedAndCountsTheLevelsOfTheSameCall(t *testing.T) {
@@ -340,13 +340,19 @@ func TestMaxBytesIsCheckedAndCountsTheLevelsOfTheSameCall(t *testing.T) {
 	a := connect(t, c, "alice")
 	agentID(t, a)
 	for _, args := range []map[string]any{
-		{"max_bytes": 511}, {"max_bytes": 40001}, {"max_bytes": -1},
+		{"max_bytes": 511}, {"max_bytes": 1}, {"max_bytes": -1},
 		{"max_bytes": 1000, "peek": true}, {"max_bytes": 1000, "recent": 5}, {"max_bytes": 1000, "skipped": true},
 		{"max_bytes": 1000, "thread": strings.Repeat("0", 32)}, {"max_bytes": 1000, "fetch": strings.Repeat("0", 64)},
 	} {
 		if r := refusal(t, a, "inbox", args); r.Code != node.ErrorInvalid || !strings.Contains(r.Error, "max_bytes") {
 			t.Errorf("%v: %+v", args, r)
 		}
+	}
+	// 0 is the default, as when it is left out: a caller written against a
+	// schema without the field sends neither (D72).
+	bob.send(localapi.SendReq{Text: strings.Repeat("y", 1000)})
+	if p, s := readPage(t, a, map[string]any{"max_bytes": 0}); len(p.Messages) != 1 || len(s) > node.DefaultInboxBytes {
+		t.Fatalf("max_bytes 0: %s", s)
 	}
 	for i := 0; i < 20; i++ {
 		bob.send(localapi.SendReq{Room: fmt.Sprint("room", i%6), Text: strings.Repeat("z", 200)})
@@ -805,7 +811,7 @@ func TestEntriesWithEveryMarkFitMaxBytesToTheByte(t *testing.T) {
 // written \u{7f} (about 115 KB shown), is refused below the ceiling, and
 // at it comes alone, its text cut between escapes to fit, saying it is
 // cut, by how much, and how a person reads the rest; it is marked seen,
-// and the result is within 40,000 bytes.
+// and the result is within the ceiling, 32,000 bytes.
 func TestAMessageLargerThanAnyBudgetComesCutToFitAndSaysSo(t *testing.T) {
 	c := startDaemon(t)
 	bob := newWriter(t, c, "bob")
@@ -815,7 +821,7 @@ func TestAMessageLargerThanAnyBudgetComesCutToFitAndSaysSo(t *testing.T) {
 	id := bob.send(localapi.SendReq{Text: text})
 	bob.send(localapi.SendReq{Text: "after it"})
 	ref := refusal(t, a, "inbox", nil)
-	if ref.Code != node.ErrorTooLarge || !strings.Contains(ref.Error, "more than any max_bytes holds") || !strings.Contains(ref.Error, "max_bytes 40000 to read it with its text cut") {
+	if ref.Code != node.ErrorTooLarge || !strings.Contains(ref.Error, "more than any max_bytes holds") || !strings.Contains(ref.Error, fmt.Sprintf("max_bytes %d to read it with its text cut", node.MaxInboxBytes)) {
 		t.Fatalf("refusal %+v", ref)
 	}
 	s := ok(t, a, "inbox", map[string]any{"max_bytes": node.MaxInboxBytes})
@@ -841,4 +847,55 @@ func TestAMessageLargerThanAnyBudgetComesCutToFitAndSaysSo(t *testing.T) {
 		t.Fatalf("%d unread, want 1", n)
 	}
 	t.Logf("whole: %d bytes shown; result %d bytes", len(b), len(s))
+}
+
+// [U4, D72] A request above the ceiling (40,000 was allowed by earlier
+// builds, and a model passes it on its own) is not refused: it is read at
+// the ceiling, the result stays within 32,000 bytes with its note saying
+// so, and what it returned is marked seen while the rest stays unread. A
+// message larger than any budget asked for that way is refused naming the
+// ceiling, then comes cut at it, and nothing is marked seen in between.
+func TestARequestAboveTheCeilingIsReadAtTheCeilingAndSaysSo(t *testing.T) {
+	c := startDaemon(t)
+	bob := newWriter(t, c, "bob")
+	a := connect(t, c, "alice")
+	agentID(t, a)
+	for i := 0; i < 50; i++ {
+		bob.send(localapi.SendReq{Text: fmt.Sprintf("m%02d %s", i, strings.Repeat("y", 1000))})
+	}
+	note := fmt.Sprintf(`"note":"max_bytes above %d was read as %d`, node.MaxInboxBytes, node.MaxInboxBytes)
+	for _, max := range []int{node.MaxInboxBytes + 1, 40000, 1 << 30} {
+		s := ok(t, a, "inbox", map[string]any{"max_bytes": max, "limit": 1})
+		if len(s) > node.MaxInboxBytes || !strings.Contains(s, note) {
+			t.Fatalf("max_bytes %d: %d bytes: %s", max, len(s), s)
+		}
+	}
+	s := ok(t, a, "inbox", map[string]any{"max_bytes": 40000})
+	var p localapi.ToolInbox
+	if err := json.Unmarshal([]byte(s), &p); err != nil {
+		t.Fatal(err)
+	}
+	if len(s) > node.MaxInboxBytes || len(p.Messages) <= 20 || !p.MarkedSeen || p.More != 47-len(p.Messages) || !strings.Contains(s, note) {
+		t.Fatalf("%d bytes, %d messages, marked %v, more %d", len(s), len(p.Messages), p.MarkedSeen, p.More)
+	}
+	if n := unread(t, a); n != p.More {
+		t.Fatalf("%d unread, more %d", n, p.More)
+	}
+	for more := p.More; more > 0; {
+		next, _ := readPage(t, a, nil)
+		more = next.More
+	}
+
+	big := bob.send(localapi.SendReq{Text: strings.Repeat("\x7f", 16000)})
+	ref := refusal(t, a, "inbox", map[string]any{"max_bytes": 40000})
+	if ref.Code != node.ErrorTooLarge || !strings.Contains(ref.Error, fmt.Sprintf("max_bytes %d to read it with its text cut", node.MaxInboxBytes)) {
+		t.Fatalf("refusal %+v", ref)
+	}
+	if n := unread(t, a); n != 1 {
+		t.Fatalf("%d unread after the refusal, want 1", n)
+	}
+	q, s := readPage(t, a, map[string]any{"max_bytes": node.MaxInboxBytes})
+	if len(q.Messages) != 1 || q.Messages[0].ID != big || q.Messages[0].TextCut == "" || !q.MarkedSeen || strings.Contains(s, `"note"`) {
+		t.Fatalf("at the ceiling: %s", s)
+	}
 }

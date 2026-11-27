@@ -87,6 +87,19 @@ awk '$2 == "a2p2_darwin_arm64"' SHA256SUMS | shasum -a 256 -c &&
   chmod +x a2p2_darwin_arm64 && mv a2p2_darwin_arm64 /usr/local/bin/a2p2
 ```
 
+## Going back to an older version
+
+A release that changes the database schema says so in the
+[changelog](../CHANGELOG.md). After a new version has opened your home
+once, an older a2p2 refuses it: `database is version N, this binary
+understands M: upgrade a2p2`. There is no downgrade. If you may need to
+go back, keep a copy of the home made before upgrading: close the agent
+sessions that use a2p2 (they start the daemon), run `a2p2 stop`, and copy
+the whole directory (`~/.a2p2`, or `A2P2_HOME`). To go back, stop a2p2
+again, put the copy in place of the home and install the older binary.
+What this machine wrote or read since the copy is gone from it; messages
+other members still hold come back when it pulls from them.
+
 ## On Windows
 
 A PowerShell script, `install.ps1`, does what `install.sh` does (the
