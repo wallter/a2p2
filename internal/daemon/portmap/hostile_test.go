@@ -198,21 +198,23 @@ func TestAGrantLongerThanAskedIsClampedAndRenewedAtHalfOfWhatWasAsked(t *testing
 		t.Fatalf("NAT-PMP mapping %+v, %v", m, err)
 	}
 
-	defer func(l, w time.Duration) { Lifetime, minWait = l, w }(Lifetime, minWait)
+	restoreTiming(t)
 	Lifetime, minWait = 2*time.Second, time.Millisecond
 	// A keeper whose Mapper does not clamp still renews at half of what it
 	// asked (1 s here), not at half of what it was told, nor at once.
 	k := NewKeeper(longGrant{client(gw)}, 7423, record(t), nil)
-	before := len(gw.requests())
+	before := len(gw.requests()) // the mapping made above
 	stop := runKeeper(t, k)
 	defer stop()
 	waitFor(t, "the mapping", func() bool { return k.State().Mapping != nil })
-	granted := time.Now()
-	if m := k.State().Mapping; m.Lifetime != Lifetime || m.Expires.After(granted.Add(Lifetime)) {
+	if m := k.State().Mapping; m.Lifetime != Lifetime || m.Expires.After(time.Now().Add(Lifetime)) {
 		t.Fatalf("held %+v, want the lifetime asked", m)
 	}
 	waitFor(t, "a renewal", func() bool { return len(gw.requests()) >= before+2 })
-	if d := time.Since(granted); d < Lifetime/2-300*time.Millisecond || d >= Lifetime {
+	// The gap between the grant's request and the renewal's, as the router
+	// saw them: the time the test took to look does not count.
+	at := gw.arrivals()
+	if d := at[before+1].Sub(at[before]); d < Lifetime/2-300*time.Millisecond || d >= Lifetime {
 		t.Fatalf("renewed %v after the grant, want about %v", d, Lifetime/2)
 	}
 }
@@ -347,7 +349,7 @@ func TestAKeeperThatEndsGivesOutNoMappingEvenIfItsRemovalFailed(t *testing.T) {
 // withdraws the address given out before, while the mapping stays held
 // to be renewed and removed.
 func TestARenewalAnsweredWithAnUnusableAddressWithdrawsTheOneGivenOut(t *testing.T) {
-	defer func(l, w, ra time.Duration) { Lifetime, minWait, retryAfter = l, w, ra }(Lifetime, minWait, retryAfter)
+	restoreTiming(t)
 	// retryAfter is short so that a first attempt lost under load (two
 	// tries of 250 ms) is tried again within waitFor's deadline, not in 5
 	// minutes; renewals answered with the unusable address then repeat,
@@ -407,7 +409,7 @@ func requestsAfter(gw *fakeUDP, d time.Duration) int {
 // public is asked again only retryAfter later, not every minWait once the
 // mapping held has expired.
 func TestARenewalAnsweredWithAnUnusableAddressIsNotRetriedEveryMinWait(t *testing.T) {
-	defer func(l, w, ra time.Duration) { Lifetime, minWait, retryAfter = l, w, ra }(Lifetime, minWait, retryAfter)
+	restoreTiming(t)
 	Lifetime, minWait, retryAfter = time.Second, time.Millisecond, time.Hour
 	r := &pcpRouter{extIP: netip.MustParseAddr("203.0.113.7"), extPort: 40001, maps: map[string]uint16{}}
 	gw := newFakeUDP(t, r.answer)
