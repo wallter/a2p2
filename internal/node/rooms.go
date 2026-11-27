@@ -527,6 +527,8 @@ func (r *Rooms) restore(rl *roomLog) {
 		delete(r.fronts, rl.id)
 		r.fmu.Unlock()
 		r.quarantine(rl.id, rl.label, err.Error())
+		// A waiting Inbox of the room looks again now: it is not read.
+		r.m.wakes.touch(rl.id)
 		return
 	}
 	r.setState(rl.id, &rl.st)

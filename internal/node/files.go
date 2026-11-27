@@ -156,11 +156,21 @@ func (f *Files) sweepRoom(ctx context.Context, room string) {
 
 // sweep applies F1 to room; in a room set aside, whose membership is not
 // known, only what retention requires (store.SweepRetained).
+// A sweep that changed something wakes the room: a staged send it decided
+// is listed in its writer's inbox (requestEntries), so every caller (a
+// pull, a fetch, the periodic pass) announces it.
 func (f *Files) sweep(ctx context.Context, room string) (int, error) {
+	var n int
+	var err error
 	if f.r.isQuarantined(room) {
-		return f.m.st.SweepRetained(ctx, room, f.m.ID, f.m.now())
+		n, err = f.m.st.SweepRetained(ctx, room, f.m.ID, f.m.now())
+	} else {
+		n, err = f.m.st.SweepFiles(ctx, room, f.m.ID, f.m.now())
 	}
-	return f.m.st.SweepFiles(ctx, room, f.m.ID, f.m.now())
+	if n > 0 {
+		f.m.wakes.touch(room)
+	}
+	return n, err
 }
 
 // UseFiles makes the exchange carry wants in its answers and run the

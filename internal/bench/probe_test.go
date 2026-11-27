@@ -15,6 +15,7 @@ import (
 
 	"github.com/wallter/a2p2/internal/localapi"
 	"github.com/wallter/a2p2/internal/node"
+	"github.com/wallter/a2p2/internal/store"
 )
 
 // TestProbePlan prints modernc SQLite's query plans, on a copy of a
@@ -24,7 +25,7 @@ func TestProbePlan(t *testing.T) {
 	if path == "" {
 		t.Skip("PROBE_DB not set")
 	}
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	db, err := sql.Open("sqlite", store.FileURI(path)+"?mode=ro")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -838,6 +838,9 @@ func (s *Store) View(ctx context.Context, fn func(*Reader) error) error {
 	if err != nil {
 		return err
 	}
+	if h := txHook; h != nil {
+		defer h(false, time.Now())
+	}
 	defer tx.Rollback()
 	return fn(&Reader{tx: tx})
 }

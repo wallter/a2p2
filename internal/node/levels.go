@@ -187,6 +187,11 @@ func (m *Machine) SetLevel(ctx context.Context, room, agent, level string) error
 	if expiredByClock {
 		m.pruneDue.Store(true)
 	}
+	if err == nil {
+		// A waiting inbox of agent here was woken by records for the
+		// level its look read (touchWrite): it looks again at the new one.
+		m.wakes.touchInbox(room, agent)
+	}
 	return err
 }
 

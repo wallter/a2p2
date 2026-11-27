@@ -22,6 +22,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/wallter/a2p2/internal/store"
 )
 
 func BenchmarkSQLiteDurability(b *testing.B) {
@@ -38,7 +40,7 @@ func BenchmarkSQLiteDurability(b *testing.B) {
 			b.Run(fmt.Sprintf("%s/rows=%d", s.name, rows), func(b *testing.B) {
 				dir := tmpHome(b)
 				defer os.RemoveAll(dir)
-				dsn := "file:" + filepath.Join(dir, "x.db") + "?_txlock=immediate&_pragma=journal_mode(WAL)" +
+				dsn := store.FileURI(filepath.Join(dir, "x.db")) + "?_txlock=immediate&_pragma=journal_mode(WAL)" +
 					s.pragmas + "&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=secure_delete(1)"
 				db, err := sql.Open("sqlite", dsn)
 				if err != nil {

@@ -36,6 +36,45 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Fixed
 
+- **Many agents waiting in one room no longer slow every send down.** A
+  message this machine writes now wakes only the waiting inboxes it can
+  show something to (its addressees, or the agents whose level lets a
+  room-wide post in; a handled report wakes its writer), and a level change
+  wakes only that agent's waiting inboxes. Other changes still wake every
+  waiter of the room. Some changes used to wait for the fallback look and
+  now wake the waiters too: a send with files that is declined or fails,
+  a staged send that a file sweep declines or fails, a room set aside
+  while the daemon runs, and an inbox receipt, which can let a message
+  through the level for the agent's other session. A waiter still looks
+  again each second, and that look is still the only way a waiter learns
+  of the changes nothing announces: an entry expiring by the clock before
+  the pruning pass, a gap hint, and a file list marked invalid or failed.
+  What an inbox shows is unchanged: Inbox and Seen walk from the cursors
+  as before, and nothing new is stored. Fan-in on one
+  machine (N workers each ask one orchestrator in one room at level
+  `addressed` and wait for the answer; real daemons on an Apple Silicon
+  laptop shared with other work; two runs each, before / after): answer
+  p50 1.5-3.0 / 1.4-1.5 ms at N=1, 23-38 / 13 ms at N=10, 878-1009 /
+  106-107 ms at N=50 and 38-44 s / 0.82-0.86 s at N=200. At N=200 the
+  orchestrator gets 122-127 answers a second (was 3) and its reply takes
+  5.5-6.0 ms (was 212-233). Room-wide at level `all`, N=50: 512-1181 /
+  430-440 ms. With a room per worker, N=50: 99-227 / 96-99 ms. Local
+  sends with no waiters (2,200-3,800 a second) and a send to one waiting
+  inbox (0.53-0.59 ms) are unchanged.
+- **A home directory whose path holds '#', '?' or '%' now holds its
+  database.** The path was given to SQLite unescaped, so a path like
+  `/x/a#b/a2p2.db` opened a file `/x/a` beside the home, and a '?'
+  also dropped a connection setting. A '%' followed by two hex digits
+  was decoded: `%00` cut the path the same way, and other escapes usually
+  named a directory that did not exist, so the open failed. The path is
+  now escaped. If no database is in the home yet and an a2p2 database
+  (one with this store's schema version and tables, opened read-only to
+  check) is at the path an older version opened, the daemon refuses to
+  start rather than start an empty node beside it. The refusal names both
+  paths and the `-wal` and `-shm` files, and says the destination must not
+  exist. Once the files are moved into the home, the node starts with its
+  data. Any other file at that path, such as another program's SQLite
+  database, does not stop the start.
 - **A send no longer slows down as a room's history grows, and an inbox
   much less.** Looking up what refers to a message, its replies, its
   thread and a new record's dependants read every record of the room;

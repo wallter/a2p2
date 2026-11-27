@@ -157,7 +157,7 @@ func loadV02(t *testing.T) string {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "a2p2.db")
-	db, err := sql.Open("sqlite", "file:"+path)
+	db, err := sql.Open("sqlite", store.FileURI(path))
 	if err != nil {
 		t.Fatal(err)
 	}

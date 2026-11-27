@@ -119,7 +119,7 @@ func BenchmarkSQLiteCommit(b *testing.B) {
 		b.Run(sync, func(b *testing.B) {
 			dir := tmpHome(b)
 			defer os.RemoveAll(dir)
-			dsn := "file:" + filepath.Join(dir, "x.db") + "?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=synchronous(" + sync + ")&_pragma=busy_timeout(5000)&_pragma=secure_delete(1)"
+			dsn := store.FileURI(filepath.Join(dir, "x.db")) + "?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=synchronous(" + sync + ")&_pragma=busy_timeout(5000)&_pragma=secure_delete(1)"
 			db, err := sql.Open("sqlite", dsn)
 			if err != nil {
 				b.Fatal(err)
@@ -187,6 +187,7 @@ type inproc struct {
 	agent string
 	c     *localapi.Client
 	srv   *http.Server
+	sock  string
 }
 
 func newInproc(b testing.TB) *inproc {
@@ -215,6 +216,7 @@ func newInproc(b testing.TB) *inproc {
 	}
 	x.agent = a.ID
 	sock := filepath.Join(x.dir, "sock")
+	x.sock = sock
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		b.Fatal(err)

@@ -331,7 +331,7 @@ func TestSecondingRequestsDoNotFillTheSendWithFilesBudget(t *testing.T) {
 func editLog(t *testing.T, n *lnode, fn func(db *sql.DB)) {
 	t.Helper()
 	n.st.Close()
-	db, err := sql.Open("sqlite", "file:"+n.path)
+	db, err := sql.Open("sqlite", store.FileURI(n.path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -507,7 +507,7 @@ func TestStatusListsARoomSetAside(t *testing.T) {
 	e := newSurf(t)
 	local := e.s.LocalRoom()
 	e.st.Close()
-	db, err := sql.Open("sqlite", "file:"+e.path)
+	db, err := sql.Open("sqlite", store.FileURI(e.path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -571,7 +571,7 @@ func TestLeavingARoomDoesNotHoldTheRoomsLockWhileItsFilesAreDeleted(t *testing.T
 	default:
 		t.Fatal("the deletions did not run after the lock was released")
 	}
-	db, err := sql.Open("sqlite", "file:"+a.path)
+	db, err := sql.Open("sqlite", store.FileURI(a.path))
 	if err != nil {
 		t.Fatal(err)
 	}

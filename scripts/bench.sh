@@ -21,6 +21,13 @@ Measures a2p2 on this computer and prints one table per run:
      duration, default 0) adds a fixed delay per reply to the one-machine
      and two-machine cases. Alone: scripts/bench.sh --only M8 --runs 2
   M7 scale: 1, 10 and 100 rooms; 100, 10,000 and 100,000 messages held
+  M8 fan-in: N workers ask one orchestrator and wait for its answer
+     (A2P2_BENCH_M8_DELAY: a delay per reply; A2P2_BENCH_M8_CASES: only
+     these one-machine cases, e.g. N50,N200 (also N1, N10, wide50, rooms50,
+     delay10); A2P2_BENCH_M8_ROUNDS: rounds per case; A2P2_BENCH_M8_INPROC=1:
+     the daemon's surface in the test process, so that go test's
+     -cpuprofile, -mutexprofile and -blockprofile see it, and each case
+     prints its inbox looks and store transactions per question)
   micro: Ed25519, record encode/parse, raw SQLite commit and fsync, the
      product's Surface.Send with and without the socket
   and a CPU profile of a serial 200 B send through the socket, in process.

@@ -621,13 +621,20 @@ func (m *Machine) HandledShown(ctx context.Context, room, agent, ref, version st
 // first write in a room after a start begins a new stream whose first
 // record links every head of this machine's own history held there [R2].
 func (m *Machine) write(ctx context.Context, room, agent string, decide func(*roomView, *core.RecordFields) error) (Sent, error) {
-	return m.writeWith(ctx, room, agent, decide, m.st.Write)
+	return m.writeWith(ctx, room, agent, decide, nil)
 }
 
-// writeWith is write storing through put: the store's Write, or its
-// WriteWithFiles for a send with files.
+// writeWith is write storing through put: the store's Write (put nil), or
+// its WriteWithFiles for a send with files. A plain write wakes only the
+// waiting inboxes the record may show something to (touchWrite); a send
+// with files also changes its request, which its writer's inbox lists,
+// so it wakes every waiter of the room.
 func (m *Machine) writeWith(ctx context.Context, room, agent string, decide func(*roomView, *core.RecordFields) error,
 	put func(context.Context, time.Time, func(*store.Reader) (*core.VerifiedRecord, error)) (*core.VerifiedRecord, error)) (Sent, error) {
+	narrow := put == nil
+	if narrow {
+		put = m.st.Write
+	}
 	if err := checkAgent(agent); err != nil {
 		return Sent{}, err
 	}
@@ -646,7 +653,11 @@ func (m *Machine) writeWith(ctx context.Context, room, agent string, decide func
 		return Sent{}, err
 	}
 	m.out[room] = epoch
-	m.wakes.touch(room)
+	if narrow {
+		m.wakes.touchWrite(room, m.ID, r.Fields())
+	} else {
+		m.wakes.touch(room)
+	}
 	if k := r.Fields().Kind; m.filesChanged != nil && (k == core.KindReplace || k == core.KindWithdraw) {
 		m.filesChanged(ctx, room) // [F1]: files the new version no longer lists
 	}

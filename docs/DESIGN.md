@@ -368,6 +368,32 @@ room's last messages through `history`. None of these three marks anything
 seen. A reply goes to its
 parent's author unless the sender names addressees (D10).
 
+**Waiting and looking again.** An inbox with a wait registers before it
+looks, so a write committed after the look always ends the wait. A
+message or handled report this machine writes wakes only the waiters it
+can show something to: a message wakes the agents it is relevant to whose
+level lets it in (an addressee, or anyone at level `all`, or anyone at
+`addressed` for a post marked for everyone); a handled report wakes its
+writer, the only inbox it changes. A waiter whose look has not yet told
+it its levels is woken by any message relevant to it. A level set wakes
+only that agent's waiters, which look again at the new level, and so does
+an inbox receipt (a listing's `Showed`), which lets its message through
+the level for every session of that agent. Every other change of the
+room wakes every waiter of the room: a replace or withdraw, a record or
+log entry pulled from a peer, a send with files and its approval,
+decline or failure, a file sweep that changed anything (among them a
+staged send it declined as expired or failed as voided or replaced, after
+a pull, a fetch or the periodic pass), a file that became available, a
+membership or access change, a pruning pass, a room joined, created, left
+or set aside. Some changes are announced by nothing and are left to the
+fallback: a waiting inbox looks again at least once a second, so it sees
+them within about a second (plus the time its look waits for the
+database). These are an entry expiring by the clock before the pruning
+pass removes it, a gap hint changing what a walk waits for, and a file
+list marked invalid or failed, which only changes how an entry already
+shown is described. Inbox and Seen always walk from the cursors: no look
+is remembered.
+
 **Not modelled: the reply tool's addressees.** Without `to`, the `reply`
 tool addresses the parent's author and every agent of a current member that
 has posted in the thread as held here, without the sender, at most 32 (the

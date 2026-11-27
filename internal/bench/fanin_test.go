@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -76,7 +77,9 @@ func runFanIn(t *testing.T, c fanCfg) fanStats {
 	for i := range ids {
 		ids[i] = c.work.agent(fmt.Sprintf("w%d", i))
 		cls[i] = c.work.client()
-		call[localapi.LevelResp](t, c.work.c, "level", localapi.LevelReq{Agent: ids[i], Level: level})
+		// through the worker's own client, which so opens its connection
+		// before the rounds (200 at once can overrun the listen backlog)
+		call[localapi.LevelResp](t, cls[i], "level", localapi.LevelReq{Agent: ids[i], Level: level})
 	}
 	roomOf := func(i int) string { return c.rooms[i%len(c.rooms)] }
 
@@ -268,8 +271,12 @@ func runFanIn(t *testing.T, c fanCfg) fanStats {
 }
 
 // fanRounds gives about 2,000 questions (800 at N=200, where one answer
-// takes seconds and 2,000 would not fit the limit).
+// takes seconds and 2,000 would not fit the limit). A2P2_BENCH_M8_ROUNDS
+// sets the rounds instead (a short run to profile).
 func fanRounds(n int) int {
+	if r, err := strconv.Atoi(os.Getenv("A2P2_BENCH_M8_ROUNDS")); err == nil && r > 0 {
+		return r
+	}
 	q := scaled(2000, 200)
 	if n >= 200 {
 		q = scaled(800, 200)
@@ -277,10 +284,34 @@ func fanRounds(n int) int {
 	return max((q+n-1)/n, 2)
 }
 
+// fanWant reports whether the one-machine case named by key runs:
+// A2P2_BENCH_M8_CASES is a comma-separated list of keys (empty: all). The
+// keys are N1, N10, N50 and N200 (one room, addressed), wide50 (room-wide,
+// level all), rooms50 (a room per worker) and delay10 (queue shape).
+func fanWant(key string) bool {
+	cs := os.Getenv("A2P2_BENCH_M8_CASES")
+	return cs == "" || slices.Contains(strings.Split(cs, ","), key)
+}
+
+// fanDaemon is the daemon of a one-machine case: a real one from the
+// binary, or with A2P2_BENCH_M8_INPROC set the product's surface and local
+// API in this process (newInproc), so that go test's -cpuprofile,
+// -mutexprofile and -blockprofile see the daemon's side, and the counts of
+// benchHooks are printed after each case.
+func fanDaemon(t *testing.T, name string) (*proc, func(cs string, answered int64)) {
+	if os.Getenv("A2P2_BENCH_M8_INPROC") == "" {
+		return startDaemon(t, name), func(string, int64) {}
+	}
+	x := newInproc(t) // closed at the test's end
+	report := benchHooks(x)
+	return &proc{t: t, c: x.c, sock: x.sock}, report
+}
+
 // One machine: the orchestrator and the workers share one daemon.
 func fanLocal(t *testing.T, name string, rooms int, wide bool, n, rounds int, delay time.Duration, cs string, rank bool) {
 	t.Helper()
-	p := startDaemon(t, name)
+	p, report := fanDaemon(t, name)
+	defer func() { report(cs, int64(n*rounds)) }()
 	var rs []string
 	if rooms == 0 {
 		rs = []string{""} // the room of this machine only
@@ -301,16 +332,24 @@ func TestM8FanIn(t *testing.T) {
 	delay := fanDelay(t)
 	note("M8 fan-in: the orchestrator's thinking time is not simulated: it answers at once, plus A2P2_BENCH_M8_DELAY per reply (here %s); rounds are synchronised: every worker asks, then all wait", delay)
 	for _, n := range []int{1, 10, 50, 200} {
-		fanLocal(t, "m8", 0, false, n, fanRounds(n), delay,
-			fmt.Sprintf("1 machine, 1 room, to=orch, level addressed, N=%d, delay=%s", n, delay), false)
+		if fanWant(fmt.Sprintf("N%d", n)) {
+			fanLocal(t, "m8", 0, false, n, fanRounds(n), delay,
+				fmt.Sprintf("1 machine, 1 room, to=orch, level addressed, N=%d, delay=%s", n, delay), false)
+		}
 	}
-	fanLocal(t, "m8b", 0, true, 50, fanRounds(50), delay,
-		"1 machine, 1 room, room-wide, level all, N=50, delay="+delay.String(), false)
-	fanLocal(t, "m8c", 50, false, 50, fanRounds(50), delay,
-		"1 machine, 50 rooms (one per worker), to=orch, orch reads all rooms, N=50, delay="+delay.String(), false)
+	if fanWant("wide50") {
+		fanLocal(t, "m8b", 0, true, 50, fanRounds(50), delay,
+			"1 machine, 1 room, room-wide, level all, N=50, delay="+delay.String(), false)
+	}
+	if fanWant("rooms50") {
+		fanLocal(t, "m8c", 50, false, 50, fanRounds(50), delay,
+			"1 machine, 50 rooms (one per worker), to=orch, orch reads all rooms, N=50, delay="+delay.String(), false)
+	}
 	// the shape of queueing: a 100 ms orchestrator delay, ten workers asking at once
-	fanLocal(t, "m8d", 0, false, 10, scaled(30, 5), 100*time.Millisecond,
-		"1 machine, 1 room, to=orch, N=10, delay=100ms (queue shape)", true)
+	if fanWant("delay10") {
+		fanLocal(t, "m8d", 0, false, 10, scaled(30, 5), 100*time.Millisecond,
+			"1 machine, 1 room, to=orch, N=10, delay=100ms (queue shape)", true)
+	}
 }
 
 // M8 on two machines, joined as in M5: the orchestrator is on the
