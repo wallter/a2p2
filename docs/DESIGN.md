@@ -67,7 +67,7 @@ Linux a code is refused to a connection whose client socket, found by
 its whole four-tuple in `/proc/net/tcp` and `tcp6`, belongs to a user
 other than the daemon's own or root; where no single socket is found,
 and on other systems, the code alone decides. `a2p2 ui` neither
-opens nor prints the long-lived token address of a daemon before 0.2.4,
+opens nor prints the long-lived token address of a daemon of 0.2.3 or earlier,
 takes no `--json`, and over SSH (`SSH_CONNECTION` set) opens nothing and
 names the port to forward. A daemon started by a client for an absolute
 home (the default) runs in its home, not in the client's working
@@ -311,8 +311,8 @@ can make it grow only by what its records cost the machine anyway, for
 example by sending headers whose text never follows, or by withdrawing
 every other one of its messages.
 
-The cache stores nothing and needs no schema change. (The release that
-brings it changes the schema for another reason: migration 15, D73.)
+The cache stores nothing and needs no schema change. (The first release
+after 0.3.0 changes the schema for another reason: migration 15, D73.)
 `TestSummaryCacheEqualsAReadOfTheRoomAfterEveryKindOfWrite` compares the
 cached summary with a read of the table after every step of random
 schedules of these writes, rollbacks, reads inside a write, forks, hints,
@@ -806,7 +806,7 @@ times its 16 KiB) is returned alone at the ceiling with its text cut
 between characters to fit, and `text_cut` saying how much was left out.
 Every other field of an entry, at its largest, renders under the
 ceiling (27,527 bytes measured), so that cut always fits and no entry holds the
-queue. So no result exceeds 32,000 bytes. A daemon before 0.2.4 ignores the
+queue. So no result exceeds 32,000 bytes. A daemon of 0.2.3 or earlier ignores the
 budget and has kept receipts of its whole page; the MCP server then
 returns that page whole, as 0.2.3 did, with a note that the budget was
 not applied. The budget never counts tokens and knows nothing of how full

@@ -3571,7 +3571,7 @@ output limit proves lower, or the confirm-on-next-call design is built.
 A field report: a lead that briefs workers before their sessions start
 loses those briefs. `send` returned an id, but the worker's first inbox
 was empty, because `Store.Register` started every cursor at the current
-end of every stream (since 0.1.0). The fan-out recipe tells a lead to send
+end of every stream (from 0.1.0 to 0.3.0). The fan-out recipe tells a lead to send
 one brief per worker, which a lead often does before the workers exist.
 
 D35 declined showing a late registrant earlier messages in its inbox: U3
@@ -3666,7 +3666,7 @@ So this amends D35 for addressed messages only.
   rooms lock as `Prune` does): it is seeded at that head when it
   arrives, as for an agent present at the admission. Before, a label
   registered then was seeded at the current end, below the frontier,
-  past text whose permission was not decided yet (since 0.1.0; the
+  past text whose permission was not decided yet (from 0.1.0 to 0.3.0; the
   differential harness found it once it registered on a machine
   admitted without history:
   `TestRealExchangeLateAgentRegisteredBeforeItsFrontierArrivesReadsItsBrief`).
@@ -3678,11 +3678,11 @@ So this amends D35 for addressed messages only.
 - **Compatibility.** No wire or signed format changes. Migration 15
   makes a database older binaries refuse to open ("upgrade a2p2"), as
   every migration does; INSTALL says how to keep a copy of the home to go
-  back. It ends, for this release, what D56 (no index, so that 0.2.3 can
+  back. From the first release after 0.3.0 it ends what D56 (no index, so that 0.2.3 can
   still open the database) and D57 (0.2.x can open a database this
   version wrote; the fix for a set-aside local room is the older
   version) said of going back: those hold for the change each describes,
-  not for a home this release has opened.
+  through 0.3.0, not for a home a later release has opened.
 
 **Revisit if** leads report briefs lost to the window (an index of
 addressees would make it exact), the records table stops being
