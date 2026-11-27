@@ -28,8 +28,9 @@ import (
 // admitted at once, below the listener's 4 concurrent requests per peer (a
 // request counts there until it is answered or enters a hold). A request
 // that does not wait keeps its slot until its answer arrives; a waiting
-// pull until its answer arrives or pullAdmitAfter has passed, by when the
-// listener has held it. Slots and tokens are handed out in the order
+// pull until its answer arrives or pullAdmitAfter has passed, by when a
+// listener under about 1 s away has held it (on a slower link the slot is
+// freed first, and more than 4 can be in flight there). Slots and tokens are handed out in the order
 // asked (a Go channel's senders and the reservations queue in order), so a
 // room waits behind at most the requests already queued, two per room
 // sharing the peer (one per anchor, an exchange sending one at a time).
@@ -41,8 +42,9 @@ const (
 	pullAdmitAfter = time.Second
 	// pullMaxRequests bounds the requests of one exchange (Exchange.Pull):
 	// a catch-up of 16,000 log entries or 32,000 records at the page
-	// limits fits in one; a longer one ends Capped and the next exchange
-	// goes on from where it stopped, paid for by the budget.
+	// limits fits in one; a longer one ends Capped and, if it moved on,
+	// the next exchange goes on from where it stopped, paid for by the
+	// budget (Scheduler.anchor); if not, it is a spin.
 	pullMaxRequests = 64
 	// pullBudgetKeys bounds the buckets kept. Buckets are made only for
 	// peers this machine pulls from (members of rooms it holds); one full

@@ -302,8 +302,11 @@ further address one request tries takes another token
 - *Slots:* at most 3 requests to one peer are in flight and not yet
   admitted at the listener, below its 4 concurrent, which count a request
   until it is answered or held. One without a wait keeps its slot until
-  its answer; a waiting pull until its answer or 1 s, by when the listener
-  holds it. Many rooms sharing one peer, starting and writing together,
+  its answer; a waiting pull until its answer or 1 s, by when a listener
+  on a link under about 1 s each way holds it. On a slower link the slot
+  is freed before the listener holds the pull, so more than 4 requests
+  can then be in flight there and draw a 429 `concurrent`. Many rooms
+  sharing one peer, starting and writing together,
   draw no 429 of either kind over TLS
   (`TestOverTLSManyRoomsWithOnePeerStartingAndWritingTogetherDrawNo429`:
   7 refused `concurrent` before). A peer that hangs holds the 3 slots for
@@ -324,13 +327,23 @@ further address one request tries takes another token
   burst 8, section 0) have their own limits and are not counted here.
 
 One exchange sends at most 64 requests (a catch-up of about 16,000 log
-entries or 32,000 records at the page limits). One cut there with work
-under way does not count the writes as offered, keeps its peer and is
-followed at once by the next, paid for by the budget; that one's detail
-starts at the author the cut one was taking and wraps round, so an early
+entries or 32,000 records at the page limits). One cut there does not
+count the writes as offered. If it moved on (something stored here, or
+records offered that no earlier exchange of this run of cut ones had
+offered: what the run sent is carried from one to the next), it keeps
+its peer and the next follows at once, with no wait, paid for by the
+budget; that one's detail starts at the author the cut one was taking
+and wraps round (each chunk still in sorted order), so an early
 difference that persists cannot keep later authors from their turn
 (`TestABacklogLargerThanOneExchangeArrivesWithNoLaterWrite`,
-`TestTheNextExchangeTakesDetailFromWhereACappedOneStopped`). Inside an
+`TestTheNextExchangeTakesDetailFromWhereACappedOneStopped`,
+`TestAfterARotatedStartACutDetailAnswerAsksAgainForExactlyTheAuthorsLeftOut`).
+If it did not, it is a spin, backed off as a failure: a peer that says it
+holds nothing and changes its digest after every offer gets, after one
+write in a quiet room, each record offered once and then the back-off
+(`TestAPeerThatClaimsToHoldNothingAfterEveryOfferIsBackedOffAfterOneWrite`:
+87, 2, 2, 2, 2 requests in the five minutes after the write; 320 a
+minute before). Inside an
 exchange, two continuations running that move nothing end the round, so
 an honest one is not cut short when another member delivered the same
 entries while a page was on the way.

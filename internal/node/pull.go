@@ -74,8 +74,10 @@ type Exchange struct {
 	heard   map[[2]string][]string
 	seen    map[[2]string]seenSums
 	// resume is, per room and peer, the author whose detail an exchange
-	// that ended Capped was taking: the next one starts there (round).
-	resume map[[2]string]string
+	// that ended Capped was taking: the next one starts there (round);
+	// carries, what it and those before it in the run had sent (Pull).
+	resume  map[[2]string]string
+	carries map[[2]string]carried
 	// As a server, per room and peer: evidence, the held and refused log
 	// entries sent that the peer cannot list in its extra (sent once until
 	// its log heads change); pages, the streams of the last page and those
@@ -110,7 +112,7 @@ type Exchange struct {
 // NewExchange returns the exchange of the machine behind r over t.
 func NewExchange(r *Rooms, t PullTransport, o ExchangeOpts) *Exchange {
 	x := &Exchange{r: r, t: t, pageLimit: o.PageLimit, offerLimit: o.OfferLimit, refused: map[[2]string]*refusal{},
-		heard: map[[2]string][]string{}, seen: map[[2]string]seenSums{}, resume: map[[2]string]string{}, latest: map[[2]string]int64{},
+		heard: map[[2]string][]string{}, seen: map[[2]string]seenSums{}, resume: map[[2]string]string{}, carries: map[[2]string]carried{}, latest: map[[2]string]int64{},
 		evidence: map[[2]string]map[string]bool{}, pages: map[[2]string]*pageMemory{},
 		book: o.Book, addrs: slices.Clone(o.Addrs), addrsNow: o.AddrsNow, after: o.After, waiting: map[[2]string]chan struct{}{},
 		asked: map[[2]string]time.Time{}, nextHold: map[[2]string][]chan struct{}{}, closed: make(chan struct{}),
@@ -1172,7 +1174,17 @@ func (x *Exchange) Pull(ctx context.Context, room, peer string, o PullOpts) (Pul
 	if err != nil {
 		return st, err
 	}
-	sent := map[string]bool{} // records and log entries given to the peer in this exchange
+	// sent is the records and log entries given to the peer in this
+	// exchange, and in the run of exchanges cut by the cap before it, so
+	// st.Offered counts only records not offered before in that run.
+	sent := x.carried(room, peer, gen)
+	defer func() {
+		if st.Capped {
+			x.carry(room, peer, gen, sent)
+		} else {
+			x.carry(room, peer, gen, nil)
+		}
+	}()
 	if x.files != nil {
 		// what the exchange stored may end files here [F1], and the
 		// manifests of headers it brought are fetched now (PROTOCOL 10.2)
@@ -1650,18 +1662,51 @@ func (x *Exchange) setResume(room, peer, author string) {
 	}
 }
 
+// carried is what a run of exchanges with peer cut by the cap has sent it
+// so far (a new map when none is under way for this generation).
+type carried struct {
+	gen  int64
+	sent map[string]bool
+}
+
+func (x *Exchange) carried(room, peer string, gen int64) map[string]bool {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	k := [2]string{room, peer}
+	c, ok := x.carries[k]
+	delete(x.carries, k) // the exchange owns it now
+	if ok && c.gen == gen {
+		return c.sent
+	}
+	return map[string]bool{}
+}
+
+// carry keeps sent for the next exchange with peer (nil: the run ended).
+func (x *Exchange) carry(room, peer string, gen int64, sent map[string]bool) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if sent == nil {
+		delete(x.carries, [2]string{room, peer})
+	} else {
+		x.carries[[2]string{room, peer}] = carried{gen: gen, sent: sent}
+	}
+}
+
 // resumed is differ, sorted, turned to start at the author an exchange
 // that ended Capped was taking, so a difference that persists early in the
 // order cannot keep later authors from their turn.
-func (x *Exchange) resumed(room, peer string, differ []string) []string {
+// It is returned in two parts, each sorted (from there, then before it),
+// to be packed apart: the server answers a chunk's detail in sorted
+// order, and the round reads a cut answer by that order.
+func (x *Exchange) resumed(room, peer string, differ []string) (from, before []string) {
 	x.mu.Lock()
 	at := x.resume[[2]string{room, peer}]
 	x.mu.Unlock()
 	if at == "" {
-		return differ
+		return differ, nil
 	}
 	i, _ := slices.BinarySearch(differ, at)
-	return append(slices.Clone(differ[i:]), differ[:i]...)
+	return differ[i:], differ[:i]
 }
 
 // chunks packs differ into detail requests of at most MaxDetailAuthors
@@ -1931,7 +1976,10 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 		clean = false
 		return x.refuse(ctx, room, peer, gen, CodeTooLarge, n)
 	}
-	queue, big := chunks(own, p.base, x.resumed(room, peer, differ(takes, own.digests, open.Digests)))
+	from, before := x.resumed(room, peer, differ(takes, own.digests, open.Digests))
+	queue, big := chunks(own, p.base, from)
+	q2, b2 := chunks(own, p.base, before)
+	queue, big = append(queue, q2...), append(big, b2...)
 	if len(big) > 0 {
 		if err := tooLarge(len(big)); err != nil {
 			return false, err

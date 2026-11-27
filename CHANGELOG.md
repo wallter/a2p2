@@ -71,15 +71,21 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   takes another token. So at most 930 pull requests reach one peer in any
   minute of one run of the daemon (a restart or a networking change
   starts full buckets), a 25 % margin under the listener's limit, and the
-  requester draws no 429 for its rate or for requests in flight. Joins,
+  requester draws no 429 for its rate or for requests in flight (on links
+  under about 1 s each way; on slower ones a waiting pull's slot can be
+  freed before the listener holds it). Joins,
   file transfers, dial-back and dials to unverified addresses keep their
   own limits. Buckets are kept for at most 1,024 peers, never dropped
   while in use; past that, peers share one. A
   peer that answers every wait at once is still backed off while the room
   is quiet, and gets at most that budget while it changes (0.2.3: up to
   1,200 requests a minute in tests). One exchange sends at most 64
-  requests; one cut there is followed at once by the next, which offers
-  again and takes detail from where it stopped. Measured over two daemons on loopback (`scripts/bench.sh
+  requests; one cut there that stored something or offered records not
+  offered before in that run is followed at once by the next, which
+  offers again and takes detail from where it stopped; one that did
+  neither is backed off, so a peer that says it holds nothing and changes
+  its digest after every offer gets each record once after a write, and
+  then the back-off. Measured over two daemons on loopback (`scripts/bench.sh
   --only M5`, one run), B connecting out only: B to A one message at a
   time, before 7 of 1,000 arrived within the 150 s budget, now all 1,000,
   median 61 ms, p95 63 ms; a burst of 2,000 from B arrives with median

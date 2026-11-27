@@ -39,8 +39,12 @@ an invite.
 - A member can take up to 930 pull requests a minute from this machine by
   answering every wait at once while the room changes, or by handing over
   one small record in each exchange (the requester's budget, PROTOCOL 4.6);
-  with the room quiet and nothing stored it is backed off to one request
-  per room every 4 to 6 minutes. The bound is per peer and per run of the
+  with the room quiet and nothing stored it is backed off: one that
+  answers every wait at once to one request per room every 4 to 6
+  minutes; one that says it holds nothing of this machine's records
+  after every offer is offered each record once after a write (each
+  write offers them again, within the budget) and then gets only its
+  waits, 2 requests a minute in tests. The bound is per peer and per run of the
   daemon: several such members add up, and a restart or a networking
   change starts full buckets. A member that hangs can hold this machine's
   3 slots for it for up to 30 s at a time, delaying other rooms' requests

@@ -257,7 +257,7 @@ func (s *Scheduler) anchor(ctx context.Context, room string, gen int64, slot int
 	// last exchange that could carry an offer and ran; until one has run
 	// for every touch, the next request offers.
 	var offered uint64
-	first, probed := true, false
+	first, probed, again := true, false, false
 	cur := ""
 	for ctx.Err() == nil {
 		// Taken before anything is looked at: a write after this point
@@ -281,6 +281,10 @@ func (s *Scheduler) anchor(ctx context.Context, room string, gen int64, slot int
 		if !probed {
 			wait = s.o.Probe
 		}
+		if again {
+			wait = 0 // goes on from a cut exchange: no wait
+		}
+		again = false
 		offer := first || seq != offered
 		began := s.o.Now()
 		st, err := s.x.Pull(ctx, room, peer, PullOpts{Offer: offer, OfferLimit: s.offerOf(room, peer),
@@ -288,11 +292,22 @@ func (s *Scheduler) anchor(ctx context.Context, room string, gen int64, slot int
 		switch {
 		case ctx.Err() != nil:
 			return
-		case err == nil && st.Capped && (st.Stored+st.Repaired+st.Entries > 0 || st.Offered+st.Given > 0):
-			// Cut by the exchange's cap with work under way: the next one
-			// follows at once, paid for by the budget, offering again, and
-			// with the same peer.
+		case err == nil && st.Capped && (st.Stored+st.Repaired+st.Entries > 0 || st.Offered > 0):
+			// Cut by the exchange's cap having moved on: something stored
+			// here, or records offered that no exchange of this run of cut
+			// ones had offered (Pull carries what was sent). The next one
+			// follows at once, paid for by the budget, offering again,
+			// with the same peer and no wait.
 			s.succeeded(room, peer)
+			s.spun(room, peer, false)
+			again = true
+		case err == nil && st.Capped:
+			// Cut by the cap with nothing new on either side (a peer that
+			// says it holds nothing and changes its digest after every
+			// offer): a spin, backed off as a failure; the writes are still
+			// to offer when it ends.
+			s.succeeded(room, peer)
+			s.spun(room, peer, true)
 		case err == nil:
 			if offer && !st.Capped {
 				first, offered = false, seq

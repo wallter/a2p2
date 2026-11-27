@@ -856,23 +856,22 @@ func TestABacklogLargerThanOneExchangeArrivesWithNoLaterWrite(t *testing.T) {
 func TestTheNextExchangeTakesDetailFromWhereACappedOneStopped(t *testing.T) {
 	x := &Exchange{resume: map[[2]string]string{}}
 	differ := []string{"a1", "b2", "c3", "d4"}
-	if got := x.resumed("r", "p", differ); !slices.Equal(got, differ) {
-		t.Fatalf("with nothing to resume: %v", got)
+	check := func(what string, d []string, from, before []string) {
+		t.Helper()
+		f, b := x.resumed("r", "p", d)
+		if !slices.Equal(f, from) || !slices.Equal(b, before) {
+			t.Fatalf("%s: %v then %v, want %v then %v", what, f, b, from, before)
+		}
 	}
+	check("with nothing to resume", differ, differ, nil)
 	x.setResume("r", "p", "c3")
-	if got, want := x.resumed("r", "p", differ), []string{"c3", "d4", "a1", "b2"}; !slices.Equal(got, want) {
-		t.Fatalf("resumed: %v, want %v", got, want)
-	}
-	if got, want := x.resumed("r", "p", []string{"a1", "d4"}), []string{"d4", "a1"}; !slices.Equal(got, want) {
-		t.Fatalf("resumed past an author no longer differing: %v, want %v", got, want)
-	}
-	if got := x.resumed("r", "q", differ); !slices.Equal(got, differ) {
-		t.Fatalf("another peer: %v", got)
+	check("resumed", differ, []string{"c3", "d4"}, []string{"a1", "b2"})
+	check("resumed past an author no longer differing", []string{"a1", "d4"}, []string{"d4"}, []string{"a1"})
+	if f, b := x.resumed("r", "q", differ); !slices.Equal(f, differ) || b != nil {
+		t.Fatalf("another peer: %v %v", f, b)
 	}
 	x.setResume("r", "p", "")
-	if got := x.resumed("r", "p", differ); !slices.Equal(got, differ) {
-		t.Fatalf("after a round that ended: %v", got)
-	}
+	check("after a round that ended", differ, differ, nil)
 }
 
 // A star: one listening hub and four outbound-only spokes in one room,
@@ -985,6 +984,69 @@ func TestARestartStartsTheBudgetFull(t *testing.T) {
 		restarted := NewExchange(a.r, net.link(a.id), ExchangeOpts{After: net.clock.After})
 		if took := admitAll(restarted); took != 0 {
 			t.Fatalf("after a restart the burst took %v, want at once", took)
+		}
+	})
+}
+
+// A peer that says it holds nothing of this machine's records and changes
+// its digest after every offer, in a quiet room: this machine has 80
+// records and offers 1 a request, so one exchange's offer is cut by the
+// cap of pullMaxRequests. After one local write, the run of cut exchanges
+// goes on only while each offers records no earlier one of the run had
+// offered; then the peer, which still claims nothing, is backed off. The
+// requests a minute fall as the back-off grows: at most 250 in the first
+// minute after the write (the run offers each record once, about 2
+// exchanges), and at most 100 in the four minutes after. Before, about 600
+// a minute, still at five minutes.
+//
+// Requirements: N1, P5
+func TestAPeerThatClaimsToHoldNothingAfterEveryOfferIsBackedOffAfterOneWrite(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		net := newRecNet()
+		net.oneWay = 5 * time.Millisecond
+		b, a := newSNode(t, "b", net), newSNode(t, "a", net)
+		b.x.offerLimit = 1
+		room := sgroup(t, b, a)
+		for range 80 {
+			b.send(room, "history")
+		}
+		k := 0
+		net.memNet.mu.Lock()
+		net.tamper = func(from, to string, resp *PullResponse) {
+			if from != b.id || to != a.id {
+				return
+			}
+			if resp.Detail != nil {
+				resp.Detail = map[string][]store.StreamDetail{b.id: {}} // holds nothing of b
+				resp.Page, resp.More = nil, false
+				return
+			}
+			k++
+			sum := sha256.Sum256(fmt.Appendf(nil, "digest %d", k))
+			resp.Same, resp.Authors = false, []string{b.id}
+			resp.Digests = map[string]string{b.id: hex.EncodeToString(sum[:])}
+			resp.Sum = sumOf(resp.Digests)
+		}
+		net.memNet.mu.Unlock()
+		schedule(t, net, a, b)
+		net.run(t, 2*time.Minute) // the first offers of the history, then quiet
+		b.send(room, "one write")
+		start := net.clock.Now()
+		var per, offers []int
+		for i := range 5 {
+			net.run(t, time.Minute)
+			n, o := requests(net.sent(), b.id, a.id, start.Add(time.Duration(i)*time.Minute), start.Add(time.Duration(i+1)*time.Minute))
+			per, offers = append(per, n), append(offers, o)
+		}
+		t.Logf("requests to the peer in each minute after the write: %v (with offers %v)", per, offers)
+		if offers[0] < pullMaxRequests {
+			t.Fatalf("%d offers after the write: no exchange reached the cap, the test shows nothing", offers[0])
+		}
+		if per[0] > 150 {
+			t.Fatalf("%d requests in the first minute after one write, at most 150", per[0])
+		}
+		if rest := per[1] + per[2] + per[3] + per[4]; rest > 50 {
+			t.Fatalf("%d requests in minutes 2 to 5 after one write, at most 50: not backed off (%v)", rest, per)
 		}
 	})
 }
