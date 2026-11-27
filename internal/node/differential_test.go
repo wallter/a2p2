@@ -288,6 +288,7 @@ const (
 	opInject   // a record the model cannot express is placed (implementation only)
 	opLevel    // agent sets its level (n: delivery.Level)
 	opRead     // agent reads a thread view (n 0) or skipped (n 1), marking what it showed
+	opPage     // the inbox tool under a byte budget: the page InboxOpts.page cuts (limit 3, pageBudget(n)) gets receipts alone, and is confirmed
 	opMore     // the real exchange's operations follow (pull_differential_test.go)
 )
 
@@ -360,6 +361,8 @@ func (o op) String() string {
 			return fmt.Sprintf("%s/%s reads thread #%d", o.machine, o.agent, o.target)
 		}
 		return fmt.Sprintf("%s/%s reads skipped", o.machine, o.agent)
+	case opPage:
+		return fmt.Sprintf("%s/%s inbox page (max_bytes %d)+seen", o.machine, o.agent, pageBudget(o.n))
 	}
 	return o.moreString()
 }
@@ -607,6 +610,8 @@ func (h *harness) do(o op, variant int) {
 		h.read(o)
 	case opSeenPart, opSeenAll:
 		h.seen(o)
+	case opPage:
+		h.page(o)
 	case opCrash:
 		h.w.Crash(o.machine)
 		h.reopen(s, "")
@@ -723,6 +728,61 @@ func (h *harness) seen(o op) {
 		}
 	}
 }
+
+// page is an inbox read cut short by its byte budget on both sides
+// (Surface.InboxPage): the whole inbox is compared, only its first o.n
+// entries are listed, so only they get receipts, and they are confirmed.
+// What the page left out stays unread with no receipt, as if never listed.
+func (h *harness) page(o op) {
+	h.t.Helper()
+	mv, iv := h.inbox(o.machine, o.agent)
+	// The cut is the production one (InboxOpts.page, which
+	// Surface.InboxPage applies to its look), then Showed as InboxPage
+	// calls it. A Surface over these machines is not used: it would make
+	// a local room and draw epochs, which the model does not.
+	opts := InboxOpts{Limit: 3, MaxBytes: pageBudget(o.n), Size: pageSize}
+	pv, err := opts.page(iv, 3, false)
+	var ue *UserError
+	switch {
+	case errors.As(err, &ue) && ue.CodeOf() == ErrorTooLarge:
+		pv.Entries = nil // refused: nothing listed
+	case err != nil:
+		h.fail("implementation page: %v", err)
+	}
+	n := len(pv.Entries)
+	if pv.Entries != nil && pv.More != len(iv.Entries)-n {
+		h.fail("page more %d, want %d", pv.More, len(iv.Entries)-n)
+	}
+	if err := h.w.Listed(o.machine, o.agent, mv.Entries[:n]); err != nil {
+		h.fail("model listed: %v", err)
+	}
+	if err := h.sims[o.machine].m.Showed(context.Background(), diffRoom, o.agent, withoutRequests(pv.Entries), true); err != nil {
+		h.fail("implementation showed: %v", err)
+	}
+	var reads []store.Read
+	for _, e := range pv.Entries {
+		reads = append(reads, store.Read{Key: e.Key, Version: e.Version})
+	}
+	res, ierr := h.sims[o.machine].m.Seen(context.Background(), diffRoom, o.agent, reads)
+	if ierr != nil {
+		h.fail("implementation seen: %v", ierr)
+	}
+	want, err := h.w.Confirm(o.machine, o.agent, mv.Entries[:n])
+	if err != nil {
+		h.fail("model seen: %v", err)
+	}
+	for i := range want {
+		if res[i].Confirmed != want[i] {
+			h.fail("page seen %s: implementation confirmed=%v (%s), the model %v",
+				h.key(reads[i].Key), res[i].Confirmed, res[i].Reason, want[i])
+		}
+	}
+}
+
+// pageBudget is the max_bytes of a page op: by pageSize, one entry of a
+// short text at n 1, two at 2 and three at 3, the limit, so that either
+// binds.
+func pageBudget(n int) int { return MinInboxBytes + 170*(n-1) }
 
 // read is a read other than the inbox on both sides (o.n: 0 the thread or
 // branch view of the target, as the thread tool picks it; 1 skipped): the
@@ -1353,6 +1413,7 @@ func alphabet() []op {
 		{kind: opShow, machine: m, agent: "bob"},
 		{kind: opSeenPart, machine: m, agent: "bob", n: 1},
 		{kind: opSeenAll, machine: m, agent: "bob"},
+		{kind: opPage, machine: m, agent: "bob", n: 1},
 		{kind: opSeenAll, machine: m, agent: lateAgent},
 		{kind: opRegister, machine: m},
 		{kind: opCrash, machine: m},
@@ -1394,6 +1455,15 @@ func levelOp(r *rand.Rand, m delivery.MachineID, agents []string) (op, bool) {
 		return op{}, false
 	}
 	return op{kind: opLevel, machine: m, agent: agents[r.IntN(len(agents))], n: r.IntN(3), same: true}, true
+}
+
+// pageOp draws, now and then, an inbox read whose byte budget holds only
+// its first one to three entries. Like levelOp it has its own source.
+func pageOp(r *rand.Rand, m delivery.MachineID, agents []string) (op, bool) {
+	if r.IntN(6) != 0 {
+		return op{}, false
+	}
+	return op{kind: opPage, machine: m, agent: agents[r.IntN(len(agents))], n: 1 + r.IntN(3), same: true}, true
 }
 
 // readOp draws, now and then, a thread or skipped read by one of agents on
@@ -1517,6 +1587,7 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 	r := rand.New(rand.NewPCG(s1, 3))
 	lr := rand.New(rand.NewPCG(s2, 11))
 	rr := rand.New(rand.NewPCG(s2, 17))
+	pr := rand.New(rand.NewPCG(s2, 19))
 	c := &counts{}
 	total := 0
 	for i := 0; i < runs; i++ {
@@ -1530,6 +1601,9 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 				h = h.apply(o)
 			}
 			if o, ok := readOp(rr, "M", agents); ok {
+				h = h.apply(o)
+			}
+			if o, ok := pageOp(pr, "M", agents); ok {
 				h = h.apply(o)
 			}
 		}
@@ -1551,6 +1625,9 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 				h = h.apply(o)
 			}
 			if o, ok := readOp(rr, m, machines[m]); ok {
+				h = h.apply(o)
+			}
+			if o, ok := pageOp(pr, m, machines[m]); ok {
 				h = h.apply(o)
 			}
 		}

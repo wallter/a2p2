@@ -17,7 +17,7 @@ cd "$(dirname "$0")/.."
 tools_json=internal/mcpshim/testdata/tools.json
 # Words that are not tools or arguments but are fine as bare code spans:
 # room and agent names, result fields, harness names and status words.
-allow='local everyone human id parent from created kind local_agents
+allow='local everyone human id parent from created kind local_agents more
 agents_seen_writing claude codex agy opencode hermes pi yes ok recent
 answer_from from_this_machine person'
 

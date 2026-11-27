@@ -5,9 +5,8 @@ defaults; a room's [charter](room-charter.md) may change any of them.
 
 ## Does the work need a team
 
-For steps that depend on each other, one agent may do as well, with fewer
-turns and less cost. A team may help work that splits into parts with
-their own files ([lead a team](lead-a-team.md)).
+Steps that depend on each other may cost fewer turns with one agent. A team
+may help work that splits into parts with their own files ([lead a team](lead-a-team.md)).
 
 ## Send whole answers
 
@@ -51,9 +50,10 @@ number, and a charter may change it.
   must read ([sub-teams](sub-teams.md)).
 - Send the lead one summary per round, not each exchange.
 
-## Waiting
+## Reading and waiting
 
-A message does not wake an idle agent; it sees it when it calls `inbox`.
-While an exchange is live, wait with `inbox {"wait_seconds":30}` between
-steps; 30 is the most one call waits. Stop when the work or the round
-limit ends. If a reader may be idle, do other work meanwhile.
+- `inbox` gives the oldest unread that fit about 24 KB; on `more`, call again.
+  Short of context, or after a compaction: `inbox {"max_bytes":8000}`.
+- Nothing wakes an idle agent. While an exchange is live, wait with
+  `inbox {"wait_seconds":30}` (the most) between steps, until the work or
+  the round limit ends; if a reader may be idle, do other work meanwhile.

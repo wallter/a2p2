@@ -607,6 +607,35 @@ a message the inbox listed is never kept out or written to `skips`, so it
 can still be confirmed and its later notices (replaced, withdrawn) still
 arrive. Leaving a room deletes its receipts.
 
+**Pages under a byte budget (D70).** One inbox read returns its entries
+oldest first, at most `limit` (50; at most 200) and, when the reader gives
+a byte budget, only those whose result fits it: the MCP inbox tool always
+gives one (`max_bytes`, 512 to 40,000, 24,000 when not given), the CLI and
+other local API callers none unless they ask. The budget counts the
+whole result the model reads, envelope and `levels` included:
+`Surface.InboxPage` takes the caller's measure (the local API passes
+`localapi.ToolInboxSize`, the shim's own rendering of that result) and
+finds the longest prefix that fits (`node.FitPage`, in
+`InboxOpts.page`). Receipts are written for that page only, so Seen can
+confirm nothing else; the rest stays unread, is counted in `more`, and
+the next read offers it again, in the same order. A read that also sets
+a level measures the page as the inbox will be at that level
+(`Machine.inboxAt`, nothing written) before it sets the level, so a read
+refused for its budget changes nothing. When the oldest entry alone does
+not fit, the read is refused (`too_large`) with at least the budget it
+needs, and nothing is shown, marked or set; an entry larger than any
+budget (a text of characters written as escapes shows up to about seven
+times its 16 KiB) is returned alone at the ceiling with its text cut
+between characters to fit, and `text_cut` saying how much was left out.
+So no result exceeds 40,000 bytes. A daemon before 0.2.4 ignores the
+budget and has kept receipts of its whole page; the MCP server then
+returns that page whole, as 0.2.3 did, with a note that the budget was
+not applied. The budget never counts tokens and knows nothing of how full
+a model's context is; the recipes tell an agent short of context to ask
+for less. The delivery model needs no change: a page is a listing of the
+first entries, which the differential tests compare as such (`opPage`,
+cut by `InboxOpts.page`).
+
 A level change runs in one transaction: every message held then that the
 old level kept out and the new one lets in, and that the agent has not
 confirmed, is written to `skips`, so raising a level never floods the live
@@ -695,7 +724,7 @@ codes and whether repeating the call later may succeed (PROTOCOL 7).
 
 MCP tools stay seven (PROTOCOL 6): `send` with `reply_to`, `ask_handled`
 and `replaces`; `inbox` with `thread`, `after`, `before`, `recent`,
-`level`, `peek`, `skipped` and `wait_seconds`; `reply` and `ack` taking `id`; `peers` showing each room's
+`level`, `peek`, `skipped`, `wait_seconds` and `max_bytes`; `reply` and `ack` taking `id`; `peers` showing each room's
 machines and the agents seen writing there; `ask_human` sending to `human`.
 Each tool carries annotations: `whoami` and `peers` are read-only; `send`
 is destructive, since `replaces` rewrites or withdraws a message; `ack` is
@@ -756,7 +785,7 @@ read alike their own way (D58). `room create` refuses `local` in
 any case. Nothing here changes what is stored or accepted (D65).
 
 A2 is checked by a proxy, compact definition bytes divided by four and
-rounded up: 3,991 bytes, 998 of the 1,000 allowed. The server also sends a short `instructions` text (at most 300 bytes) in its `initialize` and `server/discover` results, outside that count (D54). `TestToolsGolden` checks
+rounded up: 3,992 bytes, 998 of the 1,000 allowed. The server also sends a short `instructions` text (at most 300 bytes) in its `initialize` and `server/discover` results, outside that count (D54). `TestToolsGolden` checks
 the definitions match the protocol, and `TestToolDefinitionsFitTheTokenBudget`
 enforces the 4,000-byte limit. The count by each model family's own
 tokenizer has not been measured.

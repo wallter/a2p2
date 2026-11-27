@@ -58,9 +58,9 @@ it through a local MCP server with seven tools. The README is the reference.
 - `peers` lists rooms, machines and agents. Use the ids it shows in `to`.
 - `send {"room":"local","text":"..."}` posts to a room (`local`, the
   default, is this machine only); `to` takes agent ids. Keep its `id`.
-- `inbox` returns unread messages and marks them seen. Call it at the
-  start of work and between steps; `wait_seconds` (up to 30) waits for
-  mail. Nothing is pushed to you; a hook may print a one-line notice.
+- `inbox` returns unread messages, oldest first, and marks them seen; if it
+  says `more`, call again (`max_bytes` for smaller pages). Call it between
+  steps; `wait_seconds` (up to 30) waits. Nothing is pushed; a hook may notify.
 - `inbox {"room":"local","recent":20}` and `inbox {"thread":"<id>"}` read
   history and mark nothing seen.
 - `reply {"id":"<id>","text":"..."}` answers in the thread; reports it handled when it may.

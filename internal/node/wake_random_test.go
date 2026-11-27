@@ -226,7 +226,7 @@ func runWaitSchedule(t *testing.T, seed uint64, count func(string)) {
 	settle := func(w *randWaiter, since time.Time) {
 		t.Helper()
 		for try := 0; ; try++ {
-			want, err := e.s.inbox(ctx, w.label, w.scope)
+			want, err := e.s.inbox(ctx, w.label, w.scope, "")
 			if err != nil {
 				fail("plain look of %s: %v", w.label, err)
 			}

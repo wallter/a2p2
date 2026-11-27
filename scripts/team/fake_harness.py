@@ -68,11 +68,15 @@ CONTROLS = "red\x1b[31m csi\u009b31m rlo\u202eevil"
 
 
 def kickoff(m, room):
-    msgs, _ = m.tool("inbox", room=room)
-    for e in msgs.get("messages", []):
-        if e.get("from", "").startswith("lead@"):
-            return e["id"]
-    return None
+    # A page holds what fits the inbox's byte budget: read on while more.
+    kid = None
+    while True:
+        msgs, _ = m.tool("inbox", room=room)
+        for e in msgs.get("messages", []):
+            if kid is None and e.get("from", "").startswith("lead@"):
+                kid = e["id"]
+        if not msgs.get("more"):
+            return kid
 
 
 def main():

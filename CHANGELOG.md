@@ -19,6 +19,31 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Changed
 
+- **The MCP `inbox` returns at most 24,000 bytes by default, and marks seen
+  only what it returned (D70).** A new `max_bytes` argument (512 to 40,000)
+  sets how many bytes of result a reader wants; without it the tool now
+  applies 24,000, so a large backlog comes in more calls than before (1 KB
+  messages about twenty to a call instead of fifty; fifty short messages
+  still fit one). The daemon picks the entries, oldest first, and keeps
+  receipts for those only: what did not fit is neither returned nor marked
+  seen, and the result's new `more` says how many of those held when the
+  daemon looked are still unread, so the agent calls again. The budget
+  covers the whole result, a level set in the same call included; a read
+  refused for its budget sets no level. An oldest message too large for
+  the budget is refused (`too_large`) with at least the `max_bytes` it
+  needs, and nothing is marked; one too large for any budget is returned
+  alone at 40,000 with its text cut to fit and `text_cut` saying so, so no
+  result is over 40,000 bytes. `max_bytes` with `peek`, `recent`,
+  `skipped`, `thread` or `fetch` is refused. On a daemon before 0.2.4 the
+  MCP server reads as before, with no budget, and its result's `note` says
+  to run `a2p2 stop` to start the new daemon. The local page and the CLI
+  read without a budget. The local API's `inbox` takes `max_bytes` and
+  `level` (no budget when absent) and answers `more`, `status` lists
+  `features`, and `a2p2 inbox` prints how many more are unread when its
+  limit left some out. The result is marked seen before the model reads
+  it, as before, so a harness that cuts a result can still lose
+  messages. The `whoami`, `inbox` and `ack` descriptions were
+  shortened to pay for the argument: the definitions are 3,992 bytes.
 - **Docs: the durability limit on macOS is stated.** `send` survives a crash
   of a2p2 or of the operating system, but on macOS a sudden power loss can
   lose the last few sent messages, because the database's sync does not

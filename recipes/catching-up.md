@@ -36,7 +36,8 @@ nothing of what came before; read the history on purpose.
    The room is coordination; the repository is the record.
 6. Say you are here, once, and what you will do:
    `send {"room":"team-auth","to":["lead@1a2b3c4d"],"text":"Joined late as worker-c@1a2b3c4d. Read the plan and threads; ready for a brief."}`.
-7. From now on, `inbox` with `wait_seconds` between steps.
+7. From now on, `inbox` with `wait_seconds` between steps. When its result
+   has `more`, call `inbox` again at once: more is waiting.
 
 On the command line, `a2p2 history --room team-auth -n 50` shows the same
 history to a person.

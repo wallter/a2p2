@@ -153,6 +153,18 @@ type (
 		Room   string `json:"room,omitempty"`
 		Limit  int    `json:"limit,omitempty"`
 		WaitMS int64  `json:"wait_ms,omitempty"`
+		// MaxBytes (512 to 40,000; 0: none): the MCP inbox tool's result
+		// for this answer (ToolInboxSize) stays within that many bytes.
+		// The entries returned, oldest first, are what fits; the rest is
+		// not returned and keeps no receipt; an oldest entry that fits no
+		// budget comes with its text cut (text_cut). Level, when given:
+		// the call first sets the agent's level in room, or every room,
+		// as level does, and lists them in levels; a call refused for its
+		// budget sets nothing (D70). Daemons before 0.2.4 ignore both
+		// and answer without max_bytes; the status of a daemon that takes
+		// them lists the feature inbox_max_bytes.
+		MaxBytes int    `json:"max_bytes,omitempty"`
+		Level    string `json:"level,omitempty"`
 	}
 	Entry struct {
 		Key       string `json:"key"`
@@ -176,14 +188,17 @@ type (
 		AuthorRemoved   bool     `json:"author_removed,omitempty"`
 		To              []string `json:"to,omitempty"`
 		// AskHandled: the post asked for handled reports.
-		AskHandled  bool     `json:"ask_handled,omitempty"`
-		Parent      string   `json:"parent,omitempty"`
-		Thread      string   `json:"thread,omitempty"`
-		ParentState string   `json:"parent_state,omitempty"`
-		Late        bool     `json:"late,omitempty"`
-		Created     string   `json:"created"`
-		Text        string   `json:"text,omitempty"`
-		Choices     []string `json:"choices,omitempty"`
+		AskHandled  bool   `json:"ask_handled,omitempty"`
+		Parent      string `json:"parent,omitempty"`
+		Thread      string `json:"thread,omitempty"`
+		ParentState string `json:"parent_state,omitempty"`
+		Late        bool   `json:"late,omitempty"`
+		Created     string `json:"created"`
+		Text        string `json:"text,omitempty"`
+		// TextCut, in an inbox page with max_bytes: text is cut to fit,
+		// and this many bytes of the tool's rendering of it were left out.
+		TextCut int      `json:"text_cut,omitempty"`
+		Choices []string `json:"choices,omitempty"`
 		// Skipped: in a history page read by an agent, its level kept
 		// this message out of its inbox and it has not confirmed it.
 		Skipped bool `json:"skipped,omitempty"`
@@ -219,6 +234,14 @@ type (
 	InboxResp struct {
 		Entries []Entry `json:"entries"`
 		Waiting []Wait  `json:"waiting"`
+		// More: the entries held at the look that the limit or max_bytes
+		// left out; they stay unread with no receipt, and the next call
+		// offers them. MaxBytes: the budget applied, as asked (absent
+		// from a daemon before 0.2.4, which ignores it). Levels: the
+		// rooms whose level the call set (InboxReq.Level).
+		More     int         `json:"more,omitempty"`
+		MaxBytes int         `json:"max_bytes,omitempty"`
+		Levels   []RoomLevel `json:"levels,omitempty"`
 	}
 	Entries struct {
 		Entries []Entry `json:"entries"`
@@ -669,6 +692,11 @@ type (
 		// does not load in this version: not served or pulled, nothing
 		// deleted. Absent when there are none.
 		Quarantined []Quarantined `json:"quarantined,omitempty"`
+		// Features are what this daemon does that an older one does not
+		// and a client must know before it asks: inbox_max_bytes, the
+		// inbox's max_bytes and level (D70). Absent from daemons before
+		// 0.2.4.
+		Features []string `json:"features,omitempty"`
 		// Unattended counts the CLI's uses of --person away from a
 		// terminal or in an agent's shell since the daemon started.
 		// Absent when there were none, and from daemons before 0.2.4.
@@ -800,7 +828,7 @@ func waitOf(ms int64) (time.Duration, error) {
 func EntryOf(e node.Entry) Entry {
 	out := Entry{Key: e.Key, Version: e.Version, Edited: e.Edited, Kind: e.Kind, ID: e.ID, Room: e.Room, RoomLabel: e.RoomLabel,
 		From: e.From, FromNode: e.FromNode, ChangedBy: e.ChangedBy, FromThisMachine: e.Here, IDShared: e.IDShared, AuthorRemoved: e.AuthorRemoved, Parent: e.Parent, Thread: e.Thread,
-		ParentState: e.ParentState, Late: e.Late, Created: Time(e.Created), Text: e.Text, Choices: e.Choices,
+		ParentState: e.ParentState, Late: e.Late, Created: Time(e.Created), Text: e.Text, TextCut: e.TextCut, Choices: e.Choices,
 		AskHandled: e.AskHandled, Skipped: e.Skipped, FilesPending: e.FilesPending, FilesNote: e.FilesNote,
 		Request: e.Request, State: e.RequestState, Reason: e.RequestReason}
 	if e.ToIDs != nil {
@@ -834,6 +862,18 @@ func RoomFilesOf(v node.RoomFilesView) RoomFiles {
 // SendFilesOf renders the answer to a send with files.
 func SendFilesOf(r node.FileSent) SendFilesResp {
 	return SendFilesResp{Request: r.Request, State: r.State}
+}
+
+// roomLevelsOf is ls as the API gives them; nil for none.
+func roomLevelsOf(ls []node.RoomLevel) []RoomLevel {
+	if ls == nil {
+		return nil
+	}
+	out := make([]RoomLevel, 0, len(ls))
+	for _, l := range ls {
+		out = append(out, RoomLevel{Room: l.Room, RoomLabel: l.Label, Level: l.Level})
+	}
+	return out
 }
 
 func entriesOf(es []node.Entry) []Entry {
@@ -933,7 +973,7 @@ func PreviewOf(p node.Preview) PreviewResp {
 // StatusOf renders the machine at a glance.
 func StatusOf(st node.StatusView, listen []string, info Info) Status {
 	out := Status{Node: st.Node, Name: st.Name, Human: st.Human, Local: st.Local, IDShared: st.Shared[st.Node], Rooms: roomsOf(st.Rooms),
-		Agents: st.Agents, Peers: []Peer{}, Listen: listen, Version: info.Version, PID: info.PID, Notice: st.Notice,
+		Agents: st.Agents, Peers: []Peer{}, Listen: listen, Version: info.Version, PID: info.PID, Notice: st.Notice, Features: []string{FeatureInboxMaxBytes},
 		Network: statusNetwork(st), Waiting: st.Waiting, Levels: st.Levels, Reach: st.Reach,
 		Mapping: st.Mapping}
 	if out.Levels == nil {
@@ -1036,8 +1076,18 @@ func Handler(s *node.Surface, info Info) http.Handler {
 		if err != nil {
 			return InboxResp{}, err
 		}
-		v, err := s.Inbox(ctx, r.Agent, r.Room, r.Limit, wait)
-		out := InboxResp{Entries: entriesOf(v.Entries), Waiting: []Wait{}}
+		o := node.InboxOpts{Limit: r.Limit, Wait: wait, MaxBytes: r.MaxBytes, Level: r.Level}
+		if r.MaxBytes != 0 {
+			local := s.LocalRoom()
+			o.Size = func(v node.InboxView) int {
+				return ToolInboxSize(entriesOf(v.Entries), len(v.Waiting), v.More, roomLevelsOf(v.LevelsSet), local)
+			}
+		}
+		v, err := s.InboxPage(ctx, r.Agent, r.Room, o)
+		out := InboxResp{Entries: entriesOf(v.Entries), Waiting: []Wait{}, More: v.More, Levels: roomLevelsOf(v.LevelsSet)}
+		if err == nil {
+			out.MaxBytes = r.MaxBytes
+		}
 		for _, w := range v.Waiting {
 			out.Waiting = append(out.Waiting, Wait{Room: w.Room, Author: w.Author, Have: w.Have, Known: w.Known,
 				Since: Time(w.Since), Reason: w.Reason})
@@ -1074,9 +1124,9 @@ func Handler(s *node.Surface, info Info) http.Handler {
 	})
 	handle(mux, "level", func(ctx context.Context, r LevelReq) (LevelResp, error) {
 		ls, err := s.Levels(ctx, r.Agent, r.Room, r.Level)
-		out := LevelResp{Levels: []RoomLevel{}}
-		for _, l := range ls {
-			out.Levels = append(out.Levels, RoomLevel{Room: l.Room, RoomLabel: l.Label, Level: l.Level})
+		out := LevelResp{Levels: roomLevelsOf(ls)}
+		if out.Levels == nil {
+			out.Levels = []RoomLevel{}
 		}
 		return out, err
 	})

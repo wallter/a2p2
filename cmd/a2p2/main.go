@@ -1683,6 +1683,9 @@ func inbox(c *cmd, args []string) error {
 		if len(res.Waiting) > 0 {
 			fmt.Fprintf(&buf, "(%d stream(s) still being fetched from other machines)\n", len(res.Waiting))
 		}
+		if res.More > 0 {
+			fmt.Fprintf(&buf, "(%d more unread: run a2p2 inbox again)\n", res.More)
+		}
 	}
 	if _, err := io.WriteString(os.Stdout, buf.String()); err != nil {
 		return err
