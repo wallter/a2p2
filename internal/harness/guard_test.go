@@ -68,7 +68,11 @@ func TestAnEditMadeJustBeforeInstallWritesIsKeptForEveryHarness(t *testing.T) {
 			p := target(t, name, o)
 			onCheckOf(t, p, func() { writeFile(t, p, theirs) })
 			_, err := Install(name, o)
-			if !errors.Is(err, errChanged) || !strings.Contains(err.Error(), p) || !strings.Contains(err.Error(), "left it as it is") {
+			// A hook file is written at its resolved path (hookFile.realPath),
+			// so the message may name it so: /private/var for /var on macOS,
+			// and on Windows the long name for a short one (RUNNER~1).
+			named := strings.Contains(err.Error(), p) || strings.Contains(err.Error(), realPathOf(p))
+			if !errors.Is(err, errChanged) || !named || !strings.Contains(err.Error(), "left it as it is") {
 				t.Fatalf("install: %v", err)
 			}
 			if b, _ := os.ReadFile(p); string(b) != theirs {
