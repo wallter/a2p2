@@ -348,7 +348,7 @@ rails against mistakes and steered agents.
 - `room leave` deletes the room's data here and asks at a terminal
   first, naming the room by its id. `status --json` leaves out the
   page's address and its code; `ui --print` prints it. `ui` takes no
-  `--json`. With a daemon from before 0.2.4 still running, `ui` neither
+  `--json`. With a daemon of 0.2.3 or earlier still running, `ui` neither
   opens nor prints its address, which carries that daemon's long-lived
   token, and says to run `a2p2 stop`.
 - What an agent can attach. Text in a room can steer an agent into
@@ -681,7 +681,7 @@ Such a device can still:
 Release binaries are built by GitHub Actions from the tag, with no module
 or build cache, with CGO off and with `-trimpath`. Each release carries a
 `SHA256SUMS` file made in the same run; verify a binary against it before
-installing (see the [README](README.md#install)). Releases after 0.2.3 also
+installing (see the [README](README.md#install)). From version 0.3.0, releases also
 carry a GitHub artifact attestation made by the release workflow. To check
 one from the release vX.Y.Z, run `gh attestation verify a2p2_<os>_<arch>
 --repo wallter/a2p2 --signer-workflow
