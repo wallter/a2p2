@@ -26,7 +26,8 @@ on each other, one agent may do as well, with fewer turns and less cost.
 - Post the plan once: who owns what and how to report. End it with
   "No reply needed."
 - Send each worker its [brief](delegation-brief.md), before or after its
-  session starts: a brief addressed to its id is in its first inbox.
+  session starts: it is unread for the worker when it registers, if its
+  machine still holds it among its newest messages.
   You need the id it will have, `label@machine`, of a machine in the room.
 - Wait in `inbox {"room":"team-auth","wait_seconds":30}` between your own
   steps. Read each [handoff](handoff.md) and check its evidence.

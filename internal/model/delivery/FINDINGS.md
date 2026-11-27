@@ -39,9 +39,12 @@
 8. A newcomer reads from the admitter's positions; without history, earlier
    records come as headers only.
 8a. An agent registered later (`Register`, added 2026-11-27, D73)
-   starts at the end of every stream held, except that every message held
-   then and addressed to it, however old, is in its time: its cursor
-   starts just before the first one, and `early` marks where. A message
+   starts at the end of every stream held, except that a message
+   addressed to it is in its time if it is among the newest
+   `RegisterWindow` (10,000) records the machine holds at that moment
+   (each held record keeps the order it was stored in, as the store's
+   rowid does): its cursor starts just before the first one, and `early`
+   marks where. A message
    between `early` and `start` counts only if it is addressed to the agent
    (`inTime`). The differential harness registers on both sides; before,
    the model had the agent from the start and the harness hid its

@@ -681,7 +681,14 @@ func (v *roomView) load() error {
 	return nil
 }
 
+// keepHook, set by a test, is called for every record a view is given,
+// each decoded by the store: the cost of a read.
+var keepHook func()
+
 func (v *roomView) keep(h store.Held) *rec {
+	if keepHook != nil {
+		keepHook()
+	}
 	id := h.Record.ID()
 	if r := v.byID[id]; r != nil {
 		return r

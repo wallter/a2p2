@@ -28,8 +28,9 @@ send {"room":"team-auth","to":["worker-a@1a2b3c4d"],"text":"BRIEF: add token exp
 
 1. Address the brief to the id the worker has, or will have:
    `label@machine`, where the machine is in the room. It may be sent
-   before the worker's session starts; the brief is in its first inbox.
-   On this machine, `send` says when the label has not registered yet.
+   before the worker's session starts: it is unread for the worker when
+   it registers, if its machine still holds it among its newest messages.
+   `send` says when a label has not registered on this machine yet.
    To know the worker is running, ask it to send you a directed "ready"
    message (`send {"room":"team-auth","to":["lead@1a2b3c4d"],"text":"ready"}`)
    and wait for it in your `inbox`.

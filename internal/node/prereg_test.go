@@ -74,7 +74,9 @@ func TestABriefReplacedBeforeTheWorkerRegistersShowsItsNewTextAndOneWithdrawnSho
 }
 
 // [R6, R7, D7] A brief whose text expired before the worker registered is
-// shown as expired, not dropped in silence.
+// shown as expired, not dropped in silence, and holds back nothing: what
+// its author wrote after it, before and after the registration, is read
+// in the same listing as for any agent.
 func TestABriefWhoseTextExpiredBeforeTheWorkerRegisteredIsShownAsExpired(t *testing.T) {
 	r := newRig(t)
 	id := r.send("alice", Draft{Text: "old brief", To: r.to("w1")})
@@ -82,9 +84,12 @@ func TestABriefWhoseTextExpiredBeforeTheWorkerRegisteredIsShownAsExpired(t *test
 	if err := r.m.Prune(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	r.send("alice", Draft{Text: "room-wide before"})
+	r.send("bob", Draft{Text: "for w1 before", To: r.to("w1")})
 	r.register("w1")
+	r.send("alice", Draft{Text: "after"})
 	es := r.read("w1")
-	wantKinds(t, es, "expired:")
+	wantKinds(t, es, "expired:", "message:for w1 before", "message:after")
 	if es[0].ID != id || es[0].Key != "x:"+id {
 		t.Fatalf("entry %+v", es[0])
 	}

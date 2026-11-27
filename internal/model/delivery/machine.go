@@ -24,6 +24,7 @@ type held struct {
 	rec     *Record // shared and immutable
 	body    string
 	dropped Reason
+	order   int // when this machine stored it: 1 for its first record
 }
 
 // wire is a record as passed between machines: the signed header, and the
@@ -174,6 +175,7 @@ type store struct {
 	obs       map[MachineID]observation
 	view      view // who this machine believes is, and was, a member
 	files     *fileState
+	stored    int // how many records this machine has stored (held.order)
 }
 
 func newStore() *store {
@@ -208,6 +210,7 @@ func (s *store) clone() *store {
 	}
 	c.contig = copyInts(s.contig)
 	c.adm = s.adm // replaced, never modified
+	c.stored = s.stored
 	c.view = s.view.clone()
 	c.files = s.files.clone()
 	c.withdrawn = copyLists(s.withdrawn)
@@ -463,8 +466,9 @@ func (m *Machine) ownHeads() []Link {
 // insert stores a record at the next position of its stream. The caller has
 // checked that it belongs there.
 func (m *Machine) insert(r *Record, body string, hasBody bool, now Time) {
-	h := &held{rec: r}
 	st := m.st
+	st.stored++
+	h := &held{rec: r, order: st.stored}
 	st.recs[r.ID] = h
 	s := r.Stream()
 	if st.at[s] == nil {

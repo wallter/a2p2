@@ -276,3 +276,42 @@ func TestRealExchangeAgreesWithTheDeliveryModelAtSeedsThatOnceDisagreed(t *testi
 		t.Run(fmt.Sprint(seed), func(t *testing.T) { runRandomPulls(t, seed, runs, steps) })
 	}
 }
+
+// [U3, T3, R7] D73 and the admission frontier: N, admitted without
+// history, registers a late agent while the head of its frontier is not
+// held (M withholds it), so the agent's cursor in M's stream is seeded at
+// what N holds, before the frontier. The brief M writes to it after the
+// admission arrives with the head through P; the frontier seeding that
+// follows keeps that cursor, the brief is unread, the earlier text is not
+// admitted, and every view agrees with the model after every step.
+func TestRealExchangeLateAgentRegisteredBeforeItsFrontierArrivesReadsItsBrief(t *testing.T) {
+	founders, _ := pullMachines()
+	h := newPullHarness(t, founders, map[delivery.MachineID][]string{"N": {"nina", lateAgent}})
+	defer func() { h.close() }()
+	for _, o := range []op{
+		{kind: opSend, machine: "M", agent: "alice"},
+		{kind: opSend, machine: "M", agent: "bob"},
+		{kind: opPull, machine: "P", server: "M"},
+		{kind: opWithhold, machine: "M", target: 1},
+		{kind: opAdmit, machine: "N"},
+		{kind: opSend, machine: "M", agent: "alice", to: lateAgent, toMach: "N"},
+		{kind: opPull, machine: "N", server: "M"},
+		{kind: opRegister, machine: "N"},
+		{kind: opShow, machine: "N", agent: lateAgent},
+		{kind: opPull, machine: "P", server: "M"},
+		{kind: opPull, machine: "N", server: "P"},
+		{kind: opShow, machine: "N", agent: lateAgent},
+	} {
+		h = h.apply(o)
+	}
+	v, err := h.sims["N"].m.Inbox(context.Background(), diffRoom, lateAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v.Entries) != 1 || v.Entries[0].ID != h.pair[h.msgs[2]] {
+		t.Fatalf("late agent's inbox %+v, want the brief %s", v.Entries, h.pair[h.msgs[2]])
+	}
+	if x := h.held(h.sims["N"], h.pair[h.msgs[0]]); x.Reason != store.ReasonNotAdmitted {
+		t.Fatalf("N holds #0 as %q, want not_admitted", x.Reason)
+	}
+}

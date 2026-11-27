@@ -458,6 +458,8 @@ func (p *pxState) do(h *harness, o op) {
 			return
 		}
 		history := o.n == 1
+		// lateAgent registers only by opRegister, after the admission.
+		agents = slices.DeleteFunc(slices.Clone(agents), func(a string) bool { return a == lateAgent })
 		if _, err := h.w.Grant(o.machine, p.admin, history, agents...); err != nil {
 			h.fail("model grant: %v", err)
 		}
@@ -1007,7 +1009,7 @@ func randomPullOp(r *rand.Rand, h *harness, agents map[delivery.MachineID][]stri
 		}
 		return op{kind: opPull, machine: m, server: peers[r.IntN(len(peers))], n: flags}
 	}
-	o := randomOp(r, m, agents[m], peers, []int{0, -10, 10})
+	o := randomOp(r, m, agents[m], peers, []int{0, -10, 10}, false)
 	if o.kind == opInject || o.kind == opRegister {
 		return op{kind: opSeenAll, machine: m, agent: agents[m][r.IntN(len(agents[m]))]}
 	}

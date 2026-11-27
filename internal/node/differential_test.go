@@ -97,7 +97,10 @@ type written struct {
 }
 
 // counts are shared by a harness and its clones.
-type counts struct{ retries, stopped, injected, repaired, missing int }
+type counts struct {
+	retries, stopped, injected, repaired, missing int
+	lateRegs, remoteBriefs                        int // on machines with peers (D73)
+}
 
 type harness struct {
 	t        testing.TB
@@ -301,8 +304,9 @@ type op struct {
 	machine  delivery.MachineID
 	server   delivery.MachineID // pull
 	agent    string
-	to       string // send: "" everyone, or an agent label on the same machine
-	everyone bool   // reply: to everyone instead of the parent's author
+	to       string             // send: "" everyone, or an agent label
+	toMach   delivery.MachineID // send: the machine of to ("": the sender's)
+	everyone bool               // reply: to everyone instead of the parent's author
 	ask      bool
 	target   int  // index into msgs (or reps); negative counts from the end
 	n        int  // seenPart: how many; advance and skew: hours; inject: what
@@ -316,7 +320,11 @@ func (o op) String() string {
 	}
 	switch o.kind {
 	case opSend:
-		return fmt.Sprintf("%s/%s send to=%q ask=%v%s", o.machine, o.agent, o.to, o.ask, at)
+		to := o.to
+		if o.toMach != "" {
+			to += "@" + string(o.toMach)
+		}
+		return fmt.Sprintf("%s/%s send to=%q ask=%v%s", o.machine, o.agent, to, o.ask, at)
 	case opReply:
 		return fmt.Sprintf("%s/%s reply #%d everyone=%v ask=%v%s", o.machine, o.agent, o.target, o.everyone, o.ask, at)
 	case opReplace:
@@ -550,8 +558,17 @@ func (h *harness) do(o op, variant int) {
 		msg := delivery.Msg{Body: body, AskHandled: o.ask}
 		d := Draft{Room: diffRoom, Agent: o.agent, Text: body, AskHandled: o.ask}
 		if o.to != "" {
-			msg.To = []delivery.Addr{{Machine: o.machine, Agent: o.to}}
-			d.To = []core.Addressee{{Node: s.m.ID, Agent: o.to}}
+			to := s
+			if o.toMach != "" {
+				if to = h.sims[o.toMach]; to == nil {
+					return // not a member yet: its node is not known
+				}
+			}
+			msg.To = []delivery.Addr{{Machine: to.name, Agent: o.to}}
+			d.To = []core.Addressee{{Node: to.m.ID, Agent: o.to}}
+			if to != s {
+				h.c.remoteBriefs++
+			}
 		}
 		if o.kind == opReply {
 			mid, iid, ok := h.target(o.target)
@@ -829,8 +846,11 @@ func (h *harness) read(o op) {
 // register registers lateAgent on s, on both sides. Its time begins at
 // the current end of every stream (Start), and for messages addressed to
 // it just before the first one held (Early, where its cursor starts);
-// the listings that follow are the model's. Only in schedules on one
-// machine, where no stream waits for its admission frontier.
+// the listings that follow are the model's. A stream whose author has a
+// head of this machine's admission frontier not held gets no cursor: it
+// is seeded at that head when it arrives, as for the agents registered
+// at the admission (the model starts it at the current end; the records
+// between are before the frontier, not admitted on both sides).
 func (h *harness) register(s *sim) {
 	h.t.Helper()
 	if h.registered(s.name, lateAgent) {
@@ -843,14 +863,21 @@ func (h *harness) register(s *sim) {
 		h.fail("register: %v", err)
 	}
 	s.agents = append(s.agents, lateAgent)
-	start := map[streamKey]int64{}
-	for _, st := range h.streams(s) {
-		if st.Contig > 0 {
-			start[streamKey{st.Author, st.Epoch}] = st.Contig
-		}
+	if len(h.sims) > 1 {
+		h.c.lateRegs++
 	}
-	got := map[streamKey]int64{}
+	start, got := map[streamKey]int64{}, map[streamKey]int64{}
+	ss := h.streams(s)
 	err := s.st.View(context.Background(), func(rd *store.Reader) error {
+		u, err := s.m.undecided(rd)
+		if err != nil {
+			return err
+		}
+		for _, st := range ss {
+			if st.Contig > 0 && !u[[2]string{diffRoom, st.Author}] {
+				start[streamKey{st.Author, st.Epoch}] = st.Contig
+			}
+		}
 		cs, err := rd.Cursors(lateAgent, diffRoom)
 		for _, c := range cs {
 			if c.Pos != c.Early || c.Early > c.Start {
@@ -1460,8 +1487,11 @@ func readOp(r *rand.Rand, m delivery.MachineID, agents []string) (op, bool) {
 }
 
 // randomOp draws one operation over machine m with agents; peers are the
-// other machines, for pulls.
-func randomOp(r *rand.Rand, m delivery.MachineID, agents []string, peers []delivery.MachineID, skews []int) op {
+// other machines, for pulls. late says the schedule registers lateAgent
+// on machines with peers and briefs it from another machine (founders
+// only: the real exchange's schedules draw neither, so their seeds keep
+// their schedules).
+func randomOp(r *rand.Rand, m delivery.MachineID, agents []string, peers []delivery.MachineID, skews []int, late bool) op {
 	a := agents[r.IntN(len(agents))]
 	other := agents[r.IntN(len(agents))]
 	target := r.IntN(6) - 3 // the last three or the first three
@@ -1472,6 +1502,9 @@ func randomOp(r *rand.Rand, m delivery.MachineID, agents []string, peers []deliv
 		switch r.IntN(3) {
 		case 0:
 			o.to = other
+			if late && len(peers) > 0 && r.IntN(3) == 0 { // a brief to the late agent of another machine
+				o.to, o.toMach = lateAgent, peers[r.IntN(len(peers))]
+			}
 		case 1:
 			o.ask = true
 		}
@@ -1507,7 +1540,7 @@ func randomOp(r *rand.Rand, m delivery.MachineID, agents []string, peers []deliv
 		return op{kind: opSkew, machine: m, n: skews[r.IntN(len(skews))]}
 	case x < 86:
 		return op{kind: opInject, machine: m, n: r.IntN(injKinds), target: target}
-	case x < 89 && len(peers) == 0:
+	case x < 89 && (len(peers) == 0 || late):
 		return op{kind: opRegister, machine: m}
 	}
 	if len(peers) == 0 {
@@ -1581,7 +1614,7 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 		h := newHarness(t, map[delivery.MachineID][]string{"M": agents})
 		h.c = c
 		for j := 0; j < steps && !h.stopped; j++ {
-			h = h.apply(randomOp(r, "M", agents, nil, []int{0, 0, -40 * 24, 2 * 24}))
+			h = h.apply(randomOp(r, "M", agents, nil, []int{0, 0, -40 * 24, 2 * 24}, true))
 			total++
 			if o, ok := levelOp(lr, "M", agents); ok {
 				h = h.apply(o)
@@ -1597,7 +1630,7 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 	}
 	single := time.Since(start)
 	multiStart := time.Now()
-	machines := map[delivery.MachineID][]string{"M": {"alice", "bob"}, "P": {"pat"}, "Q": {"quinn"}}
+	machines := map[delivery.MachineID][]string{"M": {"alice", "bob", lateAgent}, "P": {"pat", lateAgent}, "Q": {"quinn"}}
 	names := []delivery.MachineID{"M", "P", "Q"}
 	for i := 0; i < runs; i++ {
 		h := newHarness(t, machines)
@@ -1605,7 +1638,7 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 		for j := 0; j < steps && !h.stopped; j++ {
 			m := names[r.IntN(len(names))]
 			peers := slices.DeleteFunc(slices.Clone(names), func(x delivery.MachineID) bool { return x == m })
-			h = h.apply(randomOp(r, m, machines[m], peers, []int{0, -10, 10}))
+			h = h.apply(randomOp(r, m, machines[m], peers, []int{0, -10, 10}, true))
 			total++
 			if o, ok := levelOp(lr, m, machines[m]); ok {
 				h = h.apply(o)
@@ -1619,9 +1652,9 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 		}
 		h.close()
 	}
-	t.Logf("%d single-machine and %d three-machine runs, %d steps: %v and %v; %d writes retried for id order, %d runs stopped; %d records injected, %d headers placed without text, %d texts repaired",
+	t.Logf("%d single-machine and %d three-machine runs, %d steps: %v and %v; %d writes retried for id order, %d runs stopped; %d records injected, %d headers placed without text, %d texts repaired; on three machines %d late registrations and %d sends to another machine's agent",
 		runs, runs, total, single.Round(time.Millisecond), time.Since(multiStart).Round(time.Millisecond),
-		c.retries, c.stopped, c.injected, c.missing, c.repaired)
+		c.retries, c.stopped, c.injected, c.missing, c.repaired, c.lateRegs, c.remoteBriefs)
 	if c.stopped > 0 {
 		t.Errorf("%d runs stopped at an id-order tie", c.stopped)
 	}

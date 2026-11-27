@@ -75,14 +75,19 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   Since 0.1.0 a label's first use started its reading at the end of every
   room, so a brief a lead sent to `w1@<machine>` before the worker's
   session existed was never unread for it, while `send` printed an id as
-  if it would be read. Now every message addressed to that agent and held
-  when it first registers is unread for it, however old, from this
-  machine or another; room-wide history from before stays read, as
-  before (`recent` reads it). A brief replaced since is shown with its
-  new text, one withdrawn is not shown, one whose text expired is shown
-  as expired. `send` (and the MCP send, reply and ask_human results) now
-  names addressees on this machine that have not registered yet; the
-  CLI prints that on stderr. An agent registered before this version
+  if it would be read. Now a message addressed to an agent is unread when
+  the agent first registers if it is among the newest 10,000 records this
+  machine holds at that moment, from this machine or another; room-wide
+  history from before stays read, as before (`recent` reads it, and an
+  older brief). Registration does bounded work, about 40 ms with 100,000
+  records held. A brief replaced since is shown with its newest text,
+  one withdrawn is not shown, one whose newest text expired is shown as
+  expired. A brief sent before this machine was admitted to the room
+  without history is not unread. `send` (and the MCP send, reply and
+  ask_human results) now names addressees that have not registered on
+  this machine yet; the CLI prints that on stderr. A label registered
+  while the head of this machine's admission frontier was not held yet
+  no longer starts below that frontier. An agent registered before this version
   keeps its place. The database gains a column (migration 15): once this
   version has opened a home, 0.2.3 and earlier refuse it ("upgrade
   a2p2"). To be able to go back, copy the home before upgrading
@@ -405,7 +410,9 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   by `a2p2 status` and `a2p2 doctor` with what to do. It can still be
   read, except streams without a cursor, undecided text stays undecided, and only retention deletes its
   text and files. It may be left and joined again, except the local room,
-  for which the fix is the older version. The other rooms work as before.
+  for which the fix is the older version with the copy of the home made
+  before upgrading (this release's migration 15 makes older versions
+  refuse a home it opened). The other rooms work as before.
 - **Leaving a room with many files no longer stalls the other rooms.**
   Since 0.2.0 the file deletions of a left room ran while the rooms lock
   was held, about 4 ms per file, so pulls and approvals of every room
@@ -781,7 +788,8 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   applied: nothing is mapped, what that version left on the router is
   removed, and `status` and `net on` say so. Run `a2p2 net on --map-port`
   again to map. A decision taken now carries a new role word,
-  `map_port_v2`, next to `map_port`; 0.2.3 reads it as before. A removal
+  `map_port_v2`, next to `map_port`; a machine running 0.2.3 reads it as
+  before. A removal
   that fails at `net off` or a stop is logged and shown in `status` from
   the start of the next run, and retried.
 - **The team launcher refuses a state directory another user could

@@ -10,7 +10,7 @@ filling your context. A room's [charter](room-charter.md) may change it.
   (up to 32 agents). Every addressee reads the whole message.
 - It is wrong for different briefs: each worker would read all of them.
   Send one [brief](delegation-brief.md) per worker, each its own root,
-  before or after the workers start: each is in its worker's first inbox.
+  before or after the workers start, as the brief recipe says.
 - Where your harness runs tool calls together, put the `send` calls in
   one step. Where you have a shell, one loop is cheaper to write down:
   `a2p2 send --as lead --room team-auth --to w01@1a2b3c4d "BRIEF: ..."`

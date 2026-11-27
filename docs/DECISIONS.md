@@ -3582,12 +3582,14 @@ addressed to exactly that agent. Dropping that one in silence defeats
 addressing: the sender named this reader, and no one else will read it.
 So this amends D35 for addressed messages only.
 
-- **The rule.** At its first registration, a message held then that is
-  addressed to the agent (its label on this machine's key, `to` in the
-  signed header) is unread for it, however long before it was sent.
-  Room-wide history from before stays read. The message is then read
+- **The rule.** A message addressed to an agent (its label on this
+  machine's key, `to` in the signed header) is unread when the agent
+  first registers if it is among the newest 10,000 records this machine
+  holds at that moment (`store.RegisterWindow`; messages, replacements,
+  withdrawals and handled reports all count). Room-wide history from
+  before stays read. The message is then read
   like any other: its newest text, `edited` if replaced, nothing if
-  withdrawn, `expired` if its text expired first (the reader is told,
+  withdrawn, `expired` if its newest text expired first (the reader is told,
   as D7 asks), kept out at level `none` and listed by `skipped`.
 - **How.** The cursor of each stream holding such a message starts just
   before the first one. A new column, `cursors.early` (migration 15,
@@ -3604,33 +3606,85 @@ So this amends D35 for addressed messages only.
   before it registered, under the old rule, does not reappear now. Only a
   label's first registration from this version on takes in briefs.
 - **The model changes with the code.** `World.Register` adds an agent
-  later with the same rule and `inTime` is used in `decide` and
-  `unconfirmed`. The differential harness now registers on both sides
+  later with the same rule, the window included (each held record keeps
+  the order it was stored in), and `inTime` is used in `decide` and
+  `unconfirmed`. The differential harness registers on both sides
   instead of filtering the model's listings, its exhaustive prefix sends
   a brief to the agent that registers later, and the walk-from-the-start
-  check walks from `early`.
+  check walks from `early`. Its random schedules over three founding
+  machines now register the late agent and brief it from another
+  machine; the real exchange's random schedules draw neither, so the
+  seeds that once disagreed keep their schedules, and one scenario
+  covers registration before the admission frontier arrives.
 - **What `send` says.** The local API's send result gains
   `not_registered`, the addressees on this machine never registered
   here; the CLI prints a line for each on stderr (stdout is still the
   id alone), and the MCP send, reply and ask_human results end their
-  `note` with "Not registered here yet; each reads it when it first
-  registers: " and the ids (81 bytes for one addressee with a 6-letter
-  label; no tool definition changes). Nothing is said of another
+  `note` with "Not registered on this machine yet; unread for each when
+  it registers if still among this machine's newest messages: " and the
+  ids (134 bytes for one addressee with a 6-letter label; the largest result
+  is 8,739 bytes, at 32 addressees with 64-character labels and full keys,
+  about 5,700 tokens at D72's 1.54 bytes a token; no tool definition
+  changes). Nothing is said of another
   machine's agents: this machine cannot know them, and guessing would be
   an oracle for which labels exist there. A local agent learns only what
   `peers` already lists. Labels carry no authority, and this changes no
   check.
-- **Bounds.** Registration reads every message header the room holds
-  once, in its transaction. Any member can address any label on this
-  machine's key, registered or not, so a flood of briefs to a label not
-  registered yet is no worse than one to a registered label; either is
-  paged by the inbox's `limit` and `max_bytes`. A brief at the start of a
-  long stream makes the first walk read that stream from there, as an
-  old unconfirmed message does for any agent.
+- **Bounds (review ruling).** A first version read every message header
+  every room held, in the registration's transaction: about 445 ms with
+  100,000 records, holding the machine's only database connection, so a
+  send, a pull or an inbox waited behind each new label, and any member
+  can grow the history (headers outlive retention). Registration now
+  reads only the messages among the newest 10,000 records, by a seek on
+  the records table's rowid: rows are only inserted, nothing renumbers
+  them (no VACUUM), and a stream's records are stored in position order,
+  so the rowid is the order this machine stored them in and, within a
+  stream, the order of positions. `TestTheNewestRecordsAreReadBySeekingOnTheRowid`
+  checks the plan. It decodes at most 10,000 headers, about 40 ms with
+  100,000 records held (`TestRegisteringReadsOnlyTheNewestRecordsWhateverTheHistory`,
+  Apple M-series laptop, no race detector). Because `early` is never
+  below the oldest record the window covered, the agent's first inbox, a
+  level change and `skipped` walk at most the window too: 10,001 records
+  decoded, about 65 ms each
+  (`TestALateAgentsFirstReadsDecodeAtMostTheRegistrationWindow`).
+  `skipped` and level changes walk from `early` for as long as the
+  agent's time began there, so that cost repeats, bounded the same way.
+  A brief older than the window is not unread; `recent` reads it. A
+  flood of briefs to a label not registered yet is no worse than one to
+  a registered label (any member can address any label on this
+  machine's key); either is paged by the inbox's `limit` and
+  `max_bytes`.
+- **Why not an index of addressees.** It would make registration exact
+  for any history, but it needs a table and a second migration, and its
+  rows cost every stored message. The window needs neither. It counts
+  the records of every room this machine holds, so a busy machine moves
+  it faster: at 1,000 records a day a brief stays in it ten days. One
+  that left it is still found with `recent`.
+- **The admission frontier.** A stream whose author has a head of this
+  machine's admission frontier not held yet gets no cursor at
+  registration (`Store.RegisterWith`, with the frontier read under the
+  rooms lock as `Prune` does): it is seeded at that head when it
+  arrives, as for an agent present at the admission. Before, a label
+  registered then was seeded at the current end, below the frontier,
+  past text whose permission was not decided yet (since 0.1.0; the
+  differential harness found it once it registered on a machine
+  admitted without history:
+  `TestRealExchangeLateAgentRegisteredBeforeItsFrontierArrivesReadsItsBrief`).
+- **A stated limit.** When this machine is admitted to a room without
+  history after a brief was sent to one of its labels, the brief is not
+  unread: the machine's agents start at the admission frontier, and the
+  brief is before it, and without history its text is not handed over.
+  The lead sends it again.
 - **Compatibility.** No wire or signed format changes. Migration 15
   makes a database older binaries refuse to open ("upgrade a2p2"), as
-  every migration does.
+  every migration does; INSTALL says how to keep a copy of the home to go
+  back. It ends, for this release, what D56 (no index, so that 0.2.3 can
+  still open the database) and D57 (0.2.x can open a database this
+  version wrote; the fix for a set-aside local room is the older
+  version) said of going back: those hold for the change each describes,
+  not for a home this release has opened.
 
-**Revisit if** registration becomes slow in rooms with very many
-messages (an index of addressees would replace the scan), or a way to
-forget an agent is added (it would have to say whether briefs return).
+**Revisit if** leads report briefs lost to the window (an index of
+addressees would make it exact), the records table stops being
+insert-only in rowid order (a VACUUM, a rebuild), or a way to forget an
+agent is added (it would have to say whether briefs return).

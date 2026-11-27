@@ -576,8 +576,9 @@ func sentOf(m localapi.SendResp, local string) sent {
 }
 
 // noteNotRegistered names addressees on this machine that have not
-// registered yet (D73).
-const noteNotRegistered = "Not registered here yet; each reads it when it first registers: "
+// registered yet (D73): it is unread for each when it registers, if this
+// machine still holds it among its newest messages (store.RegisterWindow).
+const noteNotRegistered = "Not registered on this machine yet; unread for each when it registers if still among this machine's newest messages: "
 
 func (sh *shim) send(ctx context.Context, in sendIn) (string, error) {
 	if strings.TrimSpace(in.Text) == "" && in.Replaces == "" {

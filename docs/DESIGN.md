@@ -311,8 +311,8 @@ can make it grow only by what its records cost the machine anyway, for
 example by sending headers whose text never follows, or by withdrawing
 every other one of its messages.
 
-Nothing is stored and the schema is unchanged, so a database moves
-between this version and 0.2.3 either way.
+The cache stores nothing and needs no schema change. (The release that
+brings it changes the schema for another reason: migration 15, D73.)
 `TestSummaryCacheEqualsAReadOfTheRoomAfterEveryKindOfWrite` compares the
 cached summary with a read of the table after every step of random
 schedules of these writes, rollbacks, reads inside a write, forks, hints,
@@ -614,7 +614,8 @@ what a room label or a name may contain), so a rule added to receipt later
 does not reject a log stored before it. The replay compares each entry's
 disposition with the stored one, not its reason: a reason is an
 explanation whose wording may change, and the stored text is left as it
-is, so the version that wrote it can still open the database. A room
+is, so this rule never stops the version that wrote it opening the
+database (a migration does: 15, D73). A room
 whose stored log does not parse, does not verify, or replays to another
 disposition is set aside: it is not served or pulled, a send, replace,
 withdraw, handled report, send with files, Seen or change of its files
@@ -665,29 +666,53 @@ parent's author unless the sender names addressees (D10).
 first time it is used here (`send`, `inbox`, the MCP shim's first call).
 In the same transaction its cursors start at the current end of every
 stream of every room, so the room's history from before is not unread
-for it (D35; `recent` reads it). A message held then that is addressed to
-exactly this agent (its label on this machine's key, from any member) is
-unread for it all the same, however long before it was sent: a lead can
-brief workers before their sessions start. Where a stream holds such a
+for it (D35; `recent` reads it). The rule for what was addressed to it:
+a message addressed to an agent is unread when the agent first registers
+if it is among the newest 10,000 records this machine holds at that
+moment (`store.RegisterWindow`; a record is a message, a replacement, a
+withdrawal or a handled report, from any member). So a lead can brief
+workers before their sessions start. Where a stream holds such a
 message, the cursor starts just before the first one and `cursors.early`
 (migration 15) records where; a message between `early` and `start` is
 in the agent's time only if it is addressed to it (`inTime`, the same in
 the delivery model's `Register`), so the walk passes the room-wide ones.
 The brief is then read like any other message: its newest text, as
 edited if it was replaced; nothing if it was withdrawn; an `expired`
-notice if its text expired first; skipped at level `none`. The scan
-reads every message header the room holds once, at registration. A
-flood of briefs to a label not yet registered is paged like any inbox
-(`limit`, `max_bytes`) and is no worse than one to a registered label:
-any member can address any label on this machine's key either way.
-Registration is never undone; a restore to a backup from before it takes
-it back, and registering again applies the rule to what the restored
-store holds. `send` names, in `not_registered`, the addressees on this
-machine never registered here ("Not registered here yet; each reads it
-when it first registers"); of other machines' agents it says nothing,
-since this machine cannot know them, and the list shows a local agent
-only what `peers` already lists. An agent registered before this rule
-existed keeps its cursors as they were.
+notice if its newest text expired first, which holds back nothing; skipped at
+level `none`. A brief whose text is not here yet holds back its author's
+stream from there, as any missing text does, and no other stream.
+
+The window bounds the work whatever the history's size, which any member
+can grow and whose headers outlive retention. Registration reads the
+messages among the newest records by a seek on the records table's
+rowid, the order this machine stored them in (rows are only inserted,
+and nothing renumbers them), and decodes at most 10,000 headers: about
+40 ms with 100,000 records held, during which the one database
+connection is held. Since a stream's records are stored in position
+order, `early` is never below the oldest record the window covered, so
+the agent's first inbox, a level change and `skipped` walk at most the
+window too (about 65 ms each at 10,000 records). A brief older than the
+window is not unread: read it with `recent`. A flood of briefs to a
+label not yet registered is paged like any inbox (`limit`, `max_bytes`)
+and is no worse than one to a registered label: any member can address
+any label on this machine's key either way.
+
+A stream whose author has a head of this machine's admission frontier
+not held yet gets no cursor at registration: it is seeded at that head
+when it arrives, as for an agent registered at the admission
+(`Store.RegisterWith`, read under the rooms lock like `Prune`). A
+machine admitted without history after a brief was sent to one of its
+labels does not make that brief unread: its agents start at the
+admission frontier, and the brief is before it. Registration is never
+undone; a restore to a backup from before it takes it back, and
+registering again applies the rule to what the restored store holds.
+`send` names, in `not_registered`, the addressees on this machine never
+registered here ("Not registered on this machine yet; unread for each
+when it registers if still among this machine's newest messages"); of
+other machines' agents it says nothing, since this machine cannot know
+them, and the list shows a local agent only what `peers` already lists.
+An agent registered before this rule existed keeps its cursors as they
+were.
 
 **Waiting and looking again.** An inbox with a wait registers before it
 looks, so a write committed after the look always ends the wait. A

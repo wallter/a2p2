@@ -343,7 +343,22 @@ func (m *Machine) Register(ctx context.Context, agent string) (bool, error) {
 	if err := checkAgent(agent); err != nil {
 		return false, err
 	}
-	return m.st.Register(ctx, m.ID, agent, m.now())
+	// As Prune does, under locked: the frontier read is the one the store
+	// seeds against (a head published meanwhile would be seeded for the
+	// agents registered before this one, and not for it).
+	var fresh bool
+	run := func() error {
+		var err error
+		fresh, err = m.st.RegisterWith(ctx, m.ID, agent, m.now(), m.undecided)
+		return err
+	}
+	var err error
+	if m.locked != nil {
+		err = m.locked(run)
+	} else {
+		err = run()
+	}
+	return fresh, err
 }
 
 // Prune is the pruning pass [R6]: text 30 days old by this machine's clock
