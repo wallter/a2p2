@@ -27,7 +27,7 @@ node=$("$bin" status --json | python3 -c 'import json,sys; print(json.load(sys.s
 pass=0; fail=0
 ok()  { echo "  PASS  $1"; pass=$((pass+1)); }
 bad() { echo "  FAIL  $1"; fail=$((fail+1)); [ -n "${2:-}" ] && echo "$2" | tail -15 | sed 's/^/        /'; }
-have_text() { "$bin" history -n 200 --json | grep -q "$1"; }
+have_text() { "$bin" history --as tester -n 200 --json | grep -q "$1"; }
 
 # run_<harness> PROMPT -> prints the model's output; runs in $proj.
 # stdin is /dev/null: codex exec otherwise waits for piped stdin to close.

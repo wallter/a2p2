@@ -61,6 +61,19 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Fixed
 
+- **`--wait` and the count flags are checked by the CLI and the error names
+  the flag.** `a2p2 inbox --wait 600` said `wait_ms is 0 to 120000`, a field
+  of the local API in milliseconds, while the flag takes seconds. `inbox`,
+  `alerts` and `fetch` now say `--wait takes 0 to 120 seconds, not 600`
+  before anything is registered, and a negative `inbox --limit` or `history
+  -n` names the flag typed. Present since 0.1.0.
+- **`make e2e` no longer shows the agent-shell notice for a command that was
+  given `--as`.** The CLI never printed it for such a command (a test now
+  says so, in a shell with `CLAUDECODE` and `AI_AGENT` set). The notice came
+  from the scripts' own `history` call, which had no `--as` and so acted as
+  the agent of the working directory, as D66 says; the scripts now pass
+  `--as`. The notice itself, for a command with neither `--as` nor
+  `--person`, is unchanged and has been in the code since after 0.2.3.
 - **Serving and making a pull no longer gets slower as a room's history
   grows.** Every pull request served or made worked out the machine's
   summary of the room by reading every record of it, under the lock that
