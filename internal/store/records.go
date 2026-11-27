@@ -444,6 +444,7 @@ func place(tx *sql.Tx, r *core.VerifiedRecord, o PutOpts) (Outcome, error) {
 		ms(f.Created), r.Header(), r.Sig(), body, reason, effect); err != nil {
 		return "", err
 	}
+	noteText(tx, textNote{f.Room, r.Author(), f.Epoch, r.ID(), reason, f.Seq, ms(f.Created)})
 	if err := hook("put:inserted"); err != nil {
 		return "", err
 	}
@@ -465,10 +466,10 @@ func place(tx *sql.Tx, r *core.VerifiedRecord, o PutOpts) (Outcome, error) {
 		// lose their text, whatever reason they had (withdrawn overrides
 		// expired, as in the model's setBody). A withdraw naming anything
 		// but a message does nothing.
-		if _, err := tx.Exec(sqlWithdrawMessage, ReasonWithdrawn, f.Room, f.Ref, r.Author()); err != nil {
+		if err := execNoted(tx, sqlWithdrawMessage, ReasonWithdrawn, f.Room, f.Ref, r.Author()); err != nil {
 			return "", err
 		}
-		if _, err := tx.Exec(sqlWithdrawReplaces, ReasonWithdrawn, f.Room, f.Ref, r.Author(), f.Room, f.Ref); err != nil {
+		if err := execNoted(tx, sqlWithdrawReplaces, ReasonWithdrawn, f.Room, f.Ref, r.Author(), f.Room, f.Ref); err != nil {
 			return "", err
 		}
 		if err := hook("put:withdrawn"); err != nil {
@@ -515,6 +516,7 @@ func repair(tx *sql.Tx, rd *Reader, h Held, r *core.VerifiedRecord, o PutOpts) (
 		body, reason, f.Room, r.ID()); err != nil {
 		return "", err
 	}
+	noteText(tx, textNote{f.Room, h.Record.Author(), f.Epoch, r.ID(), reason, f.Seq, ms(f.Created)})
 	if reason == ReasonLive {
 		return OutcomeRepaired, nil
 	}
@@ -636,9 +638,11 @@ const (
 	whereThreadRoot         = `WHERE room = ? AND id = ? AND +kind = 'message' AND thread != ?`
 	// A withdraw drops the text of its message and of the author's
 	// replacements of it, if the target is a message (or not held).
-	sqlWithdrawMessage  = `UPDATE records SET body = NULL, reason = ? WHERE room = ? AND id = ? AND author = ? AND +kind = 'message'`
+	// Both return what they changed, for the summary cache (noted).
+	sqlWithdrawMessage = `UPDATE records SET body = NULL, reason = ? WHERE room = ? AND id = ? AND author = ? AND +kind = 'message'
+		` + returningNoted
 	sqlWithdrawReplaces = `UPDATE records SET body = NULL, reason = ? WHERE room = ? AND ref = ? AND author = ? AND +kind = 'replace'
-		AND NOT EXISTS (SELECT 1 FROM records t WHERE t.room = ? AND t.id = ? AND t.kind != 'message')`
+		AND NOT EXISTS (SELECT 1 FROM records t WHERE t.room = ? AND t.id = ? AND t.kind != 'message') ` + returningNoted
 )
 
 // positioned is a record with its stored position (author, epoch, seq),
@@ -760,13 +764,10 @@ func (s *Store) ExpireTextWith(ctx context.Context, now time.Time, undecided fun
 				return err
 			}
 		}
-		const q = `UPDATE records SET body = NULL, reason = ? WHERE reason IN ('live', 'missing') AND created <= ?`
+		const q = `UPDATE records SET body = NULL, reason = ? WHERE reason IN ('live', 'missing') AND created <= ? ` + returningNoted
 		if len(keep) == 0 {
-			res, err := tx.Exec(q, ReasonExpired, cutoff)
-			if err != nil {
-				return err
-			}
-			n, err = res.RowsAffected()
+			c, err := queryNoted(tx, q, ReasonExpired, cutoff)
+			n = c
 			return err
 		}
 		// The pairs to keep are left out in Go, not as one SQL variable
@@ -775,12 +776,9 @@ func (s *Store) ExpireTextWith(ctx context.Context, now time.Time, undecided fun
 		// text past retention is expired one (room, author) pair at a
 		// time, for the pairs not kept: one statement per such pair, on
 		// the (room, author) prefix of the records position index.
-		res, err := tx.Exec(`UPDATE records SET body = NULL, reason = ? WHERE reason = 'live' AND created <= ?`,
-			ReasonExpired, cutoff)
-		if err != nil {
-			return err
-		}
-		if n, err = res.RowsAffected(); err != nil {
+		var err error
+		if n, err = queryNoted(tx, `UPDATE records SET body = NULL, reason = ? WHERE reason = 'live' AND created <= ? `+returningNoted,
+			ReasonExpired, cutoff); err != nil {
 			return err
 		}
 		rows, err := tx.Query(`SELECT DISTINCT room, author FROM records WHERE reason = 'missing' AND created <= ?`, cutoff)
@@ -803,12 +801,8 @@ func (s *Store) ExpireTextWith(ctx context.Context, now time.Time, undecided fun
 			return err
 		}
 		for _, k := range pairs {
-			res, err := tx.Exec(`UPDATE records SET body = NULL, reason = ? WHERE reason = 'missing' AND created <= ?
-				AND room = ? AND author = ?`, ReasonExpired, cutoff, k[0], k[1])
-			if err != nil {
-				return err
-			}
-			c, err := res.RowsAffected()
+			c, err := queryNoted(tx, `UPDATE records SET body = NULL, reason = ? WHERE reason = 'missing' AND created <= ?
+				AND room = ? AND author = ? `+returningNoted, ReasonExpired, cutoff, k[0], k[1])
 			if err != nil {
 				return err
 			}
@@ -842,6 +836,8 @@ func (s *Store) View(ctx context.Context, fn func(*Reader) error) error {
 		defer h(false, time.Now())
 	}
 	defer tx.Rollback()
+	txStates.Store(tx, &txState{s: s})
+	defer txStates.Delete(tx)
 	return fn(&Reader{tx: tx})
 }
 
@@ -953,6 +949,13 @@ func (rd *Reader) Record(room, id string) (Held, bool, error) {
 func (rd *Reader) RecordsFrom(room, author, epoch string, from int64) ([]Held, error) {
 	return rd.query(`WHERE room = ? AND author = ? AND epoch = ? AND seq >= ? ORDER BY seq`,
 		room, author, epoch, from)
+}
+
+// RecordsFromN is RecordsFrom of at most n records: what a page can carry
+// of a stream, without reading the rest of it.
+func (rd *Reader) RecordsFromN(room, author, epoch string, from int64, n int) ([]Held, error) {
+	return rd.query(`WHERE room = ? AND author = ? AND epoch = ? AND seq >= ? ORDER BY seq LIMIT ?`,
+		room, author, epoch, from, n)
 }
 
 // ByRef returns the records whose ref is id (handled, withdraw, replace),

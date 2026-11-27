@@ -17,6 +17,44 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   --source-ref refs/tags/<tag>`. Releases up to 0.2.3 have none, and the
   binaries are still not code-signed.
 
+### Fixed
+
+- **Serving and making a pull no longer gets slower as a room's history
+  grows.** Every pull request served or made worked out the machine's
+  summary of the room by reading every record of it, under the lock that
+  covers every room on the machine. A held pull did the same again after
+  each write. The store now keeps, per room in memory, the records without
+  live text, kept up to date by the writes as they commit. A summary then
+  reads only the room's streams. The database and the wire are unchanged.
+  A page or offer also reads at most one more record of each stream than
+  it can carry, instead of the rest of the stream, and a record received
+  from a peer reads the room's streams only when this machine's history
+  permission needs them. Measured in process on an Apple Silicon laptop
+  (`go test -tags bench -run TestBenchPullHistory ./internal/node/`: two
+  machines over the in-memory network, synthetic authors, one stream
+  each, 200 B texts; CPU per request on the serving machine, two runs
+  each, the second in brackets, in ms):
+
+  | records, authors | idle opening (`same`) | opening after one new record | detail with a page of 1 | catch-up page |
+  |---|---|---|---|---|
+  | 1,000, 5 | 0.52 (0.52) → 0.17 (0.18) | 0.41 (0.42) → 0.06 (0.07) | 0.85 (0.82) → 0.20 (0.26) | 1.75 (1.78) → 1.19 (1.16) |
+  | 10,000, 5 | 12 (13) → 0.15 (0.18) | 14 (14) → 0.06 (0.07) | 23 (28) → 0.22 (0.24) | 37 (40) → 7.20 (7.34) |
+  | 50,000, 5 | 62 (66) → 0.18 (0.20) | 66 (72) → 0.06 (0.07) | 131 (131) → 0.20 (0.24) | 146 (142) → 8.48 (9.47) |
+  | 100,000, 5 | 129 (146) → 0.18 (0.18) | 130 (131) → 0.08 (0.08) | 316 (275) → 0.26 (0.27) | 374 (296) → 8.38 (8.68) |
+  | 1,000, 50 | 3.98 (2.05) → 0.99 (0.99) | 2.63 (1.41) → 0.20 (0.21) | 5.04 (2.64) → 0.96 (1.01) | 4.83 (2.58) → 1.19 (1.31) |
+  | 10,000, 50 | 21 (11) → 1.07 (1.03) | 20 (9.79) → 0.34 (0.30) | 38 (19) → 1.24 (0.99) | 40 (21) → 2.74 (2.37) |
+  | 50,000, 50 | 109 (70) → 1.30 (1.00) | 113 (67) → 0.37 (0.29) | 217 (134) → 1.28 (1.12) | 214 (134) → 2.85 (2.54) |
+  | 100,000, 50 | 159 (147) → 1.08 (1.01) | 151 (145) → 0.24 (0.21) | 298 (290) → 1.10 (1.18) | 289 (292) → 2.74 (2.53) |
+
+  On the requesting side, preparing an idle opening went from 0.36 ms
+  to 0.06 ms at 1,000 records and 5 authors and from 158 to 0.06 ms at
+  100,000, and a catch-up costs 90 to 120 ms of CPU per request on
+  both sides together at 100,000 (it was 610 to 875).
+  Four peers' idle openings served at once rose from 2.4 to about 20,000
+  a second at 100,000 records. What still grows: the streams of a room
+  (restarts start new ones) and the positions held without text, which
+  each summary copies.
+
 ### Changed
 
 - **Docs: the durability limit on macOS is stated.** `send` survives a crash

@@ -91,10 +91,7 @@ func (r *Rooms) recordPlan(st members.State, look func(string) *core.VerifiedEnt
 			}
 			return p, nil
 		}
-		v := r.m.newView(rd, f.Room, now)
-		if err := v.load(); err != nil {
-			return p, err
-		}
+		v := r.m.newView(rd, f.Room, now) // loaded only if perm needs it (textAccess)
 		var err error
 		if p.Text, err = textAccess(v, perm, author, f, id); err != nil {
 			return p, err
@@ -176,6 +173,9 @@ func textAccess(v *roomView, perm members.Permission, author string, f core.Reco
 		return store.TextReadable, nil
 	case perm.Closed:
 		return store.TextHidden, nil
+	}
+	if err := v.ensure(); err != nil {
+		return store.TextHidden, err
 	}
 	x := &rec{f: f, id: id, author: author}
 	undecided := false

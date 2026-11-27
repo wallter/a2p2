@@ -414,7 +414,11 @@ func applyAccess(tx *sql.Tx, room string, a Access) error {
 		if err != nil {
 			return err
 		}
-		type change struct{ id, reason string }
+		type change struct {
+			id, reason string
+			f          core.RecordFields
+			author     string
+		}
 		var changes []change
 		for rows.Next() {
 			var id, reason string
@@ -435,10 +439,10 @@ func applyAccess(tx *sql.Tx, room string, a Access) error {
 			}
 			switch {
 			case acc == TextHidden && reason != ReasonNotAdmitted:
-				changes = append(changes, change{id, ReasonNotAdmitted})
+				changes = append(changes, change{id, ReasonNotAdmitted, r.Fields(), r.Author()})
 			case acc == TextUndecided && reason == ReasonLive && hasText(r.Fields().Kind),
 				acc != TextHidden && reason == ReasonNotAdmitted:
-				changes = append(changes, change{id, ReasonMissing})
+				changes = append(changes, change{id, ReasonMissing, r.Fields(), r.Author()})
 			}
 		}
 		rows.Close()
@@ -450,6 +454,7 @@ func applyAccess(tx *sql.Tx, room string, a Access) error {
 				c.reason, room, c.id); err != nil {
 				return err
 			}
+			noteText(tx, textNote{room, c.author, c.f.Epoch, c.id, c.reason, c.f.Seq, ms(c.f.Created)})
 		}
 	}
 	if a.Frontier != nil {
@@ -824,6 +829,7 @@ func (s *Store) LeaveRoom(ctx context.Context, room string, now time.Time) (int6
 		if err := leaveFiles(tx, room, now); err != nil {
 			return err
 		}
+		dropText(tx, room)
 		for _, q := range []string{
 			`DELETE FROM records WHERE room = ?`, `DELETE FROM streams WHERE room = ?`,
 			`DELETE FROM forks WHERE room = ?`, `DELETE FROM cursors WHERE room = ?`,
