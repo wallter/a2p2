@@ -3170,28 +3170,56 @@ the two-step read (AGENTS.md), so it is fixed now.
   the tool applies 24,000. The daemon (`Surface.InboxPage`) returns,
   oldest first, the entries whose result fits it, after `limit`, and
   writes receipts for those only; the shim confirms those only. The
-  result says `"more": N`, the entries still unread after these, when the
-  limit or the budget left any out; the next call offers them in the
-  same order. The tool description says "If more, call again."
-- **What is measured.** The result text the model reads, as the shim
-  renders it. The rendering moved from `internal/mcpshim` to
-  `internal/localapi/toolview.go`, which the shim and the daemon's
+  result says `"more": N` when entries are left unread: those held at
+  the daemon's look that the limit or the budget left out, of every kind
+  the inbox returns (notices and the agent's own send decisions
+  included), plus any the call returned but could not mark seen. It does
+  not count what arrives after the look. The next call offers them in
+  the same order. The tool description says "If more, call again."
+- **What is measured.** The whole result text the model reads, as the
+  shim renders it: the envelope, `streams_still_fetching`, `waited`,
+  `more` and the `levels` of a level set in the same call, measured even
+  when no entry is returned. The rendering moved from `internal/mcpshim`
+  to `internal/localapi/toolview.go`, which the shim and the daemon's
   handler both use (the daemon cannot import the shim: the shim's tests
   import the daemon). `node` gets only a measure to call, so it still
   knows nothing of MCP. The measure takes `marked_seen` as false, one
-  byte longer than true; the shim reserves the bytes of `levels` when the
-  same call sets a level (`reserve` on the local API). So the result is
-  never over `max_bytes`, with one exception below; the tests hold it to
-  that at random budgets and sizes, escapes included. `node.FitPage`
-  finds the longest prefix with about a dozen measurements.
+  byte longer than true, `waited` as set on an empty page, and `more` as
+  every entry held, the most it can become; so a page may hold a few
+  bytes less than it could. So the result is never over `max_bytes`,
+  and the tests hold it to that at random budgets, at sizes up to the
+  largest text, with escapes, files, choices, a person's identity and
+  edits, and to the byte at a boundary. `node.FitPage` finds the longest
+  prefix with about a dozen measurements and reuses the first.
+- **A level set in the same call.** The level goes to the daemon in the
+  inbox call (`level` on the local API). The daemon measures the page as
+  the inbox will be at that level (`Machine.inboxAt`, SetLevel's rule,
+  nothing written) and only then sets the level and writes receipts, so a
+  read refused for its budget changes nothing. A refusal that comes
+  after a wait, when the level is already set, says so. When the list of
+  rooms set does not fit before any message, the refusal says that, and
+  to set the level in a call of its own (`level` with `peek`). A result
+  lists at most 20 rooms in `levels` and counts the rest in
+  `levels_unlisted`, so that call stays small too. The local API's
+  `reserve` of the first version is gone.
 - **An entry too large for the budget.** When the oldest unread entry
-  alone does not fit, the call is refused with `too_large`, naming the
-  `max_bytes` it needs; nothing is shown, given a receipt or marked, and
-  the reader asks again with that. An entry larger than 40,000 bytes (a
-  16 KiB text of characters written as escapes) fits no budget: the
-  refusal names 40,000, and at 40,000 it is returned alone, over the
-  budget. So no entry is skipped, and none holds the queue for ever. A
-  plain 16 KiB text shows at about 16.7 KB and fits the default.
+  alone does not fit, the call is refused with `too_large`, naming at
+  least the `max_bytes` it needs plus 32 bytes, so that a message
+  arriving before the retry does not cause a second refusal; nothing is
+  shown, given a receipt or marked. The largest text renders far past
+  any budget: 16,372 DEL characters, each written `\u{7f}` and its
+  backslash escaped by JSON, come to 114,926 bytes of result (measured in review);
+  zero-width spaces and other hidden characters to 41 to 58 KB. Such an
+  entry is refused below 40,000, naming 40,000; at 40,000 it is returned
+  alone with its text cut, between characters and so never inside an
+  escape or a multi-byte character, to the longest start that fits, and
+  marked seen as usual. Its `text_cut` says the text is only the start,
+  how many bytes of the rendered text were left out, that no result of
+  the tool within `max_bytes` holds the rest (`thread` returns it whole,
+  unbounded), and that a person can read it with `a2p2 inbox --thread
+  ID`. So no result exceeds 40,000 bytes, no entry is skipped, and none
+  holds the queue for ever. A plain 16 KiB text shows at about 16.7 KB
+  and fits the default.
 - **The default, 24,000 bytes, and the ceiling, 40,000.** Measured inbox
   entries are 380 to 424 bytes for a 200-byte text and about 180 bytes of
   fields beyond the text; the envelope is about 200 bytes and 67 for each
@@ -3207,35 +3235,38 @@ the two-step read (AGENTS.md), so it is fixed now.
   never more than 40,000.
 - **What changes for agents.** A backlog now comes in more calls: 1 KB
   messages come about twenty to a call instead of fifty, each result
-  saying `more`. The recipes (fewer turns, catching up) and the skill say
-  to call again on `more`, and to ask for smaller pages when short of
-  context or after a compaction.
+  saying `more`. The recipes (fewer turns, catching up), the skill and
+  the team launcher's prelude say to call again on `more`, and to ask
+  for smaller pages when short of context or after a compaction.
 - **Other views.** `peek` is small already (counts and ten first lines).
   `recent`, `skipped` and `thread` mark nothing seen, so a result a
   harness cuts loses nothing; they page with `before` and `after` and a
-  smaller `recent`. `fetch` returns a path, never bytes, and `level`
-  alone is followed by a read, which the budget covers. `max_bytes` with
+  smaller `recent`. `fetch` returns a path, never bytes. `max_bytes` with
   `peek`, `recent`, `skipped`, `thread` or `fetch` is refused, so no one
   takes it for a cap that was not applied; none of them marks anything.
-- **The CLI.** `a2p2 inbox` gets no `--max-bytes`. The budget counts the
-  MCP result, not the CLI's text or its `--json` (each entry about 600
-  bytes), so the flag would promise a bound the output does not keep, and
-  the shell, not a2p2, decides what an agent's tool output keeps. It
-  prints "(N more unread: run a2p2 inbox again)" when its limit left some
-  out, from the new `more`.
+- **Reads without a budget.** The local page and the CLI keep reading
+  without one: they show a person, not a model's context. `a2p2 inbox` gets no `--max-bytes`. The budget
+  counts the MCP result, not the CLI's text or its `--json` (each entry
+  about 600 bytes), so the flag would promise a bound the output does
+  not keep, and the shell, not a2p2, decides what an agent's tool output
+  keeps. It prints "(N more unread: run a2p2 inbox again)" when its limit
+  left some out, from the new `more`. The local API applies a budget
+  only when asked.
 - **Old and new together.** A daemon before 0.2.4 ignores `max_bytes`
-  and does not echo it. A new server sees that (the answer lacks
-  `max_bytes`) and cuts the page itself by the same measure and rule,
-  confirms only that page, and counts `more`, with an `unread` call when
-  the daemon listed a full `limit`. That daemon has already kept receipts
-  for what the server cut, which only let a level change pass them and an
-  `ack` by id succeed; they are neither returned nor confirmed and come
-  again on the next call. Refusing instead would stop all reading until
-  the daemon restarts; ignoring the budget would return uncapped pages
-  without `more`, which the new description says to expect. An older
-  server on a new daemon sends no `max_bytes`: the daemon applies none
-  and reads as before, and the server ignores `more`. Nothing changes
-  between machines.
+  and `level` in the inbox call and does not echo `max_bytes`. Such a
+  daemon has already kept a receipt of every entry it listed, so a
+  server that cut its page would leave receipts for entries the model
+  never saw: an `ack` by id of one would succeed and report it handled,
+  and a level change would not keep it out. So a new server does not cut
+  it. For a read that sets a level the server asks status first, which
+  lists no `features` there, and keeps only a yes; for any read, an
+  answer without `max_bytes` tells it. It then reads as 0.2.3 did, with the daemon's own page, whole,
+  confirmed, and the level set first in its own call, and adds a `note`
+  that the daemon is older than the tool, the budget was not applied,
+  and `a2p2 stop` starts the new daemon. An explicit `max_bytes` gets the
+  same note, not an error. An older server on a new daemon
+  sends no `max_bytes`: the daemon applies none and reads as before, and
+  the server ignores `more`. Nothing changes between machines.
 - **Cost in definition bytes.** The parameter is 86 bytes and "If more,
   call again." 21. 106 bytes of text came out: `whoami` "New messages
   are not pushed: call inbox." (the server instructions and the `whoami`
@@ -3248,11 +3279,15 @@ the two-step read (AGENTS.md), so it is fixed now.
   assume yes" and "this machine only" stay.
 - **What it does not do.** It does not count tokens, and it does not know
   how full a model's context is: no harness reports that to a tool. It
-  does not make a harness show a result whole; a harness that cuts below
-  `max_bytes` still loses what the shim confirmed (an end-to-end receipt
-  after rendering would need the harness). It adds no fairness between
-  senders: one sender's many large messages still come first, in place
-  order.
+  does not make a harness show a result whole. It adds no fairness
+  between senders: one sender's many large messages still come first, in
+  place order. A notice of the agent's own send decided by the person
+  keeps no receipt (before this change too), so a local API caller can
+  confirm one by id that no page returned; no tool can.
+- **Still open.** The server marks a page seen before the model has read
+  the result. So a harness that cuts or drops a result can still lose
+  messages, even when the result is within the budget. Closing that means
+  confirming a page only when the agent next calls the server.
 
 **Revisit if** a vendor's tokenizer puts the default page over a
 harness's warning or limit, Codex's default output limit proves lower,

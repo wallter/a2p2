@@ -288,7 +288,7 @@ const (
 	opInject   // a record the model cannot express is placed (implementation only)
 	opLevel    // agent sets its level (n: delivery.Level)
 	opRead     // agent reads a thread view (n 0) or skipped (n 1), marking what it showed
-	opPage     // the inbox tool under a byte budget: list only the first n entries (receipts for them alone) and confirm them
+	opPage     // the inbox tool under a byte budget: the page InboxOpts.page cuts (limit 3, pageBudget(n)) gets receipts alone, and is confirmed
 	opMore     // the real exchange's operations follow (pull_differential_test.go)
 )
 
@@ -362,7 +362,7 @@ func (o op) String() string {
 		}
 		return fmt.Sprintf("%s/%s reads skipped", o.machine, o.agent)
 	case opPage:
-		return fmt.Sprintf("%s/%s inbox page of %d+seen", o.machine, o.agent, o.n)
+		return fmt.Sprintf("%s/%s inbox page (max_bytes %d)+seen", o.machine, o.agent, pageBudget(o.n))
 	}
 	return o.moreString()
 }
@@ -736,15 +736,31 @@ func (h *harness) seen(o op) {
 func (h *harness) page(o op) {
 	h.t.Helper()
 	mv, iv := h.inbox(o.machine, o.agent)
-	n := min(o.n, len(mv.Entries))
+	// The cut is the production one (InboxOpts.page, which
+	// Surface.InboxPage applies to its look), then Showed as InboxPage
+	// calls it. A Surface over these machines is not used: it would make
+	// a local room and draw epochs, which the model does not.
+	opts := InboxOpts{Limit: 3, MaxBytes: pageBudget(o.n), Size: pageSize}
+	pv, err := opts.page(iv, 3, false)
+	var ue *UserError
+	switch {
+	case errors.As(err, &ue) && ue.CodeOf() == ErrorTooLarge:
+		pv.Entries = nil // refused: nothing listed
+	case err != nil:
+		h.fail("implementation page: %v", err)
+	}
+	n := len(pv.Entries)
+	if pv.Entries != nil && pv.More != len(iv.Entries)-n {
+		h.fail("page more %d, want %d", pv.More, len(iv.Entries)-n)
+	}
 	if err := h.w.Listed(o.machine, o.agent, mv.Entries[:n]); err != nil {
 		h.fail("model listed: %v", err)
 	}
-	if err := h.sims[o.machine].m.Showed(context.Background(), diffRoom, o.agent, iv.Entries[:n], true); err != nil {
+	if err := h.sims[o.machine].m.Showed(context.Background(), diffRoom, o.agent, withoutRequests(pv.Entries), true); err != nil {
 		h.fail("implementation showed: %v", err)
 	}
 	var reads []store.Read
-	for _, e := range iv.Entries[:n] {
+	for _, e := range pv.Entries {
 		reads = append(reads, store.Read{Key: e.Key, Version: e.Version})
 	}
 	res, ierr := h.sims[o.machine].m.Seen(context.Background(), diffRoom, o.agent, reads)
@@ -762,6 +778,11 @@ func (h *harness) page(o op) {
 		}
 	}
 }
+
+// pageBudget is the max_bytes of a page op: by pageSize, one entry of a
+// short text at n 1, two at 2 and three at 3, the limit, so that either
+// binds.
+func pageBudget(n int) int { return MinInboxBytes + 170*(n-1) }
 
 // read is a read other than the inbox on both sides (o.n: 0 the thread or
 // branch view of the target, as the thread tool picks it; 1 skipped): the

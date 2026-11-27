@@ -612,20 +612,29 @@ oldest first, at most `limit` (50; at most 200) and, when the reader gives
 a byte budget, only those whose result fits it: the MCP inbox tool always
 gives one (`max_bytes`, 512 to 40,000, 24,000 when not given), the CLI and
 other local API callers none unless they ask. The budget counts the
-result the model reads: `Surface.InboxPage` takes the caller's measure
-(the local API passes `localapi.ToolInboxSize`, the shim's own rendering
-of that result, with the bytes of `levels` reserved) and finds the longest
-prefix that fits (`node.FitPage`). Receipts are written for that page
-only, so Seen can confirm nothing else; the rest stays unread, is counted
-in `more`, and the next read offers it again, in the same order. When the
-oldest entry alone does not fit, the read is refused (`too_large`) with
-the budget it needs, and nothing is shown or marked; an entry larger than
-any budget (a text of characters written as escapes can show three to
-six times its 16 KiB) is returned alone at the ceiling. The budget never
-counts tokens and knows nothing of how full a model's context is; the
-recipes tell an agent short of context to ask for less. The delivery
-model needs no change: a page is a listing of the first entries, which the
-differential tests compare as such (`opPage`).
+whole result the model reads, envelope and `levels` included:
+`Surface.InboxPage` takes the caller's measure (the local API passes
+`localapi.ToolInboxSize`, the shim's own rendering of that result) and
+finds the longest prefix that fits (`node.FitPage`, in
+`InboxOpts.page`). Receipts are written for that page only, so Seen can
+confirm nothing else; the rest stays unread, is counted in `more`, and
+the next read offers it again, in the same order. A read that also sets
+a level measures the page as the inbox will be at that level
+(`Machine.inboxAt`, nothing written) before it sets the level, so a read
+refused for its budget changes nothing. When the oldest entry alone does
+not fit, the read is refused (`too_large`) with at least the budget it
+needs, and nothing is shown, marked or set; an entry larger than any
+budget (a text of characters written as escapes shows up to about seven
+times its 16 KiB) is returned alone at the ceiling with its text cut
+between characters to fit, and `text_cut` saying how much was left out.
+So no result exceeds 40,000 bytes. A daemon before 0.2.4 ignores the
+budget and has kept receipts of its whole page; the MCP server then
+returns that page whole, as 0.2.3 did, with a note that the budget was
+not applied. The budget never counts tokens and knows nothing of how full
+a model's context is; the recipes tell an agent short of context to ask
+for less. The delivery model needs no change: a page is a listing of the
+first entries, which the differential tests compare as such (`opPage`,
+cut by `InboxOpts.page`).
 
 A level change runs in one transaction: every message held then that the
 old level kept out and the new one lets in, and that the agent has not

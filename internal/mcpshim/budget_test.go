@@ -38,6 +38,7 @@ type page struct {
 		Room    string `json:"room_label"`
 		Created string `json:"created"`
 		Text    string `json:"text"`
+		TextCut string `json:"text_cut"`
 	} `json:"messages"`
 	More   int `json:"more"`
 	Rooms  []localapi.ToolRoom
@@ -231,7 +232,7 @@ func TestTheInboxResultNeverExceedsMaxBytes(t *testing.T) {
 // refused with the size it needs; nothing is marked seen or skipped, and
 // asking with that size returns it. A message larger than any budget (a
 // text of hidden characters, each written as an escape) is refused at the
-// default, and returned alone, over the budget, at the ceiling.
+// default, and returned alone at the ceiling, cut to fit it.
 func TestAnOldestMessageTooLargeForTheBudgetIsRefusedWithTheSizeItNeeds(t *testing.T) {
 	c := startDaemon(t)
 	bob := newWriter(t, c, "bob")
@@ -243,9 +244,9 @@ func TestAnOldestMessageTooLargeForTheBudgetIsRefusedWithTheSizeItNeeds(t *testi
 	if ref.Code != node.ErrorTooLarge || ref.Retryable || !strings.Contains(ref.Error, "nothing was marked seen") {
 		t.Fatalf("refusal %+v", ref)
 	}
-	f := strings.Fields(ref.Error[strings.Index(ref.Error, "max_bytes "):])
+	f := strings.Fields(ref.Error[strings.LastIndex(ref.Error, "max_bytes "):])
 	need, err := strconv.Atoi(f[1])
-	if err != nil || need <= 9000 || need > 9600 {
+	if err != nil || need <= 9000 || need > 9600 || !strings.Contains(ref.Error, "at least") {
 		t.Fatalf("needs %q in %q", f[1], ref.Error)
 	}
 	if n := unread(t, a); n != 2 {
@@ -269,7 +270,7 @@ func TestAnOldestMessageTooLargeForTheBudgetIsRefusedWithTheSizeItNeeds(t *testi
 	s = ok(t, a, "inbox", map[string]any{"max_bytes": node.MaxInboxBytes})
 	var alone page
 	if err := json.Unmarshal([]byte(s), &alone); err != nil || len(alone.Messages) != 1 || alone.Messages[0].ID != hidden || alone.More != 1 ||
-		!alone.MarkedSeen || len(s) <= node.MaxInboxBytes {
+		!alone.MarkedSeen || len(s) > node.MaxInboxBytes || alone.Messages[0].TextCut == "" {
 		t.Fatalf("at the ceiling: %d bytes, more %d", len(s), alone.More)
 	}
 	if n := unread(t, a); n != 1 {
@@ -459,17 +460,16 @@ func TestAMessageReplacedOrWithdrawnBetweenPagesIsShownAsItIsNow(t *testing.T) {
 	}
 }
 
-// oldDaemon is a local API socket in front of a real daemon that answers
-// inbox as a daemon before 0.2.4 does: it drops max_bytes and reserve
-// from the request, and more and max_bytes from the answer.
-func oldDaemon(t *testing.T, real string) *localapi.Client {
+// proxy is a local API socket in front of a real daemon, which can change
+// each request (req) and each answer (resp) by the path called.
+func proxy(t *testing.T, real string, req func(path string, body []byte) []byte, resp func(path string, status int, body []byte) (int, []byte)) *localapi.Client {
 	t.Helper()
 	dir, err := os.MkdirTemp(sockTemp(), "a2p2")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	sock := filepath.Join(dir, "old")
+	sock := filepath.Join(dir, "proxy")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
@@ -477,40 +477,24 @@ func oldDaemon(t *testing.T, real string) *localapi.Client {
 	up := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", real)
 	}}}
-	strip := func(b []byte, keys ...string) []byte {
-		var m map[string]json.RawMessage
-		if json.Unmarshal(b, &m) != nil {
-			return b
-		}
-		for _, k := range keys {
-			delete(m, k)
-		}
-		out, _ := json.Marshal(m)
-		return out
-	}
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		inbox := r.URL.Path == "/v1/inbox"
-		if inbox {
-			body = strip(body, "max_bytes", "reserve")
-		}
-		req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, "http://a2p2"+r.URL.Path, bytes.NewReader(body))
-		req.Header.Set("Content-Type", r.Header.Get("Content-Type"))
+		body = req(r.URL.Path, body)
+		rq, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, "http://a2p2"+r.URL.Path, bytes.NewReader(body))
+		rq.Header.Set("Content-Type", r.Header.Get("Content-Type"))
 		if k := r.Header.Get(localapi.KeyHeader); k != "" {
-			req.Header.Set(localapi.KeyHeader, k)
+			rq.Header.Set(localapi.KeyHeader, k)
 		}
-		res, err := up.Do(req)
+		res, err := up.Do(rq)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 		defer res.Body.Close()
 		out, _ := io.ReadAll(res.Body)
-		if inbox && res.StatusCode == http.StatusOK {
-			out = strip(out, "more", "max_bytes")
-		}
+		status, out := resp(r.URL.Path, res.StatusCode, out)
 		w.Header().Set("Content-Type", res.Header.Get("Content-Type"))
-		w.WriteHeader(res.StatusCode)
+		w.WriteHeader(status)
 		w.Write(out)
 	})}
 	go srv.Serve(ln)
@@ -522,44 +506,339 @@ func oldDaemon(t *testing.T, real string) *localapi.Client {
 	return localapi.NewClient(sock).WithKey(key)
 }
 
-// [D3, U4] A new MCP server on a daemon before 0.2.4, which ignores max_bytes:
-// the server cuts the page by the same measure and rule, confirms only
-// that, and says how many are still unread, so the result stays within
-// the budget and the walk loses nothing. The oversized refusal holds too.
-func TestANewServerOnAnOldDaemonPagesItselfAndConfirmsOnlyThePage(t *testing.T) {
+// strip is the JSON object b without keys.
+func strip(b []byte, keys ...string) []byte {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(b, &m) != nil {
+		return b
+	}
+	for _, k := range keys {
+		delete(m, k)
+	}
+	out, _ := json.Marshal(m)
+	return out
+}
+
+// oldDaemon is a proxy that answers as a daemon before 0.2.4 does: its
+// inbox takes neither max_bytes nor level and answers without more,
+// max_bytes or levels, and its status lists no features.
+func oldDaemon(t *testing.T, real string) *localapi.Client {
+	return proxy(t, real, func(path string, b []byte) []byte {
+		if path == "/v1/inbox" {
+			return strip(b, "max_bytes", "level")
+		}
+		return b
+	}, func(path string, status int, b []byte) (int, []byte) {
+		switch {
+		case status != http.StatusOK:
+		case path == "/v1/inbox":
+			b = strip(b, "more", "max_bytes", "levels")
+		case path == "/v1/status":
+			b = strip(b, "features")
+		}
+		return status, b
+	})
+}
+
+// [D3, R7, U4, D70] A new MCP server on a daemon before 0.2.4, which ignores
+// max_bytes: the server reads as 0.2.3 did, the daemon's own page of up
+// to fifty, whole, and confirms all of it, and says the budget was not
+// applied and how to start the new daemon, with max_bytes given or not.
+// Nothing the page left out has a receipt: an ack of it is refused, and
+// level none keeps it out. A level set in the same call is set first, as
+// 0.2.3 did.
+func TestANewServerOnAnOldDaemonReadsAsTheOldServerDidAndSaysTheBudgetWasNotApplied(t *testing.T) {
 	c, home := startDaemonHome(t)
 	bob := newWriter(t, c, "bob")
-	a := connect(t, oldDaemon(t, daemon.SockPath(home)), "alice")
-	agentID(t, a)
-	sent := map[string]bool{}
-	for i := 0; i < 70; i++ {
-		sent[bob.send(localapi.SendReq{Text: fmt.Sprintf("m%02d %s", i, strings.Repeat("u", 100+10*i))})] = true
+	oc := oldDaemon(t, daemon.SockPath(home))
+	a := connect(t, oc, "alice")
+	alice := agentID(t, a)
+	var ids []string
+	for i := 0; i < 120; i++ {
+		ids = append(ids, bob.send(localapi.SendReq{Text: fmt.Sprintf("m%02d %s", i, strings.Repeat("u", 400)), To: []string{alice}}))
 	}
-	got := 0
-	for calls := 0; calls < 100; calls++ {
-		p, _ := readPage(t, a, map[string]any{"max_bytes": 5000})
-		if len(p.Messages) == 0 {
-			break
+	for _, args := range []map[string]any{{"max_bytes": 5000}, nil} {
+		s := ok(t, a, "inbox", args)
+		var p struct {
+			page
+			Note string `json:"note"`
 		}
-		for _, m := range p.Messages {
-			if !sent[m.ID] {
-				t.Fatalf("%s not sent, or shown twice", m.ID)
+		if err := json.Unmarshal([]byte(s), &p); err != nil {
+			t.Fatal(err)
+		}
+		want := min(node.DefaultInboxLimit, len(ids))
+		if len(p.Messages) != want || !p.MarkedSeen || p.More != 0 || p.Note != oldDaemonNote || !strings.Contains(p.Note, "a2p2 stop") {
+			t.Fatalf("%v: %d messages, marked %v, more %d, note %q", args, len(p.Messages), p.MarkedSeen, p.More, p.Note)
+		}
+		for i, m := range p.Messages {
+			if m.ID != ids[i] {
+				t.Fatalf("%v: message %d is %s, want %s", args, i, m.ID, ids[i])
 			}
-			delete(sent, m.ID)
-			got++
 		}
-		if p.More != len(sent) || unread(t, a) != len(sent) {
-			t.Fatalf("more %d, peek %d, want %d", p.More, unread(t, a), len(sent))
+		// The result is the 0.2.3 one with the note: the same messages,
+		// rendered by the same code, and nothing else.
+		var fields map[string]json.RawMessage
+		json.Unmarshal([]byte(s), &fields)
+		for k := range fields {
+			if !slices.Contains([]string{"notice", "marked_seen", "messages", "rooms", "note"}, k) {
+				t.Fatalf("%v: field %s in an old daemon's read", args, k)
+			}
+		}
+		ids = ids[want:]
+		if n := unread(t, a); n != len(ids) {
+			t.Fatalf("%v: %d unread, want %d", args, n, len(ids))
 		}
 	}
-	if got != 70 {
-		t.Fatalf("read %d of 70", got)
+	// Twenty are left with no receipt: an ack by id is refused.
+	if r := refusal(t, a, "ack", map[string]any{"id": ids[len(ids)-1]}); r.Code != node.ErrorNotShown {
+		t.Fatalf("ack of a message never returned: %+v", r)
 	}
-	bob.send(localapi.SendReq{Text: strings.Repeat("t", 3000)})
-	if r := refusal(t, a, "inbox", map[string]any{"max_bytes": 1000}); r.Code != node.ErrorTooLarge {
-		t.Fatalf("oversized on an old daemon: %+v", r)
+	// Level none in the same call: set first, so nothing comes.
+	p, _ := readPage(t, a, map[string]any{"level": "none"})
+	if len(p.Messages) != 0 || len(p.Levels) != 1 || p.Levels[0].Level != "none" {
+		t.Fatalf("level none on an old daemon: %+v", p)
+	}
+}
+
+// [U2, U4, D70] The budget covers the whole result: with nothing unread and
+// many rooms, a read that would set their levels at 512 bytes is refused
+// with a refusal of its own, naming a call of its own, and sets nothing;
+// that call (level with peek) lists twenty rooms and counts the rest; a
+// read with the level at a budget that holds the list fits it.
+func TestTheBudgetCoversTheLevelsOfTheSameCallAndARefusedReadSetsNothing(t *testing.T) {
+	c := startDaemon(t)
+	for i := 0; i < 24; i++ {
+		createRoom(t, c, fmt.Sprintf("room%02d", i))
+	}
+	a := connect(t, c, "alice")
+	agentID(t, a)
+	ref := refusal(t, a, "inbox", map[string]any{"level": "none", "max_bytes": node.MinInboxBytes})
+	if ref.Code != node.ErrorTooLarge || !strings.Contains(ref.Error, "25 rooms") || !strings.Contains(ref.Error, "a call of its own") || !strings.Contains(ref.Error, "nothing was changed") {
+		t.Fatalf("refusal %+v", ref)
+	}
+	lv := parseLevels(t, ok(t, a, "whoami", nil))
+	for _, r := range lv.Rooms {
+		if r.Level != "all" {
+			t.Fatalf("a refused read set %s to %s", r.Room, r.Level)
+		}
+	}
+	s := ok(t, a, "inbox", map[string]any{"level": "addressed", "peek": true})
+	var pk struct {
+		Levels         []localapi.ToolLevel `json:"levels"`
+		LevelsUnlisted int                  `json:"levels_unlisted"`
+	}
+	if err := json.Unmarshal([]byte(s), &pk); err != nil || len(pk.Levels) != localapi.MaxToolLevels || pk.LevelsUnlisted != 25-localapi.MaxToolLevels {
+		t.Fatalf("level with peek: %d listed, %d unlisted: %.300s", len(pk.Levels), pk.LevelsUnlisted, s)
+	}
+	for _, max := range []int{4000, node.DefaultInboxBytes} {
+		p, s := readPage(t, a, map[string]any{"level": "all", "max_bytes": max})
+		if len(p.Levels) != localapi.MaxToolLevels || !strings.Contains(s, `"levels_unlisted":5`) {
+			t.Fatalf("max %d: %s", max, s)
+		}
+	}
+	// With messages too, the page holds what fits with the list.
+	bob := newWriter(t, c, "bob")
+	for i := 0; i < 20; i++ {
+		bob.send(localapi.SendReq{Room: fmt.Sprintf("room%02d", i), Text: strings.Repeat("z", 200)})
+	}
+	p, _ := readPage(t, a, map[string]any{"level": "all", "max_bytes": 3500})
+	if len(p.Levels) != localapi.MaxToolLevels || len(p.Messages) == 0 || p.More != 20-len(p.Messages) {
+		t.Fatalf("levels %d, messages %d, more %d", len(p.Levels), len(p.Messages), p.More)
+	}
+}
+
+// [D3, U4, D70] more counts every entry a read leaves unread, of every kind
+// the inbox returns: notices of the agent's sends with files declined,
+// paged one at a time; a page whose seen failed, which comes again; and a
+// refusal names a size with room for a message arriving before the retry.
+func TestMoreCountsEveryEntryTheReadLeavesUnread(t *testing.T) {
+	c, home := startDaemonHome(t)
+	a := connect(t, c, "alice")
+	agentID(t, a)
+	// Two sends with files, declined by the person: two request entries.
+	file := filepath.Join(t.TempDir(), "f.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		var w struct {
+			Request string `json:"request"`
+		}
+		if err := json.Unmarshal([]byte(ok(t, a, "send", map[string]any{"text": fmt.Sprint("files ", i), "files": []string{file}})), &w); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Call(context.Background(), "confirm", localapi.ConfirmReq{ID: w.Request, Approve: false}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for want := 1; want >= 0; want-- {
+		p, _ := readPage(t, a, map[string]any{"limit": 1})
+		if len(p.Messages) != 1 || p.Messages[0].Kind != node.EntryRequest || p.More != want {
+			t.Fatalf("decision page: %d, kind %q, more %d, want %d", len(p.Messages), p.Messages[0].Kind, p.More, want)
+		}
+	}
+
+	// A seen that fails: what the page returned stays unread, and more
+	// says so.
+	bob := newWriter(t, c, "bob")
+	for i := 0; i < 3; i++ {
+		bob.send(localapi.SendReq{Text: fmt.Sprint("s", i)})
+	}
+	failing := proxy(t, daemon.SockPath(home), func(path string, b []byte) []byte {
+		if path == "/v1/seen" {
+			return strip(b, "entries") // the daemon confirms nothing
+		}
+		return b
+	}, func(path string, status int, b []byte) (int, []byte) {
+		if path == "/v1/seen" {
+			return http.StatusInternalServerError, []byte(`{"error":"injected"}`)
+		}
+		return status, b
+	})
+	f := connect(t, failing, "alice")
+	p, _ := readPage(t, f, map[string]any{"limit": 2})
+	if len(p.Messages) != 2 || p.MarkedSeen || p.More != 3 {
+		t.Fatalf("a page whose seen failed: %d, marked %v, more %d", len(p.Messages), p.MarkedSeen, p.More)
+	}
+	for want := 1; want >= 0; want-- {
+		if p, _ := readPage(t, a, map[string]any{"limit": 2}); p.More != want || !p.MarkedSeen {
+			t.Fatalf("then more %d, want %d", p.More, want)
+		}
+	}
+
+	// A refusal with nine held; a tenth arrives before the retry, which
+	// lengthens more by a digit: the size named still holds it.
+	bob.send(localapi.SendReq{Text: strings.Repeat("big ", 1500)})
+	for i := 0; i < 8; i++ {
+		bob.send(localapi.SendReq{Text: fmt.Sprint("small ", i)})
+	}
+	ref := refusal(t, a, "inbox", map[string]any{"max_bytes": 1000})
+	f2 := strings.Fields(ref.Error[strings.LastIndex(ref.Error, "max_bytes "):])
+	need, err := strconv.Atoi(strings.TrimSuffix(f2[1], ";"))
+	if err != nil || !strings.Contains(ref.Error, "at least") {
+		t.Fatalf("refusal %q", ref.Error)
+	}
+	bob.send(localapi.SendReq{Text: "the tenth"})
+	if p, _ := readPage(t, a, map[string]any{"max_bytes": need}); len(p.Messages) == 0 || p.More != 10-len(p.Messages) {
+		t.Fatalf("retry at %d: %d, more %d", need, len(p.Messages), p.More)
+	}
+}
+
+// measured is the size the daemon measures for result s: marked_seen
+// false, and more as every entry held.
+func measured(t *testing.T, s string, held int) int {
+	t.Helper()
+	var r localapi.ToolInbox
+	if err := json.Unmarshal([]byte(s), &r); err != nil {
+		t.Fatal(err)
+	}
+	r.MarkedSeen, r.More = false, held
+	out, _ := localapi.ToolJSON(r)
+	return len(out)
+}
+
+// [U4, D70] Messages with files, choices, a person's identity, an edit and
+// an edit by another agent of the author's machine fit max_bytes to the
+// byte: three agents see the same room-wide messages; at the size the
+// daemon measures for one's page of them all, another gets them all, and
+// a byte less, a third gets all but the last.
+func TestEntriesWithEveryMarkFitMaxBytesToTheByte(t *testing.T) {
+	c := startDaemon(t)
+	readers := []*mcp.ClientSession{connect(t, c, "alice"), connect(t, c, "carol"), connect(t, c, "erin")}
+	for _, r := range readers {
+		agentID(t, r)
+	}
+	d := connect(t, c, "dave")
+	agentID(t, d)
+	bob := newWriter(t, c, "bob")
+	var st localapi.Status
+	if err := c.Call(context.Background(), "status", nil, &st); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "report \u202e.txt")
+	if err := os.WriteFile(file, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ed := bob.send(localapi.SendReq{Text: "first text"})
+	bob.send(localapi.SendReq{Text: "pick one \u200b", Choices: []string{"yes", "no \u2066"}})
+	if err := c.Call(context.Background(), "send", localapi.SendReq{Agent: st.Human, Text: "from the person"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	bob.send(localapi.SendReq{Replaces: ed, Text: "edited text"})
+	other := bob.send(localapi.SendReq{Text: "to be edited by dave"})
+	if _, isErr := call(t, d, "send", map[string]any{"replaces": other, "text": "dave's edit"}); isErr {
+		t.Log("an edit by another agent of the machine is refused: changed_by is not covered")
+	}
+	var w struct {
+		Request string `json:"request"`
+	}
+	if err := json.Unmarshal([]byte(ok(t, d, "send", map[string]any{"text": "with a file", "files": []string{file}})), &w); err != nil {
+		t.Fatal(err)
+	}
+	var qs localapi.RequestsResp
+	if err := c.Call(context.Background(), "requests", localapi.Empty{}, &qs); err != nil || len(qs.Requests) != 1 {
+		t.Fatalf("requests: %+v %v", qs, err)
+	}
+	if err := c.Call(context.Background(), "confirm", localapi.ConfirmReq{ID: w.Request, Approve: true, Terms: qs.Requests[0].Terms}, nil); err != nil {
+		t.Fatal(err)
+	}
+	k := unread(t, readers[0])
+	whole := ok(t, readers[0], "inbox", map[string]any{"max_bytes": node.MaxInboxBytes})
+	for _, mark := range []string{`"files"`, `"choices"`, `"person"`, `"edited":true`} {
+		if !strings.Contains(whole, mark) {
+			t.Fatalf("no %s in the page: %s", mark, whole)
+		}
+	}
+	if !strings.Contains(whole, `"changed_by"`) {
+		t.Log("no changed_by in the page")
+	}
+	size := measured(t, whole, k)
+	if p, s := readPage(t, readers[1], map[string]any{"max_bytes": size}); len(p.Messages) != k || s != whole {
+		t.Fatalf("at %d bytes: %d of %d, or a page other than the first reader's", size, len(p.Messages), k)
+	}
+	if p, _ := readPage(t, readers[2], map[string]any{"max_bytes": size - 1}); len(p.Messages) != k-1 || p.More != 1 {
+		t.Fatalf("at %d bytes: %d of %d, more %d", size-1, len(p.Messages), k, p.More)
+	}
+}
+
+// [U4, D70] A message larger than any budget, 16,372 DEL characters, each
+// written \u{7f} (about 115 KB shown), is refused below the ceiling, and
+// at it comes alone, its text cut between escapes to fit, saying it is
+// cut, by how much, and how a person reads the rest; it is marked seen,
+// and the result is within 40,000 bytes.
+func TestAMessageLargerThanAnyBudgetComesCutToFitAndSaysSo(t *testing.T) {
+	c := startDaemon(t)
+	bob := newWriter(t, c, "bob")
+	a := connect(t, c, "alice")
+	agentID(t, a)
+	text := strings.Repeat("\x7f", 16372)
+	id := bob.send(localapi.SendReq{Text: text})
+	bob.send(localapi.SendReq{Text: "after it"})
+	ref := refusal(t, a, "inbox", nil)
+	if ref.Code != node.ErrorTooLarge || !strings.Contains(ref.Error, "more than any max_bytes holds") || !strings.Contains(ref.Error, "max_bytes 40000 to read it with its text cut") {
+		t.Fatalf("refusal %+v", ref)
+	}
+	s := ok(t, a, "inbox", map[string]any{"max_bytes": node.MaxInboxBytes})
+	var r localapi.ToolInbox
+	if err := json.Unmarshal([]byte(s), &r); err != nil {
+		t.Fatal(err)
+	}
+	if len(s) > node.MaxInboxBytes || len(r.Messages) != 1 || r.Messages[0].ID != id || !r.MarkedSeen || r.More != 1 {
+		t.Fatalf("%d bytes, %d messages, marked %v, more %d", len(s), len(r.Messages), r.MarkedSeen, r.More)
+	}
+	m := r.Messages[0]
+	shown := node.EscapeDisplayText(text)
+	if !strings.HasPrefix(shown, m.Text) || len(m.Text)%len(`\u{7f}`) != 0 || len(m.Text) == 0 {
+		t.Fatalf("cut text of %d bytes is not whole escapes from the start", len(m.Text))
+	}
+	b, _ := json.Marshal(shown)
+	cb, _ := json.Marshal(m.Text)
+	left := len(b) - len(cb)
+	if !strings.Contains(m.TextCut, fmt.Sprintf("%d bytes", left)) || !strings.Contains(m.TextCut, "a2p2 inbox --thread "+id) || !strings.Contains(m.TextCut, "only the start") {
+		t.Fatalf("text_cut %q, want %d bytes left out", m.TextCut, left)
 	}
 	if n := unread(t, a); n != 1 {
-		t.Fatalf("%d unread after the refusal", n)
+		t.Fatalf("%d unread, want 1", n)
 	}
+	t.Logf("whole: %d bytes shown; result %d bytes", len(b), len(s))
 }

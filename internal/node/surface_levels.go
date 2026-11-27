@@ -38,6 +38,18 @@ func (s *Surface) levelRooms(ctx context.Context, room string) ([]store.LogRoom,
 	return nil, codedErr(ErrorNotFound, "no room %q here", room)
 }
 
+// checkSetLevel refuses a level that is not one, or a level for the
+// person.
+func checkSetLevel(label, level string) error {
+	switch {
+	case !store.ValidLevel(level):
+		return userErr("level is all, addressed or none")
+	case label == HumanLabel:
+		return userErr("the person's reading has no level: what is addressed to the person is never filtered")
+	}
+	return nil
+}
+
 func (s *Surface) notRegistered(label string, err error) error {
 	if errors.Is(err, ErrUnknownAgent) {
 		return codedErr(ErrorNotRegistered, "agent %s is not registered; call register first", s.agentID(label, s.m.ID))
@@ -54,11 +66,10 @@ func (s *Surface) Levels(ctx context.Context, agent, room, level string) ([]Room
 	if err != nil {
 		return nil, err
 	}
-	if level != "" && !store.ValidLevel(level) {
-		return nil, userErr("level is all, addressed or none")
-	}
-	if level != "" && label == HumanLabel {
-		return nil, userErr("the person's reading has no level: what is addressed to the person is never filtered")
+	if level != "" {
+		if err := checkSetLevel(label, level); err != nil {
+			return nil, err
+		}
 	}
 	rs, err := s.levelRooms(ctx, room)
 	if err != nil {

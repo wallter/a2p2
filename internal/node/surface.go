@@ -923,10 +923,13 @@ func (s *Surface) Inbox(ctx context.Context, agent, room string, limit int, wait
 
 // InboxPage shows agent what it has not confirmed, in room or in every
 // room, oldest first: at most o.Limit entries and, with o.MaxBytes, what
-// that budget holds (FitPage), waiting up to o.Wait for one. It keeps a
-// receipt of each entry it returns, which Seen requires (Machine.Showed),
-// and marks nothing seen: Seen confirms. What the page leaves out gets no
-// receipt and is counted in More; the next read offers it again.
+// that budget holds (InboxOpts.page), waiting up to o.Wait for one. It
+// keeps a receipt of each entry it returns, which Seen requires
+// (Machine.Showed), and marks nothing seen: Seen confirms. What the page
+// leaves out gets no receipt and is counted in More; the next read offers
+// it again. With o.Level it first sets that level, once the page as it
+// will be at that level fits o.MaxBytes; a read refused for its budget
+// changes nothing.
 func (s *Surface) InboxPage(ctx context.Context, agent, room string, o InboxOpts) (InboxView, error) {
 	label, err := s.label(agent)
 	if err != nil {
@@ -952,16 +955,47 @@ func (s *Surface) InboxPage(ctx context.Context, agent, room string, o InboxOpts
 	if err := o.check(); err != nil {
 		return InboxView{}, err
 	}
+	var set []RoomLevel
+	if o.Level != "" {
+		if err := checkSetLevel(label, o.Level); err != nil {
+			return InboxView{}, err
+		}
+		if set, err = s.Levels(ctx, agent, room, ""); err != nil {
+			return InboxView{}, err
+		}
+		for i := range set {
+			set[i].Level = o.Level
+		}
+		// The look as it will be at the level, so that a page that does
+		// not fit is refused before anything is written.
+		v, err := s.inbox(ctx, label, room, o.Level)
+		if err == nil {
+			v.LevelsSet = set
+			v, err = o.page(v, limit, false)
+		}
+		if err != nil {
+			return InboxView{}, err
+		}
+		if _, err := s.Levels(ctx, agent, room, o.Level); err != nil {
+			return InboxView{}, err
+		}
+		if len(v.Entries) > 0 || wait == 0 {
+			// The level kept none of these out (inboxAt), and their
+			// receipts now keep it from doing so.
+			return v, s.showed(ctx, label, withoutRequests(v.Entries), true)
+		}
+	}
 	deadline := time.Now().Add(wait)
 	for {
 		// Registered before the look, so that a change committed after it
 		// wakes this call (roomWakes.waitInbox).
 		x := s.m.wakes.waitInbox(label, room)
-		v, err := s.inbox(ctx, label, room)
+		v, err := s.inbox(ctx, label, room, "")
+		v.LevelsSet = set
 		if err != nil || len(v.Entries) > 0 || wait == 0 {
 			s.m.wakes.doneInbox(x)
 			if err == nil {
-				v, err = o.page(v, limit)
+				v, err = o.page(v, limit, set != nil)
 			}
 			if err == nil {
 				err = s.showed(ctx, label, withoutRequests(v.Entries), true)
@@ -988,7 +1022,9 @@ func (s *Surface) InboxPage(ctx context.Context, agent, room string, o InboxOpts
 	}
 }
 
-func (s *Surface) inbox(ctx context.Context, label, room string) (InboxView, error) {
+// inbox is every entry agent label has not confirmed, in room or in every
+// room, sorted: at its level, or as it will be at level when not "".
+func (s *Surface) inbox(ctx context.Context, label, room, level string) (InboxView, error) {
 	var ids []string
 	if room != "" {
 		ids = []string{room}
@@ -1006,7 +1042,7 @@ func (s *Surface) inbox(ctx context.Context, label, room string) (InboxView, err
 	}
 	var out InboxView
 	for _, id := range ids {
-		v, err := s.m.Inbox(ctx, id, label)
+		v, err := s.m.inboxAt(ctx, id, label, level)
 		if errors.Is(err, ErrUnknownAgent) {
 			return InboxView{}, codedErr(ErrorNotRegistered, "agent %s is not registered; call register first", s.agentID(label, s.m.ID))
 		}

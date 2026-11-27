@@ -89,6 +89,10 @@ type Entry struct {
 	Late    bool
 	Created time.Time
 	Text    string
+	// TextCut, set by an inbox page (InboxOpts.page): Text is cut to fit
+	// the page's budget, and this many bytes of its rendering were left
+	// out (D70).
+	TextCut int
 	Choices []string
 	// Skipped: in a history page read by an agent, the agent's level kept
 	// this message out of its inbox and it has not confirmed it.
@@ -138,6 +142,9 @@ type InboxView struct {
 	// read left out, by its limit or its byte budget. They stay unread,
 	// with no receipt.
 	More int
+	// LevelsSet (InboxOpts.Level): the rooms whose level the read set,
+	// with that level.
+	LevelsSet []RoomLevel
 	// levels is the agent's reading level in each room the look read
 	// (what wakes a waiting Inbox: touchWrite).
 	levels map[string]string
@@ -160,6 +167,14 @@ type SeenResult struct {
 // Inbox shows agent what it has not confirmed in room, in each author's
 // order, and what the walk waits for. It marks nothing [R7].
 func (m *Machine) Inbox(ctx context.Context, room, agent string) (InboxView, error) {
+	return m.inboxAt(ctx, room, agent, "")
+}
+
+// inboxAt is Inbox as it will be once agent's level in room is level, by
+// SetLevel's rule, with nothing written: a read that also sets a level
+// checks its budget against it before the level is set (D70). "" is the
+// level as it is.
+func (m *Machine) inboxAt(ctx context.Context, room, agent, level string) (InboxView, error) {
 	var out InboxView
 	err := m.view(ctx, room, func(v *roomView) error {
 		if err := v.requireAgent(agent); err != nil {
@@ -168,6 +183,21 @@ func (m *Machine) Inbox(ctx context.Context, room, agent string) (InboxView, err
 		g, err := v.agent(agent)
 		if err != nil {
 			return err
+		}
+		if level != "" && level != g.level {
+			skip := make(map[string]bool, len(g.skip))
+			for id := range g.skip {
+				skip[id] = true
+			}
+			if err := v.forAgent(g, agent, func(r *rec) error {
+				if !g.listed(r) && !admits(g.level, r) && admits(level, r) {
+					skip[r.id] = true
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			g.level, g.skip = level, skip
 		}
 		es, _, ws, err := v.walk(g, agent, false)
 		out = InboxView{Entries: es, Waiting: ws, levels: map[string]string{room: g.level}}
@@ -322,7 +352,7 @@ func (s *Surface) InboxPeek(ctx context.Context, agent string, limit int) (Inbox
 	if limit <= 0 || limit > MaxInboxLimit {
 		limit = MaxInboxLimit
 	}
-	v, err := s.inbox(ctx, label, "")
+	v, err := s.inbox(ctx, label, "", "")
 	if len(v.Entries) > limit {
 		v.Entries = v.Entries[:limit]
 	}

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -45,6 +46,8 @@ type shim struct {
 	// selfMu lets one call fetch them while others wait.
 	selfMu      sync.Mutex
 	local, node string
+	// budgeted: the daemon's status listed inbox_max_bytes (budgeted).
+	budgeted bool
 }
 
 // personHarness refuses the harness name of the person's own path: an
@@ -178,12 +181,9 @@ func add[In any](s *mcp.Server, name, desc string, ann *mcp.ToolAnnotations, h f
 // them.
 func refusalOf(err error) localapi.Refusal {
 	var ue *localapi.Error
-	var ne *node.UserError // the shim's own use of a node rule (oldDaemonPage)
 	switch {
 	case errors.As(err, new(inputError)):
 		return localapi.Refusal{Error: err.Error(), Code: node.ErrorInvalid}
-	case errors.As(err, &ne):
-		return localapi.Refusal{Error: ne.Msg, Code: ne.CodeOf(), Retryable: node.Retryable(ne.CodeOf())}
 	case errors.As(err, &ue) && !ue.User:
 		r := localapi.RefusalOf(err)
 		r.Error = "the a2p2 daemon failed: " + r.Error
@@ -813,6 +813,8 @@ type peekOut struct {
 	Rooms      []peekRoom `json:"rooms"`
 	First      []peekLine `json:"first_lines"`
 	Levels     []levelOut `json:"levels,omitempty"`
+	// LevelsUnlisted: rooms set past the levels listed (MaxToolLevels).
+	LevelsUnlisted int `json:"levels_unlisted,omitempty"`
 }
 
 type peekRoom struct {
@@ -868,23 +870,30 @@ func (sh *shim) inbox(ctx context.Context, in inboxIn) (string, error) {
 		}
 		return sh.fetch(ctx, in.Room, in.Fetch, in.WaitSeconds)
 	}
-	var levels []levelOut
+	// A read sets its level in the daemon's inbox call, which checks the
+	// budget first (D70); a daemon before 0.2.4 does not, and the shim
+	// sets it first, as 0.2.3 did.
+	reading := !in.Peek && in.Thread == "" && in.Recent == 0 && !in.Skipped
+	var levels []localapi.RoomLevel
 	if in.Level != "" {
-		var ls localapi.LevelResp
-		err := sh.call(ctx, func(a string) error {
-			return sh.c.Call(ctx, "level", localapi.LevelReq{Agent: a, Room: in.Room, Level: in.Level}, &ls)
-		})
-		if err != nil {
-			return "", err
+		budgeted := false
+		if reading {
+			var err error
+			if budgeted, err = sh.budgetedDaemon(ctx); err != nil {
+				return "", err
+			}
 		}
-		for _, l := range ls.Levels {
-			levels = append(levels, levelOut{ToolRoom: ref(l.Room, l.RoomLabel, sh.localRoom(ctx)), Level: l.Level})
+		if !budgeted {
+			var err error
+			if levels, err = sh.setLevel(ctx, in.Room, in.Level); err != nil {
+				return "", err
+			}
 		}
 	}
 	if in.Peek {
 		return sh.peek(ctx, in.Room, levels)
 	}
-	if in.Thread != "" || in.Recent > 0 || in.Skipped {
+	if !reading {
 		var es localapi.Entries
 		err := sh.call(ctx, func(a string) error {
 			switch {
@@ -898,105 +907,129 @@ func (sh *shim) inbox(ctx context.Context, in inboxIn) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		out := view(es.Entries, sh.localRoom(ctx))
-		out.Levels = levels
+		local := sh.localRoom(ctx)
+		out := view(es.Entries, local)
+		out.Levels, out.LevelsUnlisted = localapi.ToolLevels(levels, local)
 		return jsonOut(out)
+	}
+	if levels != nil {
+		in.Level = "" // set already: the daemon is older
 	}
 	return sh.read(ctx, in, levels)
 }
 
-// read is inbox reading unread messages: the daemon returns, oldest
-// first, what fits max_bytes (default node.DefaultInboxBytes) of this
-// result with its levels, keeping a receipt of exactly that, and the shim
-// confirms exactly that with seen. more says how many still wait.
-func (sh *shim) read(ctx context.Context, in inboxIn, levels []levelOut) (string, error) {
+// setLevel sets the agent's level in room, or every room.
+func (sh *shim) setLevel(ctx context.Context, room, level string) ([]localapi.RoomLevel, error) {
+	var ls localapi.LevelResp
+	err := sh.call(ctx, func(a string) error {
+		return sh.c.Call(ctx, "level", localapi.LevelReq{Agent: a, Room: room, Level: level}, &ls)
+	})
+	if ls.Levels == nil {
+		ls.Levels = []localapi.RoomLevel{}
+	}
+	return ls.Levels, err
+}
+
+// budgetedDaemon says whether the daemon's inbox takes max_bytes and
+// level (localapi.FeatureInboxMaxBytes), from its status. Only a yes is
+// kept: a daemon restarted newer is asked again.
+func (sh *shim) budgetedDaemon(ctx context.Context) (bool, error) {
+	sh.selfMu.Lock()
+	ok := sh.budgeted
+	sh.selfMu.Unlock()
+	if ok {
+		return true, nil
+	}
+	st, err := sh.status(ctx)
+	if err != nil {
+		return false, err
+	}
+	ok = slices.Contains(st.Features, localapi.FeatureInboxMaxBytes)
+	sh.selfMu.Lock()
+	sh.budgeted = ok
+	sh.selfMu.Unlock()
+	return ok, nil
+}
+
+// oldDaemonNote is what a read says when the daemon ignored max_bytes.
+const oldDaemonNote = "The a2p2 daemon is older than this tool, so max_bytes was not applied to this read. Run a2p2 stop to start the new daemon."
+
+// read is inbox reading unread messages. The daemon returns, oldest
+// first, what fits the budget with the levels the call sets, keeping a
+// receipt of exactly that, and the shim confirms what it returned. A
+// daemon before 0.2.4 ignores the budget and the level: it listed a page
+// of its own, with a receipt of each entry, so the shim returns that page
+// whole and confirms it, as 0.2.3 did, and says the budget was not
+// applied (D70); the level was set first (inbox).
+func (sh *shim) read(ctx context.Context, in inboxIn, levels []localapi.RoomLevel) (string, error) {
 	budget := in.MaxBytes
 	if budget == 0 {
 		budget = node.DefaultInboxBytes
-	}
-	reserve := 0
-	if len(levels) > 0 { // the result's ,"levels":[...], which the shim adds
-		b, _ := jsonOut(levels)
-		reserve = len(",\"levels\":") + len(b)
 	}
 	var res localapi.InboxResp
 	var agent string
 	err := sh.call(ctx, func(a string) error {
 		agent = a
 		return sh.c.Call(ctx, "inbox", localapi.InboxReq{Agent: a, Room: in.Room, Limit: in.Limit, WaitMS: int64(in.WaitSeconds) * 1000,
-			MaxBytes: budget, Reserve: reserve}, &res)
+			MaxBytes: budget, Level: in.Level}, &res)
 	})
 	if err != nil {
 		return "", err
 	}
-	local := sh.localRoom(ctx)
-	full := false // an old daemon may hold more than it listed
-	if res.MaxBytes == 0 && len(res.Entries) > 0 {
-		if full, err = oldDaemonPage(&res, in.Limit, budget, reserve, local); err != nil {
+	old := res.MaxBytes == 0
+	if old && in.Level != "" {
+		// Its status listed the feature, but the daemon answering now is
+		// older (a downgrade since): it read at the level it had. Nothing
+		// it listed is lost, as it is all returned; the level is set now.
+		sh.selfMu.Lock()
+		sh.budgeted = false
+		sh.selfMu.Unlock()
+		if levels, err = sh.setLevel(ctx, in.Room, in.Level); err != nil {
 			return "", err
 		}
 	}
-	out := view(res.Entries, local)
-	out.Levels = levels
-	out.More = res.More
-	out.Fetching = len(res.Waiting)
+	if !old {
+		levels = res.Levels
+	}
+	more := res.More
+	if old {
+		more = 0
+	}
+	local := sh.localRoom(ctx)
+	out := localapi.ToolInboxOf(res.Entries, len(res.Waiting), more, levels, local)
 	out.Waited = in.WaitSeconds > 0 && len(res.Entries) == 0
+	if old {
+		out.Note = oldDaemonNote
+	}
 	if len(res.Entries) > 0 {
 		seen := localapi.SeenReq{Agent: agent}
 		for _, e := range res.Entries {
 			seen.Entries = append(seen.Entries, localapi.SeenEntry{Key: e.Key, Version: e.Version})
 		}
+		confirmed := 0
 		var sr localapi.SeenResp
 		if err := sh.c.Call(ctx, "seen", seen, &sr); err != nil {
 			slog.Warn("marking messages seen failed", "err", err)
 		} else {
-			out.MarkedSeen = true
 			for _, r := range sr.Results {
-				out.MarkedSeen = out.MarkedSeen && r.OK
+				if r.OK {
+					confirmed++
+				}
 			}
+			out.MarkedSeen = confirmed == len(res.Entries)
 		}
-	}
-	if full { // what is still unread, now that the page is confirmed
-		var u localapi.Unread
-		if err := sh.c.Call(ctx, "unread", localapi.UnreadReq{Agent: agent, Room: in.Room}, &u); err == nil {
-			out.More = u.Count
+		if !old {
+			// What it returned but could not mark seen stays unread too:
+			// more counts every entry this call leaves unread.
+			out.More += len(res.Entries) - confirmed
 		}
 	}
 	return jsonOut(out)
 }
 
-// oldDaemonPage cuts res, from a daemon before 0.2.4 that ignored
-// max_bytes, to the page a newer one returns, by the same measure and
-// rule (node.FitPage), and counts in More what it cut. That daemon kept a
-// receipt of everything it listed, so what is cut has one, but it is
-// neither returned nor confirmed, and the next call offers it again.
-// full: the daemon listed as many as the limit, so it may hold more,
-// which only a count after seen tells; room for that count is kept.
-func oldDaemonPage(res *localapi.InboxResp, limit, budget, reserve int, local string) (full bool, err error) {
-	switch {
-	case limit == 0:
-		limit = node.DefaultInboxLimit
-	case limit > node.MaxInboxLimit:
-		limit = node.MaxInboxLimit
-	}
-	es := res.Entries
-	full = len(es) >= limit
-	if full {
-		reserve += len(",\"more\":") + 12
-	}
-	n, err := node.FitPage(len(es), budget, func(n int) int {
-		return localapi.ToolInboxSize(es[:n], len(res.Waiting), len(es)-n, local) + reserve
-	})
-	if err != nil {
-		return false, err
-	}
-	res.Entries, res.More = es[:n], len(es)-n
-	return full, nil
-}
-
 // peek is inbox with peek: unread counts per room and up to ten first
 // lines, in room or every room. It marks nothing (U4).
-func (sh *shim) peek(ctx context.Context, room string, levels []levelOut) (string, error) {
+func (sh *shim) peek(ctx context.Context, room string, levels []localapi.RoomLevel) (string, error) {
 	var u localapi.Unread
 	err := sh.call(ctx, func(a string) error {
 		return sh.c.Call(ctx, "unread", localapi.UnreadReq{Agent: a, Room: room, Lines: true}, &u)
@@ -1006,7 +1039,8 @@ func (sh *shim) peek(ctx context.Context, room string, levels []levelOut) (strin
 	}
 	// The daemon resolves room and counts only it, before taking first
 	// lines, so a quiet room's lines are not crowded out by another's.
-	out := peekOut{Notice: notice, Rooms: []peekRoom{}, First: []peekLine{}, Levels: levels}
+	out := peekOut{Notice: notice, Rooms: []peekRoom{}, First: []peekLine{}}
+	out.Levels, out.LevelsUnlisted = localapi.ToolLevels(levels, sh.localRoom(ctx))
 	labels := map[string]string{}
 	local := sh.localRoom(ctx)
 	for _, c := range u.Rooms {

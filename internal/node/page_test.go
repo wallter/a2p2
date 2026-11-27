@@ -2,19 +2,20 @@ package node
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"math/rand/v2"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/wallter/a2p2/internal/store"
 )
 
 // [U4] FitPage takes the longest prefix whose size fits, for random
-// sizes, as a scan from the start would; refuses with the size needed
-// when even the first does not fit; and returns an entry larger than any
-// budget alone at the ceiling only.
+// sizes, as a scan from the start would, and gives the size of the first
+// alone when not even it fits, in a handful of measures.
 func TestFitPageTakesTheLongestPrefixThatFitsAndNeverSkipsTheFirst(t *testing.T) {
 	r := rand.New(rand.NewPCG(70, 3))
 	for i := 0; i < 5000; i++ {
@@ -26,43 +27,36 @@ func TestFitPageTakesTheLongestPrefixThatFitsAndNeverSkipsTheFirst(t *testing.T)
 		}
 		max := MinInboxBytes + r.IntN(MaxInboxBytes-MinInboxBytes+1)
 		calls := 0
-		n, err := FitPage(count, max, func(n int) int { calls++; return sizes[n] })
+		n, need := FitPage(count, max, func(n int) int { calls++; return sizes[n] })
 		want := 0
 		for want < count && sizes[want+1] <= max {
 			want++
 		}
-		switch {
-		case count > 0 && want == 0 && sizes[1] > MaxInboxBytes && max == MaxInboxBytes:
-			want = 1
-		case count > 0 && want == 0:
-			var ue *UserError
-			if !errors.As(err, &ue) || ue.CodeOf() != ErrorTooLarge {
-				t.Fatalf("first of %d is %d bytes, max %d: %d, %v", count, sizes[1], max, n, err)
-			}
-			need := min(sizes[1], MaxInboxBytes)
-			if !strings.Contains(ue.Msg, fmt.Sprintf("max_bytes %d", need)) || !strings.Contains(ue.Msg, "nothing was marked seen") {
-				t.Fatalf("refusal %q, want it to name %d", ue.Msg, need)
-			}
-			continue
+		if n != want {
+			t.Fatalf("sizes %v max %d: %d, want %d", sizes, max, n, want)
 		}
-		if err != nil || n != want {
-			t.Fatalf("sizes %v max %d: %d %v, want %d", sizes, max, n, err, want)
+		if wantNeed := 0; n == 0 && count > 0 {
+			wantNeed = sizes[1]
+			if need != wantNeed {
+				t.Fatalf("need %d, want %d", need, wantNeed)
+			}
 		}
 		if calls > 16 {
 			t.Fatalf("%d sizes measured for %d entries", calls, count)
 		}
 	}
-	if n, err := FitPage(1, MaxInboxBytes, func(int) int { return 3 * MaxInboxBytes }); n != 1 || err != nil {
-		t.Fatalf("an entry larger than any budget at the ceiling: %d %v", n, err)
-	}
 }
 
 // pageSize is a stand-in for the MCP result's size: an envelope, each
-// entry's text and a fixed share, and more's digits.
-func pageSize(page []Entry, _ []Wait, more int) int {
-	n := 200 + len(fmt.Sprint(more))
-	for _, e := range page {
+// entry's text and a fixed share, a cut entry's sentence, more's digits
+// and each level set.
+func pageSize(v InboxView) int {
+	n := 200 + len(fmt.Sprint(v.More)) + 100*len(v.LevelsSet)
+	for _, e := range v.Entries {
 		n += 150 + len(e.Text)
+		if e.TextCut > 0 {
+			n += 100 + len(fmt.Sprint(e.TextCut))
+		}
 	}
 	return n
 }
@@ -116,5 +110,203 @@ func TestAPageCutByItsBudgetKeepsNoReceiptOfTheRest(t *testing.T) {
 	}
 	if _, err := e.s.InboxPage(ctx, carol, "", InboxOpts{MaxBytes: 600, Size: pageSize}); !isUser(err) {
 		t.Fatalf("the first does not fit: %v", err)
+	}
+}
+
+// refusedFor is the refusal of err, or a failure if it is not too_large.
+func refusedFor(t *testing.T, err error) string {
+	t.Helper()
+	ue, ok := err.(*UserError)
+	if !ok || ue.CodeOf() != ErrorTooLarge {
+		t.Fatalf("want too_large, got %v", err)
+	}
+	return ue.Msg
+}
+
+// [U2, U4, D70] A read that sets a level and is refused for its budget
+// changes nothing: the level stays, nothing is marked skipped and nothing
+// gets a receipt. When the list of rooms set alone does not fit, the
+// refusal says to set the level in a call of its own. A read that fits
+// sets the level and returns the page as it is at that level.
+func TestAReadThatSetsALevelAndIsRefusedForItsBudgetChangesNothing(t *testing.T) {
+	ctx := context.Background()
+	e := newSurf(t)
+	alice, bob := e.agent("alice"), e.agent("bob")
+	to := []string{alice}
+	big := e.send(SendInput{Agent: bob, To: to, Text: strings.Repeat("b", 2000)})
+	e.send(SendInput{Agent: bob, Text: "room-wide, not marked"})
+	levelOf := func() string {
+		t.Helper()
+		ls, err := e.s.Levels(ctx, alice, "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ls[0].Level
+	}
+	_, err := e.s.InboxPage(ctx, alice, "", InboxOpts{Level: store.LevelAddressed, MaxBytes: 1000, Size: pageSize})
+	if msg := refusedFor(t, err); !strings.Contains(msg, "nothing was marked seen") || strings.Contains(msg, "level was set") {
+		t.Fatalf("refusal %q", msg)
+	}
+	if l := levelOf(); l != store.LevelAll {
+		t.Fatalf("level %s after a refused read, want all", l)
+	}
+	if sk, err := e.s.Skipped(ctx, alice, "", "", 0); err != nil || len(sk) != 0 {
+		t.Fatalf("skipped after a refused read: %d %v", len(sk), err)
+	}
+	if res, err := e.s.Seen(ctx, alice, []store.Read{{Key: big.ID, Version: big.ID}}); err != nil || res[0].Confirmed {
+		t.Fatalf("a refused read kept a receipt: %+v %v", res, err)
+	}
+	// Three more rooms: the list of four rooms set does not fit 512.
+	for _, l := range []string{"r1", "r2", "r3"} {
+		if _, err := e.s.CreateRoom(ctx, l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = e.s.InboxPage(ctx, alice, "", InboxOpts{Level: store.LevelNone, MaxBytes: MinInboxBytes, Size: pageSize})
+	if msg := refusedFor(t, err); !strings.Contains(msg, "4 rooms") || !strings.Contains(msg, "a call of its own") {
+		t.Fatalf("refusal %q", msg)
+	}
+	if l := levelOf(); l != store.LevelAll {
+		t.Fatalf("level %s after a refused read, want all", l)
+	}
+	// Fitting: the level is set, and the room-wide post it keeps out is
+	// not on the page.
+	v, err := e.s.InboxPage(ctx, alice, "", InboxOpts{Level: store.LevelAddressed, MaxBytes: 4000, Size: pageSize})
+	if err != nil || len(v.Entries) != 1 || v.Entries[0].ID != big.ID || len(v.LevelsSet) != 4 || v.More != 0 {
+		t.Fatalf("page %d more %d levels %d %v", len(v.Entries), v.More, len(v.LevelsSet), err)
+	}
+	if l := levelOf(); l != store.LevelAddressed {
+		t.Fatalf("level %s, want addressed", l)
+	}
+	if res, err := e.s.Seen(ctx, alice, []store.Read{{Key: big.ID, Version: big.ID}}); err != nil || !res[0].Confirmed {
+		t.Fatalf("the page's entry: %+v %v", res, err)
+	}
+	if sk, err := e.s.Skipped(ctx, alice, "", "", 0); err != nil || len(sk) != 1 {
+		t.Fatalf("skipped: %d %v", len(sk), err)
+	}
+}
+
+// escapedSize measures text as the tool writes it, escaped and quoted,
+// three times over, so that a 16 KiB text fits no budget.
+func escapedSize(v InboxView) int {
+	n := 300 + len(fmt.Sprint(v.More))
+	for _, e := range v.Entries {
+		b, _ := json.Marshal(EscapeDisplayText(e.Text))
+		n += 3 * len(b)
+		if e.TextCut > 0 {
+			n += 150 + len(fmt.Sprint(e.TextCut))
+		}
+	}
+	return n
+}
+
+// [U4, D70] An oldest entry larger than any budget is returned at the
+// ceiling with its text cut between characters, never inside an escape
+// or a character of several bytes, as long as fits, and says how many
+// bytes of the rendering were left out; below the ceiling the refusal
+// names it. Seen confirms the cut entry as it is.
+func TestAnOldestEntryLargerThanAnyBudgetIsCutBetweenCharacters(t *testing.T) {
+	ctx := context.Background()
+	e := newSurf(t)
+	alice, bob := e.agent("alice"), e.agent("bob")
+	var b strings.Builder
+	for b.Len() < 16000 {
+		b.WriteString("é\x7f😀\u200bx")
+	}
+	sent := e.send(SendInput{Agent: bob, Text: b.String()})
+	e.send(SendInput{Agent: bob, Text: "after it"})
+	_, err := e.s.InboxPage(ctx, alice, "", InboxOpts{MaxBytes: MaxInboxBytes - 1, Size: escapedSize})
+	if msg := refusedFor(t, err); !strings.Contains(msg, fmt.Sprintf("max_bytes %d to read it with its text cut", MaxInboxBytes)) {
+		t.Fatalf("refusal %q", msg)
+	}
+	v, err := e.s.InboxPage(ctx, alice, "", InboxOpts{MaxBytes: MaxInboxBytes, Size: escapedSize})
+	if err != nil || len(v.Entries) != 1 || v.More != 1 {
+		t.Fatalf("page %d more %d %v", len(v.Entries), v.More, err)
+	}
+	c := v.Entries[0]
+	if !utf8.ValidString(c.Text) || !strings.HasPrefix(b.String(), c.Text) || len(c.Text) == 0 || len(c.Text) >= b.Len() {
+		t.Fatalf("cut text of %d bytes, not a start of the text between characters", len(c.Text))
+	}
+	if got := escapedSize(v); got > MaxInboxBytes {
+		t.Fatalf("result %d bytes over %d", got, MaxInboxBytes)
+	}
+	full, _ := json.Marshal(EscapeDisplayText(b.String()))
+	cut, _ := json.Marshal(EscapeDisplayText(c.Text))
+	if c.TextCut != 3*(len(full)-len(cut)) {
+		t.Fatalf("text_cut %d, want %d", c.TextCut, 3*(len(full)-len(cut)))
+	}
+	// One character more would not fit.
+	_, w := utf8.DecodeRuneInString(b.String()[len(c.Text):])
+	longer := c
+	longer.Text = b.String()[:len(c.Text)+w]
+	if escapedSize(InboxView{Entries: []Entry{longer}, More: 2}) <= MaxInboxBytes {
+		t.Fatalf("the cut leaves out a character that fits")
+	}
+	if res, err := e.s.Seen(ctx, alice, []store.Read{{Key: c.Key, Version: c.Version}}); err != nil || !res[0].Confirmed || c.Key != sent.ID {
+		t.Fatalf("the cut entry: %+v %v", res, err)
+	}
+}
+
+// [D3, D7, U4] Messages whose text expires between two pages: the first
+// page confirms what it returned, and the next pages show the rest as
+// expired, confirmed in turn, with More counting down to nothing; none
+// is lost or shown twice.
+func TestMessagesThatExpireBetweenPagesComeAsExpiredInTheNextPages(t *testing.T) {
+	ctx := context.Background()
+	e := newSurf(t)
+	at := time.Now()
+	e.now = func() time.Time { return at }
+	e.restart()
+	alice, bob := e.agent("alice"), e.agent("bob")
+	sent := map[string]bool{}
+	for i := 0; i < 6; i++ {
+		sent[e.send(SendInput{Agent: bob, Text: fmt.Sprintf("m%d %s", i, strings.Repeat("x", 300))}).ID] = true
+	}
+	o := InboxOpts{MaxBytes: 1500, Size: pageSize}
+	kinds := map[string]string{}
+	for calls := 0; calls < 10; calls++ {
+		if calls == 1 {
+			at = at.Add(store.Retention + time.Hour)
+		}
+		v, err := e.s.InboxPage(ctx, alice, "", o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(v.Entries) == 0 {
+			break
+		}
+		var reads []store.Read
+		for _, x := range v.Entries {
+			if _, dup := kinds[x.ID]; dup {
+				t.Fatalf("%s shown twice", x.ID)
+			}
+			kinds[x.ID] = x.Kind
+			reads = append(reads, store.Read{Key: x.Key, Version: x.Version})
+		}
+		res, err := e.s.Seen(ctx, alice, reads)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range res {
+			if !r.Confirmed {
+				t.Fatalf("%s not confirmed: %s", r.Key, r.Reason)
+			}
+		}
+		if left := len(sent) - len(kinds); v.More != left {
+			t.Fatalf("more %d, want %d", v.More, left)
+		}
+	}
+	expired := 0
+	for id := range sent {
+		switch kinds[id] {
+		case EntryMessage:
+		case EntryExpired:
+			expired++
+		default:
+			t.Fatalf("%s came as %q", id, kinds[id])
+		}
+	}
+	if expired != len(sent)-2 {
+		t.Fatalf("%d expired, want %d: the first page held two", expired, len(sent)-2)
 	}
 }

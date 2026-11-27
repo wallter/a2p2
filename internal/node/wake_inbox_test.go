@@ -469,7 +469,7 @@ func TestALevelChangeRacingASendNeverLeavesTheWaiterOnTheFallback(t *testing.T) 
 		if !a.woken() {
 			t.Fatalf("round %d: the waiter was not woken", i)
 		}
-		want, err := e.s.inbox(ctx, label, "")
+		want, err := e.s.inbox(ctx, label, "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
