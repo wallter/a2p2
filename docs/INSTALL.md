@@ -87,6 +87,14 @@ awk '$2 == "a2p2_darwin_arm64"' SHA256SUMS | shasum -a 256 -c &&
   chmod +x a2p2_darwin_arm64 && mv a2p2_darwin_arm64 /usr/local/bin/a2p2
 ```
 
+To replace an a2p2 you already have, move the new file into place with
+`mv`, as above. Do not copy it over the old file (`cp`): on macOS a binary
+overwritten in place can be killed when it starts (seen as exit status
+137). The installer avoids this by staging a copy and renaming it. After
+installing, run `a2p2 stop` so the daemon that is still running is
+replaced by this version; `a2p2 status` and `a2p2 doctor` say when it is
+not.
+
 ## Going back to an older version
 
 A release that changes the database schema says so in the
