@@ -869,7 +869,7 @@ func (h *harness) register(s *sim) {
 	start, got := map[streamKey]int64{}, map[streamKey]int64{}
 	ss := h.streams(s)
 	err := s.st.View(context.Background(), func(rd *store.Reader) error {
-		u, err := s.m.undecided(rd)
+		u, err := s.m.unadmitted(rd)
 		if err != nil {
 			return err
 		}

@@ -3642,8 +3642,8 @@ So this amends D35 for addressed messages only.
   stream, the order of positions. `TestTheNewestRecordsAreReadBySeekingOnTheRowid`
   checks the plan. It decodes at most 10,000 headers, about 40 ms with
   100,000 records held (`TestRegisteringReadsOnlyTheNewestRecordsWhateverTheHistory`,
-  Apple M-series laptop, no race detector). Because `early` is never
-  below the oldest record the window covered, the agent's first inbox, a
+  Apple M-series laptop, no race detector). Because `early` is at least
+  the position just before the oldest record of its stream that the window covered, the agent's first inbox, a
   level change and `skipped` walk at most the window too: 10,001 records
   decoded, about 65 ms each
   (`TestALateAgentsFirstReadsDecodeAtMostTheRegistrationWindow`).
@@ -3670,6 +3670,13 @@ So this amends D35 for addressed messages only.
   differential harness found it once it registered on a machine
   admitted without history:
   `TestRealExchangeLateAgentRegisteredBeforeItsFrontierArrivesReadsItsBrief`).
+  Only a known frontier defers a stream (`Machine.unadmitted`). A room
+  set aside (D57) has no known frontier; a first version deferred all
+  its streams, and nothing seeds them when the room opens again, so a
+  label registered meanwhile read the room's whole history as unread (the
+  final review found it). Its streams start at the current end, as in
+  0.3.0 (`TestALabelRegisteredWhileItsRoomIsSetAsideDoesNotReadTheOldHistoryWhenItOpens`,
+  `TestALabelRegisteredWhileARoomAdmittedWithoutHistoryIsSetAsideStartsAtTheEnd`).
 - **A stated limit.** When this machine is admitted to a room without
   history after a brief was sent to one of its labels, the brief is not
   unread: the machine's agents start at the admission frontier, and the

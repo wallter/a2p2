@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -25,6 +26,50 @@ func TestTheNewestRecordsAreReadBySeekingOnTheRowid(t *testing.T) {
 	}
 	if !seek {
 		t.Fatalf("plan %q does not seek on the rowid", plan)
+	}
+}
+
+// [U3] Each stream's cursor moves to just before its own first brief: 16
+// streams of 20 records, the brief of stream i at position i+2, all to
+// the same four agents. A cursor moved by another stream's brief would
+// start after its own (hiding it) or before it; each agent's registration
+// visits the streams in another order, so a seed that is not tied to its
+// stream fails here.
+func TestEachStreamsCursorStartsJustBeforeItsOwnFirstBrief(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	self := nodeOf(testKey("self"))
+	agents := []string{"ag0", "ag1", "ag2", "ag3"}
+	var to []core.Addressee
+	for _, a := range agents {
+		to = append(to, core.Addressee{Node: self, Agent: a})
+	}
+	const streams, length = 16, 20
+	for i := 0; i < streams; i++ {
+		k := testKey(fmt.Sprint("stream ", i))
+		prev := ""
+		for n := int64(1); n <= length; n++ {
+			f := core.RecordFields{Seq: n, Prev: prev}
+			if n == int64(i+2) {
+				f.To = to
+			}
+			r := mk(t, k, f)
+			wantOutcome(t, put(t, s, r, t0), OutcomeStored)
+			prev = r.ID()
+		}
+	}
+	for _, a := range agents {
+		if _, err := s.Register(ctx, self, a, t0); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range snapshot(t, s, a).Cursors {
+			var i int
+			for i = 0; i < streams && nodeOf(testKey(fmt.Sprint("stream ", i))) != c.Author; i++ {
+			}
+			if want := (Cursor{c.Author, c.Epoch, length, int64(i + 1), int64(i + 1)}); c != want {
+				t.Fatalf("%s, stream %d: cursor %+v, want %+v", a, i, c, want)
+			}
+		}
 	}
 }
 

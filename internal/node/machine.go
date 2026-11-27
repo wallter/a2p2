@@ -274,12 +274,30 @@ type readFront struct {
 
 // undecided lists the (room, author) pairs with a head of this machine's
 // reading frontier not held: whether it may read their text is undecided.
+// Every author of a room whose frontier is not known (set aside) is.
 func (m *Machine) undecided(rd *store.Reader) (map[[2]string]bool, error) {
+	return m.headsNotHeld(rd, true)
+}
+
+// unadmitted lists the (room, author) pairs whose admission head this
+// machine does not hold yet, in rooms whose frontier is known: the streams
+// a registration leaves for the frontier seeding (Register). A room set
+// aside is not among them: its frontier is not known, so its streams are
+// seeded at the current end as for any registration, and nothing would
+// seed them when it opens again.
+func (m *Machine) unadmitted(rd *store.Reader) (map[[2]string]bool, error) {
+	return m.headsNotHeld(rd, false)
+}
+
+func (m *Machine) headsNotHeld(rd *store.Reader, unknown bool) (map[[2]string]bool, error) {
 	if m.fronts == nil {
 		return nil, nil
 	}
 	out := map[[2]string]bool{}
 	for room, f := range m.fronts() {
+		if f.Unknown && !unknown {
+			continue
+		}
 		if f.Unknown {
 			ss, err := rd.Streams(room)
 			if err != nil {
@@ -349,7 +367,7 @@ func (m *Machine) Register(ctx context.Context, agent string) (bool, error) {
 	var fresh bool
 	run := func() error {
 		var err error
-		fresh, err = m.st.RegisterWith(ctx, m.ID, agent, m.now(), m.undecided)
+		fresh, err = m.st.RegisterWith(ctx, m.ID, agent, m.now(), m.unadmitted)
 		return err
 	}
 	var err error

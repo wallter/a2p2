@@ -279,7 +279,9 @@ func (s *Store) Register(ctx context.Context, node, agent string, now time.Time)
 // author undecided returns, read in the same transaction: a head of the
 // author's admission frontier is not held yet, so the agent's cursors
 // there are seeded at that head when it arrives (Access.Frontier), as for
-// an agent registered at the admission, not before it.
+// an agent registered at the admission, not before it. The caller names
+// only streams that seeding will reach (Machine.unadmitted: not those of
+// a room set aside).
 func (s *Store) RegisterWith(ctx context.Context, node, agent string, now time.Time, undecided func(*Reader) (map[[2]string]bool, error)) (bool, error) {
 	fresh := false
 	err := s.tx(ctx, func(tx *sql.Tx) error {
@@ -357,8 +359,9 @@ var seedAddressedHook func(decoded int)
 // just before the first message addressed to it among the newest
 // RegisterWindow records held, stream by stream, and sets Early there
 // (D73). A message's addressees are in its signed header, so no text
-// is needed. Early is never below the position before the oldest record
-// the window covers, so the first read walks at most the window.
+// is needed. In each stream Early is at least the position just before
+// the oldest record of that stream the window covered, so the first read
+// walks at most the window.
 func seedAddressed(tx *sql.Tx, node, agent string) error {
 	rows, err := tx.Query(sqlNewestMessages, RegisterWindow, string(core.KindMessage))
 	if err != nil {

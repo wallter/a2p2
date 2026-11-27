@@ -689,18 +689,23 @@ rowid, the order this machine stored them in (rows are only inserted,
 and nothing renumbers them), and decodes at most 10,000 headers: about
 40 ms with 100,000 records held, during which the one database
 connection is held. Since a stream's records are stored in position
-order, `early` is never below the oldest record the window covered, so
+order, `early` is at least the position just before the oldest record of its stream that the window covered, so
 the agent's first inbox, a level change and `skipped` walk at most the
 window too (about 65 ms each at 10,000 records). A brief older than the
-window is not unread: read it with `recent`. A flood of briefs to a
+window is not unread: read it with `recent`. The CLI line, the MCP note
+and the recipes say "newest messages" for these newest records. A flood of briefs to a
 label not yet registered is paged like any inbox (`limit`, `max_bytes`)
 and is no worse than one to a registered label: any member can address
 any label on this machine's key either way.
 
-A stream whose author has a head of this machine's admission frontier
-not held yet gets no cursor at registration: it is seeded at that head
-when it arrives, as for an agent registered at the admission
-(`Store.RegisterWith`, read under the rooms lock like `Prune`). A
+In a room whose reading frontier is known, a stream whose author has a
+head of this machine's admission frontier not held yet gets no cursor at
+registration: it is seeded at that head when it arrives, as for an agent
+registered at the admission (`Store.RegisterWith`, read under the rooms
+lock like `Prune`). Every other stream starts at the current end, those
+of a room set aside included: its frontier is not known, and nothing
+would seed its cursors when it opens again, so a label registered then
+reads none of its earlier room-wide history, as in 0.3.0. A
 machine admitted without history after a brief was sent to one of its
 labels does not make that brief unread: its agents start at the
 admission frontier, and the brief is before it. Registration is never
