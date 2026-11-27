@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -355,6 +356,106 @@ func TestRateLimiterFullOfStrangersStillServesMembers(t *testing.T) {
 	}
 }
 
+// alertBlockConn is a server-side connection whose writes block until
+// release is closed once the server has sent its handshake flight and read
+// again (so any later write, such as a close alert, which TLS 1.3 sends as an
+// application-data record), as a write to a peer that never reads does once
+// its buffers are full; it records its close.
+type alertBlockConn struct {
+	net.Conn
+	release chan struct{}
+	closed  atomic.Bool
+	wrote   atomic.Bool
+	armed   atomic.Bool
+}
+
+func (c *alertBlockConn) Read(b []byte) (int, error) {
+	if c.wrote.Load() {
+		c.armed.Store(true)
+	}
+	return c.Conn.Read(b)
+}
+
+func (c *alertBlockConn) Write(b []byte) (int, error) {
+	if c.armed.Load() {
+		<-c.release
+	} else {
+		c.wrote.Store(true)
+	}
+	return c.Conn.Write(b)
+}
+
+func (c *alertBlockConn) Close() error {
+	c.closed.Store(true)
+	return c.Conn.Close()
+}
+
+type alertBlockLn struct {
+	net.Listener
+	release chan struct{}
+	conns   chan *alertBlockConn
+}
+
+func (l *alertBlockLn) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	b := &alertBlockConn{Conn: c, release: l.release}
+	l.conns <- b
+	return b, nil
+}
+
+// A connection refused after its handshake is closed without writing a TLS
+// alert: the socket closes at once, even when a write to the peer would
+// block, so a peer that does not read cannot hold a socket, a descriptor and
+// a goroutine with no slot counted against it.
+//
+// Requirements: N1; PROTOCOL 4.6
+func TestARefusedConnectionIsClosedWithoutWritingAnAlert(t *testing.T) {
+	set(t, &maxStrangerConns, 0) // every stranger's key is refused after its handshake
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln := &alertBlockLn{Listener: raw, release: make(chan struct{}), conns: make(chan *alertBlockConn, 4)}
+	ctx, cancel := context.WithCancel(bg)
+	done := make(chan error, 1)
+	go func() { done <- Serve(ctx, ln, newID(t), &memberH{}) }()
+	t.Cleanup(func() {
+		close(ln.release) // frees a blocked write so that Serve can end
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Serve: %v", err)
+		}
+	})
+	c := holdTLS(t, raw.Addr().String()) // completes the handshake, then never reads
+	if c == nil {
+		t.Fatal("the client's handshake failed")
+	}
+	srv := <-ln.conns
+	deadline := time.Now().Add(time.Second)
+	for !srv.closed.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("the refused connection was not closed within a second: a write of an alert holds it")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// The client, which now reads, finds the connection closed.
+	_ = c.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := c.Read(make([]byte, 1)); !closedBeforeAnswer(err) {
+		t.Fatalf("the refused client saw %v, not a closed connection", err)
+	}
+}
+
+// closedBeforeAnswer says whether err is what a client sees when the
+// server closed its connection before answering: end of file, a reset or a
+// broken pipe.
+func closedBeforeAnswer(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
+}
+
 // countLog counts records at Info or above with a given message.
 type countLog struct {
 	mu sync.Mutex
@@ -393,10 +494,49 @@ func TestRefusedPeerRequestsDoNotGrowLog(t *testing.T) {
 	stranger := keyClient(t, newID(t))
 	member := keyClient(t, h.add(newID(t)))
 	codes := map[string]int{}
+	// A stranger's connection is closed after each answer and its slot is
+	// given back when the server closes it, which can be a moment after the
+	// client has the answer and dials again. A connection that finds its
+	// source over its share is closed before the handshake (PROTOCOL 4.6:
+	// "a client that is refused a slot sees a failed handshake or a closed
+	// connection and retries"), so a stranger's dial that ends in a closed
+	// connection is tried again, within 3 s for the whole request. Such a
+	// try reached no request limiter; it may have written the refusal's
+	// own Info line, which is rate-limited and counted below. Any other
+	// error, a timeout, and any error of
+	// the member (whose connection is never refused) fail the test at once.
+	retries := 0
+	stranger1 := func() (int, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		for {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+addr+"/nowhere", strings.NewReader(""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := stranger.Do(req)
+			if err == nil {
+				resp.Body.Close()
+				return resp.StatusCode, nil
+			}
+			if !closedBeforeAnswer(err) {
+				t.Fatalf("a stranger's request failed otherwise than by a closed connection: %v", err)
+			}
+			retries++
+			select {
+			case <-ctx.Done():
+				t.Fatalf("a stranger's request was not answered within 3 s: %v", err)
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}
 	for i := 0; i < 200; i++ {
-		code, err := post(stranger, addr, "/nowhere", "")
+		code, err := stranger1()
 		codes[fmt.Sprintf("stranger %d %v", code, err)]++
 		code, err = post(member, addr, pathPullV2, "{}")
+		if err != nil {
+			t.Fatalf("request %d of a member got no answer: %v", i, err)
+		}
 		if i >= int(rateBurst) {
 			codes[fmt.Sprintf("member %d %v", code, err)]++
 		}
@@ -405,6 +545,7 @@ func TestRefusedPeerRequestsDoNotGrowLog(t *testing.T) {
 		codes["member 429 <nil>"] != 200-int(rateBurst) {
 		t.Fatalf("the requests were not refused as the test needs: %v", codes)
 	}
+	t.Logf("dials that needed another try: %d", retries)
 	time.Sleep(100 * time.Millisecond) // the strangers' last connection is given back
 	var raw []net.Conn
 	for i := 0; i < 20; i++ {

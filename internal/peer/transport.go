@@ -514,20 +514,30 @@ func (l *limitListener) knownSource(group string) bool {
 // then returns it.
 func (l *limitListener) handshake(c *limitConn) {
 	tc := tls.Server(c, l.cfg)
+	// A connection refused here is closed through c: its slot is given
+	// back, then the socket is closed. No TLS close alert is written
+	// (tc.Close would write one under a fresh five-second write deadline,
+	// so a peer that never reads could hold the socket, a descriptor and
+	// this goroutine, with no slot counted). The client sees the TLS
+	// library's own fatal alert if the handshake itself failed, else a
+	// closed connection (EOF or a reset); either is a transport failure
+	// to it (PROTOCOL 4.6). Where the TLS library fails the handshake
+	// itself, its alert can reach the client before the slot is free.
+	drop := func() { _ = c.Close() }
 	deadline := time.Now().Add(handshakeTimeout)
 	_ = c.SetDeadline(deadline)
 	ctx, cancel := context.WithDeadline(l.ctx, deadline)
 	err := tc.HandshakeContext(ctx)
 	cancel()
 	if err != nil {
-		tc.Close()
+		drop()
 		return
 	}
 	key := connNode(tc.ConnectionState())
 	member, ok := l.isMember(key, deadline)
 	if !ok {
 		l.refused("the membership lookup did not finish within the handshake deadline")
-		tc.Close()
+		drop()
 		return
 	}
 	if err := c.enter(key, member); err != nil {
@@ -540,14 +550,14 @@ func (l *limitListener) handshake(c *limitConn) {
 		default:
 			l.refused("the connection slots of keys that share no room are full")
 		}
-		tc.Close()
+		drop()
 		return
 	}
 	_ = c.SetDeadline(time.Time{})
 	select {
 	case l.ready <- tc:
 	case <-l.ctx.Done():
-		tc.Close()
+		drop()
 	}
 }
 
@@ -769,12 +779,19 @@ func (c *limitConn) end() {
 	c.mu.Unlock()
 }
 
+// Close gives the connection's slot back, then closes the socket, so the
+// slot is free by the time the other end sees the socket close.
 func (c *limitConn) Close() error {
-	err := c.Conn.Close()
+	c.release()
+	return c.Conn.Close()
+}
+
+// release gives back c's slot, once.
+func (c *limitConn) release() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.pool == poolClosed {
-		return err
+		return
 	}
 	if c.timer != nil {
 		c.timer.Stop()
@@ -797,7 +814,6 @@ func (c *limitConn) Close() error {
 	}
 	l.mu.Unlock()
 	c.pool = poolClosed
-	return err
 }
 
 type connKey struct{}
