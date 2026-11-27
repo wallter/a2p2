@@ -681,7 +681,7 @@ Such a device can still:
 Release binaries are built by GitHub Actions from the tag, with no module
 or build cache, with CGO off and with `-trimpath`. Each release carries a
 `SHA256SUMS` file made in the same run; verify a binary against it before
-installing (see the [README](README.md#install)). Releases after 0.2.3 also
+installing (see the [README](README.md#install)). From version 0.3.0, releases also
 carry a GitHub artifact attestation made by the release workflow. To check
 one from the release vX.Y.Z, run `gh attestation verify a2p2_<os>_<arch>
 --repo wallter/a2p2 --signer-workflow
