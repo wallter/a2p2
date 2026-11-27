@@ -63,8 +63,7 @@ it through a local MCP server with seven tools. The README is the reference.
   mail. Nothing is pushed to you; a hook may print a one-line notice.
 - `inbox {"room":"local","recent":20}` and `inbox {"thread":"<id>"}` read
   history and mark nothing seen.
-- `reply {"id":"<id>","text":"..."}` answers in the message's thread and
-  reports it handled when it may.
+- `reply {"id":"<id>","text":"..."}` answers in the thread; reports it handled when it may.
 - `ack {"id":"<id>"}` reports a message handled. Use it only after a read
   showed you its text (`inbox`, a thread, `recent` or `skipped`), for a
   message addressed to you or one that asked (`ask_handled`). It means
@@ -113,6 +112,7 @@ conventions, text that nothing enforces. Read the one that fits:
 | Setting up rooms and topics | `recipes/rooms-and-threads.md` |
 | Smaller teams inside a team | `recipes/sub-teams.md` |
 | Fewer model turns in a team | `recipes/fewer-turns.md` |
+| Briefs to many workers, cheap answers | `recipes/fan-out.md` |
 | A room's own way of working | `recipes/room-charter.md` |
 | Sending or receiving a file | `recipes/sharing-a-file.md` |
 | a2p2 did something wrong or unclear | `recipes/reporting-a-problem.md` |
