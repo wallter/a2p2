@@ -79,7 +79,7 @@
           "type": "integer"
         },
         "max_bytes": {
-          "description": "512-32000 result bytes (default 18000)",
+          "description": "512-32000 result bytes (0: default 18000)",
           "type": "integer"
         },
         "peek": {

@@ -43,9 +43,11 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   limit left some out. The result is marked seen before the model reads
   it, as before, so a harness that cuts a result can still lose
   messages. The `whoami`, `inbox` and `ack` descriptions were
-  shortened to pay for the argument: the definitions are 3,992 bytes.
+  shortened to pay for the argument: the definitions are 3,995 bytes.
 - **The inbox's byte sizes are lower: 18,000 by default and 32,000 at
-  most (D72).** Earlier builds of this unreleased change used 24,000 and
+  most (D72).** An absent or 0 `max_bytes` is the default; 1 to 511 and
+  negative values are refused. A wait that ends with nothing, and a read that set a level and
+  then waited, are now held to the budget too. Earlier builds of this unreleased change used 24,000 and
   40,000, sized at about 4 bytes a token. Inbox results measured in Claude
   Code came to 1.5 to 3.4 bytes a token, about 2 for ordinary entries, so
   a default page could pass its 10,000-token warning, and a page it saves
@@ -73,8 +75,10 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   directory.** Since 0.1.0 the daemon started by the first CLI command or
   MCP server ran in whatever directory that was, for as long as it ran:
   it held a temporary worktree or project directory that someone may want
-  to remove, and could keep a volume from being unmounted. It now runs in
-  its home, made absolute first.
+  to remove, and could keep a volume from being unmounted. With an
+  absolute `A2P2_HOME`, the default, it now runs in its home. A relative
+  `A2P2_HOME` is relative to that directory, so it is kept there, as
+  before.
 - **Serving and making a pull no longer gets slower as a room's history
   grows.** Every pull request served or made worked out the machine's
   summary of the room by reading every record of it, under the lock that

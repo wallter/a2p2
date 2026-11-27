@@ -128,7 +128,13 @@ func (o InboxOpts) page(v InboxView, limit int, levelSet bool) (InboxView, error
 			}
 			e, ok := cutToFit(es[0], func(e Entry) int { return measure([]Entry{e}) }, o.MaxBytes)
 			if !ok {
-				return InboxView{}, codedErr(ErrorTooLarge, "the oldest unread entry takes %d bytes before its text, more than any max_bytes holds; nothing was marked seen%s", measure([]Entry{entryWithText(es[0], "")}), set)
+				bare := measure([]Entry{entryWithText(es[0], "")})
+				if len(v.LevelsSet) > 0 && !levelSet {
+					// Without the list of rooms set, the entry fits
+					// (TestAnEntryAtItsLargestBesidesItsTextFitsTheCeiling).
+					return InboxView{}, codedErr(ErrorTooLarge, "the list of the %d rooms whose level this call sets and the oldest unread entry take %d bytes before its text, over max_bytes %d; nothing was changed: set the level in a call of its own (inbox with level and peek), then read", len(v.LevelsSet), bare, o.MaxBytes)
+				}
+				return InboxView{}, codedErr(ErrorTooLarge, "the oldest unread entry takes %d bytes before its text, more than any max_bytes holds; nothing was marked seen%s", bare, set)
 			}
 			es, n = []Entry{e}, 1
 		}

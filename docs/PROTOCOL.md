@@ -850,16 +850,17 @@ and tells the person the outcome.
 
 ## 6. MCP tools (golden file)
 
-The [golden file](../internal/mcpshim/testdata/tools.json) is 3,992 bytes
-in compact JSON, as the server writes it. The A2 proxy is ⌈3,992 / 4⌉ =
-998 ≤ 1,000. `max_bytes` on `inbox` (D70) added 86 bytes and "If more,
+The [golden file](../internal/mcpshim/testdata/tools.json) is 3,995 bytes
+in compact JSON, as the server writes it. The A2 proxy is ⌈3,995 / 4⌉ =
+999 ≤ 1,000. `max_bytes` on `inbox` (D70) added 86 bytes and "If more,
 call again." in the `inbox` description 21, so 3,991 + 107 = 4,098; 106
 bytes of text came out: `whoami` lost "New messages are not pushed: call
 inbox." (41; the server instructions and the `whoami` result say it),
 `inbox` lost "from other agents and people," (30; its notice says it) and
 "; fetch requests a file" (23; the `fetch` parameter says it), and `ack`'s
 "; give its id after reading it" became ", after reading it" (12; `id` is
-its only parameter): 4,098 − 106 = 3,992.
+its only parameter): 4,098 − 106 = 3,992. D72 made `max_bytes` say
+"(0: default 18000)", 3 bytes more: 3,995.
 
 The server also sends `instructions` in the `initialize` result (and in
 the `server/discover` result of the newest MCP revision, which the SDK
@@ -961,7 +962,7 @@ left out of the list (section 10.7).
           "type": "integer"
         },
         "max_bytes": {
-          "description": "512-32000 result bytes (default 18000)",
+          "description": "512-32000 result bytes (0: default 18000)",
           "type": "integer"
         },
         "peek": {
@@ -1113,7 +1114,7 @@ Tool behaviour:
 | `send` | `send`; `to: ["everyone"]` means everyone and is sent with `to` omitted on the wire; `human` in `to` is the person at this machine (`human@<own short node>`); with `reply_to` and no `to`, `to` is the parent's `{author, agent}` |
 | `reply(id, text, to?)` | `send` with `reply_to`, `thread: true` (and `to` if given), then `ack`; without `to` it addresses the parent's author and the agents that have posted in the thread here, at most 32 addressees in all (`to_omitted` in the `send` response counts those left out, and becomes a `note`); the result's `to` lists whom it addressed; `handled_report` is `sent…`, `sent before…` (this agent had reported it) or `not sent: <ack's refusal>` |
 | `ack(id)` | `ack`; a repeat succeeds with `already: true` and the first report; a refusal says which: no such message here; not addressed to you and no `ask_handled`; your own message; no read has shown you its text (an inbox listing, or a thread, recent or skipped view of a message you may report, counts) |
-| `inbox` | `inbox` with `max_bytes` (512 to 32,000; 18,000 when not given; a larger one is read as 32,000 less the bytes of a `note` saying so, D72), and `level` when given, then `seen` with every returned `key` and `version`: the daemon returns, oldest first, the entries whose result fits `max_bytes` bytes (the whole result text the model reads, `levels` included, measured by the shim's own rendering, `localapi.ToolInboxSize`, with `marked_seen` false and `more` as every entry held), and `more`: the entries held at its look that this call left unread, those left out and those returned but not marked seen, which the next call offers; what is left out gets no receipt and is not confirmed. When the oldest unread entry alone does not fit, the call is refused (`too_large`) naming at least the `max_bytes` it needs (with 32 bytes to spare), and nothing is marked or set; when the list of rooms a `level` sets does not fit, the refusal says to set it in a call of its own (`level` with `peek`). An entry larger than 32,000 bytes (text of characters written as escapes, up to about 115 KB) is refused below 32,000, naming it; at 32,000 it is returned alone with its text cut, between characters, to fit, and `text_cut` saying so, how many bytes of the rendered text were left out and that a person can read it with `a2p2 inbox --thread ID`. Every other field of an entry fits 32,000 bytes, so that cut always fits. No result is over 32,000 bytes. `limit` still applies; whichever binds first decides. `max_bytes` with `peek`, `recent`, `skipped`, `thread` or `fetch` is refused: they mark nothing and are not paged by it. Against a daemon before 0.2.4, which ignores `max_bytes` and `level` and answers without `max_bytes`, the shim reads as 0.2.3 did: `level` first in its own call, then the daemon's own page, whole, confirmed, with a `note` that the budget was not applied (D70); with `thread`, `thread` (with `after` if given: only what follows that message) and no `seen`; `wait_seconds` is 0 to 30 (the CLI keeps 120), and a wait that ends with nothing sets `waited: true`; a cancelled call marks nothing; with `recent: N` (1 to 50) and no `thread`, `history` of `room` (default local) with `limit: N`, and no `seen`. With `level` (`all`, `addressed` or `none`), the level is set for `room`, or for every room when `room` is not given (in the `inbox` call for a read, else first by `level`), then whatever else was asked; the result carries `levels`, at most 20 rooms, the rest counted in `levels_unlisted`. With `peek`, `unread` with `lines` instead of `inbox`: unread counts per room and up to 10 first lines, no `seen` (U4). With `skipped` and no `thread`, `history` with `skipped` for `room` (every room when not given) and `limit: recent` (default 50): what this agent's level kept out of its inbox and it has not confirmed, oldest first, no `seen` (U3) |
+| `inbox` | `inbox` with `max_bytes` (512 to 32,000; 18,000 when absent or 0; 1 to 511 and negative values are refused; a larger one is read as 32,000 less the bytes of a `note` saying so, D72), and `level` when given, then `seen` with every returned `key` and `version`: the daemon returns, oldest first, the entries whose result fits `max_bytes` bytes (the whole result text the model reads, `levels` included, measured by the shim's own rendering, `localapi.ToolInboxSize`, with `marked_seen` false and `more` as every entry held), and `more`: the entries held at its look that this call left unread, those left out and those returned but not marked seen, which the next call offers; what is left out gets no receipt and is not confirmed. When the oldest unread entry alone does not fit, the call is refused (`too_large`) naming at least the `max_bytes` it needs (with 32 bytes to spare), and nothing is marked or set; when the list of rooms a `level` sets does not fit, the refusal says to set it in a call of its own (`level` with `peek`). An entry larger than 32,000 bytes (text of characters written as escapes, up to about 115 KB) is refused below 32,000, naming it; at 32,000 it is returned alone with its text cut, between characters, to fit, and `text_cut` saying so, how many bytes of the rendered text were left out and that a person can read it with `a2p2 inbox --thread ID`. Every other field of an entry fits 32,000 bytes, so that cut always fits. No result is over 32,000 bytes. `limit` still applies; whichever binds first decides. `max_bytes` with `peek`, `recent`, `skipped`, `thread` or `fetch` is refused: they mark nothing and are not paged by it. Against a daemon before 0.2.4, which ignores `max_bytes` and `level` and answers without `max_bytes`, the shim reads as 0.2.3 did: `level` first in its own call, then the daemon's own page, whole, confirmed, with a `note` that the budget was not applied (D70); with `thread`, `thread` (with `after` if given: only what follows that message) and no `seen`; `wait_seconds` is 0 to 30 (the CLI keeps 120), and a wait that ends with nothing sets `waited: true`; a cancelled call marks nothing; with `recent: N` (1 to 50) and no `thread`, `history` of `room` (default local) with `limit: N`, and no `seen`. With `level` (`all`, `addressed` or `none`), the level is set for `room`, or for every room when `room` is not given (in the `inbox` call for a read, else first by `level`), then whatever else was asked; the result carries `levels`, at most 20 rooms, the rest counted in `levels_unlisted`. With `peek`, `unread` with `lines` instead of `inbox`: unread counts per room and up to 10 first lines, no `seen` (U4). With `skipped` and no `thread`, `history` with `skipped` for `room` (every room when not given) and `limit: recent` (default 50): what this agent's level kept out of its inbox and it has not confirmed, oldest first, no `seen` (U3) |
 | `whoami` | `status`, `level` and `unread` for this agent: each room carries `level` and `unread` (the count of what `inbox` would show); marks nothing |
 | `peers` | `status`: per room its `machines` and `agents_seen_writing` (`agent`, `last_seen`); a machine with no name here is named by its short id |
 | `ask_human` | `send` to `human` with `choices` |
@@ -1877,7 +1878,7 @@ Code tests are in `internal/node` (`files_test.go`, `files_compat_test.go`,
 `files_differential_test.go`, `files_memnet_test.go`, `files_review_test.go`),
 `internal/store` (`files_test.go`, `stage_unix_test.go`) and
 `internal/mcpshim` (`TestToolsGolden`, `TestToolDefinitionsFitTheTokenBudget`
-at 3,992 bytes). The scenarios above run there over the in-memory
+at 3,995 bytes). The scenarios above run there over the in-memory
 transport and are compared with the model by a differential test. Fault
 matrix rows are in [TESTING.md](TESTING.md) and rows in
 [TRACE.md](TRACE.md).

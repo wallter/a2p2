@@ -793,7 +793,7 @@ type inboxIn struct {
 	Peek        bool   `json:"peek,omitempty" jsonschema:"counts and first lines"`
 	Skipped     bool   `json:"skipped,omitempty" jsonschema:"what your level kept out"`
 	Fetch       string `json:"fetch,omitempty" jsonschema:"file sha256: download, verified"`
-	MaxBytes    int    `json:"max_bytes,omitempty" jsonschema:"512-32000 result bytes (default 18000)"`
+	MaxBytes    int    `json:"max_bytes,omitempty" jsonschema:"512-32000 result bytes (0: default 18000)"`
 }
 
 // maxRecent bounds inbox's recent.
@@ -857,7 +857,7 @@ func (sh *shim) inbox(ctx context.Context, in inboxIn) (string, error) {
 		return "", inputError("level is all, addressed or none")
 	}
 	if in.MaxBytes != 0 && in.MaxBytes < node.MinInboxBytes {
-		return "", inputError(fmt.Sprintf("max_bytes must be between %d and %d", node.MinInboxBytes, node.MaxInboxBytes))
+		return "", inputError(fmt.Sprintf("max_bytes must be between %d and %d, or 0 (or left out) for the default, %d", node.MinInboxBytes, node.MaxInboxBytes, node.DefaultInboxBytes))
 	}
 	if in.MaxBytes != 0 && (in.Fetch != "" || in.Peek || in.Thread != "" || in.Recent > 0 || in.Skipped) {
 		// They mark nothing seen, so a result a harness cuts loses nothing:

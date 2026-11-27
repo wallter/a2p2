@@ -3482,7 +3482,9 @@ output, so that it uses the same count is inferred. Codex passed
 `max_bytes` 40,000 on its own, from the schema, in 4 of 4 MCP runs.
 
 - **The sizes.** `max_bytes` is 512 to 32,000, and the tool applies
-  18,000 when none is given.
+  18,000 when it is absent or 0: a caller written against a schema
+  without the field sends neither. 1 to 511 and negative values are
+  refused.
   - 18,000 bytes is about 8,800 tokens of short entries at 2.05 bytes a
     token, under the warning; at 1.54 it is about 11,700, past the
     warning and well under the file limit.
@@ -3500,14 +3502,22 @@ output, so that it uses the same count is inferred. Codex passed
   characters come to 114,926 bytes), so the cut is what makes it
   readable. The cut fails only if the entry without its text did not fit,
   which D70 did not test. `TestAnEntryAtItsLargestBesidesItsTextFitsTheCeiling`
-  now does: every field but the text at the largest it can carry (32
-  addressees with full keys, 8 choices and 8 file names of DEL, which
-  grows most, a room label, a reason, `text_cut` and `more` at their
-  longest), even fields that never come together, is 28,665 bytes. So at
-  32,000 the cut always fits, and an entry is either returned whole or cut
-  with `text_cut`, never confirmed otherwise. Levels a read sets are left
-  out of that sum: a read whose levels do not fit is already told to set
-  them in a call of their own.
+  now does, with values that pass the checks a received record, manifest
+  and room log pass: 32 addressees and the author written with full keys,
+  8 distinct choices of 200 bytes, mostly DEL, which grows most, 8 file
+  names of the characters a name may hold that are written longest,
+  clipped at 128 characters as shown, a room label of 64 bytes with the
+  33 bytes a label shared by two rooms gains, and `text_cut` and `more`
+  at their longest. That is 27,527 bytes. So at 32,000 the cut always
+  fits, and an entry is either returned whole or cut with `text_cut`,
+  never confirmed otherwise. Levels a read sets are left out of that sum:
+  when they and the entry do not fit, the refusal says to set the level
+  in a call of its own, which changes nothing.
+- **Every view returned is sized.** A wait that ended with nothing
+  returned its last look unmeasured, and what it shows (streams still
+  fetching, `more`, the levels set) can grow while it waits. It is now
+  measured like any page, and refused as a too small budget is when it
+  does not fit; nothing is confirmed.
 - **A request above the ceiling** is read at the ceiling, and the result's
   `note` says "max_bytes above 32000 was read as 32000, the most one
   result holds." The note's bytes come out of the budget, so the result
@@ -3524,8 +3534,25 @@ output, so that it uses the same count is inferred. Codex passed
   The local API still refuses a value outside its range: its callers are
   code, the MCP server clamps before it, and an MCP server of an earlier
   build would get a refusal that names the range.
-- **Definitions.** The parameter now says "512-32000 result bytes
-  (default 18000)", the same length; the definitions stay at 3,992 bytes.
+- **Definitions.** The parameter now says "512-32000 result bytes (0:
+  default 18000)"; the definitions go from 3,992 to 3,995 bytes.
+- **The daemon's working directory.** A command that starts the daemon
+  for an absolute home, the default, starts it in its home, so it holds
+  no one's directory while it runs. A relative home is passed as given,
+  with no directory set: it names a place from the caller's directory,
+  and an absolute spelling could pass the socket path limit, or through
+  a symlinked directory and "..", name another directory than the one
+  the client resolves. No path is rewritten.
+- **Raised and declined.**
+  - A new MCP server against a daemon built from main between D70 and
+    D72 can strand an oversized entry. D70 was never released: such
+    daemons are development builds of one day. One must be restarted
+    (`a2p2 stop`); no feature name changes for it.
+  - The fallback for a daemon without the feature (0.2.3 and earlier)
+    returns its page unbounded and confirms it. That is D70's decision,
+    since cutting on the client left receipts for text the model never
+    got. It lasts only until the daemon restarts, and its `note` says to
+    run `a2p2 stop`, so it stands.
 - **Still open.** A harness can set a tool result aside in a file, or cut
   it, after a2p2 has recorded the page as seen. The model then never reads
   messages that count as read. A byte cap makes this rarer but cannot rule

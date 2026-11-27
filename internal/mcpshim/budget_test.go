@@ -51,8 +51,8 @@ func readPage(t *testing.T, cs *mcp.ClientSession, args map[string]any) (page, s
 	t.Helper()
 	s := ok(t, cs, "inbox", args)
 	max := node.DefaultInboxBytes
-	if m, ok := args["max_bytes"].(int); ok {
-		max = m
+	if m, ok := args["max_bytes"].(int); ok && m != 0 {
+		max = min(m, node.MaxInboxBytes)
 	}
 	if len(s) > max {
 		t.Fatalf("result is %d bytes, over max_bytes %d", len(s), max)
@@ -340,13 +340,19 @@ func TestMaxBytesIsCheckedAndCountsTheLevelsOfTheSameCall(t *testing.T) {
 	a := connect(t, c, "alice")
 	agentID(t, a)
 	for _, args := range []map[string]any{
-		{"max_bytes": 511}, {"max_bytes": -1},
+		{"max_bytes": 511}, {"max_bytes": 1}, {"max_bytes": -1},
 		{"max_bytes": 1000, "peek": true}, {"max_bytes": 1000, "recent": 5}, {"max_bytes": 1000, "skipped": true},
 		{"max_bytes": 1000, "thread": strings.Repeat("0", 32)}, {"max_bytes": 1000, "fetch": strings.Repeat("0", 64)},
 	} {
 		if r := refusal(t, a, "inbox", args); r.Code != node.ErrorInvalid || !strings.Contains(r.Error, "max_bytes") {
 			t.Errorf("%v: %+v", args, r)
 		}
+	}
+	// 0 is the default, as when it is left out: a caller written against a
+	// schema without the field sends neither (D72).
+	bob.send(localapi.SendReq{Text: strings.Repeat("y", 1000)})
+	if p, s := readPage(t, a, map[string]any{"max_bytes": 0}); len(p.Messages) != 1 || len(s) > node.DefaultInboxBytes {
+		t.Fatalf("max_bytes 0: %s", s)
 	}
 	for i := 0; i < 20; i++ {
 		bob.send(localapi.SendReq{Room: fmt.Sprint("room", i%6), Text: strings.Repeat("z", 200)})
