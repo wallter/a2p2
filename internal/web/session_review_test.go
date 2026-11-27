@@ -86,7 +86,13 @@ func TestALinkTradedByAnotherUserIsRefusedAndStaysGood(t *testing.T) {
 	e := setup(t)
 	old := peerOf
 	t.Cleanup(func() { peerOf = old })
-	peerOf = func(*http.Request) (int, bool) { return os.Getuid() + 1, true }
+	// Another user: neither this one nor root. Not Getuid()+1, which is 0
+	// on Windows, where Getuid is -1.
+	other := 1000
+	if other == os.Getuid() {
+		other++
+	}
+	peerOf = func(*http.Request) (int, bool) { return other, true }
 	code := e.ss.Code()
 	if st, out := e.trade(t, code, e.srv.URL); st != http.StatusForbidden || out["session"] != "" || !strings.Contains(out["error"], "another user") {
 		t.Fatalf("another user's trade: %d %v", st, out)

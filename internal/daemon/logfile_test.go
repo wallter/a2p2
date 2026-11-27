@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -58,7 +59,9 @@ func TestTheDaemonLogIsRotatedBySizeAndOneOldFileKept(t *testing.T) {
 	if len(ents) != 2 {
 		t.Fatalf("files kept: %v", ents)
 	}
-	if fi, _ := os.Stat(path + ".1"); fi.Mode().Perm() != 0o600 {
+	// Windows has no Unix modes (Go reports 0666 for any writable file);
+	// the archive takes its directory's access control list there.
+	if fi, _ := os.Stat(path + ".1"); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("daemon.log.1 mode %o", fi.Mode().Perm())
 	}
 }
@@ -99,29 +102,57 @@ func TestKeepLogRotatesWhileRunning(t *testing.T) {
 	<-done
 }
 
-// F19: when daemon.log.1 cannot be written (a full disk, here a directory
-// the daemon may not create files in), the log is emptied all the same,
-// so a remote party that makes the daemon log cannot fill the disk.
+// F19: when daemon.log.1 cannot be written (a full disk, say), the log is
+// emptied all the same, so a remote party that makes the daemon log cannot
+// fill the disk. The archive is made to fail in two ways: a directory in
+// the way of daemon.log.1, which no system renames a file over (this runs
+// on Windows too), and, on Unix, a directory the daemon may not create
+// files in.
 func TestALogThatCannotBeArchivedIsStillEmptied(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("root may create files in any directory")
-	}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "daemon.log")
-	if err := os.WriteFile(path, []byte(strings.Repeat("x", 100)), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	if err := rotateLog(path, 10); err == nil {
-		t.Fatal("no error for a log that could not be archived")
-	}
-	if fi, err := os.Stat(path); err != nil || fi.Size() != 0 {
-		t.Fatalf("the log was not emptied: %v %v", fi, err)
-	}
-	if _, err := os.Stat(path + ".1"); !os.IsNotExist(err) {
-		t.Fatalf("daemon.log.1: %v", err)
+	for _, c := range []struct {
+		name  string
+		block func(t *testing.T, dir, path string)
+	}{
+		{"daemon.log.1 cannot be replaced", func(t *testing.T, dir, path string) {
+			if err := os.MkdirAll(filepath.Join(path+".1", "x"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"no file can be made beside the log", func(t *testing.T, dir, path string) {
+			if runtime.GOOS == "windows" {
+				t.Skip("Go's Chmod sets only the read-only attribute on Windows, which does not stop new files in a directory; the other case runs there")
+			}
+			if os.Getuid() == 0 {
+				t.Skip("root may create files in any directory")
+			}
+			if err := os.Chmod(dir, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "daemon.log")
+			if err := os.WriteFile(path, []byte(strings.Repeat("x", 100)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c.block(t, dir, path)
+			if err := rotateLog(path, 10); err == nil {
+				t.Fatal("no error for a log that could not be archived")
+			}
+			if fi, err := os.Stat(path); err != nil || fi.Size() != 0 {
+				t.Fatalf("the log was not emptied: %v %v", fi, err)
+			}
+			if fi, err := os.Stat(path + ".1"); err == nil && fi.Mode().IsRegular() {
+				t.Fatal("daemon.log.1 was made")
+			}
+			ents, _ := os.ReadDir(dir)
+			for _, e := range ents {
+				if strings.HasSuffix(e.Name(), ".tmp") {
+					t.Fatalf("a temporary file was left: %s", e.Name())
+				}
+			}
+		})
 	}
 }

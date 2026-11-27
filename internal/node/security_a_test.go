@@ -13,6 +13,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -576,12 +579,32 @@ func TestLeavingARoomDoesNotHoldTheRoomsLockWhileItsFilesAreDeleted(t *testing.T
 		t.Fatal(err)
 	}
 	defer db.Close()
-	var n int
-	if err := db.QueryRow(`SELECT count(*) FROM file_trash`).Scan(&n); err != nil {
+	// Where a directory cannot be synced (Windows) a removal that was done
+	// stays in the queue, marked unlinked, until a start sees the path gone
+	// (store/files_windows.go); only a removal not yet done is a failure.
+	var n, done int
+	if err := db.QueryRow(`SELECT count(*), coalesce(sum(unlinked), 0) FROM file_trash`).Scan(&n, &done); err != nil {
 		t.Fatal(err)
 	}
-	if n != 0 {
-		t.Fatalf("%d deletions still queued after Leave", n)
+	if n-done != 0 || runtime.GOOS != "windows" && n != 0 {
+		t.Fatalf("%d deletions still queued after Leave, %d of them done but not yet known durable", n, done)
+	}
+	q, err := db.Query(`SELECT path FROM file_trash`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	for q.Next() {
+		var rel string
+		if err := q.Scan(&rel); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(filepath.Join(filepath.Dir(a.path), filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Fatalf("%s is marked removed but is there: %v", rel, err)
+		}
+	}
+	if err := q.Err(); err != nil {
+		t.Fatal(err)
 	}
 }
 

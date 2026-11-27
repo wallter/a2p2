@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"unicode"
 )
@@ -37,7 +38,12 @@ func checkBinary(o Options) (warn string, err error) {
 	if strings.ContainsFunc(bin, unicode.IsControl) {
 		return "", fmt.Errorf("the path of this a2p2 binary has a control character (%q); move it to a plain directory, then run that copy's install", bin)
 	}
-	if o.targetOS() == "windows" {
+	// The walk below reads this machine's file modes and owners. Windows
+	// has neither (Go reports every directory as 0777 and every writable
+	// file as 0666), so on a Windows machine they mean nothing, whatever
+	// system the configuration is written for; reading them refused every
+	// path, as its drive's root looked writable by everyone.
+	if o.targetOS() == "windows" || runtime.GOOS == "windows" {
 		return "", nil
 	}
 	paths := []string{filepath.Clean(bin)}

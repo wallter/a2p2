@@ -1449,7 +1449,7 @@ func runDoctor(c *cmd, w io.Writer, o harness.Options) error {
 		checks = append(checks, harness.Check{Name: "daemon", Info: "not checked: fix the state directory first"})
 	} else {
 		cl, err := c.client()
-		add("daemon", err, "running", "see "+c.home+"/daemon.log")
+		add("daemon", err, "running", "see "+filepath.Join(c.home, "daemon.log"))
 		if err == nil {
 			var st localapi.Status
 			err = cl.Call(c.ctx, "status", nil, &st)
