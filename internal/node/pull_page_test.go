@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/wallter/a2p2/internal/core"
 	"github.com/wallter/a2p2/internal/store"
@@ -202,5 +203,68 @@ func TestTextBeforeTheFrontierInAnEarlierStreamIsHeldWithoutTextByAMachineAdmitt
 	}
 	if h, _ := e.held(room, m2); h.Reason != store.ReasonLive {
 		t.Fatalf("text after it: %+v", h)
+	}
+}
+
+// A page reads on the order of its limit from each stream, whatever the
+// stream's length: a catch-up from position 1 (whose first record the
+// loaded view already holds), text wanted far down the stream, and many
+// records already sent in the exchange (skip). Counted in records read
+// from the store, not only in what the page holds. The gate runs it
+// under -race at 20,000 records; go test without -race runs 100,000.
+func TestACatchUpPageOfAHundredThousandRecordStreamReadsOnTheOrderOfItsLimit(t *testing.T) {
+	n := 100000
+	if testing.Short() || raceDetector { // filling 100,000 takes 5 minutes under -race
+		n = 20000
+	}
+	clock := lclock()
+	net := newMemNet()
+	a := newPNode(t, net, "a", newLNode(t, "a", clock))
+	room := a.create("team")
+	au := newBenchAuthors(1)
+	a.change(room, Change{Kind: core.EntryAdd, Target: au.ids[0], Name: "w00", History: true})
+	start := clock.Add(-24 * time.Hour)
+	recs := make([]*core.VerifiedRecord, 0, n)
+	for i := 0; i < n; i++ {
+		recs = append(recs, au.next(t, room, 0, start.Add(time.Duration(i)*time.Millisecond)))
+	}
+	benchFill(t, a.lnode, room, recs)
+	author, epoch := au.ids[0], au.epoch[0]
+	all := func(*rec) (bool, error) { return true, nil }
+	const limit = 512
+	for _, c := range []struct {
+		name  string
+		want  store.StreamDetail
+		skip  int // the first records past C sent already
+		bound int
+	}{
+		{"from position 1", store.StreamDetail{E: epoch}, 0, 2 * (limit + 1)},
+		{"text wanted far down", store.StreamDetail{E: epoch, C: int64(n - 600), NB: []int64{7, int64(n / 2)}, W: []int64{7, int64(n / 2)}},
+			0, 2*(limit+1) + 2},
+		{"many sent already", store.StreamDetail{E: epoch}, 3 * limit, 3*limit + 2*(limit+1)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			skip := map[string]bool{}
+			for _, r := range recs[c.want.C : c.want.C+int64(c.skip)] {
+				skip[r.ID()] = true
+			}
+			if err := a.m.view(context.Background(), room, func(v *roomView) error {
+				read := v.rd.RecordsRead()
+				page, cut, err := a.x.buildPage(v, all, map[string][]store.StreamDetail{author: {c.want}}, []string{author},
+					skip, nil, limit, 1<<30)
+				if err != nil {
+					return err
+				}
+				if got := v.rd.RecordsRead() - read; got > c.bound {
+					return fmt.Errorf("read %d records of a stream of %d for a page of %d (bound %d)", got, n, len(page), c.bound)
+				}
+				if len(page) != limit || !cut {
+					return fmt.Errorf("page of %d, cut %v", len(page), cut)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

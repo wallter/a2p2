@@ -161,11 +161,22 @@ func (r *Rooms) summarize(v *roomView, st members.State) (summary, error) {
 		if _, ok := slices.BinarySearch(s.authors, row.Author); !ok {
 			continue
 		}
+		if row.PastRetention {
+			// Live text counted expired by the clock: ask for the pruning
+			// pass that marks it so durably, as reading it would (keep).
+			r.m.pruneDue.Store(true)
+		}
 		var wanted []int64
 		for i, n := range row.Missing {
 			if !member && row.Author != r.m.ID {
 				break
 			}
+			// Defensive, and no test needs it: v.get reads the record
+			// itself, and what loading the view adds here is the room's
+			// member list (v.hidden), which cannot hide an author of rows
+			// already filtered by st.Admitted, and the streams' first
+			// records, which textAccess loads for itself. Kept so that a
+			// later use of v below does not meet an unloaded view.
 			if err := v.ensure(); err != nil {
 				return s, err
 			}
@@ -186,7 +197,7 @@ func (r *Rooms) summarize(v *roomView, st members.State) (summary, error) {
 				wanted = append(wanted, n)
 			}
 		}
-		s.detail[row.Author] = append(s.detail[row.Author], streamDetail(row.Epoch, row.Contig, row.NoBody, wanted))
+		s.detail[row.Author] = append(s.detail[row.Author], streamDetail(row.Epoch, row.Contig, row.Floor, row.NoBody, wanted))
 	}
 	for a, d := range s.detail {
 		s.digests[a] = digestOf(d)
@@ -221,10 +232,20 @@ func (v *roomView) ensure() error {
 }
 
 // streamDetail is one stream's detail from the positions held without
-// text (ascending) and those wanted: the floor x is the longest run from 1
-// of positions without text and not wanted; nb and w list what is above it.
-func streamDetail(epoch string, c int64, noBody, wanted []int64) store.StreamDetail {
+// text, 1 to floor and noBody (ascending, above floor), and those wanted
+// (ascending): the floor x is the longest run from 1 of positions without
+// text and not wanted; nb and w list what is above it.
+func streamDetail(epoch string, c, floor int64, noBody, wanted []int64) store.StreamDetail {
 	d := store.StreamDetail{E: epoch, C: c, W: wanted}
+	if len(wanted) > 0 && wanted[0] <= floor {
+		d.X = wanted[0] - 1
+		for n := d.X + 1; n <= floor; n++ {
+			d.NB = append(d.NB, n)
+		}
+		d.NB = append(d.NB, noBody...)
+		return d
+	}
+	d.X = floor
 	i := 0
 	for i < len(noBody) && noBody[i] == d.X+1 && (len(wanted) == 0 || wanted[0] != noBody[i]) {
 		d.X++
@@ -315,6 +336,28 @@ func (x *Exchange) buildPage(v *roomView, readable func(*rec) (bool, error), wan
 		}
 		return readable(h)
 	}
+	// Every read of a stream here is bounded: atMost(k, n, upto) reads
+	// positions n to upto of k, at most, and only when n is not read yet;
+	// v.at would read the rest of the stream.
+	atMost := func(k streamKey, n, upto int64) (*rec, error) {
+		if n < 1 || n > v.contig[k] {
+			return nil, nil
+		}
+		if h := v.byPos[k][n]; h != nil {
+			return h, nil
+		}
+		if lo, ok := v.loaded[k]; ok && n >= lo {
+			return nil, nil // read already, from lo on: not held
+		}
+		hs, err := v.rd.RecordsFromN(v.room, k.author, k.epoch, n, int(max(upto, n)-n+1))
+		if err != nil {
+			return nil, err
+		}
+		for _, h := range hs {
+			v.keep(h)
+		}
+		return v.byPos[k][n], nil
+	}
 	var out []pageItem
 	for _, k := range streams {
 		for _, s := range want[k.author] {
@@ -322,7 +365,7 @@ func (x *Exchange) buildPage(v *roomView, readable func(*rec) (bool, error), wan
 				continue
 			}
 			for _, n := range s.W {
-				h, err := v.at(k, n)
+				h, err := atMost(k, n, n)
 				if err != nil {
 					return nil, false, err
 				}
@@ -340,25 +383,18 @@ func (x *Exchange) buildPage(v *roomView, readable func(*rec) (bool, error), wan
 		}
 	}
 	// At most limit records of a stream can be in the page, so no more are
-	// read: the first limit+1 of each stream (one more, to tell that the
-	// page is cut), read at once and not the rest of the stream as v.at
-	// would, give the page and the cut the whole stream would, since a
-	// record past them could only follow them in the page.
+	// read: the first limit+1 of each stream that are not in skip (one
+	// more, to tell that the page is cut) give the page and the cut the
+	// whole stream would, since a record past them could only follow them
+	// in the page. They are read limit+1 at a time, so a stream costs the
+	// page's limit plus the records of it skip holds, which were sent
+	// earlier in the exchange, never the rest of the stream.
 	per := map[streamKey][]pageItem{}
 	inPage := map[string]bool{}
 	for _, k := range streams {
 		from := reqC(k) + 1
-		if from <= v.contig[k] && v.byPos[k][from] == nil {
-			hs, err := v.rd.RecordsFromN(v.room, k.author, k.epoch, from, limit+1+min(len(skip), limit))
-			if err != nil {
-				return nil, false, err
-			}
-			for _, h := range hs {
-				v.keep(h)
-			}
-		}
 		for n := from; n <= v.contig[k] && len(per[k]) <= limit; n++ {
-			h, err := v.at(k, n)
+			h, err := atMost(k, n, n+int64(limit))
 			if err != nil {
 				return nil, false, err
 			}

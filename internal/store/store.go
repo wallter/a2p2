@@ -354,7 +354,7 @@ func (s *Store) tx(ctx context.Context, fn func(*sql.Tx) error) error {
 	s.texts.mu.Lock()
 	defer s.texts.mu.Unlock()
 	if err := tx.Commit(); err != nil {
-		s.texts.rooms = nil // committed or not: read again
+		s.texts.dropped() // committed or not: read again
 		return err
 	}
 	s.texts.committed(ts)

@@ -90,15 +90,19 @@ type Refusal struct {
 }
 
 // StreamHeld is what this machine holds of one stream, for its summary:
-// every position in [1, Contig]; NoBody, the positions held without text
-// (by its durable mark, or past retention by now); Missing, the subset
-// whose text is missing here.
+// every position in [1, Contig]; the positions held without text (by its
+// durable mark, or past retention by now), which are 1 to Floor and those
+// listed in NoBody (each above Floor); Missing, the subset whose text is
+// missing here. PastRetention says that some of them are live text past
+// retention that pruning has not marked expired yet.
 type StreamHeld struct {
-	Author  string
-	Epoch   string
-	Contig  int64
-	NoBody  []int64
-	Missing []int64
+	Author        string
+	Epoch         string
+	Contig        int64
+	Floor         int64
+	NoBody        []int64
+	PastRetention bool
+	Missing       []int64
 	// MissingIDs are the records at Missing, in the same order.
 	MissingIDs []string
 }

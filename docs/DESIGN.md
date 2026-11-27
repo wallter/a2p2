@@ -257,39 +257,84 @@ live records past retention by the clock that pruning has not marked yet.
 Up to 0.2.3 every summary read every record of the room, and every
 request served or made computes one (a held pull computes one again after
 each write), so serving an idle opening cost about 0.5 ms at 1,000 records
-and 130 to 160 ms at 100,000, all of it under the rooms lock. It now costs
-0.1 to 1 ms at any of these sizes (`go test -tags bench -run
-TestBenchPullHistory ./internal/node/`; the CHANGELOG has the table). Now each store keeps,
-in memory per room, the records without live text as of its last commit
-(`internal/store/summary.go`). It is read from the table once, the first
-time a summary of the room is asked for. After that, the writes keep it
-up to date: every statement that inserts a record or changes its reason
-(a stored record, a repair, a withdraw and the replacements it empties,
-pruning with or without undecided pairs kept, access re-decided by a log
-batch) notes the record's new state in its transaction (an `UPDATE` notes
-what its `RETURNING` clause gives). The notes are applied only once the
-transaction has committed. The cache's lock is held across that commit,
-so no read can see the committed rows before the cache does. A
-transaction that rolls back applies nothing, and leaving a room drops its
-entry. A summary read inside a write transaction lays that transaction's
-own notes over the committed entry. Live records past retention come from
-the expiry index each time. The summary's view of the room is read only
-when a missing text has to be decided. Nothing is stored and the schema
-is unchanged, so a database moves between this version and 0.2.3 either
-way. `TestSummaryCacheEqualsAReadOfTheRoomAfterEveryKindOfWrite` compares
-the cached summary with a read of the table after every step of random
-schedules of all these writes, rollbacks, reads inside a write, a room
-left and joined again, the clock passing retention and the store
-reopened. `TestSummaryReadsOnlyTheExpiryIndexAndTheStreams` checks the
-plans. What is left grows with the streams of the room (one row each,
-and one per stream held without text) and with the positions held without
-text, which are copied for each summary. It does not grow with the
-records held with text.
+and 130 to 160 ms at 100,000, all of it under the rooms lock. In the
+in-process benchmark (`go test -tags bench -run TestBenchPullHistory
+./internal/node/`; the CHANGELOG has the table) it now costs 0.1 to 1 ms
+from 1,000 to 100,000 records of text, growing with the streams and not
+with those records.
 
-**Pages.** A page, or an offer, holds at most its limit of records. It
-reads at most that many plus one of each stream, not the rest of the
-stream, so a page of a catch-up costs its page and not the backlog
-(`TestAPageCutAtItsLimitIsTheStartOfTheWholePage`).
+Each store keeps, in memory per room, the records without live text as of
+its last commit (`internal/store/summary.go`): per stream the runs of
+positions without text, and the missing texts by position. It is read
+from the table once, the first time a summary of the room is asked for.
+After that, the writes keep it up to date. Every statement that inserts a
+record without live text or changes a record's reason notes the record's
+new state in its transaction: a stored header, a repair, a withdraw and
+the replacements it empties and the three pruning updates (each of these
+`UPDATE`s notes what its `RETURNING` clause gives), and access re-decided
+by a log batch (noted per record it changes). A record stored with live
+text is not noted: it changes nothing kept here. The notes are applied
+only once the transaction has committed, and the cache's lock is held
+across that commit, so no read can see the committed rows before the
+cache does. A transaction that rolls back applies nothing, a commit that
+fails drops the whole cache, and leaving a room drops its entry. A
+summary read inside a write transaction lays that transaction's own notes
+over the committed entry. Live records past retention come from the
+expiry index each time; a summary that counts one asks for the pruning
+pass, as reading that record does, so the expiry becomes durable before
+the clock can be set back
+(`TestASummaryThatCountsTextPastRetentionAsksForPruningAndTheClockGoingBackDoesNotReviveIt`).
+The summary's view of the room is read only when a missing text has to be
+decided.
+
+One connection keeps a read and a write apart only while the read's
+context lives: when it is cancelled, `database/sql` rolls the read back
+and hands the connection to the next transaction while the read is still
+running. So an entry is never changed once in the cache (a commit puts a
+new one in its place), and an entry a read built is kept only if no write
+noting that room has committed since the read began
+(`TestACancelledColdReadDoesNotPublishWhatAWriteCommittedSinceMadeStale`,
+`TestAWriteCommittedAfterACancelledReadTookTheCacheDoesNotChangeWhatItReads`,
+`TestACancelledSummaryReadNeverLeavesAStaleEntry`).
+
+The cache assumes that its store is the only writer of the database. A
+second store on the same file, or another program writing it, would leave
+it stale until a restart; the daemon's lock on its home is what prevents
+that. It has no eviction: an entry lives until the room is left or the
+daemon stops. What bounds it is what the machine holds: per stream, one
+run for each stretch of positions without text (16 bytes) and one entry
+for each missing text (about 80 bytes until pruning expires it). A member
+can make it grow only by what its records cost the machine anyway, for
+example by sending headers whose text never follows, or by withdrawing
+every other one of its messages.
+
+Nothing is stored and the schema is unchanged, so a database moves
+between this version and 0.2.3 either way.
+`TestSummaryCacheEqualsAReadOfTheRoomAfterEveryKindOfWrite` compares the
+cached summary with a read of the table after every step of random
+schedules of these writes, rollbacks, reads inside a write, forks, hints,
+a room left and joined again, the clock passing retention and the store
+reopened; its comment lists the writes it does not generate.
+`TestSummaryReadsOnlyTheExpiryIndexAndTheStreams` checks the plans.
+
+What a summary still costs grows with history in these ways. It reads one
+row per stream of the room, and a restart starts a new stream. It lists
+every position without text above the first run from position 1, since
+the detail on the wire lists them. The expiry index it reads is shared by
+every room, so it also passes the unpruned rows of other rooms (missing
+text kept undecided, rooms set aside). The first summary of a room after
+a start reads the room's records without text once.
+
+**Pages.** A page, or an offer, holds at most its limit of records. Each
+stream is read at most limit+1 records at a time, and wanted text one
+record at a time, so a page reads on the order of its limit plus the
+records of the stream already sent in the exchange, never the rest of the
+stream. `TestACatchUpPageOfAHundredThousandRecordStreamReadsOnTheOrderOfItsLimit`
+counts the records read for a catch-up from position 1 of a 100,000-record
+stream (20,000 under the race detector), for text wanted far down it, and
+with many records already sent.
+`TestAPageCutAtItsLimitIsTheStartOfTheWholePage` checks that the page is
+the one the whole stream would give.
 
 **The rooms lock.** `Rooms.mu` is held while a request is served (steps 4
 to 8 of PROTOCOL 4.4, including the write transaction that stores the
@@ -297,10 +342,10 @@ request's entries, offer and observation), while a held answer is
 checked after a write and when it is released, and while a requester
 prepares a request and applies a response. It keeps one room's membership
 machine and what the store holds of it from diverging, and it is the one
-lock for every room. It still is. After the changes above, a request
-holds it for well under a millisecond plus its transaction's commit,
-whatever the history. A per-room lock would add little, because the
-store's single connection serialises every transaction anyway.
+lock for every room. It still is. In the benchmark a request now holds it
+for well under a millisecond plus its transaction's commit at 1,000 to
+100,000 records. A per-room lock would add little, because the store's
+single connection serialises every transaction anyway.
 
 Measured with `TestPullSizesInASixtyFourMachineRoomAfterThirtyDaysOfDailyRestarts`
 (skipped unless `A2P2_MODEL_DEEP=1`; the log lines say "64 machines", but

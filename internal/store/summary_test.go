@@ -27,6 +27,13 @@ func sameSummary(a, b []StreamHeld) bool {
 	norm := func(xs []StreamHeld) []StreamHeld {
 		out := make([]StreamHeld, len(xs))
 		for i, x := range xs {
+			if x.Floor > 0 { // the same positions, listed
+				all := make([]int64, 0, int(x.Floor)+len(x.NoBody))
+				for n := int64(1); n <= x.Floor; n++ {
+					all = append(all, n)
+				}
+				x.Floor, x.NoBody = 0, append(all, x.NoBody...)
+			}
 			if len(x.NoBody) == 0 {
 				x.NoBody = nil
 			}
@@ -48,8 +55,14 @@ func sameSummary(a, b []StreamHeld) bool {
 // and without undecided pairs kept; access re-decided by a log batch; a
 // room left and joined again; transactions rolled back; a summary read inside a write
 // transaction before it commits; the clock passing retention with nothing
-// pruned; the store reopened), the summary equals a fresh read of the
-// records table after every step, read now and 31 days later.
+// pruned; the store reopened; a second record at a held position; a hint
+// of a stream not held), the summary equals a fresh read of the records
+// table after every step, read now and 31 days later.
+//
+// Not generated here: observations of peers; membership replay and the
+// settling of a log fork; real frontier changes (access is re-decided by
+// a fixed rule); file sends and sweeps; a room set aside; a commit that
+// fails. Cancellation is in summary_race_test.go.
 func TestSummaryCacheEqualsAReadOfTheRoomAfterEveryKindOfWrite(t *testing.T) {
 	for seed := int64(1); seed <= 12; seed++ {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) { summaryCacheSchedule(t, seed, 400) })
@@ -126,7 +139,7 @@ func summaryCacheSchedule(t *testing.T, seed int64, steps int) {
 		k, e := rng.Intn(len(keys)), rng.Intn(len(epochs))
 		key := sk{r, k, e}
 		var what string
-		switch op := rng.Intn(15); {
+		switch op := rng.Intn(17); {
 		case op < 4:
 			what = "message"
 			v := next(r, k, e, core.RecordFields{Text: fmt.Sprint("m", step)})
@@ -259,6 +272,19 @@ func summaryCacheSchedule(t *testing.T, seed int64, steps int) {
 			case errors.Is(err, errRollback), errors.Is(err, ErrNotFound), errors.Is(err, ErrLeft):
 			default:
 				t.Fatalf("seed %d step %d: %v", seed, step, err)
+			}
+		case op == 15 && seq[key] > 0:
+			// A second record at a held position: evidence only.
+			what = "fork"
+			v := mk(t, keys[k], core.RecordFields{Room: r, Epoch: epochs[e], Seq: 1, Text: fmt.Sprint("f", step), Created: now})
+			if _, err := s.PutRecord(ctx, v, PutOpts{Now: now, MayRead: true}); err != nil && !errors.Is(err, ErrNotFound) {
+				t.Fatal(err)
+			}
+		case op == 16:
+			// A peer's hint of a stream not held here (contig 0).
+			what = "hint"
+			if err := s.NoteKnown(ctx, r, nodeOf(keys[k]), "00000000000000e9", int64(1+rng.Intn(9)), now); err != nil {
+				t.Fatal(err)
 			}
 		case op == 13:
 			what = "clock"

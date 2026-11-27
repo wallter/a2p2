@@ -444,7 +444,9 @@ func place(tx *sql.Tx, r *core.VerifiedRecord, o PutOpts) (Outcome, error) {
 		ms(f.Created), r.Header(), r.Sig(), body, reason, effect); err != nil {
 		return "", err
 	}
-	noteText(tx, textNote{f.Room, r.Author(), f.Epoch, r.ID(), reason, f.Seq, ms(f.Created)})
+	if reason != ReasonLive { // a new position with live text changes no cached summary
+		noteText(tx, textNote{f.Room, r.Author(), f.Epoch, r.ID(), reason, f.Seq, ms(f.Created)})
+	}
 	if err := hook("put:inserted"); err != nil {
 		return "", err
 	}
@@ -669,6 +671,7 @@ func (rd *Reader) queryPositioned(where string, args ...any) ([]positioned, erro
 			return nil, err
 		}
 		out = append(out, p)
+		rd.read++
 	}
 	return out, rows.Err()
 }
@@ -894,7 +897,15 @@ func (s *Store) Seen(ctx context.Context, agent, room string, plan func(*Reader)
 
 // Reader reads one consistent state inside a transaction. It is only valid
 // inside the View, Write or Seen call that made it.
-type Reader struct{ tx *sql.Tx }
+type Reader struct {
+	tx   *sql.Tx
+	read int // records read through query and Record
+}
+
+// RecordsRead is how many records rd has read through RecordsFrom,
+// RecordsFromN, Record and the other reads of whole records: what a test
+// counts to tell that a read is bounded.
+func (rd *Reader) RecordsRead() int { return rd.read }
 
 const heldCols = `hdr, sig, body, reason, effect`
 
@@ -928,6 +939,7 @@ func (rd *Reader) query(where string, args ...any) ([]Held, error) {
 			return nil, err
 		}
 		out = append(out, h)
+		rd.read++
 	}
 	return out, rows.Err()
 }
@@ -935,6 +947,7 @@ func (rd *Reader) query(where string, args ...any) ([]Held, error) {
 // Record returns the record with id in room, if held.
 func (rd *Reader) Record(room, id string) (Held, bool, error) {
 	h, err := scanHeld(rd.tx.QueryRow(`SELECT `+heldCols+` FROM records WHERE room = ? AND id = ?`, room, id))
+	rd.read++
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return Held{}, false, nil
@@ -1010,6 +1023,7 @@ func (rd *Reader) Streams(room string) ([]Stream, error) {
 				return nil, fmt.Errorf("stored record does not parse: %w", err)
 			}
 			s.First = Held{Record: r, Reason: reason.String, Effect: effect.String}
+			rd.read++
 		}
 		if knownAt != 0 {
 			s.KnownAt = fromMS(knownAt)
