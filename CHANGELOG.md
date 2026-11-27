@@ -19,12 +19,12 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Changed
 
-- **The MCP `inbox` returns at most 24,000 bytes by default, and marks seen
-  only what it returned (D70).** A new `max_bytes` argument (512 to 40,000)
-  sets how many bytes of result a reader wants; without it the tool now
-  applies 24,000, so a large backlog comes in more calls than before (1 KB
-  messages about twenty to a call instead of fifty; fifty short messages
-  still fit one). The daemon picks the entries, oldest first, and keeps
+- **The MCP `inbox` returns at most 18,000 bytes by default, and marks seen
+  only what it returned (D70, D72).** A new `max_bytes` argument (512 to
+  32,000) sets how many bytes of result a reader wants; without it the tool
+  now applies 18,000, so a large backlog comes in more calls than before
+  (1 KB messages about fifteen to a call instead of fifty; fifty one-line
+  messages still fit one). The daemon picks the entries, oldest first, and keeps
   receipts for those only: what did not fit is neither returned nor marked
   seen, and the result's new `more` says how many of those held when the
   daemon looked are still unread, so the agent calls again. The budget
@@ -32,8 +32,8 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   refused for its budget sets no level. An oldest message too large for
   the budget is refused (`too_large`) with at least the `max_bytes` it
   needs, and nothing is marked; one too large for any budget is returned
-  alone at 40,000 with its text cut to fit and `text_cut` saying so, so no
-  result is over 40,000 bytes. `max_bytes` with `peek`, `recent`,
+  alone at 32,000 with its text cut to fit and `text_cut` saying so, so no
+  result is over 32,000 bytes. `max_bytes` with `peek`, `recent`,
   `skipped`, `thread` or `fetch` is refused. On a daemon before 0.2.4 the
   MCP server reads as before, with no budget, and its result's `note` says
   to run `a2p2 stop` to start the new daemon. The local page and the CLI
@@ -44,6 +44,14 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   it, as before, so a harness that cuts a result can still lose
   messages. The `whoami`, `inbox` and `ack` descriptions were
   shortened to pay for the argument: the definitions are 3,992 bytes.
+- **The inbox's byte sizes are lower: 18,000 by default and 32,000 at
+  most (D72).** Earlier builds of this unreleased change used 24,000 and
+  40,000, sized at about 4 bytes a token. Inbox results measured in Claude
+  Code came to 1.5 to 3.4 bytes a token, about 2 for ordinary entries, so
+  a default page could pass its 10,000-token warning, and a page it saves
+  to a file instead of showing had already been marked seen. A `max_bytes`
+  above 32,000 is now read as 32,000, and the result's `note` says so,
+  rather than refused; the local API still refuses one.
 - **Docs: the durability limit on macOS is stated.** `send` survives a crash
   of a2p2 or of the operating system, but on macOS a sudden power loss can
   lose the last few sent messages, because the database's sync does not
@@ -61,6 +69,12 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Fixed
 
+- **A daemon that a command starts no longer keeps that command's working
+  directory.** Since 0.1.0 the daemon started by the first CLI command or
+  MCP server ran in whatever directory that was, for as long as it ran:
+  it held a temporary worktree or project directory that someone may want
+  to remove, and could keep a volume from being unmounted. It now runs in
+  its home, made absolute first.
 - **Serving and making a pull no longer gets slower as a room's history
   grows.** Every pull request served or made worked out the machine's
   summary of the room by reading every record of it, under the lock that

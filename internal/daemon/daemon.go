@@ -761,8 +761,10 @@ func Connect(ctx context.Context, home string) (*localapi.Client, error) {
 		return nil, err
 	}
 	defer logf.Close()
-	cmd := exec.Command(exe, "daemon")
-	cmd.Env = append(os.Environ(), "A2P2_HOME="+home)
+	cmd, err := daemonCmd(exe, home)
+	if err != nil {
+		return nil, err
+	}
 	cmd.Stdout, cmd.Stderr = logf, logf
 	if cmd, err = startDetached(cmd); err != nil { // survive the caller's terminal
 
@@ -777,6 +779,23 @@ func Connect(ctx context.Context, home string) (*localapi.Client, error) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return nil, fmt.Errorf("the a2p2 daemon did not start; see %s", filepath.Join(home, "daemon.log"))
+}
+
+// daemonCmd is the command that starts the daemon of home. It runs in its
+// home, not in the directory of whoever started it, so that it holds no
+// directory someone may want to remove or unmount for as long as it runs.
+// The home is made absolute first, since a relative one would then name
+// a directory inside itself; the daemon resolves no path from its working
+// directory otherwise (files to send must be absolute).
+func daemonCmd(exe, home string) (*exec.Cmd, error) {
+	abs, err := filepath.Abs(home)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(exe, "daemon")
+	cmd.Dir = abs
+	cmd.Env = append(os.Environ(), "A2P2_HOME="+abs)
+	return cmd, nil
 }
 
 // WaitStopped waits up to d for the daemon of home to have exited: its

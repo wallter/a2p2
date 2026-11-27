@@ -6,15 +6,19 @@ import (
 	"unicode/utf8"
 )
 
-// A reader's byte budget for one inbox read (D70). The MCP inbox tool
-// applies DefaultInboxBytes when its caller gives none; the local API and
-// the CLI apply none unless asked. The bounds keep one result under what
-// the harnesses keep in context (Claude Code saves a result to a file past
-// 25,000 tokens or 50,000 characters).
+// A reader's byte budget for one inbox read (D70, D72). The MCP inbox
+// tool applies DefaultInboxBytes when its caller gives none, and reads a
+// larger max_bytes as MaxInboxBytes; the local API and the CLI apply none
+// unless asked. The bounds keep one result under what the harnesses keep
+// in context: Claude Code warns past 10,000 tokens and saves a result to
+// a file past 25,000, and its inbox results were measured at 1.54 to 3.44
+// bytes a token (2.05 for short entries). The default still holds one
+// plain 16 KiB text, and the ceiling every field of an entry but its text,
+// at their largest, with room for text_cut (TestAnEntryAtItsLargestBesidesItsTextFitsTheCeiling).
 const (
-	DefaultInboxBytes = 24000
+	DefaultInboxBytes = 18000
 	MinInboxBytes     = 512
-	MaxInboxBytes     = 40000
+	MaxInboxBytes     = 32000
 )
 
 // NeedSlack is what a refusal adds to the size it measured when it names
@@ -185,7 +189,7 @@ func (o InboxOpts) check() error {
 	case o.MaxBytes == 0:
 		return nil
 	case o.MaxBytes < MinInboxBytes || o.MaxBytes > MaxInboxBytes:
-		return userErr("max_bytes is 512 to 40000")
+		return userErr("max_bytes is %d to %d", MinInboxBytes, MaxInboxBytes)
 	case o.Size == nil:
 		return errors.New("inbox: max_bytes without a size")
 	}
