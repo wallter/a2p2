@@ -10,6 +10,15 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Fixed
 
+- **`a2p2 status` and `a2p2 doctor` say when the running daemon is another
+  version than the binary.** After installing a new binary with the old
+  daemon still running, `status` showed only the daemon's version. It now
+  adds one line naming both versions and `a2p2 stop`. `doctor` fails the
+  check "daemon version" when the daemon is older, and warns when it is
+  newer or the two cannot be ordered. `send` to several addressees that
+  have not registered now prints its stderr sentence once, naming up to
+  three and then "and N more", instead of once for each. docs/INSTALL.md
+  says to `mv` a new binary into place, not copy over the old one.
 - **A message sent to an agent before it registers now reaches it.**
   From 0.1.0 to 0.3.0 a label's first use started its reading at the end
   of every room, so a brief a lead sent to `w1@<machine>` before the

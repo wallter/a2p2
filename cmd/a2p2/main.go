@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -715,6 +716,9 @@ func status(c *cmd) error {
 			fmt.Println("NOTICE   " + st.Notice)
 		}
 		fmt.Printf("machine  %s (%s)  a2p2 %s  pid %d\n", node.EscapeDisplay(st.Name), short(st.Node), st.Version, st.PID)
+		if _, line := daemonVersionNote(st.Version, version); line != "" {
+			fmt.Println("         " + line)
+		}
 		switch {
 		case st.Network.Reason == "being applied":
 			fmt.Printf("network  %s decided, being applied (still %s)\n", st.Network.State, st.Network.Applied)
@@ -1412,6 +1416,58 @@ func netCmd(c *cmd, args []string) error {
 	return errors.New("the decision is recorded; the daemon has not applied it yet. Run a2p2 status to check")
 }
 
+// daemonVersionNote compares the running daemon's version with this
+// binary's. line is empty when they are the same or the daemon did not
+// report one. cmp is -1 when the daemon is older, 1 when it is newer and 0
+// when they differ in a way that cannot be ordered (a development build).
+func daemonVersionNote(daemon, binary string) (cmp int, line string) {
+	if daemon == "" || daemon == binary {
+		return 0, ""
+	}
+	d, dok := versionCore(daemon)
+	b, bok := versionCore(binary)
+	if dok && bok {
+		for i := range d {
+			if d[i] != b[i] {
+				cmp = -1
+				if d[i] > b[i] {
+					cmp = 1
+				}
+				break
+			}
+		}
+	}
+	head := "The running a2p2 daemon is " + node.EscapeDisplay(daemon) + " and this a2p2 is " + binary
+	switch cmp {
+	case -1:
+		return cmp, head + ": the daemon is older. Run a2p2 stop to start this one."
+	case 1:
+		return cmp, head + ": the daemon is newer. Install the newer a2p2, or run a2p2 stop to start this one."
+	}
+	return cmp, head + ": they differ. Run a2p2 stop to start this one."
+}
+
+// versionCore reads the three numbers of vMAJOR.MINOR.PATCH, ignoring any
+// pre-release or build suffix.
+func versionCore(v string) (n [3]int, ok bool) {
+	v = strings.TrimPrefix(v, "v")
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		v = v[:i]
+	}
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return n, false
+	}
+	for i, p := range parts {
+		x, err := strconv.Atoi(p)
+		if err != nil || x < 0 {
+			return n, false
+		}
+		n[i] = x
+	}
+	return n, true
+}
+
 func doctor(c *cmd, args []string) error {
 	if err := c.fs.Parse(args); err != nil {
 		return errUsage
@@ -1475,6 +1531,13 @@ func runDoctor(c *cmd, w io.Writer, o harness.Options) error {
 			var st localapi.Status
 			err = cl.Call(c.ctx, "status", nil, &st)
 			add("local API", err, fmt.Sprintf("machine %s, %d room(s), %d agent(s)", short(st.Node), len(st.Rooms), len(st.Agents)), "")
+			if err == nil {
+				if cmp, line := daemonVersionNote(st.Version, version); cmp < 0 {
+					checks = append(checks, harness.Check{Name: "daemon version", Info: line, Fix: "a2p2 stop"})
+				} else if line != "" {
+					warns = append(warns, harness.Check{Name: "daemon version", OK: true, Info: "warning: " + line})
+				}
+			}
 			if u := st.Unattended; u != nil {
 				warns = append(warns, harness.Check{Name: "person", OK: true, Info: "warning: " + personUseText(*u)})
 			}
@@ -1583,10 +1646,32 @@ func send(c *cmd, args []string) error {
 	var m localapi.SendResp
 	return c.call("send", req, &m, func() {
 		fmt.Println(m.ID)
-		for _, a := range m.NotRegistered {
-			fmt.Fprintf(os.Stderr, "%s has not registered on this machine yet; the message is unread for it when it registers, if this machine still holds it among its newest messages\n", a)
+		if line := notRegisteredLine(m.NotRegistered); line != "" {
+			fmt.Fprintln(os.Stderr, line)
 		}
 	})
+}
+
+// notRegisteredLine is the one sentence for the addressees on this machine
+// that have not registered (D73). It names up to three, then "and N more".
+func notRegisteredLine(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	who := strings.Join(ids[:min(len(ids), 3)], ", ")
+	verb := "has"
+	if len(ids) > 1 {
+		verb = "have"
+	}
+	if len(ids) > 3 {
+		who += fmt.Sprintf(" and %d more", len(ids)-3)
+	}
+	it := "it"
+	if len(ids) > 1 {
+		it = "each"
+	}
+	return who + " " + verb + " not registered on this machine yet; the message is unread for " + it +
+		" when it registers, if this machine still holds it among its newest messages"
 }
 
 // filesModeWords says what each files setting of a room does.
