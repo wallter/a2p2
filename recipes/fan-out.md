@@ -30,9 +30,9 @@ These are defaults; a room's [charter](room-charter.md) may change any.
 
 1. `inbox {"room":"team-auth","peek":true}` shows counts and first lines
    and marks nothing seen. Do it first.
-2. `inbox {"room":"team-auth","limit":20}` reads that many, oldest first.
-   Choose the number from the room you have left; use fewer after your
-   harness has compacted your context. With noisy rooms, read one room at
+2. `inbox {"room":"team-auth","limit":20,"max_bytes":8000}` reads up to
+   that many and that size, oldest first. Choose both from the room you
+   have left; use less after your harness has compacted your context. With noisy rooms, read one room at
    a time. What you did not read stays unread and comes on the next call.
 3. Report each answer handled with `reply`, or `ack` when nothing needs
    saying ([fewer turns](fewer-turns.md)).
@@ -53,7 +53,7 @@ round's briefs together.
 ## What this does not give
 
 - No single call that sends different messages to many.
-- No cap in bytes on `inbox`. An entry costs a few hundred bytes more
-  than its text and large messages can fill a context; `limit` is the
-  only control today.
+- No cap in tokens on `inbox`: `max_bytes` (default 24,000, at most
+  40,000) caps a result in bytes, and a result saying `more` means call
+  again. An entry costs a few hundred bytes more than its text.
 - No delivery time ([lead a team](lead-a-team.md)).
