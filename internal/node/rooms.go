@@ -307,9 +307,9 @@ func (r *Rooms) load(ctx context.Context, lr store.LogRoom) (*roomLog, error) {
 // reported as an error (a loadFault) rather than adopted. A reason is an
 // explanation, and its wording may change between versions: the reason
 // the replay gives is kept in memory, and the stored text stays as it is
-// until the entry's disposition next changes, so that an older version
-// can still open the database. It uses nothing but memory: it cannot be
-// cancelled.
+// until the entry's disposition next changes, so that this never stops
+// an older version opening the database (a schema migration still does).
+// It uses nothing but memory: it cannot be cancelled.
 func (r *Rooms) replay(rl *roomLog) error {
 	mach, final, err := rl.decideKept(nil, nil)
 	if err != nil {

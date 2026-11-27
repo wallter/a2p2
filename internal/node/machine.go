@@ -274,12 +274,30 @@ type readFront struct {
 
 // undecided lists the (room, author) pairs with a head of this machine's
 // reading frontier not held: whether it may read their text is undecided.
+// Every author of a room whose frontier is not known (set aside) is.
 func (m *Machine) undecided(rd *store.Reader) (map[[2]string]bool, error) {
+	return m.headsNotHeld(rd, true)
+}
+
+// unadmitted lists the (room, author) pairs whose admission head this
+// machine does not hold yet, in rooms whose frontier is known: the streams
+// a registration leaves for the frontier seeding (Register). A room set
+// aside is not among them: its frontier is not known, so its streams are
+// seeded at the current end as for any registration, and nothing would
+// seed them when it opens again.
+func (m *Machine) unadmitted(rd *store.Reader) (map[[2]string]bool, error) {
+	return m.headsNotHeld(rd, false)
+}
+
+func (m *Machine) headsNotHeld(rd *store.Reader, unknown bool) (map[[2]string]bool, error) {
 	if m.fronts == nil {
 		return nil, nil
 	}
 	out := map[[2]string]bool{}
 	for room, f := range m.fronts() {
+		if f.Unknown && !unknown {
+			continue
+		}
 		if f.Unknown {
 			ss, err := rd.Streams(room)
 			if err != nil {
@@ -336,13 +354,29 @@ func NewMachine(st *store.Store, key ed25519.PrivateKey, o MachineOpts) *Machine
 
 // Register makes agent known here. The first time, in one transaction, its
 // cursors start at the current end of every stream in every room, so what
-// was written before it arrived is not unread for it. It reports whether
-// the agent is new.
+// was written to the room before it arrived is not unread for it; a
+// message held then that is addressed to it is unread all the same
+// (store.Register, D73). It reports whether the agent is new.
 func (m *Machine) Register(ctx context.Context, agent string) (bool, error) {
 	if err := checkAgent(agent); err != nil {
 		return false, err
 	}
-	return m.st.Register(ctx, agent, m.now())
+	// As Prune does, under locked: the frontier read is the one the store
+	// seeds against (a head published meanwhile would be seeded for the
+	// agents registered before this one, and not for it).
+	var fresh bool
+	run := func() error {
+		var err error
+		fresh, err = m.st.RegisterWith(ctx, m.ID, agent, m.now(), m.unadmitted)
+		return err
+	}
+	var err error
+	if m.locked != nil {
+		err = m.locked(run)
+	} else {
+		err = run()
+	}
+	return fresh, err
 }
 
 // Prune is the pruning pass [R6]: text 30 days old by this machine's clock
@@ -427,6 +461,11 @@ type Sent struct {
 	// ToOmitted is how many thread participants a reply to the thread
 	// left out at the addressee limit (Surface, SendInput.Thread).
 	ToOmitted int
+	// NotRegistered: the addressees on this machine that have never
+	// registered here (Surface.Send). Each reads the message when it first
+	// registers (D73). Nothing is said of other machines' agents:
+	// this machine cannot know them.
+	NotRegistered []core.Addressee
 }
 
 // Send writes a message. Once it returns, the message is committed (D1).

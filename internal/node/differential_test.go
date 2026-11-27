@@ -8,10 +8,12 @@ package node
 // times are normalised; epochs are the same on both sides, because each
 // Machine draws its epochs from the model's counter.
 //
+// Registering an agent mid-schedule runs on both sides (the model's
+// Register): its time begins at the current end, except for messages
+// addressed to it (D73).
+//
 // What the model does not have is checked against invariants instead:
-// registration of an agent mid-schedule (the model's agents exist from the
-// start; the implementation's start at the current end, so the model's
-// listing is compared without the positions before it), records the model
+// records the model
 // cannot express (references of the wrong kind or author, placed directly:
 // every view must be as if they were not there), and cursors (walking from
 // where each agent's time began gives exactly what walking from its
@@ -49,14 +51,13 @@ const diffRoom = "r_0123456789abcdef0123456789abcdef"
 
 var diffBase = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// lateAgent is registered only by opRegister; the model has it from the
-// start.
+// lateAgent is registered only by opRegister, on both sides.
 const lateAgent = "dave"
 
 // sim is one machine on the implementation side.
 type sim struct {
 	name   delivery.MachineID
-	agents []string // the model's agents; lateAgent only once registered here
+	agents []string // the agents; lateAgent only once registered here
 	key    ed25519.PrivateKey
 	path   string
 	st     *store.Store
@@ -69,7 +70,6 @@ type backup struct {
 	machine delivery.MachineID
 	model   *delivery.Snapshot
 	path    string // a copy of the database files, never written again
-	reg     map[streamKey]int64
 	isReg   bool
 	px      *pxBackup // with the real exchange
 }
@@ -97,7 +97,10 @@ type written struct {
 }
 
 // counts are shared by a harness and its clones.
-type counts struct{ retries, stopped, injected, repaired, missing int }
+type counts struct {
+	retries, stopped, injected, repaired, missing int
+	lateRegs, remoteBriefs                        int // on machines with peers (D73)
+}
 
 type harness struct {
 	t        testing.TB
@@ -115,16 +118,13 @@ type harness struct {
 	shown    map[agentKey]listing
 	backups  []backup
 	injected map[string]bool
-	// reg is where lateAgent's time began on each machine where it is
-	// registered (its cursors right after registration).
-	reg     map[delivery.MachineID]map[streamKey]int64
-	epochs  uint64 // mirrors the model's epoch counter
-	ids     uint64 // other random bytes
-	texts   int
-	log     []string
-	ops     []op // what log says, to replay a failing schedule (A2P2_MODEL_DUMP)
-	stopped bool
-	c       *counts
+	epochs   uint64 // mirrors the model's epoch counter
+	ids      uint64 // other random bytes
+	texts    int
+	log      []string
+	ops      []op // what log says, to replay a failing schedule (A2P2_MODEL_DUMP)
+	stopped  bool
+	c        *counts
 	// px, when set, runs the real exchange and the room log instead of
 	// pull below (pull_differential_test.go).
 	px *pxState
@@ -153,7 +153,7 @@ func newHarness(t testing.TB, machines map[delivery.MachineID][]string) *harness
 	h := &harness{t: t, w: delivery.NewWorld(), sims: map[delivery.MachineID]*sim{},
 		label: map[string]string{}, pair: map[delivery.RecordID]string{}, implPair: map[string]delivery.RecordID{},
 		nodes: map[string]delivery.MachineID{}, shown: map[agentKey]listing{}, injected: map[string]bool{},
-		reg: map[delivery.MachineID]map[streamKey]int64{}, c: &counts{}}
+		c: &counts{}}
 	var names []delivery.MachineID
 	for n := range machines {
 		names = append(names, n)
@@ -163,7 +163,7 @@ func newHarness(t testing.TB, machines map[delivery.MachineID][]string) *harness
 	h.foreign = ed25519.NewKeyFromSeed(seed[:])
 	for i, k := range keys(names) {
 		n := names[i]
-		h.w.AddMachine(n, machines[n]...)
+		h.w.AddMachine(n, slices.DeleteFunc(slices.Clone(machines[n]), func(a string) bool { return a == lateAgent })...)
 		s := &sim{name: n, key: k, path: filepath.Join(t.TempDir(), "a2p2.db")}
 		st, err := store.Open(s.path)
 		if err != nil {
@@ -241,10 +241,6 @@ func (h *harness) clone() *harness {
 	c.label, c.pair, c.implPair = cloneMap(h.label), cloneMap(h.pair), cloneMap(h.implPair)
 	c.writes, c.msgs, c.reps = slices.Clone(h.writes), slices.Clone(h.msgs), slices.Clone(h.reps)
 	c.shown, c.injected = cloneMap(h.shown), cloneMap(h.injected)
-	c.reg = map[delivery.MachineID]map[streamKey]int64{}
-	for k, v := range h.reg {
-		c.reg[k] = cloneMap(v)
-	}
 	c.backups = slices.Clone(h.backups)
 	c.log = slices.Clone(h.log)
 	c.ops = slices.Clone(h.ops)
@@ -308,8 +304,9 @@ type op struct {
 	machine  delivery.MachineID
 	server   delivery.MachineID // pull
 	agent    string
-	to       string // send: "" everyone, or an agent label on the same machine
-	everyone bool   // reply: to everyone instead of the parent's author
+	to       string             // send: "" everyone, or an agent label
+	toMach   delivery.MachineID // send: the machine of to ("": the sender's)
+	everyone bool               // reply: to everyone instead of the parent's author
 	ask      bool
 	target   int  // index into msgs (or reps); negative counts from the end
 	n        int  // seenPart: how many; advance and skew: hours; inject: what
@@ -323,7 +320,11 @@ func (o op) String() string {
 	}
 	switch o.kind {
 	case opSend:
-		return fmt.Sprintf("%s/%s send to=%q ask=%v%s", o.machine, o.agent, o.to, o.ask, at)
+		to := o.to
+		if o.toMach != "" {
+			to += "@" + string(o.toMach)
+		}
+		return fmt.Sprintf("%s/%s send to=%q ask=%v%s", o.machine, o.agent, to, o.ask, at)
 	case opReply:
 		return fmt.Sprintf("%s/%s reply #%d everyone=%v ask=%v%s", o.machine, o.agent, o.target, o.everyone, o.ask, at)
 	case opReplace:
@@ -549,7 +550,7 @@ func (h *harness) do(o op, variant int) {
 		return t
 	}
 	if o.agent != "" && !h.registered(o.machine, o.agent) {
-		return // the model's agent exists; the implementation's does not yet
+		return // lateAgent before it registers: an addressee only
 	}
 	switch o.kind {
 	case opSend, opReply:
@@ -557,8 +558,17 @@ func (h *harness) do(o op, variant int) {
 		msg := delivery.Msg{Body: body, AskHandled: o.ask}
 		d := Draft{Room: diffRoom, Agent: o.agent, Text: body, AskHandled: o.ask}
 		if o.to != "" {
-			msg.To = []delivery.Addr{{Machine: o.machine, Agent: o.to}}
-			d.To = []core.Addressee{{Node: s.m.ID, Agent: o.to}}
+			to := s
+			if o.toMach != "" {
+				if to = h.sims[o.toMach]; to == nil {
+					return // not a member yet: its node is not known
+				}
+			}
+			msg.To = []delivery.Addr{{Machine: to.name, Agent: o.to}}
+			d.To = []core.Addressee{{Node: to.m.ID, Agent: o.to}}
+			if to != s {
+				h.c.remoteBriefs++
+			}
 		}
 		if o.kind == opReply {
 			mid, iid, ok := h.target(o.target)
@@ -617,7 +627,7 @@ func (h *harness) do(o op, variant int) {
 		h.reopen(s, "")
 	case opBackup:
 		b := backup{machine: o.machine, model: h.w.Backup(o.machine), path: filepath.Join(h.t.TempDir(), "backup.db"),
-			reg: cloneMap(h.reg[o.machine]), isReg: h.registered(o.machine, lateAgent)}
+			isReg: h.registered(o.machine, lateAgent)}
 		copyDB(h.t, s.path, b.path)
 		if h.px != nil {
 			b.px = h.px.backup(o.machine)
@@ -642,10 +652,8 @@ func (h *harness) do(o op, variant int) {
 		// after it confirms entries the restored store may not hold.
 		h.reopen(s, b.path)
 		s.agents = slices.DeleteFunc(s.agents, func(a string) bool { return a == lateAgent })
-		delete(h.reg, o.machine)
 		if b.isReg {
 			s.agents = append(s.agents, lateAgent)
-			h.reg[o.machine] = cloneMap(b.reg)
 		}
 	case opAdvance:
 		h.advance(delivery.Time(o.n))
@@ -820,7 +828,7 @@ func (h *harness) read(o op) {
 			ie, err = s.m.Branch(ctx, diffRoom, iid)
 		}
 	} else {
-		me = slices.DeleteFunc(h.w.Skipped(o.machine, o.agent), func(e delivery.Entry) bool { return h.before(o.machine, o.agent, e.Pos) })
+		me = h.w.Skipped(o.machine, o.agent)
 		ie, err = s.m.Skipped(ctx, diffRoom, o.agent)
 	}
 	if err != nil {
@@ -835,33 +843,47 @@ func (h *harness) read(o op) {
 	}
 }
 
-// register registers lateAgent on s. Its time begins at the current end,
-// which the model does not have: the model's listings are compared without
-// the positions before. Only in schedules without missing text, where the
-// model's walk passes those positions as the implementation's cursor does.
+// register registers lateAgent on s, on both sides. Its time begins at
+// the current end of every stream (Start), and for messages addressed to
+// it just before the first one held (Early, where its cursor starts);
+// the listings that follow are the model's. A stream whose author has a
+// head of this machine's admission frontier not held gets no cursor: it
+// is seeded at that head when it arrives, as for the agents registered
+// at the admission (the model starts it at the current end; the records
+// between are before the frontier, not admitted on both sides).
 func (h *harness) register(s *sim) {
 	h.t.Helper()
 	if h.registered(s.name, lateAgent) {
 		return
 	}
+	if err := h.w.Register(s.name, lateAgent); err != nil {
+		h.fail("model register: %v", err)
+	}
 	if _, err := s.m.Register(context.Background(), lateAgent); err != nil {
 		h.fail("register: %v", err)
 	}
 	s.agents = append(s.agents, lateAgent)
-	start := map[streamKey]int64{}
-	for _, st := range h.streams(s) {
-		if st.Contig > 0 {
-			start[streamKey{st.Author, st.Epoch}] = st.Contig
-		}
+	if len(h.sims) > 1 {
+		h.c.lateRegs++
 	}
-	got := map[streamKey]int64{}
+	start, got := map[streamKey]int64{}, map[streamKey]int64{}
+	ss := h.streams(s)
 	err := s.st.View(context.Background(), func(rd *store.Reader) error {
+		u, err := s.m.unadmitted(rd)
+		if err != nil {
+			return err
+		}
+		for _, st := range ss {
+			if st.Contig > 0 && !u[[2]string{diffRoom, st.Author}] {
+				start[streamKey{st.Author, st.Epoch}] = st.Contig
+			}
+		}
 		cs, err := rd.Cursors(lateAgent, diffRoom)
 		for _, c := range cs {
-			if c.Start != c.Pos {
+			if c.Pos != c.Early || c.Early > c.Start {
 				return fmt.Errorf("cursor %+v", c)
 			}
-			got[streamKey{c.Author, c.Epoch}] = c.Pos
+			got[streamKey{c.Author, c.Epoch}] = c.Start
 		}
 		return err
 	})
@@ -871,7 +893,6 @@ func (h *harness) register(s *sim) {
 	if fmt.Sprint(got) != fmt.Sprint(start) {
 		h.fail("registered at %v, want the current end %v", got, start)
 	}
-	h.reg[s.name] = start
 }
 
 // pull is the model's Pull and, on the implementation side, what step 5's
@@ -1168,23 +1189,12 @@ func (h *harness) reopen(s *sim, from string) {
 
 func epochHex(e uint64) string { return fmt.Sprintf("%016x", e) }
 
-// before reports whether model entry e is at a position before lateAgent's
-// time began on m.
-func (h *harness) before(m delivery.MachineID, agent string, p delivery.Pos) bool {
-	if agent != lateAgent {
-		return false
-	}
-	start := h.reg[m]
-	return int64(p.Seq) <= start[streamKey{h.sims[p.Stream.Author].m.ID, epochHex(p.Stream.Epoch)}]
-}
-
 func (h *harness) inbox(m delivery.MachineID, agent string) (delivery.View, InboxView) {
 	h.t.Helper()
 	mv, err := h.w.Inbox(m, agent)
 	if err != nil {
 		h.fail("model inbox: %v", err)
 	}
-	mv.Entries = slices.DeleteFunc(slices.Clone(mv.Entries), func(e delivery.Entry) bool { return h.before(m, agent, e.Pos) })
 	iv, err := h.sims[m].m.Inbox(context.Background(), diffRoom, agent)
 	if err != nil {
 		h.fail("implementation inbox %s/%s: %v", m, agent, err)
@@ -1314,7 +1324,7 @@ func (h *harness) compare() {
 		}
 		for _, a := range s.agents {
 			_, iv := h.inbox(n, a)
-			ms := slices.DeleteFunc(h.w.Skipped(n, a), func(e delivery.Entry) bool { return h.before(n, a, e.Pos) })
+			ms := h.w.Skipped(n, a)
 			is, err := s.m.Skipped(ctx, diffRoom, a)
 			if err != nil {
 				h.fail("skipped: %v", err)
@@ -1386,7 +1396,7 @@ func (h *harness) inboxFromStart(s *sim, agent string) []string {
 		if err != nil {
 			return err
 		}
-		g.cursor = copyCursor(g.start)
+		g.cursor = copyCursor(g.early)
 		v.Entries, _, v.Waiting, err = rv.walk(g, agent, false)
 		return err
 	})
@@ -1477,8 +1487,11 @@ func readOp(r *rand.Rand, m delivery.MachineID, agents []string) (op, bool) {
 }
 
 // randomOp draws one operation over machine m with agents; peers are the
-// other machines, for pulls.
-func randomOp(r *rand.Rand, m delivery.MachineID, agents []string, peers []delivery.MachineID, skews []int) op {
+// other machines, for pulls. late says the schedule registers lateAgent
+// on machines with peers and briefs it from another machine (founders
+// only: the real exchange's schedules draw neither, so their seeds keep
+// their schedules).
+func randomOp(r *rand.Rand, m delivery.MachineID, agents []string, peers []delivery.MachineID, skews []int, late bool) op {
 	a := agents[r.IntN(len(agents))]
 	other := agents[r.IntN(len(agents))]
 	target := r.IntN(6) - 3 // the last three or the first three
@@ -1489,6 +1502,9 @@ func randomOp(r *rand.Rand, m delivery.MachineID, agents []string, peers []deliv
 		switch r.IntN(3) {
 		case 0:
 			o.to = other
+			if late && len(peers) > 0 && r.IntN(3) == 0 { // a brief to the late agent of another machine
+				o.to, o.toMach = lateAgent, peers[r.IntN(len(peers))]
+			}
 		case 1:
 			o.ask = true
 		}
@@ -1524,7 +1540,7 @@ func randomOp(r *rand.Rand, m delivery.MachineID, agents []string, peers []deliv
 		return op{kind: opSkew, machine: m, n: skews[r.IntN(len(skews))]}
 	case x < 86:
 		return op{kind: opInject, machine: m, n: r.IntN(injKinds), target: target}
-	case x < 89 && len(peers) == 0:
+	case x < 89 && (len(peers) == 0 || late):
 		return op{kind: opRegister, machine: m}
 	}
 	if len(peers) == 0 {
@@ -1538,7 +1554,9 @@ func randomOp(r *rand.Rand, m delivery.MachineID, agents []string, peers []deliv
 // the step before), replies, replaces, withdraws, handled reports, shows,
 // partial and full Seen, registering an agent, crashes, backups and
 // restores, a 31-day jump, a clock set back 40 days, and references that
-// do not check out. Every view and the durable state agree with the model
+// do not check out. The prefix briefs an agent that registers later, so
+// that schedules replace, withdraw and reply to the brief before and after
+// it registers. Every view and the durable state agree with the model
 // after every step.
 func TestImplementationAgreesWithTheDeliveryModelOnEveryShortSchedule(t *testing.T) {
 	if testing.Short() {
@@ -1548,6 +1566,7 @@ func TestImplementationAgreesWithTheDeliveryModelOnEveryShortSchedule(t *testing
 	h := newHarness(t, map[delivery.MachineID][]string{"M": {"alice", "bob", lateAgent}})
 	for _, o := range []op{
 		{kind: opSend, machine: "M", agent: "alice", to: "bob"},
+		{kind: opSend, machine: "M", agent: "alice", to: lateAgent},
 		{kind: opBackup, machine: "M"},
 	} {
 		h = h.apply(o)
@@ -1595,7 +1614,7 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 		h := newHarness(t, map[delivery.MachineID][]string{"M": agents})
 		h.c = c
 		for j := 0; j < steps && !h.stopped; j++ {
-			h = h.apply(randomOp(r, "M", agents, nil, []int{0, 0, -40 * 24, 2 * 24}))
+			h = h.apply(randomOp(r, "M", agents, nil, []int{0, 0, -40 * 24, 2 * 24}, true))
 			total++
 			if o, ok := levelOp(lr, "M", agents); ok {
 				h = h.apply(o)
@@ -1611,7 +1630,7 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 	}
 	single := time.Since(start)
 	multiStart := time.Now()
-	machines := map[delivery.MachineID][]string{"M": {"alice", "bob"}, "P": {"pat"}, "Q": {"quinn"}}
+	machines := map[delivery.MachineID][]string{"M": {"alice", "bob", lateAgent}, "P": {"pat", lateAgent}, "Q": {"quinn"}}
 	names := []delivery.MachineID{"M", "P", "Q"}
 	for i := 0; i < runs; i++ {
 		h := newHarness(t, machines)
@@ -1619,7 +1638,7 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 		for j := 0; j < steps && !h.stopped; j++ {
 			m := names[r.IntN(len(names))]
 			peers := slices.DeleteFunc(slices.Clone(names), func(x delivery.MachineID) bool { return x == m })
-			h = h.apply(randomOp(r, m, machines[m], peers, []int{0, -10, 10}))
+			h = h.apply(randomOp(r, m, machines[m], peers, []int{0, -10, 10}, true))
 			total++
 			if o, ok := levelOp(lr, m, machines[m]); ok {
 				h = h.apply(o)
@@ -1633,9 +1652,9 @@ func TestImplementationAgreesWithTheDeliveryModelOnRandomSchedules(t *testing.T)
 		}
 		h.close()
 	}
-	t.Logf("%d single-machine and %d three-machine runs, %d steps: %v and %v; %d writes retried for id order, %d runs stopped; %d records injected, %d headers placed without text, %d texts repaired",
+	t.Logf("%d single-machine and %d three-machine runs, %d steps: %v and %v; %d writes retried for id order, %d runs stopped; %d records injected, %d headers placed without text, %d texts repaired; on three machines %d late registrations and %d sends to another machine's agent",
 		runs, runs, total, single.Round(time.Millisecond), time.Since(multiStart).Round(time.Millisecond),
-		c.retries, c.stopped, c.injected, c.missing, c.repaired)
+		c.retries, c.stopped, c.injected, c.missing, c.repaired, c.lateRegs, c.remoteBriefs)
 	if c.stopped > 0 {
 		t.Errorf("%d runs stopped at an id-order tie", c.stopped)
 	}

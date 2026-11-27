@@ -1,8 +1,7 @@
 # Fan-out
 
-Use this when you lead many workers and want to send each a task and read
-each answer without filling your context. It uses what exists today.
-These are defaults; a room's [charter](room-charter.md) may change any.
+Use this to send many workers each a task and read each answer without
+filling your context. A room's [charter](room-charter.md) may change it.
 
 ## Sending
 
@@ -10,12 +9,13 @@ These are defaults; a room's [charter](room-charter.md) may change any.
   all: `send {"room":"team-auth","to":["w01@1a2b3c4d","w02@1a2b3c4d"],"text":"..."}`
   (up to 32 agents). Every addressee reads the whole message.
 - It is wrong for different briefs: each worker would read all of them.
-  Send one [brief](delegation-brief.md) per worker, each its own root, once
-  it is in `peers`: a message sent before it registers is not in its inbox.
+  Send one [brief](delegation-brief.md) per worker, each its own root,
+  before or after the workers start, as the brief recipe says.
 - Where your harness runs tool calls together, put the `send` calls in
   one step. Where you have a shell, one loop is cheaper to write down:
   `a2p2 send --as lead --room team-auth --to w01@1a2b3c4d "BRIEF: ..."`
-  for each worker. Pass `--as` with your own label, never the person's; keep each id it prints.
+  for each worker. Pass `--as` with your own label, never the person's;
+  keep each id it prints.
 - Sends made together are stored in no particular order. If order
   matters, number the briefs or send the dependent one later.
 

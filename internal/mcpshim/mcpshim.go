@@ -568,8 +568,17 @@ func sentOf(m localapi.SendResp, local string) sent {
 	if len(to) == 0 {
 		to = []string{"everyone"}
 	}
-	return sent{ID: m.ID, roomRef: ref(m.Room, m.RoomLabel, local), To: lines(to), Note: "Other machines fetch it."}
+	s := sent{ID: m.ID, roomRef: ref(m.Room, m.RoomLabel, local), To: lines(to), Note: "Other machines fetch it."}
+	if len(m.NotRegistered) > 0 {
+		s.Note += " " + noteNotRegistered + strings.Join(lines(m.NotRegistered), ", ") + "."
+	}
+	return s
 }
+
+// noteNotRegistered names addressees on this machine that have not
+// registered yet (D73): it is unread for each when it registers, if this
+// machine still holds it among its newest messages (store.RegisterWindow).
+const noteNotRegistered = "Not registered on this machine yet; unread for each when it registers if still among this machine's newest messages: "
 
 func (sh *shim) send(ctx context.Context, in sendIn) (string, error) {
 	if strings.TrimSpace(in.Text) == "" && in.Replaces == "" {

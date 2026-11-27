@@ -147,6 +147,9 @@ type (
 		To        []string `json:"to,omitempty"`
 		// ToOmitted: thread participants left out at the addressee limit.
 		ToOmitted int `json:"to_omitted,omitempty"`
+		// NotRegistered: addressees on this machine that have not
+		// registered yet; each reads the message when it does.
+		NotRegistered []string `json:"not_registered,omitempty"`
 	}
 	InboxReq struct {
 		Agent  string `json:"agent"`
@@ -1061,6 +1064,9 @@ func Handler(s *node.Surface, info Info) http.Handler {
 			return out, err
 		}
 		out.To = s.AgentIDs(ctx, m.To) // a shared short id in full; never fails a committed send
+		if len(m.NotRegistered) > 0 {
+			out.NotRegistered = s.AgentIDs(ctx, m.NotRegistered)
+		}
 		return out, nil
 	})
 	// fetch is an agent's request for one file's bytes, copied for it

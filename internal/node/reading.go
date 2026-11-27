@@ -289,7 +289,7 @@ func (m *Machine) Seen(ctx context.Context, room, agent string, reads []store.Re
 		}
 		for s, n := range pos {
 			if before[s] != n {
-				p.Cursors = append(p.Cursors, store.Cursor{Author: s.author, Epoch: s.epoch, Start: g.start[s], Pos: n})
+				p.Cursors = append(p.Cursors, store.Cursor{Author: s.author, Epoch: s.epoch, Start: g.start[s], Pos: n, Early: g.early[s]})
 			}
 		}
 		return p, nil
@@ -681,7 +681,14 @@ func (v *roomView) load() error {
 	return nil
 }
 
+// keepHook, set by a test, is called for every record a view is given,
+// each decoded by the store: the cost of a read.
+var keepHook func()
+
 func (v *roomView) keep(h store.Held) *rec {
+	if keepHook != nil {
+		keepHook()
+	}
 	id := h.Record.ID()
 	if r := v.byID[id]; r != nil {
 		return r
@@ -843,11 +850,14 @@ func (v *roomView) ownHeads(self string) ([]core.Link, error) {
 // agentState is one agent's cursors and heads, with its confirmations read
 // on demand through the store's indexes, plus those Seen is adding.
 type agentState struct {
-	rd      *store.Reader
-	agent   string
-	room    string
-	cursor  map[streamKey]int64
-	start   map[streamKey]int64
+	rd     *store.Reader
+	agent  string
+	room   string
+	cursor map[streamKey]int64
+	start  map[streamKey]int64
+	// early is where the agent's time began for messages addressed to it,
+	// at or below start (store.Cursor.Early; inTime).
+	early   map[streamKey]int64
 	heads   map[string][]string
 	keys    map[string]*store.Read // nil: not confirmed
 	byMsg   map[string][]store.Read
@@ -883,10 +893,10 @@ func (v *roomView) agent(agent string) (*agentState, error) {
 		return nil, err
 	}
 	g := &agentState{rd: v.rd, agent: agent, room: v.room, cursor: map[streamKey]int64{}, start: map[streamKey]int64{},
-		keys: map[string]*store.Read{}, byMsg: map[string][]store.Read{}, pending: map[string]store.Read{}}
+		early: map[streamKey]int64{}, keys: map[string]*store.Read{}, byMsg: map[string][]store.Read{}, pending: map[string]store.Read{}}
 	for _, c := range cs {
 		k := streamKey{c.Author, c.Epoch}
-		g.cursor[k], g.start[k] = c.Pos, c.Start
+		g.cursor[k], g.start[k], g.early[k] = c.Pos, c.Start, c.Early
 	}
 	if g.heads, err = v.rd.ReadHeads(agent, v.room); err != nil {
 		return nil, err
@@ -1076,6 +1086,18 @@ func changedBy(msg, r *rec) string {
 	return core.AgentID(r.f.Agent, r.author)
 }
 
+// inTime says whether message r is in the agent's time: after where its
+// time began in r's stream, or, for a message addressed to it, after where
+// its time began for those (an agent registered after a brief was sent to
+// it reads the brief; D73). The model's inTime is the same.
+func (g *agentState) inTime(r *rec, self string) bool {
+	k := r.stream()
+	if r.f.Seq > g.start[k] {
+		return true
+	}
+	return r.f.Seq > g.early[k] && slices.Contains(r.f.To, core.Addressee{Node: self, Agent: g.agent})
+}
+
 func relevant(r *rec, self, agent string) bool {
 	if r.f.Kind != core.KindMessage || (r.author == self && r.f.Agent == agent) {
 		return false
@@ -1113,7 +1135,7 @@ func (v *roomView) decide(g *agentState, agent string, h *rec, heads map[string]
 	var err error
 	switch h.f.Kind {
 	case core.KindMessage:
-		if !relevant(h, v.self, agent) || g.keptOut(h) {
+		if !relevant(h, v.self, agent) || !g.inTime(h, v.self) || g.keptOut(h) {
 			return nil, nil, nil
 		}
 		for _, k := range []string{h.id, "x:" + h.id} {

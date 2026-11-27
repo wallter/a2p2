@@ -732,7 +732,34 @@ func (s *Surface) Send(ctx context.Context, in SendInput) (Sent, error) {
 	}
 	sent, err := s.m.Send(ctx, d)
 	sent.ToOmitted = omitted
+	if err == nil {
+		sent.NotRegistered = s.unregisteredHere(ctx, sent.To)
+	}
 	return s.labelled(ctx, sent, err)
+}
+
+// unregisteredHere returns the addressees in to that are agents of this
+// machine never registered here. It never fails a committed send: on an
+// error it says nothing.
+func (s *Surface) unregisteredHere(ctx context.Context, to []core.Addressee) []core.Addressee {
+	var out []core.Addressee
+	_ = s.m.st.View(ctx, func(rd *store.Reader) error {
+		for _, a := range to {
+			if a.Node != s.m.ID {
+				continue
+			}
+			ok, err := rd.Registered(a.Agent)
+			if err != nil {
+				out = nil
+				return err
+			}
+			if !ok {
+				out = append(out, a)
+			}
+		}
+		return nil
+	})
+	return out
 }
 
 // labelled fills in the room label of a write's result.

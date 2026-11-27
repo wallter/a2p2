@@ -1,6 +1,9 @@
 package delivery
 
-import "sort"
+import (
+	"slices"
+	"sort"
+)
 
 // EntryKind is what an inbox entry tells the agent.
 type EntryKind uint8
@@ -71,6 +74,17 @@ type Gap struct {
 type View struct {
 	Entries []Entry
 	Waiting []Gap
+}
+
+// inTime says whether r is in the agent's time: after where its time
+// began in r's stream, or, for a message addressed to it, after early (an
+// agent registered after a brief was sent to it reads the brief).
+func (g *agentState) inTime(r *Record, m MachineID, agent string) bool {
+	s := r.Stream()
+	if r.Seq > g.start[s] {
+		return true
+	}
+	return r.Seq > g.early[s] && slices.Contains(r.To, Addr{m, agent})
 }
 
 func relevant(r *Record, m MachineID, agent string) bool {
@@ -192,7 +206,7 @@ func (m *Machine) decide(g *agentState, agent string, h *held, heads map[Machine
 	var e *Entry
 	switch r.Kind {
 	case Message:
-		if !relevant(r, m.ID, agent) || g.keptOut(h) || g.seen[string(r.ID)] || g.seen["x:"+string(r.ID)] {
+		if !relevant(r, m.ID, agent) || !g.inTime(r, m.ID, agent) || g.keptOut(h) || g.seen[string(r.ID)] || g.seen["x:"+string(r.ID)] {
 			return nil, nil
 		}
 		if m.handledByAgent(r.ID, agent) {

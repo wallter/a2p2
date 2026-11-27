@@ -162,3 +162,106 @@ func TestRandomLevelChangesNeitherLoseNorRepeatAMessage(t *testing.T) {
 		}
 	}
 }
+
+// Requirements: R7, U3. An agent registered after a brief was sent to it,
+// from this machine or another, reads the brief; room-wide history from
+// before, and a message to the same label on another machine, it does
+// not. At level none the brief is in Skipped. Registering again changes
+// nothing.
+func TestAgentRegisteredLaterReadsWhatWasAddressedToItButNotTheRoomsHistory(t *testing.T) {
+	w := levelRoom()
+	post(w, Msg{Body: "room-wide"})
+	post(w, Msg{Body: "remote brief", To: []Addr{{"A", "w"}}})
+	post(w, Msg{Body: "for w on B", To: []Addr{{"B", "w"}}})
+	pull(t, w, "A", "B")
+	w.Advance(Hour)
+	must(w.Send("A", "a", Msg{Body: "local brief", To: []Addr{{"A", "w"}, {"A", "v"}}}))
+	if _, err := w.Inbox("A", "w"); err == nil {
+		t.Fatal("an agent never registered has an inbox")
+	}
+	for _, a := range []string{"w", "v"} {
+		if err := w.Register("A", a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.SetLevel("A", "v", None); err != nil {
+		t.Fatal(err)
+	}
+	wantTexts(t, readAs(t, w, "A", "w"), "shown:local brief shown:remote brief")
+	wantTexts(t, readAs(t, w, "A", "v"), "")
+	wantTexts(t, w.Skipped("A", "v"), "shown:local brief")
+	if err := w.Register("A", "w"); err != nil {
+		t.Fatal(err)
+	}
+	post(w, Msg{Body: "after"})
+	pull(t, w, "A", "B")
+	wantTexts(t, readAs(t, w, "A", "w"), "shown:after")
+}
+
+// Requirements: R7, D2. A brief whose text this machine does not hold yet
+// sits where the late agent's time begins in its author's stream: it holds
+// back that stream alone, as a missing text does after registration. What
+// another author wrote is read now; the author's later message waits and
+// comes with the brief when its text arrives.
+func TestABriefWhoseTextIsNotHereYetHoldsBackOnlyItsAuthorsStream(t *testing.T) {
+	w := levelRoom()
+	post(w, Msg{Body: "history"})
+	brief := post(w, Msg{Body: "brief", To: []Addr{{"A", "w"}}})
+	post(w, Msg{Body: "history"})
+	w.tamper = func(_ MachineID, it wire) wire {
+		if it.rec.ID == brief {
+			it.body, it.hasBody = "", false
+		}
+		return it
+	}
+	pull(t, w, "A", "B")
+	w.tamper = nil
+	if err := w.Register("A", "w"); err != nil {
+		t.Fatal(err)
+	}
+	w.Advance(Hour)
+	must(w.Send("A", "a", Msg{Body: "local after"}))
+	w.tamper = func(_ MachineID, it wire) wire {
+		if it.rec.ID == brief {
+			it.body, it.hasBody = "", false
+		}
+		return it
+	}
+	post(w, Msg{Body: "remote after"})
+	pull(t, w, "A", "B")
+	w.tamper = nil
+	v := must(w.List("A", "w"))
+	wantTexts(t, v.Entries, "shown:local after")
+	if len(v.Waiting) != 1 || !v.Waiting[0].Text || v.Waiting[0].Stream.Author != "B" {
+		t.Fatalf("waiting %+v", v.Waiting)
+	}
+	if err := w.Seen("A", "w", v.Entries); err != nil {
+		t.Fatal(err)
+	}
+	pull(t, w, "A", "B")
+	wantTexts(t, readAs(t, w, "A", "w"), "shown:brief shown:remote after")
+}
+
+// Requirements: U3. A registration looks only at the newest
+// RegisterWindow records the machine holds: a brief older than that is
+// not unread for the agent that registers; one at the oldest position of
+// the window is.
+func TestABriefOlderThanTheNewestRecordsIsNotUnreadForALateAgent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("sends RegisterWindow messages")
+	}
+	w := NewWorld()
+	w.AddMachine("A", "a")
+	must(w.Send("A", "a", Msg{Body: "old brief", To: []Addr{{"A", "v"}}}))
+	must(w.Send("A", "a", Msg{Body: "brief", To: []Addr{{"A", "w"}}}))
+	for i := 1; i < RegisterWindow; i++ {
+		must(w.Send("A", "a", Msg{Body: "history"}))
+	}
+	for _, a := range []string{"v", "w"} {
+		if err := w.Register("A", a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wantTexts(t, readAs(t, w, "A", "v"), "")
+	wantTexts(t, readAs(t, w, "A", "w"), "shown:brief")
+}

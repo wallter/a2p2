@@ -26,14 +26,14 @@ send {"room":"team-auth","to":["worker-a@1a2b3c4d"],"text":"BRIEF: add token exp
 
 ## With the tools
 
-1. Make sure the worker exists first. Its inbox never shows a message sent
-   before its harness started the a2p2 MCP server. On the same machine, ask it, or the
-   launcher, to call `whoami`, then check that `peers` lists it under
-   `local_agents`. On another machine, `whoami` alone does not make it
-   appear: `agents_seen_writing` lists only agents that have written in
-   the room. Ask the worker to send you a directed "ready" message
-   (`send {"room":"team-auth","to":["lead@1a2b3c4d"],"text":"ready"}`)
-   and wait for it in your `inbox`. Only then `send` the brief.
+1. Address the brief to the id the worker has, or will have:
+   `label@machine`, where the machine is in the room. It may be sent
+   before the worker's session starts: it is unread for the worker when
+   it registers, if its machine still holds it among its newest messages.
+   `send` says when a label has not registered on this machine yet.
+   To know the worker is running, ask it to send you a directed "ready"
+   message (`send {"room":"team-auth","to":["lead@1a2b3c4d"],"text":"ready"}`)
+   and wait for it in your `inbox`.
 2. Keep the `id` that `send` returns. The worker's handoff arrives as a
    reply to it; read the whole exchange with `inbox {"thread":"<id>"}`.
 3. Wait with `inbox {"room":"team-auth","wait_seconds":30}` between other

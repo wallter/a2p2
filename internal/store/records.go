@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -64,6 +65,13 @@ CREATE INDEX reads_msg ON reads (agent, room, msg, key);
 CREATE TABLE read_heads (
   agent TEXT NOT NULL, room TEXT NOT NULL, author TEXT NOT NULL, record TEXT NOT NULL,
   PRIMARY KEY (agent, room, author, record));
+`
+
+// schemaEarly is migration 15 (D73): cursors.early, where an
+// agent's time began for messages addressed to it. NULL, which every row
+// from before has and every cursor but a registration's gets, means start.
+const schemaEarly = `
+ALTER TABLE cursors ADD COLUMN early INTEGER;
 `
 
 // Reasons a held record has, or lacks, its text [R6]. Every reason but
@@ -162,12 +170,17 @@ type Stream struct {
 }
 
 // Cursor is one agent's place in one stream [R7]: every position at or below
-// Pos is resolved for the agent; Start is where its time began.
+// Pos is resolved for the agent; Start is where its time began. Early, at
+// or below Start, is where its time began for messages addressed to it: a
+// position above Early and at or below Start is in the agent's time only
+// if it holds a message addressed to the agent (Register; D73).
+// Early is Start for every cursor but a registration's.
 type Cursor struct {
 	Author string
 	Epoch  string
 	Start  int64
 	Pos    int64
+	Early  int64
 }
 
 // Read is one confirmed inbox entry: its key, the version of the text shown
@@ -252,9 +265,24 @@ func (s *Store) AddRoom(ctx context.Context, id, label, createID string, now tim
 
 // Register records agent as registered, if it was not, and in the same
 // transaction starts its reading at the current end of every stream of
-// every room, so history from before it arrived is not unread for it
-// (v0.2's behaviour). It reports whether the agent is new.
-func (s *Store) Register(ctx context.Context, agent string, now time.Time) (bool, error) {
+// every room, so room-wide history from before it arrived is not unread
+// for it (v0.2's behaviour). A message addressed to this agent (agent on
+// node, this machine) is unread for it all the same if it is among the
+// newest RegisterWindow records this machine holds (D73): in that
+// message's stream the cursor starts just before the first such message,
+// with Early there. It reports whether the agent is new.
+func (s *Store) Register(ctx context.Context, node, agent string, now time.Time) (bool, error) {
+	return s.RegisterWith(ctx, node, agent, now, nil)
+}
+
+// RegisterWith is Register leaving unseeded the streams of each room and
+// author undecided returns, read in the same transaction: a head of the
+// author's admission frontier is not held yet, so the agent's cursors
+// there are seeded at that head when it arrives (Access.Frontier), as for
+// an agent registered at the admission, not before it. The caller names
+// only streams that seeding will reach (Machine.unadmitted: not those of
+// a room set aside).
+func (s *Store) RegisterWith(ctx context.Context, node, agent string, now time.Time, undecided func(*Reader) (map[[2]string]bool, error)) (bool, error) {
 	fresh := false
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.Exec(`INSERT INTO registrations (agent, at) VALUES (?,?) ON CONFLICT DO NOTHING`, agent, ms(now))
@@ -282,14 +310,104 @@ func (s *Store) Register(ctx context.Context, agent string, now time.Time) (bool
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		for _, r := range rooms {
-			if err := seedCursors(tx, agent, r, currentEnd); err != nil {
+		var skip map[[2]string]bool
+		if undecided != nil {
+			if skip, err = undecided(&Reader{tx: tx}); err != nil {
 				return err
 			}
 		}
-		return nil
+		for _, r := range rooms {
+			err := seedCursors(tx, agent, r, func(st Stream) int64 {
+				if skip[[2]string{r, st.Author}] {
+					return 0
+				}
+				return currentEnd(st)
+			})
+			if err != nil {
+				return err
+			}
+		}
+		return seedAddressed(tx, node, agent)
 	})
 	return fresh, err
+}
+
+// RegisterWindow is how many of the newest records this machine holds a
+// registration looks through for messages addressed to the new agent
+// (D73). It bounds the work, and the time the one database connection
+// is held, whatever the size of the history any member can grow: decoding
+// a header takes a few microseconds, so 10,000 take tens of milliseconds.
+// The same bound holds for the agent's first read, which walks from Early.
+const RegisterWindow = 10000
+
+// sqlNewestMessages reads the messages among the newest RegisterWindow
+// records, in every room. A records row's rowid is the order this machine
+// stored it in: rows are only inserted (place), never replaced, nothing
+// here renumbers rowids (no VACUUM), and a stream's records are stored in
+// position order, so in each stream
+// the rows after a record's rowid are the positions after it. The range
+// is a seek on the rowid (TestTheNewestRecordsAreReadBySeekingOnTheRowid);
+// rows deleted with a room leave gaps, so it covers at most the window.
+const sqlNewestMessages = `SELECT room, author, epoch, seq, hdr, sig FROM records
+	WHERE rowid > (SELECT max(rowid) FROM records) - ? AND kind = ?`
+
+// seedAddressedHook, set by a test, is told how many headers a
+// registration decoded.
+var seedAddressedHook func(decoded int)
+
+// seedAddressed moves agent's cursors, just seeded by Register, back to
+// just before the first message addressed to it among the newest
+// RegisterWindow records held, stream by stream, and sets Early there
+// (D73). A message's addressees are in its signed header, so no text
+// is needed. In each stream Early is at least the position just before
+// the oldest record of that stream the window covered, so the first read
+// walks at most the window.
+func seedAddressed(tx *sql.Tx, node, agent string) error {
+	rows, err := tx.Query(sqlNewestMessages, RegisterWindow, string(core.KindMessage))
+	if err != nil {
+		return err
+	}
+	type key struct{ room, author, epoch string }
+	first := map[key]int64{}
+	want := core.Addressee{Node: node, Agent: agent}
+	decoded := 0
+	for rows.Next() {
+		var k key
+		var seq int64
+		var hdr, sig []byte
+		if err := rows.Scan(&k.room, &k.author, &k.epoch, &seq, &hdr, &sig); err != nil {
+			rows.Close()
+			return err
+		}
+		decoded++
+		r, err := core.RecordFromParts(hdr, sig, nil)
+		if err != nil {
+			rows.Close()
+			return fmt.Errorf("stored record does not parse: %w", err)
+		}
+		if !slices.Contains(r.Fields().To, want) {
+			continue
+		}
+		if n, ok := first[k]; !ok || seq < n {
+			first[k] = seq
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if seedAddressedHook != nil {
+		seedAddressedHook(decoded)
+	}
+	for k, n := range first {
+		// Only a cursor seeded just now moves: pos is still start, early
+		// unset, and the message at or below start.
+		if _, err := tx.Exec(`UPDATE cursors SET pos = ?, early = ? WHERE agent = ? AND room = ? AND author = ? AND epoch = ?
+			AND pos = start AND early IS NULL AND start >= ?`, n-1, n-1, agent, k.room, k.author, k.epoch, n); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // currentEnd is where an agent registered now starts in a stream: after
@@ -885,9 +1003,13 @@ func (s *Store) Seen(ctx context.Context, agent, room string, plan func(*Reader)
 			return err
 		}
 		for _, c := range p.Cursors {
-			if _, err := tx.Exec(`INSERT INTO cursors (agent, room, author, epoch, start, pos) VALUES (?,?,?,?,?,?)
+			var early any // NULL: start
+			if c.Early != c.Start {
+				early = c.Early
+			}
+			if _, err := tx.Exec(`INSERT INTO cursors (agent, room, author, epoch, start, pos, early) VALUES (?,?,?,?,?,?,?)
 				ON CONFLICT (agent, room, author, epoch) DO UPDATE SET pos = excluded.pos`,
-				agent, room, c.Author, c.Epoch, c.Start, c.Pos); err != nil {
+				agent, room, c.Author, c.Epoch, c.Start, c.Pos, early); err != nil {
 				return err
 			}
 		}
@@ -1063,8 +1185,8 @@ func (rd *Reader) Registered(agent string) (bool, error) {
 
 // Cursors returns agent's cursors in room.
 func (rd *Reader) Cursors(agent, room string) ([]Cursor, error) {
-	rows, err := rd.tx.Query(`SELECT author, epoch, start, pos FROM cursors WHERE agent = ? AND room = ?
-		ORDER BY author, epoch`, agent, room)
+	rows, err := rd.tx.Query(`SELECT author, epoch, start, pos, coalesce(early, start) FROM cursors
+		WHERE agent = ? AND room = ? ORDER BY author, epoch`, agent, room)
 	if err != nil {
 		return nil, err
 	}
@@ -1072,7 +1194,7 @@ func (rd *Reader) Cursors(agent, room string) ([]Cursor, error) {
 	var out []Cursor
 	for rows.Next() {
 		var c Cursor
-		if err := rows.Scan(&c.Author, &c.Epoch, &c.Start, &c.Pos); err != nil {
+		if err := rows.Scan(&c.Author, &c.Epoch, &c.Start, &c.Pos, &c.Early); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

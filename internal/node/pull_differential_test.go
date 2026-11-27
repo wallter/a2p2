@@ -322,7 +322,7 @@ func newPullHarness(t testing.TB, founders, later map[delivery.MachineID][]strin
 	h := &harness{t: t, w: delivery.NewWorld(), sims: map[delivery.MachineID]*sim{},
 		label: map[string]string{}, pair: map[delivery.RecordID]string{}, implPair: map[string]delivery.RecordID{},
 		nodes: map[string]delivery.MachineID{}, shown: map[agentKey]listing{}, injected: map[string]bool{},
-		reg: map[delivery.MachineID]map[streamKey]int64{}, c: &counts{}}
+		c: &counts{}}
 	p := &pxState{net: newMemNet(), keys: map[delivery.MachineID]ed25519.PrivateKey{}, later: later,
 		known: map[delivery.MachineID]int{}, asleep: map[delivery.MachineID]bool{}, noInbound: map[delivery.MachineID]bool{},
 		withhold: map[delivery.MachineID]map[string]bool{}, skews: map[delivery.MachineID][]skewChange{},
@@ -458,6 +458,8 @@ func (p *pxState) do(h *harness, o op) {
 			return
 		}
 		history := o.n == 1
+		// lateAgent registers only by opRegister, after the admission.
+		agents = slices.DeleteFunc(slices.Clone(agents), func(a string) bool { return a == lateAgent })
 		if _, err := h.w.Grant(o.machine, p.admin, history, agents...); err != nil {
 			h.fail("model grant: %v", err)
 		}
@@ -1007,7 +1009,7 @@ func randomPullOp(r *rand.Rand, h *harness, agents map[delivery.MachineID][]stri
 		}
 		return op{kind: opPull, machine: m, server: peers[r.IntN(len(peers))], n: flags}
 	}
-	o := randomOp(r, m, agents[m], peers, []int{0, -10, 10})
+	o := randomOp(r, m, agents[m], peers, []int{0, -10, 10}, false)
 	if o.kind == opInject || o.kind == opRegister {
 		return op{kind: opSeenAll, machine: m, agent: agents[m][r.IntN(len(agents[m]))]}
 	}

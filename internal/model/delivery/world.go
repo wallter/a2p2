@@ -3,6 +3,7 @@ package delivery
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 )
 
@@ -152,6 +153,45 @@ func (w *World) Admit(id MachineID, by MachineID, history bool, agents ...string
 		w.tellAll(w.changes[len(w.changes)-1])
 	}
 	return m, err
+}
+
+// Register makes agent known on machine id later, as the daemon does the
+// first time a label is used; an agent already known is left as it is.
+// Its time begins at the current end of every stream held, so room-wide
+// history from before is not unread for it, except that a message
+// addressed to it is in its time (inTime) if it is among the newest
+// RegisterWindow records this machine holds: the cursor of that stream
+// starts just before the first one, and early there (D73). The label is
+// durable state like the rest of the agent's reading: a restore to
+// before the registration takes it back.
+// RegisterWindow is how many of the newest records a registration looks
+// through, as in the store (store.RegisterWindow).
+const RegisterWindow = 10000
+
+func (w *World) Register(id MachineID, agent string) error {
+	m, err := w.awake(id)
+	if err != nil {
+		return err
+	}
+	if m.st.agents[agent] != nil {
+		return nil
+	}
+	start := map[StreamID]int{}
+	for s, c := range m.st.contig {
+		if c > 0 {
+			start[s] = c
+		}
+	}
+	g := newAgent(start)
+	for _, h := range m.st.recs {
+		r := h.rec
+		s := r.Stream()
+		if h.order > m.st.stored-RegisterWindow && r.Kind == Message && r.Seq <= start[s] && r.Seq-1 < g.early[s] && slices.Contains(r.To, Addr{m.ID, agent}) {
+			g.early[s], g.cursor[s] = r.Seq-1, r.Seq-1
+		}
+	}
+	m.st.agents[agent] = g
+	return nil
 }
 
 // Machine returns a machine by id.

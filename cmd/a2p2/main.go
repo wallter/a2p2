@@ -1581,7 +1581,12 @@ func send(c *cmd, args []string) error {
 		return c.call("send", req, &w, func() { printSendFiles(os.Stdout, w) })
 	}
 	var m localapi.SendResp
-	return c.call("send", req, &m, func() { fmt.Println(m.ID) })
+	return c.call("send", req, &m, func() {
+		fmt.Println(m.ID)
+		for _, a := range m.NotRegistered {
+			fmt.Fprintf(os.Stderr, "%s has not registered on this machine yet; the message is unread for it when it registers, if this machine still holds it among its newest messages\n", a)
+		}
+	})
 }
 
 // filesModeWords says what each files setting of a room does.

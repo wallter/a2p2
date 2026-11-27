@@ -626,14 +626,14 @@ func (h *harness) check() {
 			g := m.st.agents[a]
 			l := h.logs[id][a]
 			for s, c := range g.cursor {
-				for k := g.start[s] + 1; k <= c; k++ {
+				for k := g.early[s] + 1; k <= c; k++ {
 					x := m.at(Pos{s, k})
 					if x == nil {
 						h.fail("Q6: %s/%s cursor past a position not held: %v.%d", id, a, s, k)
 						continue
 					}
 					rid := x.rec.ID
-					if !relevant(x.rec, id, a) || l.keys[string(rid)] ||
+					if !relevant(x.rec, id, a) || !g.inTime(x.rec, id, a) || l.keys[string(rid)] ||
 						l.keys["x:"+string(rid)] || x.dropped == Withdrawn || x.dropped == NotAdmitted ||
 						h.handledBy[string(id)+"|"+string(rid)] {
 						continue

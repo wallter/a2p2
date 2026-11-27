@@ -172,6 +172,7 @@ func (m *Machine) dropAuthor(x MachineID) {
 			if s.Author == x {
 				delete(g.cursor, s)
 				delete(g.start, s)
+				delete(g.early, s)
 			}
 		}
 		delete(g.heads, x)

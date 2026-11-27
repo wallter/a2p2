@@ -8,6 +8,31 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A message sent to an agent before it registers now reaches it.**
+  From 0.1.0 to 0.3.0 a label's first use started its reading at the end
+  of every room, so a brief a lead sent to `w1@<machine>` before the
+  worker's session existed was never unread for it, while `send` printed
+  an id as if it would be read (0.3.0 lists this as a known limit). Now a
+  message addressed to an agent is unread when the agent first registers
+  if it is among the newest 10,000 records this machine holds at that
+  moment, from this machine or another; room-wide history from before
+  stays read, as before (`recent` reads it, and an older brief).
+  Registration does bounded work, about 40 ms with 100,000 records held.
+  A brief replaced since is shown with its newest text, one withdrawn is
+  not shown, one whose newest text expired is shown as expired. A brief
+  sent before this machine was admitted to the room without history is
+  not unread. `send` (and the MCP send, reply and ask_human results) now
+  names addressees that have not registered on this machine yet; the CLI
+  prints that on stderr. A label registered while the head of this
+  machine's admission frontier was not held yet no longer starts below
+  that frontier (from 0.1.0 to 0.3.0). An agent registered before this version
+  keeps its place. The database gains a column after 0.3.0 (migration
+  15): once this version has opened a home, 0.3.0 and earlier refuse it
+  ("upgrade a2p2"). To be able to go back, copy the home before upgrading
+  ([installing](docs/INSTALL.md#going-back-to-an-older-version)).
+
 ## [0.3.0] - 2026-11-27
 
 A security release with breaking changes. It closes ways for other
