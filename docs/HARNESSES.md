@@ -11,6 +11,50 @@ the earlier version of the daemon and its tools. They show how each harness
 treats a stdio MCP server and a hook; they do not show that the current code
 works.
 
+## Verified on 2026-11-27, release candidate for 0.3.0
+
+Build `v0.2.3-126-g99bb885` (`bin/a2p2 version`), macOS arm64, one
+`make e2e HARNESS=<name>` run per harness (`scripts/e2e/run.sh`), each with
+a throwaway `A2P2_HOME` and a throwaway project directory. Every run passed
+all four checks, with no repeat and no change to the script.
+
+| Harness | CLI version | Model | Result | Model tool calls (two runs) | Tokens (two runs) |
+|---|---|---|---|---|---|
+| Claude Code | 2.1.332 | the account default | 4 of 4 | send run: `ToolSearch`, `whoami`, `send`; inbox run: `ToolSearch`, `whoami`, `inbox` | 22 in, 484 out, 175.6K read from cache, 35.6K written to cache |
+| Codex CLI | 0.171.0 | `gpt-6.2-sol` | 4 of 4 | send run: tool listing, `whoami`, `send`; inbox run: tool listing, `whoami`, `inbox` | 149.2K in (129.9K cached), 221 out |
+| Antigravity CLI | 1.5.18 | `gemini-4-neon-medium` | 4 of 4 | send run: `read_file` of the tool's schema, `send`; inbox run: `read_file` of the schema, `inbox` | 31.4K in, 35.4K read from cache, 0.6K out |
+
+The four checks: the model called `send` and the message was stored; the
+agent registered under `<harness>-proj@<machine>`; the model called `inbox`
+and reported the code word a checker had sent; the hook, run by hand,
+printed an unread notice for that mailbox. Token figures come from each
+harness's own session record.
+
+What the transcripts show:
+
+- In all three, the model called `inbox` and `send` with correct arguments
+  at the first try and answered as asked. Claude Code and Codex called
+  `whoami` first in every run, which the prompt did not ask for.
+- The `inbox` result carried the notice that the text comes from other
+  agents or people, and `marked_seen`. The `send` result carried the room
+  and the recipient list.
+- Antigravity read its own copy of the tool schema under
+  `~/.gemini/antigravity-cli/mcp/a2p2/` before each call, then called the
+  tool through `call_mcp_tool`.
+- The prompts name the tool, so these runs do not show that a model picks
+  `inbox` by itself after the hook's notice, that it calls `inbox` again
+  when a page is cut (`more`), or that it chooses `reply` over `send`. The
+  hook was run by hand, not by the harness.
+- The cross-harness case runs only when the script is given more than one
+  harness, so it did not run.
+
+OpenCode 1.18.30 on `qwen3.6:32k`, one `make e2e-local` run: all six
+checks passed (exit status 0, `whoami`, `peers`, reply to the checker,
+reported handled, new message sent) in 69 seconds. The model also sent
+PINEAPPLE to `human`, which the checker's message asked for; the script
+reports that and does not fail it. Hermes and Pi are not installed on this
+computer, so the script skipped them.
+
 ## Verified on 2026-11-24, after the delivery rewrite
 
 Build `befd992`, macOS arm64, a throwaway `A2P2_HOME`. Each harness was
@@ -202,8 +246,8 @@ and treats a failed run or a very short answer as a failure.
 - Whether Codex hooks fire under `codex exec` without interactive trust.
 - What a harness does when the person interrupts a tool call that is
   waiting (`inbox` with `wait_seconds`).
-- `scripts/e2e/run.sh` since the rewrite (the 2026-11-24 check used its
-  own prompts), and any harness on Linux.
+- The cross-harness case of `scripts/e2e/run.sh` since the rewrite, and
+  any harness on Linux.
 
 ## Per-run configuration
 
