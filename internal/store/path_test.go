@@ -19,7 +19,7 @@ import (
 // opened a database file named "a" next to the directory.)
 func TestAStoreUnderADirectoryNamedWithURICharactersIsOpenedAtItsPath(t *testing.T) {
 	ctx := context.Background()
-	for _, name := range []string{"a#b", "a?b", "a b", "a%23b", "a%b", "a?_txlock=deferred#c", "é:ü&x=1"} {
+	for _, name := range []string{"a#b", "a?b", "a b", "a%23b", "a%b", "a?_txlock=deferred#c", "é:ü&x=1", "é ü&x=1"} {
 		t.Run(name, func(t *testing.T) {
 			if runtime.GOOS == "windows" && strings.ContainsAny(name, `?:`) {
 				t.Skip("not a file name on Windows")
@@ -86,6 +86,30 @@ func TestTheDatabaseURIEscapesThePath(t *testing.T) {
 	}
 }
 
+// [store] The URI of a Windows path: a drive takes the documented form
+// file:///C:/dir/file, and a UNC path \\server\share\... keeps its two
+// leading slashes after the empty authority, file:////server/share/...,
+// which SQLite's Windows layer passes on as //server/share/..., a UNC path
+// to GetFullPathNameW. Only Windows reads these paths so.
+func TestTheDatabaseURIOfAWindowsPath(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("drive letters and UNC paths are Windows paths")
+	}
+	for in, want := range map[string]string{
+		`C:\Users\name\.a2p2\a2p2.db`:     "file:///C:/Users/name/.a2p2/a2p2.db",
+		`C:\Users\a b\.a2p2\a2p2.db`:      "file:///C:/Users/a%20b/.a2p2/a2p2.db",
+		`C:\Users\a#b\.a2p2\a2p2.db`:      "file:///C:/Users/a%23b/.a2p2/a2p2.db",
+		`C:\Users\é\.a2p2\a2p2.db`:        "file:///C:/Users/%C3%A9/.a2p2/a2p2.db",
+		`\\server\share\.a2p2\a2p2.db`:    "file:////server/share/.a2p2/a2p2.db",
+		`\\server\share name\a#b\a2p2.db`: "file:////server/share%20name/a%23b/a2p2.db",
+		`.a2p2\a2p2.db`:                   "file:.a2p2/a2p2.db",
+	} {
+		if got := fileURI(in); got != want {
+			t.Errorf("fileURI(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // [store] A home whose database 0.2.3 put elsewhere (its path cut at the
 // '#') is not opened as a new, empty node: Open refuses, naming both
 // paths, and creates nothing; once the file is moved, it opens with its
@@ -107,7 +131,8 @@ func TestADatabaseThatAnOlderVersionPutBesideTheHomeIsNotHiddenByANewOne(t *test
 		t.Fatal(err)
 	}
 	path := filepath.Join(home, "a2p2.db")
-	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), old) || !strings.Contains(err.Error(), path) {
+	// The refusal quotes each path (%q), which doubles a Windows backslash.
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), strconv.Quote(old)) || !strings.Contains(err.Error(), strconv.Quote(path)) {
 		t.Fatalf("open: %v", err)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {

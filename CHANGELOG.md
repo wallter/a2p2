@@ -205,6 +205,9 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   paces it, and every message still arrives (worst 275 ms in tests).
   No wire change: machines running 0.2.0 to 0.2.3 see fewer requests from
   this version, and this version answers theirs as before.
+- On Windows, `doctor` names the daemon log with the system's separator
+  (`C:\Users\you\.a2p2\daemon.log`). Since 0.2.0 it wrote
+  `C:\Users\you\.a2p2/daemon.log`.
 
 ### Security
 
