@@ -557,6 +557,7 @@ lists every skip it meets.
 | Room split into two halves by the network, a daemon killed during the split, then healed | Both halves converge to the same records; handled reports arrive | `make chaos` |
 | One machine cut off for good (sabotage) | The chaos checker reports the missing records and exits non-zero | `make chaos` with `--sabotage isolate` |
 | A scheduled fault that did not take effect, or a run with nothing delivered | The chaos run is inconclusive (exit 3), not a pass | `chaos.py check DIR --unverify partition`, `--empty` |
+| An entry field that describes the reading machine (`from_this_machine`), or one the chaos checker does not know | The checker compares members without the first and checks it against the author; the second is a violation, and a Go test fails first | `TestChaosCheckerKnowsEveryEntryField`; `chaos.py check DIR --add-field NAME`, `--flip-local` |
 
 ### Chaos runs of real daemons
 
@@ -600,8 +601,17 @@ side). The summary lists faults applied and not applied.
 
 After the heal every node sends once more. The checker then requires:
 
-- on every member, the same records with every field equal; each message
-  once; every message a sender accepted; for each, the text, author,
+- on every member, the same records with every field that every machine
+  holds alike equal (`ENTRY_SHARED` in `chaos.py`: id, key, version,
+  kind, room, author, addressees, parent, thread, created time, text and
+  the rest); the fields that describe the reading machine
+  (`ENTRY_LOCAL`: `from_this_machine`, `room_label` as shown here,
+  `id_shared`, `late`, `skipped`, a page's `text_cut`, file and request
+  state) left out of that comparison, and `from_this_machine` true
+  exactly when the author is the reading machine; an entry field in
+  neither list is a violation, and `TestChaosCheckerKnowsEveryEntryField`
+  (in `make check`) keeps both lists equal to `localapi.Entry`; each
+  message once; every message a sender accepted; for each, the text, author,
   creation time, parent, thread and addressees the driver sent, and no
   record whose text no workload agent tried to send;
 - each author's messages in the author's order in history and in the
@@ -629,7 +639,9 @@ snapshot and `summary.txt` go to `.chaos/`.
 The checker fails when it should, shown on a saved snapshot with
 `chaos.py check DIR`: `--drop n3:n1` (n1's records deleted from n3's
 copy) gives violations; `--corrupt` (one message's text changed the same
-way on every member) gives violations; `--unverify partition` and
+way on every member) gives violations; `--add-field NAME` (an entry
+field the checker does not know) and `--flip-local` (one entry's
+`from_this_machine` wrong) give violations; `--unverify partition` and
 `--empty` (nothing got through) are inconclusive. `run --sabotage
 isolate` leaves one node cut off after the heal and fails the run.
 
