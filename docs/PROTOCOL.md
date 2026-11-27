@@ -51,14 +51,18 @@ peer has a share of it (one every 2 s, burst 4).
 
 An address in a peer's `addrs` or in `peers` is kept and dialled only if
 it is `host:port` as in a token, with a port of 1024 or more or 443, and
-its host is either an IP address that is not unspecified, in `0.0.0.0/8`,
-multicast, broadcast, link-local or zoned, or a name that is not
-`localhost` and does not end in a number. A loopback address is kept only
-from a peer on the same computer: its request came over loopback, or the
-peer that lists it answered over loopback. A name is looked up at the
-dial, once, and only the addresses it gives that pass the same rule are
-dialled. Addresses from a token the person pasted are dialled as given,
-and so is an IP address that completed a pinned handshake with the peer.
+its host is either an IP address that is not loopback, unspecified, in
+`0.0.0.0/8`, multicast, broadcast, link-local or zoned, and not an IPv6
+form carrying such an IPv4 address (NAT64 `64:ff9b::/96`, 6to4
+`2002::/16`) or any IPv4 address (`64:ff9b:1::/48`, IPv4-compatible,
+IPv4-translated); or a name that is not `localhost` and does not end in a
+number. Loopback is refused whoever lists it and however the peer
+connected. A name is looked up at the dial, once, and only the addresses
+it gives that pass the same rule are dialled. Addresses from a token the
+person pasted and accepted are dialled as given, and so is an IP address
+that completed a pinned handshake with the peer. The same rule applies
+to file transfers, dial-back requests and `net check` of members; an
+address a person types for `net check HOST:PORT` is dialled as typed.
 Nothing on the wire changed: an address the rule refuses is dropped, not
 refused, so a peer of any version that sends one is answered as before.
 
@@ -453,11 +457,14 @@ behind catches up through its own pulls, where `log.more` pages without
 limit.
 
 A server checks membership before it keeps anything of a request: one
-from a key that is not a member of the room, without `log.entries`, is
-answered 403 at step 4 at once, by the membership as last decided; one
-with `log.entries` goes through step 4, within a budget of 8 at once and 4
-a second for the whole server (429 `rate_limited` past it). Nothing of
-either is kept: not its heads, its addresses or a refusal count.
+for a room it does not hold, or from a key that is not a member of the
+room without `log.entries`, is answered 403 at step 4 at once, by the
+membership as last decided; one with `log.entries` goes through step 4,
+admitted from a token bucket for the whole server (burst 8, 4 a second),
+at most 2 at a time, with a share per source IPv4 address or IPv6 /64
+(2 at once, one a second); past it, 429 `rate_limited` with
+`Retry-After`. Nothing of either is kept: not its heads, its addresses or
+a refusal count.
 
 ### 4.5 Status codes
 
@@ -545,9 +552,12 @@ Responder, in order:
    burst of 4, then one every 10 minutes; for the whole responder a burst
    of 16, then one every 10 seconds; at most 4 requests being dialled at
    once. A key over its own limit spends nothing of the responder's.
-4. Unspecified, multicast, broadcast and link-local addresses are never
-   dialled. A loopback address is dialled only when the request itself
-   came over loopback (the asker is on the responder's machine).
+4. An address is dialled only if the rule of section 0 for addresses on
+   another machine's word allows it: never loopback (behind a tunnel or
+   proxy on the responder's machine every request comes over loopback),
+   unspecified, multicast, broadcast or link-local, and only on port 443
+   or 1024 and above. Until D71 a loopback address was dialled when the
+   request came over loopback, and any port from 1 was.
 5. Of the rest, the responder dials only the IP address the request came
    from, on at most two ports the asker names (the first two such
    addresses asked: its listening port and a mapped external port). Every

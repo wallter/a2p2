@@ -33,7 +33,7 @@ func dialBackPair(t *testing.T) (a, b *pm) {
 	t.Helper()
 	a, b = newPM(t, "a", true), newPM(t, "b", true)
 	group(t, a, b)
-	addr := serve(t, a.id, dbH{a.h, node.NewDialBackServer(a.r, NewProber(a.id))}, nil)
+	addr := serve(t, a.id, dbH{a.h, loopbackDialBack(a)}, nil)
 	b.book.Keep(func(n string) bool { return n != a.node() }) // only the dial-back listener
 	b.book.Replace(a.node(), []string{addr}, time.Now())
 	return a, b
@@ -256,7 +256,7 @@ func TestOverTLSACandidateIsVerifiedOnlyWhereTheAskersKeyAnswersAndIPv6Works(t *
 	}
 	ctx, cancel := context.WithCancel(bg)
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, l6, a.id, dbH{a.h, node.NewDialBackServer(a.r, NewProber(a.id))}) }()
+	go func() { done <- Serve(ctx, l6, a.id, dbH{a.h, loopbackDialBack(a)}) }()
 	t.Cleanup(func() { cancel(); <-done })
 	b.book.Replace(a.node(), append(b.book.Addrs(a.node()), l6.Addr().String()), time.Now())
 	got = r.Check(bg, []string{a.node()}, true)
@@ -344,4 +344,13 @@ func TestAProbeShowsOnlyAThrowawayCertificateAndNoneToAWrongKey(t *testing.T) {
 	if len(shown) != 1 || shown[0] == machine.NodeID() || shown[0] == srvID.NodeID() || requests != 0 {
 		t.Fatalf("certificates shown %v (machine %s), requests %d", shown, core.ShortNode(machine.NodeID()), requests)
 	}
+}
+
+// loopbackDialBack is a's dial-back server, allowed to dial an asker's
+// loopback source address: these tests run on one computer, and the rule
+// refuses loopback on another machine's word (D71).
+func loopbackDialBack(a *pm) *node.DialBackServer {
+	s := node.NewDialBackServer(a.r, NewProber(a.id))
+	s.LoopbackForTests = true
+	return s
 }

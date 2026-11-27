@@ -147,22 +147,6 @@ func literalAddr(a string) (netip.AddrPort, bool) {
 	return netip.AddrPortFrom(ip.Unmap(), uint16(p)), true
 }
 
-// dialable says whether the responder may dial ip for an asker that
-// connected from source: never an unspecified, multicast, broadcast or
-// link-local address; a loopback address only when the asker itself
-// connected over loopback (it is on this machine, so the dial reaches
-// nothing the asker could not reach itself).
-func dialable(ip netip.Addr, source netip.Addr) bool {
-	switch {
-	case ip.IsUnspecified(), ip.IsMulticast(), ip.IsLinkLocalUnicast(), ip.IsLinkLocalMulticast(),
-		ip.IsInterfaceLocalMulticast(), ip == netip.AddrFrom4([4]byte{255, 255, 255, 255}):
-		return false
-	case ip.IsLoopback():
-		return source.IsLoopback()
-	}
-	return true
-}
-
 // Handshaker completes the pinned handshake of the dial-back: a TCP
 // connection to addr, then TLS expecting exactly key, presenting this
 // machine's own certificate, and then closing without sending anything
@@ -176,6 +160,10 @@ type DialBackServer struct {
 	r   *Rooms
 	hs  Handshaker
 	now func() time.Time
+	// LoopbackForTests lets the asker's loopback source address be dialled,
+	// for tests of two machines on one computer over real TLS; the daemon
+	// never sets it, and no setting does (D71).
+	LoopbackForTests bool
 
 	mu   sync.Mutex
 	per  map[string]*tokens
@@ -200,6 +188,23 @@ func (t *tokens) take(now time.Time, burst float64, every time.Duration) (bool, 
 	}
 	t.n--
 	return true, 0
+}
+
+// wait is how long until a token is there, without taking it (0: now).
+func (t *tokens) wait(now time.Time, burst float64, every time.Duration) time.Duration {
+	n := burst
+	if !t.last.IsZero() {
+		n = min(burst, t.n+float64(now.Sub(t.last))/float64(every))
+	}
+	if n >= 1 {
+		return 0
+	}
+	return time.Duration((1 - n) * float64(every))
+}
+
+// full says whether the bucket is full again at now.
+func (t *tokens) full(now time.Time, burst float64, every time.Duration) bool {
+	return t.last.IsZero() || t.n+float64(now.Sub(t.last))/float64(every) >= burst
 }
 
 // maxDialBackPeers bounds the per-peer table; only members ever enter it.
@@ -269,10 +274,15 @@ func (s *DialBackServer) DialBack(ctx context.Context, from, source string, q *D
 	var wg sync.WaitGroup
 	ports := 0
 	for i, a := range q.Addrs {
-		// Only the IP address the request came from, on at most two ports:
-		// a member can make this machine connect to itself and nothing else.
+		// Only the IP address the request came from, on at most two ports,
+		// and only as the address rule allows another machine's word
+		// (AddrRefusal: never loopback, link-local or a port below 1024
+		// other than 443, whatever the source; behind a tunnel or proxy on
+		// this machine every source is loopback): a member can make this
+		// machine connect to itself and nothing else.
 		ap, valid := literalAddr(a)
-		if !valid || ap.Addr() != srcIP || !dialable(ap.Addr(), srcIP) || ports == dialBackPorts {
+		if !valid || ap.Addr() != srcIP || ports == dialBackPorts ||
+			!RemoteAddrOK(ap.String()) && !(s.LoopbackForTests && srcIP.IsLoopback() && remotePortOK(int(ap.Port()))) {
 			continue
 		}
 		ports++

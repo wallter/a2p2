@@ -162,9 +162,8 @@ func (x *Exchange) pullStoppable(ctx context.Context, peer string, q *PullReques
 // learnPeers takes the addresses a response lists for members of room
 // (other than this machine and the peer that answered, whose own word in
 // its requests counts instead) into the book, as a third party's word
-// (AddrBook.Listed); loopback: the peer that answered was reached over
-// loopback, so it is on this machine.
-func (x *Exchange) learnPeers(room, from string, ps []PullPeer, loopback bool) {
+// (AddrBook.Listed).
+func (x *Exchange) learnPeers(room, from string, ps []PullPeer) {
 	if x.book == nil || len(ps) == 0 {
 		return
 	}
@@ -183,7 +182,7 @@ func (x *Exchange) learnPeers(room, from string, ps []PullPeer, loopback bool) {
 		if seen.After(now) {
 			seen = now
 		}
-		x.book.Listed(p.Node, p.Addrs, seen, loopback) // a third party's word: RemoteAddrOK
+		x.book.Listed(p.Node, p.Addrs, seen) // a third party's word: RemoteAddrOK
 	}
 }
 

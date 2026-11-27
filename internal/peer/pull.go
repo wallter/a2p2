@@ -128,8 +128,8 @@ func (s *pullServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(node.WithHoldNotice(r.Context(), leave))
 	defer cancel()
 	defer context.AfterFunc(s.closing, cancel)()
-	// The source, so a member on this machine may give loopback addresses
-	// for itself (node.RemoteAddrOK).
+	// The source, by which requests that carry entries from keys that are
+	// not members are shared out (node.WithSource); it grants nothing.
 	resp, err := s.h.Serve(node.WithSource(ctx, r.RemoteAddr), from, q)
 	if err != nil {
 		var pe *node.PullError
@@ -234,6 +234,15 @@ func (l *pullLimiter) take(key string) (bool, time.Duration) {
 	return true, 0
 }
 
+// give returns a token taken from key that was not used.
+func (l *pullLimiter) give(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if b := l.m[key]; b != nil {
+		b.tokens = min(l.burst, b.tokens+1)
+	}
+}
+
 // ---- client ----
 
 // PullClient implements node.PullTransport over pinned mutual TLS 1.3 and
@@ -313,8 +322,8 @@ func (c *PullClient) client(peer string) *http.Client {
 		// An address another machine gave is checked before anything is
 		// spent on it, and a name it gave is looked up here, once, and
 		// only the addresses found that pass are dialled (F5, F54).
-		given, loopback := c.book.DialPolicy(peer, addr)
-		if !given && !node.RemoteAddrOK(addr, loopback) {
+		given, refused := c.book.Rule(peer, addr)
+		if refused != "" {
 			return nil, node.ErrAddrRefused
 		}
 		if !c.verified(peer, addr) {
@@ -322,10 +331,11 @@ func (c *PullClient) client(peer string) *http.Client {
 				return nil, errDialBudget
 			}
 			if ok, _ := c.dials.take(""); !ok {
+				c.peerDials.give(peer) // not dialled: the peer's share is not spent
 				return nil, errDialBudget
 			}
 		}
-		targets, err := node.DialTargets(ctx, addr, given, loopback, c.Resolve)
+		targets, err := node.DialTargets(ctx, addr, given, c.Resolve)
 		if err != nil {
 			return nil, err
 		}
@@ -362,6 +372,22 @@ func (c *PullClient) client(peer string) *http.Client {
 
 func (c *PullClient) usable(addr string) bool {
 	return validAddr(addr) && (c.Usable == nil || c.Usable(addr))
+}
+
+// dialled says whether addr of peer is one this machine dials at all
+// (node.AddrBook.Rule) and can route from here (usable). An address
+// refused here is noted as failing, so one an earlier version stored
+// ages out, and is charged nothing: no token of the requester's budget
+// or of the dial budgets.
+func (c *PullClient) dialled(peer, addr string) bool {
+	if !c.usable(addr) {
+		return false
+	}
+	if _, refused := c.book.Rule(peer, addr); refused != "" {
+		c.book.Failed(peer, addr, time.Now())
+		return false
+	}
+	return true
 }
 
 // errDialBudget: the daemon's budget of dials to unverified addresses is
@@ -404,7 +430,7 @@ func (c *PullClient) Pull(ctx context.Context, peer string, req *node.PullReques
 	lastErr := errors.New("peer: no usable address")
 	tried := false
 	for _, addr := range c.book.Addrs(peer) {
-		if !c.usable(addr) {
+		if !c.dialled(peer, addr) {
 			continue
 		}
 		// Each attempt may reach the peer: one after the first pays the
@@ -436,11 +462,7 @@ func (c *PullClient) Pull(ctx context.Context, peer string, req *node.PullReques
 			continue // unreachable, or another key at this address: the next one
 		}
 		c.book.Worked(peer, addr)
-		r, err := readPull(resp)
-		if r != nil {
-			r.Via = addr // where the peer was reached: on loopback, it is on this machine
-		}
-		return r, err
+		return readPull(resp)
 	}
 	return nil, lastErr
 }

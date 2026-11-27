@@ -98,10 +98,6 @@ type PullResponse struct {
 	Peers   []PullPeer                      `json:"peers,omitempty"`
 	// Want asks the puller, the author, to upload files (PROTOCOL 10.4).
 	Want []PullWant `json:"want,omitempty"`
-	// Via is the address the transport reached the peer at; not sent. A
-	// peer reached over loopback is on this machine, and the loopback
-	// addresses it lists for others are kept (RemoteAddrOK).
-	Via string `json:"-"`
 }
 
 // PullPeer is a member with addresses and when it was last heard from.

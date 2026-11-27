@@ -308,7 +308,7 @@ func (t *Tx) NoteKnown(room, peer, author string, known map[string]int64, at tim
 	}
 	sort.Strings(gone)
 	for _, e := range gone {
-		if err := t.lowerKnown(room, peer, author, e, have[e].contig, 0, at, true); err != nil {
+		if err := t.lowerKnown(room, peer, author, e, have[e].contig, 0, at, true, anyReport); err != nil {
 			return err
 		}
 	}
@@ -342,7 +342,7 @@ func (t *Tx) NoteKnown(room, peer, author string, known map[string]int64, at tim
 			continue
 		}
 		if c < r.known {
-			if err := t.lowerKnown(room, peer, author, epoch, r.contig, c, at, false); err != nil {
+			if err := t.lowerKnown(room, peer, author, epoch, r.contig, c, at, false, anyReport); err != nil {
 				return err
 			}
 			continue
@@ -363,9 +363,10 @@ func (t *Tx) NoteKnown(room, peer, author string, known map[string]int64, at tim
 // another's (a peer could otherwise raise a hint another peer set and
 // then drop it). Such a stream counts against the peer whose report it
 // takes, and is not taken while that peer is at MaxHintedStreams. A
-// stream that holds nothing and is lowered to nothing goes.
-func (t *Tx) lowerKnown(room, peer, author, epoch string, contig, c int64, at time.Time, gone bool) error {
-	k, from, kat, err := t.otherKnown(room, peer, author, epoch)
+// stream that holds nothing and is lowered to nothing goes. Only reports
+// that elig accepts are taken (anyReport: every one).
+func (t *Tx) lowerKnown(room, peer, author, epoch string, contig, c int64, at time.Time, gone bool, elig reportFilter) error {
+	k, from, kat, err := t.otherKnown(room, peer, author, epoch, elig)
 	if err != nil {
 		return err
 	}
@@ -394,8 +395,9 @@ func (t *Tx) lowerKnown(room, peer, author, epoch string, contig, c int64, at ti
 // otherKnown is the highest position of stream (author, epoch) of room
 // that a peer other than peer reports in its last observed detail, the
 // latest such report on a tie, with that peer and when it was observed
-// (this machine's clock, in milliseconds); 0 when none reports it.
-func (t *Tx) otherKnown(room, peer, author, epoch string) (known int64, from string, at int64, err error) {
+// (this machine's clock, in milliseconds); 0 when none reports it. Only
+// reports elig accepts count.
+func (t *Tx) otherKnown(room, peer, author, epoch string, elig reportFilter) (known int64, from string, at int64, err error) {
 	rows, err := t.tx.Query(`SELECT peer, detail, at FROM observed WHERE room = ? AND author = ? AND peer <> ?
 		AND detail IS NOT NULL ORDER BY peer`, room, author, peer)
 	if err != nil {
@@ -409,7 +411,7 @@ func (t *Tx) otherKnown(room, peer, author, epoch string) (known int64, from str
 			return 0, "", 0, err
 		}
 		var ds []StreamDetail
-		if json.Unmarshal([]byte(detail), &ds) != nil {
+		if !elig.ok(p, when) || json.Unmarshal([]byte(detail), &ds) != nil {
 			continue
 		}
 		for _, d := range ds {
@@ -463,77 +465,94 @@ func (t *Tx) dropHints(room, peer string, keep map[string]bool) error {
 	return nil
 }
 
+// reportFilter says which peers' observed reports may hold up a stream
+// hint: from members only (nil: any peer), observed at or after since.
+type reportFilter struct {
+	member map[string]bool
+	since  int64
+}
+
+var anyReport = reportFilter{}
+
+func (f reportFilter) ok(peer string, at int64) bool {
+	return (f.member == nil || f.member[peer]) && at >= f.since
+}
+
 // DropReports forgets, in room, what peers not in members reported (their
-// observed rows) and the stream hints only their reports keep, and the
-// hints of a member not observed since before (a report sets them
-// again). A hint is an unsigned claim (F9): it lasts while a member keeps
-// making it, and no longer.
+// observed rows), and every stream hint that no report observed since
+// before can still hold up: a hint is an unsigned claim (F9), and it lasts
+// while a member keeps making it, and no longer. A hint is held up by the
+// report of the author's row that set it, from a member, observed since
+// before; a fresh observation of a peer's log alone does not hold up its
+// day-old stream detail. One that is not is handed to the highest other
+// report that is held up in the same way, and otherwise forgotten, so two
+// silent members cannot pass a hint back and forth between them. Signed
+// records are not touched: a stream that holds records keeps its row.
 func (t *Tx) DropReports(room string, members []string, before time.Time) error {
-	member := map[string]bool{}
+	f := reportFilter{member: map[string]bool{}, since: ms(before)}
 	for _, m := range members {
-		member[m] = true
+		f.member[m] = true
 	}
-	last := map[string]int64{}
-	rows, err := t.tx.Query(`SELECT peer, max(at) FROM observed WHERE room = ? GROUP BY peer`, room)
+	rows, err := t.tx.Query(`SELECT DISTINCT peer FROM observed WHERE room = ?`, room)
 	if err != nil {
 		return err
 	}
-	for rows.Next() {
-		var p string
-		var at int64
-		if err := rows.Scan(&p, &at); err != nil {
-			rows.Close()
-			return err
-		}
-		last[p] = at
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, p := range sortedKeys(last) {
-		if !member[p] {
-			if _, err := t.tx.Exec(`DELETE FROM observed WHERE room = ? AND peer = ?`, room, p); err != nil {
-				return err
-			}
-		}
-	}
-	rows, err = t.tx.Query(`SELECT DISTINCT known_from FROM streams WHERE room = ? AND known_from <> ''`, room)
-	if err != nil {
-		return err
-	}
-	var hinting []string
+	var peers []string
 	for rows.Next() {
 		var p string
 		if err := rows.Scan(&p); err != nil {
 			rows.Close()
 			return err
 		}
-		hinting = append(hinting, p)
+		peers = append(peers, p)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	sort.Strings(hinting)
-	for _, p := range hinting {
-		if at, ok := last[p]; member[p] && ok && at >= ms(before) {
+	sort.Strings(peers)
+	for _, p := range peers {
+		if !f.member[p] {
+			if _, err := t.tx.Exec(`DELETE FROM observed WHERE room = ? AND peer = ?`, room, p); err != nil {
+				return err
+			}
+		}
+	}
+	type hint struct {
+		author, epoch, from string
+		contig              int64
+		held                bool
+	}
+	rows, err = t.tx.Query(`SELECT s.author, s.epoch, s.known_from, s.contig, o.at FROM streams s
+		LEFT JOIN observed o ON o.room = s.room AND o.peer = s.known_from AND o.author = s.author AND o.detail IS NOT NULL
+		WHERE s.room = ? AND s.known_from <> '' ORDER BY s.author, s.epoch`, room)
+	if err != nil {
+		return err
+	}
+	var hs []hint
+	for rows.Next() {
+		var h hint
+		var at sql.NullInt64
+		if err := rows.Scan(&h.author, &h.epoch, &h.from, &h.contig, &at); err != nil {
+			rows.Close()
+			return err
+		}
+		h.held = at.Valid && f.ok(h.from, at.Int64)
+		hs = append(hs, h)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, h := range hs {
+		if h.held {
 			continue
 		}
-		if err := t.dropHints(room, p, nil); err != nil {
+		if err := t.lowerKnown(room, h.from, h.author, h.epoch, h.contig, 0, time.Time{}, true, f); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // Observe replaces what peer reported in room with obs, an observation

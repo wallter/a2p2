@@ -80,14 +80,15 @@ func (s *Surface) Describe(ctx context.Context, q store.Request) (RequestView, e
 
 // OnlyReachedWarning is what a person is told before removing node, the
 // one member of the room this machine has exchanged with within
-// ReachedFor (F21). name is the room's record of node's name, escaped
-// here for one line (EscapeDisplay); the warning is not approved, so the
-// name is not isolated as in a request's text, and the CLI and the page
-// can escape the whole warning again without changing it.
+// ReachedFor (F21). name is the room's record of node's name, from
+// another machine, so it is escaped for one line and isolated here, once,
+// as in a request's text (requestText); the CLI (approvalText) and the
+// page (isolated) show the warning as they show that text, without
+// escaping it again.
 func OnlyReachedWarning(node, name string) string {
 	m := "machine " + Fingerprint(node)
 	if name != "" {
-		m += " (" + EscapeDisplay(name) + ")"
+		m += " (" + Isolate(EscapeDisplay(name)) + ")"
 	}
 	return m + " is the only member of this room this machine has exchanged with in the last hour. " +
 		"Once it is removed, this machine may reach no other member, and no other member may learn of the " +

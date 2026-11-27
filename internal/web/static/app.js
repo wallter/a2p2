@@ -498,7 +498,7 @@ function requestCard(r, row) {
   } else {
     if (r.name && r.kind !== "network") c.append(el("div", "sub", NAME_NOTES[r.name_from] || NAME_NOTES[""]));
     if (due) c.append(el("div", "sub", "Invite expires " + due));
-    if (r.warning) c.append(el("div", "warnline", "Warning: " + escapeDisplay(r.warning)));
+    if (r.warning) c.append(el("div", "warnline", "Warning: ", ...isolated(r.warning))); // escaped and isolated by the daemon, as r.text
   }
   c.append(row);
   return c;

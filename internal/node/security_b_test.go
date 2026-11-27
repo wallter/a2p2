@@ -104,9 +104,10 @@ func TestPullsFromKeysThatAreNotMembersKeepNoStateAndDoNotWaitForTheRoomsLock(t 
 
 // F3: a key that is not a member and carries log entries (honestly, only
 // a machine its own entries admit) is checked under the rooms lock, so
-// such requests share a budget of 8 at once and 4 a second for the whole
-// machine; entries that are garbage or do not admit it leave nothing,
-// refusal counts included.
+// such requests share a token bucket for the whole machine (8 after a
+// quiet spell, 4 a second); entries that are garbage or do not admit it
+// leave nothing, refusal counts included. Requests for rooms not held
+// here spend none of it.
 func TestRequestsWithEntriesFromKeysThatAreNotMembersShareOneBudgetAndLeaveNothing(t *testing.T) {
 	ctx := context.Background()
 	a, _, _, room := pairWithHistory(t)
@@ -116,11 +117,20 @@ func TestRequestsWithEntriesFromKeysThatAreNotMembersShareOneBudgetAndLeaveNothi
 		t.Fatal(err)
 	}
 	before := exchangeSizes(a.x)
+	entries := []json.RawMessage{json.RawMessage(ws[0]), json.RawMessage(`{"not":"an entry"}`)}
+	for i := range 100 { // rooms that do not exist here: refused, nothing spent
+		q := strangerOpening(fmt.Sprintf("r_%032x", 0xdead00+i), heads)
+		q.Log.Entries = entries
+		if _, err := a.x.Serve(WithSource(ctx, "198.51.100.1:5000"), junkNode(i), q); !isNotMember(err) {
+			t.Fatalf("a room not held: %v", err)
+		}
+	}
 	refused, limited := 0, 0
 	for i := range 3 * strangerEntriesBurst {
 		q := strangerOpening(room, heads)
-		q.Log.Entries = []json.RawMessage{json.RawMessage(ws[0]), json.RawMessage(`{"not":"an entry"}`)}
-		_, err := a.x.Serve(ctx, junkNode(i), q)
+		q.Log.Entries = entries
+		src := fmt.Sprintf("198.51.100.%d:5000", 10+i) // a source each, so only the machine's bucket binds
+		_, err := a.x.Serve(WithSource(ctx, src), junkNode(i), q)
 		var pe *PullError
 		switch {
 		case isNotMember(err):
@@ -160,13 +170,13 @@ func TestAMachineAdmittedByEntriesInItsOwnRequestIsStillServed(t *testing.T) {
 	a.change(room, Change{Kind: core.EntryAdd, Target: c.id, Name: "cee", History: true})
 	c.pin(room, a.lnode)
 	c.pull(room, a.lnode)
-	if b.r.isMember(room, c.id) {
+	if _, m := b.r.memberOf(room, c.id); m {
 		t.Fatal("b already knows c")
 	}
 	if _, err := c.x.Pull(ctx, room, b.id, PullOpts{}); err != nil {
 		t.Fatalf("c pulls from b with the entries that admit it: %v", err)
 	}
-	if !b.r.isMember(room, c.id) {
+	if _, m := b.r.memberOf(room, c.id); !m {
 		t.Fatal("b did not take the entries that admit c")
 	}
 	b.x.mu.Lock()
@@ -372,8 +382,8 @@ func TestRemovingTheOnlyMemberReachedLatelyIsWarnedOf(t *testing.T) {
 	if !strings.Contains(w, Fingerprint(b.id)) || !strings.Contains(w, "bee") || !strings.Contains(w, "only member") {
 		t.Fatalf("removing the only member reached: %q", w)
 	}
-	if w != EscapeDisplay(w) {
-		t.Fatalf("the warning holds what the display escapes: %q", w)
+	if !strings.Contains(w, Isolate("bee")) {
+		t.Fatalf("the name is not isolated: %q", w)
 	}
 	a.mustPull(room, c, PullOpts{})
 	if w := warning(); w != "" {
@@ -390,25 +400,37 @@ func TestRemovingTheOnlyMemberReachedLatelyIsWarnedOf(t *testing.T) {
 }
 
 // F21: the warning names the machine by the room's record of its name,
-// escaped, so another machine's name cannot rewrite it.
-func TestTheOnlyReachedWarningEscapesTheName(t *testing.T) {
-	w := OnlyReachedWarning(wNode, "ok\u202e\x1b[2K")
-	if strings.ContainsAny(w, "\x1b\u202e") || !strings.Contains(w, Fingerprint(wNode)) {
+// escaped once and isolated, as a request's text is, so another machine's
+// name cannot rewrite or reorder it; the surfaces show it as they show
+// that text, without escaping it again (the review of D71).
+func TestTheOnlyReachedWarningEscapesTheNameOnceAndIsolatesIt(t *testing.T) {
+	name := "ok\u200f\u202e\x1b[2K"
+	w := OnlyReachedWarning(wNode, name)
+	if strings.ContainsAny(w, "\x1b\u202e\u200f") || !strings.Contains(w, Fingerprint(wNode)) {
 		t.Fatalf("%q", w)
+	}
+	if !strings.Contains(w, Isolate(EscapeDisplay(name))) || strings.Count(w, "\u2068") != 1 {
+		t.Fatalf("the name is not escaped once and isolated: %q", w)
+	}
+	parts := Isolated(w)
+	if len(parts) != 3 || !parts[1].Isolated || parts[1].Text != EscapeDisplay(name) {
+		t.Fatalf("isolated parts %+v", parts)
 	}
 }
 
 // F5, F54: what this machine keeps and dials on another machine's word.
 // Private ranges (LAN, VPN and overlay networks) and names stay; never
-// loopback (unless the machine itself is on loopback), link-local,
-// unspecified, multicast or broadcast addresses, well-known ports other
-// than 443, localhost, or a name that is a number.
+// loopback, whoever gives it, link-local, unspecified, multicast or
+// broadcast addresses, IPv6 forms that embed one of those (NAT64, 6to4)
+// or any IPv4 address (IPv4-compatible, IPv4-translated), well-known
+// ports other than 443, localhost, or a name that is a number.
 func TestTheAddressRuleForAddressesFromOtherMachines(t *testing.T) {
 	ok := []string{
 		"192.168.1.5:7423", "10.0.0.5:7423", "172.16.4.2:7423", // LAN
 		"100.101.102.103:7423", "[fd7a:115c:a1e0::1]:7423", // overlay (CGNAT range, unique-local IPv6)
 		"198.51.100.7:40001", "[2001:db8::1]:7423", "203.0.113.9:443",
 		"laptop.tail1234.ts.net:7423", "hub.example.com:443", "macbook.local:7423",
+		"[64:ff9b::c633:6407]:7423", "[2002:c633:6407::1]:7423", // NAT64 and 6to4 of a public address
 	}
 	bad := []string{
 		"127.0.0.1:7423", "127.9.9.9:7423", "[::1]:7423", "[::ffff:127.0.0.1]:7423",
@@ -417,24 +439,26 @@ func TestTheAddressRuleForAddressesFromOtherMachines(t *testing.T) {
 		"10.0.0.1:445", "192.168.1.1:22", "10.0.0.1:80", "10.0.0.1:0", "10.0.0.1:65536",
 		"localhost:7423", "a.localhost:7423", "127.1:7423", "0x7f.1:7423", "2130706433:7423",
 		"", "nohost", ":7423", "a b:7423", strings.Repeat("a", 300) + ":7423",
+		// IPv6 forms that embed an IPv4 address this rule refuses
+		"[64:ff9b::7f00:1]:7423", "[64:ff9b::a9fe:a9fe]:7423", "[64:ff9b::a00:1]:445",
+		"[64:ff9b:1::7f00:1]:7423", "[64:ff9b:1::c633:6407]:7423", // the local-use NAT64 prefix: refused whole
+		"[2002:7f00:1::1]:7423", "[2002:a9fe:a9fe::1]:7423", "[2002:0:1::1]:7423",
+		"[::127.0.0.1]:7423", "[::7f00:1]:7423", "[::c633:6407]:7423", // IPv4-compatible
+		"[::ffff:0:7f00:1]:7423", "[::ffff:0:c633:6407]:7423", // IPv4-translated
+		"[::ffff:169.254.169.254]:7423", "[::ffff:0.0.0.0]:7423",
 	}
 	for _, a := range ok {
-		if !RemoteAddrOK(a, false) {
-			t.Errorf("%q refused", a)
+		if why := AddrRefusal(a); why != "" {
+			t.Errorf("%q refused: %s", a, why)
 		}
 	}
 	for _, a := range bad {
-		if RemoteAddrOK(a, false) {
+		if AddrRefusal(a) == "" {
 			t.Errorf("%q accepted", a)
 		}
 	}
-	for _, a := range []string{"127.0.0.1:7423", "[::1]:7423"} {
-		if !RemoteAddrOK(a, true) {
-			t.Errorf("%q refused from a machine on loopback", a)
-		}
-	}
-	if RemoteAddrOK("169.254.169.254:7423", true) || RemoteAddrOK("localhost:7423", true) {
-		t.Error("loopback relaxed more than loopback")
+	if !strings.Contains(AddrRefusal("127.0.0.1:7423"), "loopback") || !strings.Contains(AddrRefusal("10.0.0.1:22"), "port") {
+		t.Error("the reasons do not say why")
 	}
 }
 
@@ -443,36 +467,36 @@ func TestTheAddressRuleForAddressesFromOtherMachines(t *testing.T) {
 // result still replaces what the member said of itself before.
 func TestAddressesFromOtherMachinesAreFilteredAsTheyReachTheBook(t *testing.T) {
 	b := NewAddrBook()
-	b.Heard(wNode, []string{"127.0.0.1:22", "192.168.1.5:7423", "evil.example:22", "laptop.ts.net:7423"}, bookT0, false)
+	b.Heard(wNode, []string{"127.0.0.1:22", "192.168.1.5:7423", "evil.example:22", "laptop.ts.net:7423"}, bookT0)
 	if got := b.Addrs(wNode); !slices.Equal(got, []string{"192.168.1.5:7423", "laptop.ts.net:7423"}) {
 		t.Fatalf("its own word: %v", got)
 	}
 	other := wNode[:63] + "e"
-	b.Listed(other, []string{"[::1]:7423", "169.254.169.254:80", "10.1.2.3:7423"}, bookT0, false)
+	b.Listed(other, []string{"[::1]:7423", "169.254.169.254:80", "10.1.2.3:7423"}, bookT0)
 	if got := b.Addrs(other); !slices.Equal(got, []string{"10.1.2.3:7423"}) {
 		t.Fatalf("a third party's word: %v", got)
 	}
-	if given, _ := b.DialPolicy(other, "10.1.2.3:7423"); given {
-		t.Fatal("a third party's address counts as given")
+	if given, why := b.Rule(other, "10.1.2.3:7423"); given || why != "" {
+		t.Fatalf("a third party's LAN address: given %v, refused %q", given, why)
 	}
 	b.Learn(other, []string{"127.0.0.1:7424"}, bookT0) // an invite pasted here
-	if given, _ := b.DialPolicy(other, "127.0.0.1:7424"); !given {
+	if given, why := b.Rule(other, "127.0.0.1:7424"); !given || why != "" {
 		t.Fatal("an invite's address is not given")
 	}
-	b.Heard(wNode, []string{"127.0.0.1:22"}, bookT0.Add(time.Hour), false)
+	b.Heard(wNode, []string{"127.0.0.1:22"}, bookT0.Add(time.Hour))
 	if got := b.Addrs(wNode); len(got) != 0 {
 		t.Fatalf("a refused list did not replace its own earlier one: %v", got)
 	}
-	b.Heard(wNode, []string{"127.0.0.1:7423"}, bookT0.Add(2*time.Hour), true)
-	if _, local := b.DialPolicy(wNode, "127.0.0.1:7423"); !local || len(b.Addrs(wNode)) != 1 {
-		t.Fatalf("a machine on loopback: %v", b.Addrs(wNode))
-	}
+	// Loopback on another machine's word is never kept, however it came:
+	// behind a tunnel or proxy on this machine every member's request
+	// arrives over loopback.
+	b.Heard(wNode, []string{"127.0.0.1:7423", "[::1]:7423"}, bookT0.Add(2*time.Hour))
 	third := wNode[:63] + "f"
-	b.Listed(third, []string{"127.0.0.1:7425"}, bookT0, true) // listed by a member reached over loopback
-	if _, local := b.DialPolicy(third, "127.0.0.1:7425"); !local || len(b.Addrs(third)) != 1 {
-		t.Fatalf("a loopback address listed by a member on this machine: %v", b.Addrs(third))
+	b.Listed(third, []string{"127.0.0.1:7425"}, bookT0)
+	if len(b.Addrs(wNode)) != 0 || len(b.Addrs(third)) != 0 {
+		t.Fatalf("loopback kept: %v %v", b.Addrs(wNode), b.Addrs(third))
 	}
-	if ps := b.peers([]string{other}, false); len(ps) != 1 || !slices.Equal(ps[0].Addrs, []string{"10.1.2.3:7423"}) {
+	if ps := b.peers([]string{other}); len(ps) != 1 || !slices.Equal(ps[0].Addrs, []string{"10.1.2.3:7423"}) {
 		t.Fatalf("listed to others: %+v", ps)
 	}
 }
@@ -527,22 +551,19 @@ func TestANameFromAnotherMachineIsLookedUpOnceAndOnlyAddressesThatPassAreDialled
 		lookups++
 		return answer, nil
 	}
-	got, err := DialTargets(ctx, "hub.example:7423", false, false, resolve)
+	got, err := DialTargets(ctx, "hub.example:7423", false, resolve)
 	if err != nil || lookups != 1 || !slices.Equal(got, []string{"192.168.1.9:7423", "10.0.0.3:7423"}) {
 		t.Fatalf("%v %v after %d lookups", got, err, lookups)
 	}
-	answer = []netip.Addr{netip.MustParseAddr("127.0.0.1")}
-	if _, err := DialTargets(ctx, "hub.example:7423", false, false, resolve); !errors.Is(err, ErrAddrRefused) {
+	answer = []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("64:ff9b::7f00:1")}
+	if _, err := DialTargets(ctx, "hub.example:7423", false, resolve); !errors.Is(err, ErrAddrRefused) {
 		t.Fatalf("a name that resolves to loopback: %v", err)
 	}
-	if got, err := DialTargets(ctx, "hub.example:7423", false, true, resolve); err != nil || !slices.Equal(got, []string{"127.0.0.1:7423"}) {
-		t.Fatalf("a machine on loopback: %v %v", got, err)
-	}
 	n := lookups
-	if _, err := DialTargets(ctx, "evil.example:22", false, false, resolve); !errors.Is(err, ErrAddrRefused) || lookups != n {
+	if _, err := DialTargets(ctx, "evil.example:22", false, resolve); !errors.Is(err, ErrAddrRefused) || lookups != n {
 		t.Fatalf("a refused port was looked up: %v", err)
 	}
-	if got, err := DialTargets(ctx, "localhost:7423", true, false, resolve); err != nil || !slices.Equal(got, []string{"localhost:7423"}) || lookups != n {
+	if got, err := DialTargets(ctx, "localhost:7423", true, resolve); err != nil || !slices.Equal(got, []string{"localhost:7423"}) || lookups != n {
 		t.Fatalf("an invite's address: %v %v", got, err)
 	}
 }
@@ -572,10 +593,16 @@ func TestStoredAddressesTheRuleRefusesLoadAndCountAsAnotherMachinesWord(t *testi
 		t.Fatalf("loaded %v", got)
 	}
 	for _, a := range b.Addrs(wNode) {
-		given, local := b.DialPolicy(wNode, a)
-		if _, err := DialTargets(ctx, a, given, local, nil); (err == nil) != (a == "192.168.1.5:7423") {
+		given, why := b.Rule(wNode, a)
+		if (why == "") != (a == "192.168.1.5:7423") {
+			t.Errorf("%s: refused %q", a, why)
+		}
+		if _, err := DialTargets(ctx, a, given, nil); (err == nil) != (a == "192.168.1.5:7423") {
 			t.Errorf("%s: %v", a, err)
 		}
+	}
+	if h := b.Held(wNode); len(h) != 1 || h[0].Addr != "127.0.0.1:22" || h[0].Why == "" {
+		t.Fatalf("held and not dialled: %+v", h)
 	}
 	// A literal address that completed a pinned handshake with the node
 	// is dialled (the node's key answers there); a name that did is still
@@ -589,15 +616,18 @@ func TestStoredAddressesTheRuleRefusesLoadAndCountAsAnotherMachinesWord(t *testi
 	if b, err = LoadAddrBook(ctx, st); err != nil {
 		t.Fatal(err)
 	}
-	if given, _ := b.DialPolicy(wNode[:63]+"c", "127.0.0.1:7423"); !given {
+	if given, why := b.Rule(wNode[:63]+"c", "127.0.0.1:7423"); !given || why != "" {
 		t.Fatal("a verified literal address is not dialled after a restart")
 	}
-	if given, _ := b.DialPolicy(wNode[:63]+"c", "hub.example:7423"); given {
+	if given, _ := b.Rule(wNode[:63]+"c", "hub.example:7423"); given {
 		t.Fatal("a verified name is dialled unchecked")
 	}
 	b.Learn(wNode, []string{"127.0.0.1:22"}, time.Time{}) // the invite the person accepted names it
-	if given, _ := b.DialPolicy(wNode, "127.0.0.1:22"); !given {
+	if given, why := b.Rule(wNode, "127.0.0.1:22"); !given || why != "" {
 		t.Fatal("given again by an invite, still not dialled")
+	}
+	if h := b.Held(wNode); len(h) != 0 {
+		t.Fatalf("held after the invite: %+v", h)
 	}
 }
 
@@ -609,9 +639,9 @@ func TestAListenerOfSixtyFourMembersOnALANKeepsAndListsEveryMembersAddress(t *te
 	for i := range 64 {
 		n := fmt.Sprintf("%064x", 0xbeef00+i)
 		nodes = append(nodes, n)
-		b.Heard(n, []string{fmt.Sprintf("192.168.%d.%d:7423", i/200, 10+i%200)}, bookT0, false)
+		b.Heard(n, []string{fmt.Sprintf("192.168.%d.%d:7423", i/200, 10+i%200)}, bookT0)
 	}
-	if ps := b.peers(nodes, false); len(ps) != MaxPeersListed {
+	if ps := b.peers(nodes); len(ps) != MaxPeersListed {
 		t.Fatalf("%d of 64 members listed", len(ps))
 	}
 }

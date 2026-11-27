@@ -15,44 +15,105 @@ import (
 	"github.com/wallter/a2p2/internal/store"
 )
 
-// isMember says whether peer is a member of room as its membership was
-// last published (State), without the rooms lock. A stale answer only
-// refuses a member admitted a moment ago (it asks again) or lets a key
-// removed a moment ago through to the check under the lock.
-func (r *Rooms) isMember(room, peer string) bool {
+// memberOf says whether room is held here and peer is a member of it, as
+// its membership was last published (State), without the rooms lock. A
+// stale answer only refuses a member admitted a moment ago (it asks
+// again) or lets a key removed a moment ago through to the check under
+// the lock.
+func (r *Rooms) memberOf(room, peer string) (held, member bool) {
 	st, err := r.State(room)
-	return err == nil && slices.Contains(st.Members, peer)
+	if err != nil {
+		return false, false
+	}
+	return true, slices.Contains(st.Members, peer)
 }
 
 type sourceKey struct{}
 
 // WithSource returns ctx carrying the address a peer's request came from
-// (the TCP peer), for Serve: a member that connected over loopback may
-// give loopback addresses for itself (RemoteAddrOK).
+// (the TCP peer), for Serve: requests with log entries from keys that are
+// not members are shared out by source (strangerEntries). It grants
+// nothing: behind a tunnel or proxy on this machine every source is
+// loopback.
 func WithSource(ctx context.Context, remoteAddr string) context.Context {
 	return context.WithValue(ctx, sourceKey{}, remoteAddr)
 }
 
-// sourceLoopback says whether ctx's request came over loopback.
-func sourceLoopback(ctx context.Context) bool {
+// sourceGroup is the group of ctx's source address: an IPv4 address or
+// an IPv6 /64, as the listener counts connections; "" when unknown.
+func sourceGroup(ctx context.Context) string {
 	s, _ := ctx.Value(sourceKey{}).(string)
 	ap, err := netip.ParseAddrPort(s)
-	return err == nil && ap.Addr().Unmap().IsLoopback()
+	if err != nil {
+		return ""
+	}
+	ip := ap.Addr().Unmap()
+	if ip.Is6() {
+		p, _ := ip.Prefix(64)
+		return p.String()
+	}
+	return ip.String()
 }
 
-// Requests with log entries from keys that are not members of the room,
-// for the whole machine: they are verified under the rooms lock, and only
-// a machine admitted by entries it carries itself sends one honestly.
+// Requests with log entries for a room held here from keys that are not
+// members of it: they are verified under the rooms lock, and only a
+// machine admitted by entries it carries itself sends one honestly. For
+// the whole machine, a token bucket (8 at once after a quiet spell, 4 a
+// second sustained) and at most 2 served at a time; each source group
+// (an IPv4 address or IPv6 /64, as the listener counts connections) has a
+// share of it (2 at once, one a second), so a hostile host takes at most
+// that share from an honest joiner at another address. Past it: 429 with
+// Retry-After.
 const (
-	strangerEntriesBurst = 8
-	strangerEntriesEvery = 250 * time.Millisecond // 4 a second
+	strangerEntriesBurst    = 8
+	strangerEntriesEvery    = 250 * time.Millisecond // 4 a second
+	strangerEntriesInFlight = 2
+	strangerSourceBurst     = 2
+	strangerSourceEvery     = time.Second
+	maxStrangerSources      = 1024
 )
 
-// strangerEntries takes a token of that budget, or says how long to wait.
-func (x *Exchange) strangerEntries() (bool, time.Duration) {
+// strangerEntries admits one such request from source, returning the
+// function to call when it is served; nil and how long to wait when it is
+// not admitted. A refusal spends nothing.
+func (x *Exchange) strangerEntries(source string) (done func(), wait time.Duration) {
+	now := x.r.m.now()
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	return x.strangers.take(x.r.m.now(), strangerEntriesBurst, strangerEntriesEvery)
+	if x.strangerBusy >= strangerEntriesInFlight {
+		return nil, strangerEntriesEvery
+	}
+	src := x.strangerBy[source]
+	if src == nil {
+		if len(x.strangerBy) >= maxStrangerSources {
+			for k, t := range x.strangerBy { // forget the sources whose share is full again
+				if t.full(now, strangerSourceBurst, strangerSourceEvery) {
+					delete(x.strangerBy, k)
+				}
+			}
+		}
+		if len(x.strangerBy) >= maxStrangerSources {
+			source = "" // the rest share one
+		}
+		if src = x.strangerBy[source]; src == nil {
+			src = &tokens{}
+			x.strangerBy[source] = src
+		}
+	}
+	if w := src.wait(now, strangerSourceBurst, strangerSourceEvery); w > 0 {
+		return nil, w
+	}
+	if w := x.strangers.wait(now, strangerEntriesBurst, strangerEntriesEvery); w > 0 {
+		return nil, w
+	}
+	src.take(now, strangerSourceBurst, strangerSourceEvery)
+	x.strangers.take(now, strangerEntriesBurst, strangerEntriesEvery)
+	x.strangerBusy++
+	return func() {
+		x.mu.Lock()
+		x.strangerBusy--
+		x.mu.Unlock()
+	}, 0
 }
 
 // forget drops what the server side keeps of peer for room (its heads

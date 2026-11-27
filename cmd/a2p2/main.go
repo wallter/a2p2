@@ -789,6 +789,9 @@ func status(c *cmd) error {
 					heard = "last heard " + clock(p.LastHeard)
 				}
 				fmt.Printf("  %-16s %s  %s  %s\n", node.EscapeDisplay(p.Name), short(p.Node), escapeAll(p.Addrs, ","), heard)
+				if h := heldText(p.Held); h != "" {
+					fmt.Println("    " + h)
+				}
 			}
 		}
 	})
@@ -1048,8 +1051,8 @@ func printTerms(w io.Writer, q localapi.Request) {
 	if q.Deadline != "" {
 		fmt.Fprintf(w, "  Invite expires %s\n", clock(q.Deadline))
 	}
-	if q.Warning != "" { // the daemon's words, with a name from another machine: escaped again here
-		fmt.Fprintf(w, "  WARNING: %s\n", node.EscapeDisplay(q.Warning))
+	if q.Warning != "" { // escaped and isolated by the daemon, as Text is
+		fmt.Fprintf(w, "  WARNING: %s\n", approvalText(q.Warning, "    "))
 	}
 }
 
@@ -1465,6 +1468,9 @@ func runDoctor(c *cmd, w io.Writer, o harness.Options) error {
 				if p.LastHeard == "" {
 					info = "not heard from in this run"
 				}
+				if h := heldText(p.Held); h != "" {
+					info += "; " + h
+				}
 				add("machine "+node.EscapeDisplay(p.Name)+" ("+short(p.Node)+")", nil, info, "")
 			}
 		}
@@ -1736,4 +1742,22 @@ func writeJSON(w io.Writer, v any) error {
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
+}
+
+// heldText says, for status and doctor, how many of a machine's addresses
+// are kept and not dialled, and why (D71); "" when none. Every string is
+// another machine's or the store's, so each is escaped for the terminal.
+func heldText(held []node.HeldAddr) string {
+	if len(held) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(held))
+	for _, h := range held {
+		parts = append(parts, node.EscapeDisplay(h.Addr)+" ("+node.EscapeDisplay(h.Why)+")")
+	}
+	n := "1 address is"
+	if len(held) > 1 {
+		n = fmt.Sprintf("%d addresses are", len(held))
+	}
+	return n + " held and not dialled, on another machine's word: " + strings.Join(parts, ", ")
 }

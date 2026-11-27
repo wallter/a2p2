@@ -655,12 +655,16 @@ type (
 		First    []FirstLine `json:"first,omitempty"`
 	}
 	Peer struct {
-		Node      string   `json:"node"`
-		Name      string   `json:"name,omitempty"`
-		IDShared  bool     `json:"id_shared,omitempty"`
-		Rooms     []string `json:"rooms"`
-		Addrs     []string `json:"addrs,omitempty"`
-		LastHeard string   `json:"last_heard,omitempty"`
+		Node     string   `json:"node"`
+		Name     string   `json:"name,omitempty"`
+		IDShared bool     `json:"id_shared,omitempty"`
+		Rooms    []string `json:"rooms"`
+		Addrs    []string `json:"addrs,omitempty"`
+		// Held is the addresses among addrs that are kept but not
+		// dialled, each with why (D71): stored by an earlier version, or
+		// refused by the address rule.
+		Held      []node.HeldAddr `json:"held,omitempty"`
+		LastHeard string          `json:"last_heard,omitempty"`
 	}
 	Status struct {
 		Node  string `json:"node"`
@@ -1005,7 +1009,7 @@ func StatusOf(st node.StatusView, listen []string, info Info) Status {
 		out.Agents = []store.Agent{}
 	}
 	for _, p := range st.Peers {
-		out.Peers = append(out.Peers, Peer{Node: p.Node, Name: p.Name, IDShared: st.Shared[p.Node], Rooms: p.Rooms, Addrs: p.Addrs, LastHeard: Time(p.LastHeard)})
+		out.Peers = append(out.Peers, Peer{Node: p.Node, Name: p.Name, IDShared: st.Shared[p.Node], Rooms: p.Rooms, Addrs: p.Addrs, Held: p.Held, LastHeard: Time(p.LastHeard)})
 	}
 	if info.UIURL != nil {
 		out.UI = info.UIURL()

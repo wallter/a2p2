@@ -232,11 +232,14 @@ var _ node.FileTransport = (*FileClient)(nil)
 // NewFileClient reaches peers through pc's clients and address book.
 func NewFileClient(pc *PullClient) *FileClient { return &FileClient{pc: pc} }
 
-// CanDial: this machine knows an address for peer that is not failing.
+// CanDial: this machine holds an address for peer that it would dial
+// (the same rule as pulls: PullClient.usable and node.AddrBook.Rule).
 func (c *FileClient) CanDial(peer string) bool {
 	for _, a := range c.pc.book.Addrs(peer) {
-		if validAddr(a) {
-			return true
+		if c.pc.usable(a) {
+			if _, refused := c.pc.book.Rule(peer, a); refused == "" {
+				return true
+			}
 		}
 	}
 	return false
@@ -252,7 +255,7 @@ func (c *FileClient) do(ctx context.Context, peer, method, path string, hdr http
 	hc := c.pc.client(peer)
 	lastErr := errors.New("peer: no usable address")
 	for _, addr := range c.pc.book.Addrs(peer) {
-		if !validAddr(addr) {
+		if !c.pc.dialled(peer, addr) {
 			continue
 		}
 		u := url.URL{Scheme: "https", Host: addr, Path: path}

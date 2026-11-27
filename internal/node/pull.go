@@ -101,6 +101,10 @@ type Exchange struct {
 	// with log entries from keys that are not members.
 	lastEx    map[[2]string]time.Time
 	strangers tokens
+	// strangerBy is that budget's share per source group, strangerBusy
+	// how many such requests are being served (strangerEntries).
+	strangerBy   map[string]*tokens
+	strangerBusy int
 	// nextHold is, per room and peer, the channels to close at the next
 	// hold registered (NextHold); closed, by Close: no more holds.
 	nextHold map[[2]string][]chan struct{}
@@ -121,7 +125,7 @@ func NewExchange(r *Rooms, t PullTransport, o ExchangeOpts) *Exchange {
 		evidence: map[[2]string]map[string]bool{}, pages: map[[2]string]*pageMemory{},
 		book: o.Book, addrs: slices.Clone(o.Addrs), addrsNow: o.AddrsNow, after: o.After, waiting: map[[2]string]chan struct{}{},
 		asked: map[[2]string]time.Time{}, nextHold: map[[2]string][]chan struct{}{}, closed: make(chan struct{}),
-		budget: newPullBudget(PullBudgetRate, PullBudgetBurst), lastEx: map[[2]string]time.Time{}}
+		budget: newPullBudget(PullBudgetRate, PullBudgetBurst), lastEx: map[[2]string]time.Time{}, strangerBy: map[string]*tokens{}}
 	r.reached = x.exchangedIn
 	if x.after == nil {
 		x.after = time.After
@@ -904,19 +908,21 @@ func (x *Exchange) serve(ctx context.Context, peer string, q *PullRequest) (*bui
 	r := x.r
 	// Membership first (F3): a key that is not a member of the room here
 	// keeps no state and takes no rooms lock. Only log entries can make it
-	// one (T4), so a request without any is refused on the membership as
-	// last published (Rooms.State, a leaf lock); one with entries is
-	// verified under the rooms lock, within a budget for the whole
-	// machine.
-	if !r.isMember(q.Room, peer) {
-		if len(q.Log.Entries) == 0 {
+	// one (T4), so a request without any, or for a room not held here, is
+	// refused on the membership as last published (Rooms.State, a leaf
+	// lock); one with entries is verified under the rooms lock, within a
+	// budget shared out by source (strangerEntries).
+	if held, member := r.memberOf(q.Room, peer); !member {
+		if !held || len(q.Log.Entries) == 0 {
 			return nil, notMember()
 		}
-		if ok, wait := x.strangerEntries(); !ok {
+		done, wait := x.strangerEntries(sourceGroup(ctx))
+		if done == nil {
 			e := pullErr(429, CodeRateLimited, "")
 			e.RetryAfter = wait
 			return nil, e
 		}
+		defer done()
 	}
 	if err := r.m.pruneIfDue(ctx); err != nil {
 		return nil, unavailable(err)
@@ -933,7 +939,7 @@ func (x *Exchange) serve(ctx context.Context, peer string, q *PullRequest) (*bui
 		x.hear(q.Room, peer, q.Log.Heads, true)
 		if x.book != nil {
 			// its own word on where it is, from the authenticated peer
-			x.book.Heard(peer, q.Addrs, now, sourceLoopback(ctx))
+			x.book.Heard(peer, q.Addrs, now)
 		}
 	} else {
 		x.forget(q.Room, peer) // nothing is kept for a key not a member here
@@ -1172,7 +1178,7 @@ func (x *Exchange) release(ctx context.Context, peer string, q *PullRequest, b *
 				others = append(others, n)
 			}
 		}
-		if ps := x.book.peers(others, sourceLoopback(ctx)); len(ps) > 0 && jsonSize(resp)+jsonSize(ps)+wireMargin <= maxResponseBytes {
+		if ps := x.book.peers(others); len(ps) > 0 && jsonSize(resp)+jsonSize(ps)+wireMargin <= maxResponseBytes {
 			resp.Peers = ps
 		}
 	}
@@ -2002,7 +2008,7 @@ func (x *Exchange) round(ctx context.Context, room, peer string, gen int64, o Pu
 		}
 		st.relog = false
 		// Only from a member: a refused answer leaves nothing behind.
-		x.learnPeers(room, peer, resp.Peers, viaLoopback(resp.Via))
+		x.learnPeers(room, peer, resp.Peers)
 		if x.files != nil {
 			x.files.answerWants(room, peer, resp.Want)
 		}

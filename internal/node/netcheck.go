@@ -6,6 +6,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -190,6 +191,11 @@ func (s *Surface) NetCheck(ctx context.Context) (NetCheck, error) {
 			if _, ok := results[k]; ok {
 				continue
 			}
+			if _, why := s.book.Rule(m.Node, a); why != "" {
+				// What the pulls would not dial is not probed either.
+				results[k] = AddrCheck{Addr: a, Result: ProbeNotTried, Detail: NotDialledDetail(why)}
+				continue
+			}
 			results[k] = AddrCheck{Addr: a, Result: ProbeNotTried, Detail: "over the limit of one check"}
 			if len(todo) < maxProbes && s.probe != nil {
 				todo = append(todo, k)
@@ -205,8 +211,7 @@ func (s *Surface) NetCheck(ctx context.Context) (NetCheck, error) {
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			got := s.probe.Probe(ctx, k.node, k.addr)
-			got.Addr = k.addr
+			got := s.probeMember(ctx, k.node, k.addr)
 			mu.Lock()
 			results[k] = got
 			mu.Unlock()
@@ -249,6 +254,44 @@ func (s *Surface) NetCheck(ctx context.Context) (NetCheck, error) {
 	nc.Forward = forwardLine(nc)
 	nc.Advice = Advice(nc)
 	return nc, nil
+}
+
+// NotDialledDetail is what net check, status and doctor say of an
+// address held for a member and not dialled, why being AddrRefusal's.
+func NotDialledDetail(why string) string {
+	return "not dialled: " + why + ", on another machine's word (only an invite's address is dialled as given)"
+}
+
+// probeMember tries addr of node as the pulls would dial it (AddrBook.Rule,
+// DialTargets): an address dialled as given at itself, a literal one at
+// itself, and a name looked up once, at each address it gives that the
+// rule allows, until node's key answers at one. So "reached" means the
+// pulls would reach node there.
+func (s *Surface) probeMember(ctx context.Context, node, addr string) AddrCheck {
+	given, why := s.book.Rule(node, addr)
+	if why != "" {
+		return AddrCheck{Addr: addr, Result: ProbeNotTried, Detail: NotDialledDetail(why)}
+	}
+	targets, err := DialTargets(ctx, addr, given, s.resolve)
+	switch {
+	case errors.Is(err, ErrAddrRefused):
+		return AddrCheck{Addr: addr, Result: ProbeNotTried, Detail: RefusedNameDetail}
+	case err != nil:
+		return AddrCheck{Addr: addr, Result: ProbeUnreachable, Detail: "the name could not be looked up: " + err.Error()}
+	}
+	var got AddrCheck
+	for _, t := range targets {
+		got = s.probe.Probe(ctx, node, t)
+		if t != addr {
+			got.Detail = strings.TrimSpace("at " + t + ": " + got.Detail)
+			got.Detail = strings.TrimSuffix(got.Detail, ":")
+		}
+		if got.Result == ProbeReached || ctx.Err() != nil {
+			break
+		}
+	}
+	got.Addr = addr
+	return got
 }
 
 // forwardLine is the config line for a port forwarded by hand: when no
