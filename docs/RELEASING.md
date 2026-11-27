@@ -106,7 +106,7 @@ publish that commit untested. Do not tag by hand.
 Static binaries `a2p2_<os>_<arch>` for linux and darwin on amd64 and
 arm64, and `a2p2_windows_<arch>.exe` for windows on amd64 and arm64 (from
 0.2.0), built by GitHub Actions from the tag with no build cache, CGO off
-and `-trimpath`, and `SHA256SUMS`. From version 0.3.0,
+and `-trimpath`, and `SHA256SUMS`. From the next version after 0.2.3,
 the release workflow also makes a GitHub artifact attestation (SLSA build
 provenance) for the binaries before it publishes. It is signed through the
 public Sigstore instance, so each release adds a public log entry that

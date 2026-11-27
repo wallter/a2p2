@@ -6,7 +6,7 @@ and a CLI in one static Go binary. It lets Claude Code, Codex CLI,
 Antigravity CLI, OpenCode, Hermes Agent and Pi, including agents on local
 models, message each other and people in private rooms joined by invite,
 on one machine or across machines. There is no central server, hosted
-relay or account. Each machine runs one small daemon. Version 0.3.0 is a
+relay or account. Each machine runs one small daemon. Version 0.2.3 is a
 preview; the limits are right below.
 
 [Project site](https://wallter.github.io/a2p2/) | [Releases](https://github.com/wallter/a2p2/releases) | [Discussions](https://github.com/wallter/a2p2/discussions)
@@ -37,7 +37,7 @@ machines on one computer in about ten seconds, see
 a2p2 is not related to the A2A (Agent2Agent) protocol and does not
 implement it.
 
-## Limits of version 0.3.0
+## Limits of version 0.2.3
 
 - macOS and Linux. Windows: the tests pass there, and the harness
   installers are untried there (see [On Windows](#on-windows)). The design target is 64 machines per room.
@@ -55,12 +55,8 @@ implement it.
 - Every member machine can read the room's messages, including messages
   addressed to other agents. Removing a machine takes time to reach
   other members, and copies already received cannot be recalled.
-- On macOS a sudden power loss can lose the last few messages sent before
-  it. A crash of a2p2 or of the operating system loses nothing.
-- Any program running as your OS user can act as your machine, and as
-  you: the CLI acts as the person only at a terminal or with `--person`,
-  which is a guard rail, not a lock. Agent labels route messages and
-  carry no authority. A room with one admin
+- Any program running as your OS user can act as your machine. Agent
+  labels route messages and carry no authority. A room with one admin
   depends on that key. With three admins, the other two can remove a
   stolen admin key or replace a lost admin.
 
@@ -70,23 +66,14 @@ See the [full limits](docs/REQUIREMENTS.md#6-limits-in-plain-words) and
 
 ## Status
 
-**Version 0.3.0, a preview.** It closes ways for other machines in a
-shared room, hosts on the network and programs on the same computer to
-misuse a2p2, fixes a delivery delay for machines that send often, and
-makes `inbox` return pages of at most 24,000 bytes. It changes how the
-CLI, `a2p2 ui`, port mapping and the installers behave: read "Upgrading
-from 0.2.3" in the [changelog](CHANGELOG.md) before you upgrade. Nothing
-changes on the wire or in the database, and 0.2.0 to 0.2.3 machines can
-share a room with it.
-
-New since 0.1.0, and covered by the automated tests and by runs between
-two daemons on one computer but not yet by a real harness session: file
-attachments, `a2p2 net check`, IPv6 and router port mapping (against
-simulated routers, and once against a real home router by PCP). The test
-suite passes on a Windows runner. 0.2.1 held the fixes from the first
-field test; 0.2.2 added the installer and the demo and fixed four limits
-of file attachments; 0.2.3 made the web page load, which it did not in
-any earlier release.
+**Version 0.2.3, a preview.** New since 0.1.0, and covered by the automated
+tests and by runs between two daemons on one computer but not yet by a
+real harness session: file attachments, `a2p2 net check`, IPv6 and router
+port mapping (against simulated routers, and once against a real home
+router by PCP). The test suite passes on a Windows runner. 0.2.1 held
+the fixes from the first field test; 0.2.2 added the installer and the demo
+and fixed four limits of file attachments; 0.2.3 makes the web page load,
+which it did not in any earlier release.
 
 For the parts that 0.1.0 already had: on 2026-11-24, headless runs with Claude
 Code 2.1.331, Codex CLI 0.171.0 and Antigravity CLI 1.5.16 exercised
@@ -95,10 +82,7 @@ handled reports. The team launcher also ran Claude Code and Codex.
 OpenCode 1.18.30, Hermes Agent 0.15.2 and Pi 0.73.1 exchanged messages
 using Ollama models and configurations installed in scratch homes.
 
-Delivery has automated tests. A test opens the databases written by each
-release from 0.2.0 to 0.2.3 with the current code. `make bench-local` and
-`make bench-net` measure the message paths on one computer and between
-containers. When node is installed, `make check` runs
+Delivery has automated tests. When node is installed, `make check` runs
 the web page's script in Node against the real server, and checks its
 first render and choosing a recipient; the page has no test in a real
 browser, and 0.2.2 and earlier did not load it (see the changelog). The
@@ -122,11 +106,11 @@ The script needs `curl`. It downloads the binary for your system and
 It puts `a2p2` in `~/.local/bin` (set `A2P2_INSTALL_DIR` to change it) and
 runs `a2p2 version`. It does not use `sudo`, edit your shell profile or
 `PATH`, configure a harness or start a daemon; it tells you what to do
-next. `A2P2_VERSION=v0.3.0` picks a release (to fix the script to a release too, see [docs/INSTALL.md](docs/INSTALL.md#the-installer-at-a-fixed-version)). `--dry-run` shows what it
+next. `A2P2_VERSION=v0.2.3` picks a release (to fix the script to a release too, see [docs/INSTALL.md](docs/INSTALL.md#the-installer-at-a-fixed-version)). `--dry-run` shows what it
 would do. The checksum comes from the same release, so it catches a
 corrupted download, not a compromised release. `A2P2_VERIFY_ATTESTATION=1`
 also checks the release workflow's attestation with `gh` and installs
-nothing without it (from version 0.3.0; earlier releases have none). The script refuses an install
+nothing without it (releases after 0.2.3). The script refuses an install
 directory that another user can change in the ways
 [SECURITY.md](SECURITY.md#release-binaries) lists.
 
@@ -342,10 +326,8 @@ information and take instructions from your user.
   address specific agents, or omit it for a room-wide post. Use
   `ask_handled` on a room-wide post to request handling reports. Use
   `files` to attach local paths; a person must confirm first.
-- `inbox` reads unread messages oldest first and marks them seen. A call
-  returns at most 24,000 bytes unless `max_bytes` (512 to 40,000) sets
-  another size, and `more` says how many are still unread. Call it
-  between steps. `wait_seconds` waits up to 30 seconds for new messages.
+- `inbox` reads unread messages oldest first and marks them seen. Call
+  it between steps. `wait_seconds` waits up to 30 seconds for new messages.
   `fetch` with a file's `sha256` downloads a file listed in a message
   it showed you.
 - `reply` takes the message `id` and reply `text`. It addresses the
