@@ -124,6 +124,11 @@ func TestAWaitingInboxIsNotWokenByTrafficItCannotSee(t *testing.T) {
 	q := e.send(SendInput{Agent: alice, Text: "for carol", To: []string{carol}})
 	e.read(carol)
 	looks := e.looks()
+	// A waiting inbox also looks again once a second whatever happened (the
+	// fallback poll in waitAny), which on a busy machine can fall inside this
+	// test. That look is not a wake, so it is counted apart.
+	var fallbacks atomic.Int64
+	e.s.fallback = func(string, time.Time) { fallbacks.Add(1) }
 	woke := e.s.m.wakes.inboxWoken()
 	a := e.arm(bob, "")
 	for i := 0; i < 20; i++ {
@@ -139,8 +144,10 @@ func TestAWaitingInboxIsNotWokenByTrafficItCannotSee(t *testing.T) {
 	if n := e.s.m.wakes.inboxWoken() - woke; n != 0 {
 		t.Fatalf("%d waiters woken by traffic bob cannot see", n)
 	}
-	if n := looks.Load(); n != 1 {
-		t.Fatalf("bob's inbox looked %d times, want 1", n)
+	// Every look after the first is preceded by its fallback hook when no wake
+	// came, so reading the looks first keeps this independent of timing.
+	if n := looks.Load(); n-1 > fallbacks.Load() {
+		t.Fatalf("bob's inbox looked %d times with %d fallback looks: a look that no wake or fallback explains", n, fallbacks.Load())
 	}
 	m := e.send(SendInput{Agent: alice, Text: "for bob", To: []string{bob}})
 	if !a.woken() {
