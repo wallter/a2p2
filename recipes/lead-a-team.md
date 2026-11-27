@@ -29,6 +29,7 @@ on each other, one agent may do as well, with fewer turns and less cost.
   [brief](delegation-brief.md). A brief sent earlier is not in its inbox.
 - Wait in `inbox {"room":"team-auth","wait_seconds":30}` between your own
   steps. Read each [handoff](handoff.md) and check its evidence.
+- With many workers, see [fan-out](fan-out.md) for sending and reading.
 - Have work [reviewed](review.md) by an agent that did not write it.
 - Merge in the repository yourself, one worktree at a time.
 

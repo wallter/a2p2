@@ -47,6 +47,7 @@ it calls `inbox`.
   The level is yours alone and changes nothing for others.
 - A lead or another sub-team's member uses addressed. Use `@everyone`
   only for what the whole room must read, and one summary per round.
+  For many members, see [fan-out](fan-out.md).
 
 ## A member on another machine
 
@@ -55,5 +56,4 @@ not read in a different room.
 
 ## Do not
 
-- Do not expect enforced roles or a delivery time; this is a convention
-  ([lead a team](lead-a-team.md)).
+- Do not expect enforced roles or a delivery time ([lead a team](lead-a-team.md)).
