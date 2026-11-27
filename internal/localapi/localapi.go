@@ -395,6 +395,9 @@ type (
 		Deadline     string `json:"deadline,omitempty"`
 		// Text says exactly what approving it does.
 		Text string `json:"text"`
+		// Warning, when set, is said beside text before deciding; it is
+		// not part of what is approved.
+		Warning string `json:"warning,omitempty"`
 		// For kind send_files (PROTOCOL 10.6): the agent that asked, the
 		// effective recipients (to, or ["everyone"] with members, the
 		// room's member count; for a replacement, its message's), the
@@ -652,12 +655,16 @@ type (
 		First    []FirstLine `json:"first,omitempty"`
 	}
 	Peer struct {
-		Node      string   `json:"node"`
-		Name      string   `json:"name,omitempty"`
-		IDShared  bool     `json:"id_shared,omitempty"`
-		Rooms     []string `json:"rooms"`
-		Addrs     []string `json:"addrs,omitempty"`
-		LastHeard string   `json:"last_heard,omitempty"`
+		Node     string   `json:"node"`
+		Name     string   `json:"name,omitempty"`
+		IDShared bool     `json:"id_shared,omitempty"`
+		Rooms    []string `json:"rooms"`
+		Addrs    []string `json:"addrs,omitempty"`
+		// Held is the addresses among addrs that are kept but not
+		// dialled, each with why (D71): stored by an earlier version, or
+		// refused by the address rule.
+		Held      []node.HeldAddr `json:"held,omitempty"`
+		LastHeard string          `json:"last_heard,omitempty"`
 	}
 	Status struct {
 		Node  string `json:"node"`
@@ -916,7 +923,7 @@ func roomsOf(rs []node.RoomInfo) []Room {
 func RequestOf(q node.RequestView) Request {
 	out := Request{ID: q.ID, Kind: q.Kind, Action: q.Action, Room: q.Room, RoomLabel: q.RoomLabel, Node: q.Machine,
 		Fingerprint: q.Fingerprint, Name: q.Name, NameFrom: q.NameFrom, RecordedName: q.RecordedName, Role: q.Role, History: q.History, Seconding: q.Seconding,
-		Created: Time(q.Created), Deadline: Time(q.Deadline), Text: q.Text}
+		Created: Time(q.Created), Deadline: Time(q.Deadline), Text: q.Text, Warning: q.Warning}
 	if s := q.Send; s != nil {
 		out.Agent, out.To, out.ReplyTo, out.TextLine, out.Terms = s.Agent, s.To, s.Parent, s.TextLine, s.Terms
 		out.ReplyAuthor, out.Body = s.ParentAuthor, s.Body
@@ -1002,7 +1009,7 @@ func StatusOf(st node.StatusView, listen []string, info Info) Status {
 		out.Agents = []store.Agent{}
 	}
 	for _, p := range st.Peers {
-		out.Peers = append(out.Peers, Peer{Node: p.Node, Name: p.Name, IDShared: st.Shared[p.Node], Rooms: p.Rooms, Addrs: p.Addrs, LastHeard: Time(p.LastHeard)})
+		out.Peers = append(out.Peers, Peer{Node: p.Node, Name: p.Name, IDShared: st.Shared[p.Node], Rooms: p.Rooms, Addrs: p.Addrs, Held: p.Held, LastHeard: Time(p.LastHeard)})
 	}
 	if info.UIURL != nil {
 		out.UI = info.UIURL()

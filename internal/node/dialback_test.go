@@ -246,13 +246,21 @@ func TestDialBackNeverDialsLoopbackOrSpecialAddressesForARemoteAsker(t *testing.
 	if tr := fn.tried(); len(tr) != 0 {
 		t.Fatalf("dialled %v for a remote asker", tr)
 	}
-	// An asker on this machine itself (it connected over loopback) may be
-	// dialled on loopback: that reaches nothing it could not reach.
+	// An asker whose request came over loopback is not dialled on loopback
+	// either (D71): behind a tunnel or a reverse proxy on this machine
+	// every asker comes over loopback. Nor is a port below 1024 other than
+	// 443 of the asker's own source address.
 	fn.at["127.0.0.1:7423"] = b.id
 	resp, perr := srv.DialBack(context.Background(), b.id, "127.0.0.1:50000",
 		&DialBackRequest{V: PullVersion, Addrs: []string{"127.0.0.1:7423"}})
-	if perr != nil || !slices.Equal(resp.Reached, []string{"127.0.0.1:7423"}) {
-		t.Fatalf("loopback asker: %+v %v", resp, perr)
+	if perr != nil || len(resp.Reached) != 0 || len(fn.tried()) != 0 {
+		t.Fatalf("loopback asker: %+v %v, dialled %v", resp, perr, fn.tried())
+	}
+	fn.at["203.0.113.9:22"], fn.at["203.0.113.9:443"] = b.id, b.id
+	resp, perr = srv.DialBack(context.Background(), b.id, "203.0.113.9:1",
+		&DialBackRequest{V: PullVersion, Addrs: []string{"203.0.113.9:22", "203.0.113.9:443"}})
+	if perr != nil || !slices.Equal(resp.Reached, []string{"203.0.113.9:443"}) || len(fn.tried()) != 1 || fn.tried()[0][0] != "203.0.113.9:443" {
+		t.Fatalf("ports of the source address: %+v %v, dialled %v", resp, perr, fn.tried())
 	}
 }
 

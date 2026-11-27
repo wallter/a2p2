@@ -589,19 +589,18 @@ func TestOverTLSTheRateLimitGives429WithRetryAfter(t *testing.T) {
 }
 
 // N1: a machine with no listener converges with two others through its
-// own requests only: its writes go out as offers, and it learns the third
-// machine's address from a response's peers.
+// own requests only: its writes go out as offers. On one computer it
+// learns no address for the third machine (a loopback address is never
+// taken on another machine's word, D71), and reaches it through the
+// machine it joined; a response's peers are covered by
+// TestPeersAreAskedForWhenAnAddressIsMissingOrHourlyAndListedOnlyWhenAsked.
 //
 // Requirements: N1
 func TestOverTLSAMachineWithNoListenerConvergesThroughItsOwnRequests(t *testing.T) {
 	a, c, n := newPM(t, "alice", true), newPM(t, "carol", true), newPM(t, "nomad", false)
-	// c's first pull told a where c is (its addrs); n's first pull, after
-	// it, was answered with c among the peers.
 	room := group(t, a, c, n)
-	// n had no address for c, so its pull in group asked for peers, and
-	// the same answer listed c.
-	if got := n.book.Addrs(c.node()); len(got) != 1 || got[0] != c.addr {
-		t.Fatalf("n learned c at %v, want %s", got, c.addr)
+	if got := n.book.Addrs(c.node()); len(got) != 0 {
+		t.Fatalf("n took c's loopback address %v on a's word", got)
 	}
 	c.knows(a)
 	runSched(t, a, c, n)

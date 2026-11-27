@@ -100,7 +100,7 @@ func (c *PullClient) DialBack(ctx context.Context, peer string, addrs []string) 
 		fam = node.AddrFamily(addrs[0])
 	}
 	for _, addr := range c.book.Addrs(peer) {
-		if !c.usable(addr) || node.AddrFamily(addr) != fam {
+		if node.AddrFamily(addr) != fam || !c.dialled(peer, addr) {
 			continue
 		}
 		u := url.URL{Scheme: "https", Host: addr, Path: pathDialBackV2}

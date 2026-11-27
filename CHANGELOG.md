@@ -208,6 +208,55 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Security
 
+- **A key that is not a member no longer leaves state behind on a
+  listener.** Since 0.1.0, a pull from any key, member or not, was
+  recorded in memory, and its requests waited for the lock every room
+  shares. Any host that reaches the peer port could grow the daemon's
+  memory with fresh keys and slow members' pulls. Now such a request is
+  refused before the lock, and nothing of it is kept; so is one for a
+  room not held here. One that carries log entries is checked at most 2
+  at a time, within a budget of 4 a second for the machine and one a
+  second for each source address. What is kept of a peer that is no
+  longer a member goes within 10 minutes, and so does a stream hint
+  whose report is a day old (hints are new since 0.2.3).
+- **Members no longer choose what this machine dials.** Since 0.1.0, any
+  member could give addresses for itself or for other members: loopback
+  ports, link-local and cloud metadata addresses, well-known ports, and
+  names that resolve to these. This machine then dialled them with a TLS
+  handshake, for pulls and, since 0.2.0, file transfers and `a2p2 net
+  check`; and a dial-back it answered went to any port from 1, and to
+  loopback when the request came over loopback. Now an address on
+  another machine's word is kept and dialled only if it could be a
+  member's, on every one of those paths: LAN, VPN, overlay and public
+  addresses at port 443 or 1024 and above, never loopback, link-local, or
+  an IPv6 form that carries a refused IPv4 address. A name is looked up
+  once and only the addresses that pass are dialled. Addresses from an
+  invite are dialled as given once the invite is accepted; a preview no
+  longer marks them. An address `a2p2 net check HOST:PORT` is given is
+  dialled as typed. Each member also gets a share of the unverified dial
+  budget, and a host name pays it for every address it gives, even a
+  name that answered before. A listener on a port below 1024 other than
+  443, or on a plain link-local address, is now learned only from an
+  invite. An address an older version stored that the rule refuses, even
+  one where the member's key answered, is shown by `a2p2 status`, `a2p2
+  doctor` and `a2p2 net check`, not dialled unless an accepted invite
+  gave it, and dropped after a day of failing. A member known only by
+  such addresses is no longer dialled: status and doctor say to join with
+  an invite from it, which makes its address dialled as given.
+- **A mute ends.** Since 0.1.0, a peer that answered `not_member` twice
+  was left alone until either side's log changed. A listener that left
+  the room and joined again could so stop a laptop pulling until a
+  restart. Now the mute lasts 5 minutes, doubling up to an hour; a laptop
+  removed from a room asks its former listener once an hour.
+- **Strangers are not recorded as connected in.** Since 0.2.0, requests
+  from keys that share no room counted, and enough of them pushed
+  members out of what `a2p2 status` reports.
+- **A warning before removing the only member reached.** Proposing or
+  confirming the removal of the only member this machine exchanged with
+  in the last hour now says so in `a2p2 confirm`, on the page and in the
+  local API, with the member's name escaped and isolated as in the
+  request's text.
+
 - **A join can no longer write into a room this machine already holds
   from a machine that is not a member.** Since 0.1.0, a removed admin, or
   any machine holding a copy of the room, could send a member an invite.

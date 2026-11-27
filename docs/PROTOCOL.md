@@ -46,7 +46,26 @@ node (`peer_addrs`, section 8) and tried most recent success first. At most
 8 per node; an address a node reports for itself takes a slot before one
 heard from a third party; one that has failed for 24 hours and at least 5
 attempts is dropped. Dials to addresses that have never completed a pinned
-handshake share one budget for the daemon (2 a second, burst 8).
+handshake share one budget for the daemon (2 a second, burst 8), and each
+peer has a share of it (one every 2 s, burst 4).
+
+An address in a peer's `addrs` or in `peers` is kept and dialled only if
+it is `host:port` as in a token, with a port of 1024 or more or 443, and
+its host is either an IP address that is not loopback, unspecified, in
+`0.0.0.0/8`, multicast, broadcast, link-local or zoned, and not an IPv6
+form carrying such an IPv4 address (NAT64 `64:ff9b::/96`, 6to4
+`2002::/16`) or any IPv4 address (`64:ff9b:1::/48`, IPv4-compatible,
+IPv4-translated); or a name that is not `localhost` and does not end in a
+number. Loopback is refused whoever lists it and however the peer
+connected. A name is looked up at the dial, once, and only the addresses
+it gives that pass the same rule are dialled. Addresses from a token the
+person pasted and accepted are dialled as given, and only those: an
+address that completed a pinned handshake with the peer is still checked
+by the rule. The same rule applies
+to file transfers, dial-back requests and `net check` of members; an
+address a person types for `net check HOST:PORT` is dialled as typed.
+Nothing on the wire changed: an address the rule refuses is dropped, not
+refused, so a peer of any version that sends one is answered as before.
 
 ## 1. Record header
 
@@ -432,8 +451,21 @@ Requester on any 403 from a peer it believes is a member: forget what it
 had observed of that peer's log; the next attempt sends its accepted log
 from the start, once, with no offer. If that is refused too, later attempts
 carry neither entries nor offers until its own accepted log changes or a
-request from that peer shows different log heads. A server that is behind catches up through its own
-pulls, where `log.more` pages without limit.
+request from that peer shows different log heads, or 5 minutes pass:
+then it is asked again as after a first 403, and a further 403 in the same
+run of refusals leaves it twice as long, up to an hour. A server that is
+behind catches up through its own pulls, where `log.more` pages without
+limit.
+
+A server checks membership before it keeps anything of a request: one
+for a room it does not hold, or from a key that is not a member of the
+room without `log.entries`, is answered 403 at step 4 at once, by the
+membership as last decided; one with `log.entries` goes through step 4,
+admitted from a token bucket for the whole server (burst 8, 4 a second),
+at most 2 at a time, with a share per source IPv4 address or IPv6 /64
+(2 at once, one a second); past it, 429 `rate_limited` with
+`Retry-After`. Nothing of either is kept: not its heads, its addresses or
+a refusal count.
 
 ### 4.5 Status codes
 
@@ -521,9 +553,12 @@ Responder, in order:
    burst of 4, then one every 10 minutes; for the whole responder a burst
    of 16, then one every 10 seconds; at most 4 requests being dialled at
    once. A key over its own limit spends nothing of the responder's.
-4. Unspecified, multicast, broadcast and link-local addresses are never
-   dialled. A loopback address is dialled only when the request itself
-   came over loopback (the asker is on the responder's machine).
+4. An address is dialled only if the rule of section 0 for addresses on
+   another machine's word allows it: never loopback (behind a tunnel or
+   proxy on the responder's machine every request comes over loopback),
+   unspecified, multicast, broadcast or link-local, and only on port 443
+   or 1024 and above. Until D71 a loopback address was dialled when the
+   request came over loopback, and any port from 1 was.
 5. Of the rest, the responder dials only the IP address the request came
    from, on at most two ports the asker names (the first two such
    addresses asked: its listening port and a mapped external port). Every

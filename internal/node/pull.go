@@ -96,6 +96,15 @@ type Exchange struct {
 	waiting map[[2]string]chan struct{}
 	// asked is, per room and peer, when its peers were last asked for.
 	asked map[[2]string]time.Time
+	// lastEx is, per room and peer, when an exchange with it last ended
+	// without an error (pullstate.go); strangers, the budget of requests
+	// with log entries from keys that are not members.
+	lastEx    map[[2]string]time.Time
+	strangers tokens
+	// strangerBy is that budget's share per source group, strangerBusy
+	// how many such requests are being served (strangerEntries).
+	strangerBy   map[string]*tokens
+	strangerBusy int
 	// nextHold is, per room and peer, the channels to close at the next
 	// hold registered (NextHold); closed, by Close: no more holds.
 	nextHold map[[2]string][]chan struct{}
@@ -116,7 +125,8 @@ func NewExchange(r *Rooms, t PullTransport, o ExchangeOpts) *Exchange {
 		evidence: map[[2]string]map[string]bool{}, pages: map[[2]string]*pageMemory{},
 		book: o.Book, addrs: slices.Clone(o.Addrs), addrsNow: o.AddrsNow, after: o.After, waiting: map[[2]string]chan struct{}{},
 		asked: map[[2]string]time.Time{}, nextHold: map[[2]string][]chan struct{}{}, closed: make(chan struct{}),
-		budget: newPullBudget(PullBudgetRate, PullBudgetBurst)}
+		budget: newPullBudget(PullBudgetRate, PullBudgetBurst), lastEx: map[[2]string]time.Time{}, strangerBy: map[string]*tokens{}}
+	r.reached = x.exchangedIn
 	if x.after == nil {
 		x.after = time.After
 	}
@@ -896,6 +906,24 @@ func isNotMember(err error) bool {
 
 func (x *Exchange) serve(ctx context.Context, peer string, q *PullRequest) (*built, error) {
 	r := x.r
+	// Membership first (F3): a key that is not a member of the room here
+	// keeps no state and takes no rooms lock. Only log entries can make it
+	// one (T4), so a request without any, or for a room not held here, is
+	// refused on the membership as last published (Rooms.State, a leaf
+	// lock); one with entries is verified under the rooms lock, within a
+	// budget shared out by source (strangerEntries).
+	if held, member := r.memberOf(q.Room, peer); !member {
+		if !held || len(q.Log.Entries) == 0 {
+			return nil, notMember()
+		}
+		done, wait := x.strangerEntries(sourceGroup(ctx))
+		if done == nil {
+			e := pullErr(429, CodeRateLimited, "")
+			e.RetryAfter = wait
+			return nil, e
+		}
+		defer done()
+	}
 	if err := r.m.pruneIfDue(ctx); err != nil {
 		return nil, unavailable(err)
 	}
@@ -905,13 +933,18 @@ func (x *Exchange) serve(ctx context.Context, peer string, q *PullRequest) (*bui
 	if rl == nil {
 		return nil, notMember()
 	}
-	x.hear(q.Room, peer, q.Log.Heads, slices.Contains(rl.st.Members, peer))
 	now := r.m.now()
-	if x.book != nil && len(q.Addrs) > 0 && slices.Contains(rl.st.Members, peer) {
-		x.book.Replace(peer, q.Addrs, now) // its own word on where it is, from the authenticated peer
+	wasMember := slices.Contains(rl.st.Members, peer)
+	if wasMember {
+		x.hear(q.Room, peer, q.Log.Heads, true)
+		if x.book != nil {
+			// its own word on where it is, from the authenticated peer
+			x.book.Heard(peer, q.Addrs, now)
+		}
+	} else {
+		x.forget(q.Room, peer) // nothing is kept for a key not a member here
 	}
 	order := x.next() // received now: later than anything stored
-	wasMember := slices.Contains(rl.st.Members, peer)
 	member := false
 	var sv served
 	refused := map[string]int{}
@@ -975,6 +1008,9 @@ func (x *Exchange) serve(ctx context.Context, peer string, q *PullRequest) (*bui
 	}
 	if !member {
 		return nil, notMember()
+	}
+	if !wasMember {
+		x.hear(rl.id, peer, q.Log.Heads, true) // made a member by its entries
 	}
 	if sv.stored {
 		r.m.wakes.touch(rl.id)
@@ -1159,6 +1195,7 @@ func (x *Exchange) release(ctx context.Context, peer string, q *PullRequest, b *
 		note(id, true)
 	}
 	x.paged(rl.id, peer, q, b.blocked, b.items)
+	x.exchanged(rl.id, peer)
 	return resp, nil
 }
 
@@ -1218,11 +1255,35 @@ type PullStats struct {
 // refusal is how a peer last refused this machine as not a member: full,
 // the next opening request sends the whole accepted log (once); muted, it
 // was refused that too, and openings carry no entries until this
-// machine's log heads (own) or those heard from the peer change.
+// machine's log heads (own) or those heard from the peer change, or until
+// (F22): then it is asked again as after a first refusal. mutes counts the
+// mutes of this run of refusals, which sets how long the next one lasts
+// (muteFor).
 type refusal struct {
 	full, muted bool
 	own, heard  []string
 	since       time.Time // the first not_member of this run of refusals
+	until       time.Time
+	mutes       int
+}
+
+// How long a peer that refused this machine twice running is left alone
+// before it is asked again with the whole log: 5 minutes, doubling at each
+// mute of the same run of refusals, to an hour (F22). A machine that
+// reaches a room only through that peer, as a laptop behind a listener
+// does, would otherwise never ask again until its daemon restarted, when
+// the listener left and joined again or was restored.
+const (
+	muteMin = 5 * time.Minute
+	muteMax = time.Hour
+)
+
+func muteFor(mutes int) time.Duration {
+	d := muteMin
+	for i := 1; i < mutes && d < muteMax; i++ {
+		d *= 2
+	}
+	return min(d, muteMax)
 }
 
 // seenSums is a peer's sum, and this machine's, after a round with it
@@ -1285,6 +1346,7 @@ func (x *Exchange) Pull(ctx context.Context, room, peer string, o PullOpts) (Pul
 			// detail from where this one stopped.
 			st.Capped = true
 			x.setResume(room, peer, st.resume)
+			x.exchanged(room, peer)
 			return st, nil
 		}
 		if err != nil {
@@ -1306,6 +1368,7 @@ func (x *Exchange) Pull(ctx context.Context, room, peer string, o PullOpts) (Pul
 // accepted here: a peer that names newer heads and does not hand them
 // over, or hands over entries that are not accepted, unlocks nothing.
 func (x *Exchange) pulled(room, peer string, gen int64, heads []string) {
+	x.exchanged(room, peer) // noted for OnlyReached
 	x.r.caughtUp(room, peer, gen, heads)
 }
 
@@ -1530,12 +1593,19 @@ func (x *Exchange) ownSummary(ctx context.Context, room string, gen int64) (summ
 // member, shows log heads other than those heard when it was muted. The
 // one place the scheduler and the exchange both read.
 func (x *Exchange) refusalOf(key [2]string, heads []string) *refusal {
+	now := x.r.m.now()
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	rf := x.refused[key]
-	if rf != nil && rf.muted && !sameSet(rf.own, heads) {
+	switch {
+	case rf != nil && rf.muted && !sameSet(rf.own, heads):
 		delete(x.refused, key)
 		return nil
+	case rf != nil && rf.muted && !now.Before(rf.until):
+		// The mute has run out: asked again with the whole log, and muted
+		// for longer if refused that too.
+		rf = &refusal{full: true, since: rf.since, mutes: rf.mutes}
+		x.refused[key] = rf
 	}
 	return rf
 }
@@ -1556,7 +1626,7 @@ func (x *Exchange) NotMemberSince(room string) map[string]time.Time {
 	defer x.mu.Unlock()
 	out := map[string]time.Time{}
 	for key, rf := range x.refused {
-		if key[0] == room && rf.muted {
+		if key[0] == room && (rf.muted || rf.mutes > 0) { // and while asked again after a mute
 			out[key[1]] = rf.since
 		}
 	}
@@ -1577,7 +1647,9 @@ func (x *Exchange) answered(ctx context.Context, room, peer string, gen int64, q
 	case rf == nil:
 		x.refused[key] = &refusal{full: true, since: x.r.m.now()}
 	case rf.full:
-		x.refused[key] = &refusal{muted: true, own: q.Log.Heads, heard: x.heard[key], since: rf.since}
+		n := rf.mutes + 1
+		x.refused[key] = &refusal{muted: true, own: q.Log.Heads, heard: x.heard[key], since: rf.since,
+			until: x.r.m.now().Add(muteFor(n)), mutes: n}
 	}
 	x.mu.Unlock()
 	if !isNotMember(err) {

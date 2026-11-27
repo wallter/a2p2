@@ -73,6 +73,9 @@ type SurfaceOpts struct {
 	// if set, is the run's dial-back state (only a run that listens).
 	Probe Prober
 	Reach *Reacher
+	// Resolve, if set, looks up the names members give, for net check
+	// (nil: the system's resolver); the pull client has its own.
+	Resolve Resolver
 	// Mapping, if set, is the router's port mapping now (nil: none yet).
 	Mapping func() *PortMapping
 	// NotAdvertised is the configured addresses left out, each with why.
@@ -107,6 +110,7 @@ type Surface struct {
 	notMb   func(room string) map[string]time.Time
 	probe   Prober
 	reach   *Reacher
+	resolve Resolver
 	mapping func() *PortMapping
 	notAdv  []string
 	extra   func() []string
@@ -128,7 +132,7 @@ type Surface struct {
 func OpenSurface(ctx context.Context, m *Machine, r *Rooms, o SurfaceOpts) (*Surface, error) {
 	s := &Surface{m: m, r: r, j: o.Joiner, book: o.Book, name: o.Name, addrs: o.Addrs, local: localRoomID(m.ID),
 		net: o.Network, fault: o.NetworkFault, onNet: o.OnNetwork, notMb: o.NotMember,
-		probe: o.Probe, reach: o.Reach, mapping: o.Mapping, notAdv: o.NotAdvertised, extra: o.InviteExtra}
+		probe: o.Probe, reach: o.Reach, resolve: o.Resolve, mapping: o.Mapping, notAdv: o.NotAdvertised, extra: o.InviteExtra}
 	if s.fault == nil {
 		s.fault = func() string { return "" }
 	}
@@ -490,9 +494,10 @@ const NotCaughtUpWarning = "This machine has not checked the room's log with ano
 
 // ---- joining ----
 
-// JoinPreview opens the invite in token. The admin's addresses in the
-// token are learned at once, so that the room is pulled as soon as it is
-// held.
+// JoinPreview opens the invite in token. Its dials to the token's
+// addresses are the person's choice (they ran the join with that invite);
+// nothing of them goes into the address book until the person accepts
+// (JoinAccept), so a preview left there leaves nothing behind.
 func (s *Surface) JoinPreview(ctx context.Context, token string) (Preview, error) {
 	if s.j == nil {
 		return Preview{}, userErr("joining is not available")
@@ -500,15 +505,10 @@ func (s *Surface) JoinPreview(ctx context.Context, token string) (Preview, error
 	if err := s.dials(); err != nil {
 		return Preview{}, err
 	}
-	tok, err := core.DecodeToken(token)
-	if err != nil {
+	if _, err := core.DecodeToken(token); err != nil {
 		return Preview{}, userErr("not an invite: %v", err)
 	}
-	p, err := s.j.JoinPreview(ctx, token)
-	if err == nil && s.book != nil {
-		s.book.Learn(p.Admin, tok.Addrs, time.Time{})
-	}
-	return p, err
+	return s.j.JoinPreview(ctx, token)
 }
 
 // JoinAccept accepts the preview with id preview of the invite in token,
@@ -525,8 +525,11 @@ func (s *Surface) JoinAccept(ctx context.Context, token, preview string, wait ti
 		return JoinOutcome{}, err
 	}
 	o, err := s.j.JoinAccept(ctx, token, preview, min(wait, MaxWait))
-	if err == nil {
-		err = s.SeedBook(ctx)
+	// The invite's addresses are dialled as given from the moment the
+	// person accepted it, which recorded the join, so that the room is
+	// pulled as soon as it is held; also when the outcome is not known yet.
+	if serr := s.SeedBook(ctx); err == nil {
+		err = serr
 	}
 	return o, err
 }
@@ -1609,6 +1612,9 @@ type PeerView struct {
 	Name  string
 	Rooms []string
 	Addrs []string
+	// Held is the addresses among Addrs that are kept but not dialled,
+	// each with why (AddrBook.Held).
+	Held []HeldAddr
 	// LastHeard is when it last showed what it holds (the observed
 	// table); zero if never in this run of its history.
 	LastHeard time.Time
@@ -1784,7 +1790,7 @@ func (s *Surface) peers(ctx context.Context, rooms []RoomInfo) ([]PeerView, erro
 				if p == nil {
 					p = &PeerView{Node: m.Node, Name: m.Name}
 					if s.book != nil {
-						p.Addrs = s.book.Addrs(m.Node)
+						p.Addrs, p.Held = s.book.Addrs(m.Node), s.book.Held(m.Node)
 					}
 					byNode[m.Node] = p
 					order = append(order, m.Node)

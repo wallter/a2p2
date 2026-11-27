@@ -34,6 +34,11 @@ type RequestView struct {
 	Created      time.Time
 	Deadline     time.Time // the invite's expiry, for a request an invite raised
 	Text         string
+	// Warning, when set, is said beside Text before the person decides:
+	// a removal of the one member this machine has reached lately
+	// (OnlyReachedWarning). It is not part of what is approved, and is
+	// not compared when a decision names the text shown.
+	Warning string
 	// Send is a send with files (kind store.RequestSendFiles), every term
 	// as the person approves it.
 	Send *SendView
@@ -60,6 +65,9 @@ func (s *Surface) Describe(ctx context.Context, q store.Request) (RequestView, e
 		Fingerprint: Fingerprint(q.Node), Name: q.Name, NameFrom: nameFrom(q), RecordedName: recordedName(members, q.Node),
 		Role: q.Role, History: q.History, Seconding: q.Seconds != "",
 		Created: q.Created, Deadline: q.Deadline, Text: requestText(q, label, members)}
+	if q.Action == ActionRemove && q.Room != "" && s.r != nil && s.r.OnlyReached(q.Room, q.Node) {
+		v.Warning = OnlyReachedWarning(q.Node, recordedName(members, q.Node))
+	}
 	if q.Kind == store.RequestSendFiles {
 		v.Machine, v.Fingerprint = "", ""
 		v.Deadline = q.Created.Add(core.StagingLife)
@@ -68,6 +76,23 @@ func (s *Surface) Describe(ctx context.Context, q store.Request) (RequestView, e
 		}
 	}
 	return v, nil
+}
+
+// OnlyReachedWarning is what a person is told before removing node, the
+// one member of the room this machine has exchanged with within
+// ReachedFor (F21). name is the room's record of node's name, from
+// another machine, so it is escaped for one line and isolated here, once,
+// as in a request's text (requestText); the CLI (approvalText) and the
+// page (isolated) show the warning as they show that text, without
+// escaping it again.
+func OnlyReachedWarning(node, name string) string {
+	m := "machine " + Fingerprint(node)
+	if name != "" {
+		m += " (" + Isolate(EscapeDisplay(name)) + ")"
+	}
+	return m + " is the only member of this room this machine has exchanged with in the last hour. " +
+		"Once it is removed, this machine may reach no other member, and no other member may learn of the " +
+		"removal from this machine until one is reached."
 }
 
 // Waiting lists the requests waiting for this machine's person, rendered.

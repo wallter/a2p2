@@ -347,6 +347,27 @@ for well under a millisecond plus its transaction's commit at 1,000 to
 100,000 records. A per-room lock would add little, because the store's
 single connection serialises every transaction anyway.
 
+A request for a room not held here, or from a key that is not a member
+of the room by the membership last published (`Rooms.State`, a leaf
+lock) and that carries no log entries, is refused `not_member` before
+the rooms lock and before anything is kept of it. One with log entries,
+which only a machine those entries admit sends honestly (T4), is decided
+under the lock, admitted from a token bucket for the machine (burst 8,
+4 a second), at most 2 at a time, with a share for each source group (2
+at once, one a second), so a flood from one source does not keep out a
+joining machine at another (`strangerEntries`). `SharesRoom`, which
+the listener asks per handshake and per request, reads the same
+published membership. The exchange keeps its per-peer state (heads
+heard, evidence sent, pages, refusals, seen sums, last exchanges) only
+for members, and the scheduler drops what it kept of a peer no longer a
+member, with that peer's observed reports and the stream hints only its
+reports keep, when the rooms held change and every 10 minutes
+(`Exchange.tidy`). A hint also goes once the report of that author that
+set it is a day old (a fresh observation of the member's log alone does
+not hold it up), and passes only to another member's report of the
+stream from within a day; its next report sets it again (F3, F9, F18,
+F20).
+
 Measured with `TestPullSizesInASixtyFourMachineRoomAfterThirtyDaysOfDailyRestarts`
 (skipped unless `A2P2_MODEL_DEEP=1`; the log lines say "64 machines", but
 no 64 machines run). Two real nodes, `a` and `b`, in one process, joined
@@ -370,6 +391,7 @@ of a network.
 | Local write or new records | Abandon the waiting pulls and issue them again at once, with offers; a request on the way that carries an offer is not cancelled by a newer write, and what changed meanwhile goes in the next request |
 | A peer holds what we lack | Pull from it at once; repeat while `more` |
 | Failure | Back off 1 s doubling to 5 min with jitter; next member |
+| `not_member` twice running | Leave the peer until either side's log heads change, or for 5 min, doubling at each further mute of one run of refusals to 1 h; then ask again with the whole log (F22) |
 
 A server holds a waiting pull at most 60 s; client and server deadlines
 exceed it by 30 s. A rotating anchor is first probed with a 10 s pull; failure moves on.
@@ -1274,6 +1296,53 @@ widen who can be reached, none of them a service run by anyone else.
   members passed on (not its own word) stays in a book, tried last, until
   it has failed for a day and five attempts; and a machine that stops
   listening altogether is still dialled at its last list until then.
+- **What is dialled on another machine's word** (`internal/node/addrrule.go`,
+  F5 and F54 of the 2026-11-25 review, D71). An address a member gives
+  for itself in its own request, or lists for another member in a
+  response, is its free choice, so it is kept only if it could be a
+  member's (`AddrRefusal` finds nothing): a port of 1024 or more, or 443;
+  an IP address that is not loopback, unspecified, in `0.0.0.0/8`,
+  multicast, broadcast or link-local, has no zone, and is not an IPv6
+  form that carries such an IPv4 address (NAT64, 6to4) or any IPv4
+  address (IPv4-compatible, IPv4-translated, the local NAT64 prefix);
+  or a host name that is not `localhost` and does not end in a number.
+  Loopback is refused whoever gives it and however it connected: a
+  listener behind a tunnel or a reverse proxy on its own computer sees
+  every member's request come from loopback. Private ranges stay, since
+  members on one LAN, VPN or overlay network find each other by them.
+  `AddrBook.Rule` is the one answer to "would this be dialled", asked by
+  pulls, file transfers, dial-back requests, net check and status; at
+  the dial, `DialTargets` looks a name up once and dials only the
+  addresses it gives that pass, as literal addresses, so a name cannot be
+  checked as one address and dialled as another. Dialled as given: the
+  addresses of an invite the person accepted, marked when the join is
+  recorded and learned again from the recorded joins at every start
+  (names, loopback and LAN addresses; a preview dials them but marks
+  nothing). Nothing else: an address that completed a pinned handshake
+  with the member is still another machine's word, since the key that
+  answered there says nothing about whether this machine's person asked
+  for it. Which addresses an invite gave is kept in memory only: any
+  other stored address counts as another machine's word, so one an older
+  version kept that the rule refuses, verified or not, is held, not
+  dialled, shown by status, doctor and net check with why
+  (`AddrBook.Held`; status and doctor say to join with an invite from
+  that machine to have it dialled), and goes as a failing address does. Two machines on one computer work through the
+  invite: the joiner dials the inviter's address as given; the inviter
+  never dials the joiner's loopback address and gets its messages from
+  its requests; a third reaches the others through the machine it
+  joined. Each literal address dialled takes a token of the machine's
+  budget (2 a second, burst 8) and of the peer's share (one every 2 s,
+  burst 4, given back when the machine's budget then refuses) unless
+  that very literal completed a pinned handshake with the peer; a name,
+  verified or not, is charged for every address it resolves to, the
+  first before it is looked up. An address the rule refuses costs no
+  token of these or of the requester's budget.
+  These cover pulls, file transfers and dial-back requests; a verified
+  address, a join and its preview, net check probes and the dial-backs
+  answered here have their own limits. `net check` probes a member's
+  address as the pulls dial it and reports one they would not as not
+  tried, with why; an address a person types for `net check HOST:PORT`
+  is dialled as typed.
 - **The address others see is shown, never advertised.** The dial-back
   answer carries the IP address the responder saw the request come from
   (`saw`). `net check` shows it ("members see this machine as") and

@@ -3293,3 +3293,164 @@ the two-step read (AGENTS.md), so it is fixed now.
 harness's warning or limit, Codex's default output limit proves lower,
 harnesses report context fill to tools, a harness confirms what it showed,
 or readers often hit the oversized refusal.
+
+## D71. What a key that is not a member leaves behind, and what a member makes this machine dial (2026-11-27)
+
+The 2026-11-25 security review (group B, pull-path state) found that
+the pull path kept state for any key, and dialled what members said.
+Each of these is reachable from the network or from one member, and the
+fixes change no wire format and no signed record. So they are made now.
+A review of the first version by three models found that net check, the
+loopback exception, an invite's preview, hint expiry and file transfers
+did not hold the line; this entry is the line as it now is.
+
+- **Keys that are not members (F3, F18, F20).** `Serve` recorded a
+  request's log heads before it checked membership, and never forgot
+  them. Every fresh key added an entry, and each request took the rooms
+  lock. Now a request is checked against the membership last published
+  (`Rooms.State`, a leaf lock) before anything else. One for a room not
+  held here, or from a key that is not a member and with no log entries,
+  is refused `not_member` before the lock and keeps nothing. One with
+  log entries (only a machine those entries admit sends one honestly,
+  T4) still takes the lock. Those are admitted from a token bucket for
+  the machine (burst 8, 4 a second), at most 2 at a time (a real cap on
+  requests in flight; the burst is not one), and each source group (an
+  IPv4 address or an IPv6 /64, as the listener counts connections) has
+  a share of 2 at once and one a second. A refusal is 429 with
+  Retry-After and spends nothing. `SharesRoom` reads the published
+  membership, not the lock. The scheduler drops what the exchange keeps
+  of a peer that is no longer a member every 10 minutes and whenever the
+  rooms held change (`tidy`).
+- **Hints (F9).** D62 bounded hints to 32 per author per peer, but the
+  rows of a removed peer, and of a member that went silent, stayed. Now
+  `tidy` drops a non-member's observed reports, and expires each hint by
+  the age of the report that set it: the observed row of that author from
+  that member, within a day. A fresh observation of the member's log
+  alone does not hold it up. A hint that expires goes to another
+  member's report of the stream only if that report is within a day too,
+  so two silent members cannot pass it back and forth. Signed records
+  are not touched: a stream that holds records keeps its row.
+- **The dial line (F5, F54).** One function, `AddrBook.Rule`, answers
+  "would this machine dial this address of this member", and every path
+  asks it: pulls, file transfers (`FileClient.CanDial` and its dials), the
+  dial-back requests this machine sends, `net check` of members, and
+  status and doctor (`AddrBook.Held`). An address from another machine's
+  word (a member's own `addrs`, or `peers` in a response) is kept and
+  dialled only if `AddrRefusal` finds nothing. Private ranges stay,
+  since LAN, VPN and overlay members need them. Refused, whoever gave it
+  and however it connected, with no setting:
+  - loopback. "The member connected over loopback" was read from the TCP
+    source address, and a listener behind a tunnel or a reverse proxy on
+    its own computer sees every member that way;
+  - link-local addresses (cloud metadata among them), unspecified,
+    `0.0.0.0/8`, multicast and broadcast addresses, and zoned addresses;
+  - NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) addresses whose IPv4
+    address is refused, the local NAT64 prefix `64:ff9b:1::/48`, and the
+    IPv4-compatible and IPv4-translated forms;
+  - ports below 1024 other than 443;
+  - `localhost`, and names whose last label is a number.
+
+  A name is resolved once at each dial, and only the literal addresses
+  that pass are dialled, so rebinding gains nothing. Dialled as given:
+  - the addresses of an invite the person accepted, marked when the join
+    is recorded (`JoinAccept`) and again from the recorded joins at every
+    start. Previewing an invite dials its addresses, since the person ran
+    the join with it, but puts nothing in the book; a preview left there
+    leaves nothing.
+
+  Nothing else is dialled as given. A completed pinned handshake (the
+  verified mark) never overrides the rule: it says the member's key
+  answered at that address once, not that this machine's person gave it,
+  and a member that answers at a loopback or link-local address of the
+  dialler's own computer is exactly what the rule is for.
+
+  `net check` probes a member's address as the pulls would dial it, and
+  reports one they would not dial as `not_tried`, with why; `reached`
+  means the pulls would reach the member there. An address the person
+  types (`net check HOST:PORT`, `--invite`) is the person's choice and is
+  dialled as typed. A dial-back this machine answers dials only the
+  asker's own source address, by `AddrRefusal` (it took any port from 1
+  and loopback from a loopback source before), on at most two ports.
+
+  Budgets. Each literal address dialled takes a token of the machine's
+  budget (2 a second, burst 8) and of the member's share (one every 2 s,
+  burst 4) unless that very literal completed a pinned handshake with
+  the member. A name is charged for every address it resolves to, the
+  first token before it is looked up, even if the name was verified:
+  it may resolve anywhere since. A share's token is given back when the
+  machine's budget then refuses. They cover pulls, file transfers and
+  dial-back requests to members. A verified literal address, a join and
+  its preview, `net check` and the dial-backs answered here are outside
+  them. An address the rule refuses
+  locally costs nothing: no dial token, and no token of the requester's
+  budget (PROTOCOL 4.6).
+
+  Stored rows are not migrated or deleted. One the rule refuses and no
+  recorded join gave is held, not dialled, verified or not; status,
+  doctor and net check show it with why, and status and doctor say to
+  join with an invite from that machine to have it dialled; each pull
+  that passes it counts a failure, so it goes after a day and 5 tries.
+  The daemon starts as before.
+- **Mute (F22).** A peer refused twice was muted until either side's
+  heads changed, so a listener that left and joined again stayed muted
+  until a restart. Now a mute lasts 5 minutes, doubling up to an hour
+  within one run of refusals (5, 10, 20, 40, then 60 minutes).
+- **Connected in (F25).** Every key's request was recorded, so strangers
+  could push members out of the 1,024 kept. Now only keys that share a
+  room are recorded.
+- **Removing the only member reached (D57 F21).** The exchange records,
+  in memory, when it last exchanged with each member. A proposal or
+  confirmation to remove the only member reached in the last hour
+  carries a warning beside the request text, not in it. The name in it
+  is escaped and isolated once, where the warning is built, as in the
+  request text; the CLI and the page show it as they show that text.
+- **Compatibility.** No field on the wire, no table and no migration
+  changed. The local API's `status` gains `held` per peer, and a request
+  `warning`. An address the rule refuses is dropped, not answered with
+  an error, so peers of 0.2.0 to 0.2.3 are served as before.
+- **Migration, and costs.**
+  - A listener on a port below 1024 other than 443, and a plain
+    link-local address (a direct cable or a bridge), are no longer
+    learned from another machine's word, only from an invite.
+  - An upgrading machine stops dialling a member it knows only at
+    addresses the rule refuses that no invite it accepted gave. Up to
+    0.2.3 that happens when the member is on the same computer or a
+    direct link and was learned from its own requests or another
+    member's `peers` (a third machine on one computer, a member that
+    moved its listener to a loopback-forwarded or low port, a
+    link-local cable), and only if this machine does not listen or the
+    member cannot reach it: otherwise the member's own requests still
+    carry everything both ways. Status and doctor show the address as
+    held with why; the person asks that member for an invite and joins
+    with it (a member may join again), which makes its address given.
+  - Two machines on one computer work through what the person accepted:
+    the joiner dials the inviter's invite address, the inviter gets the
+    joiner's messages from its requests, and a third machine reaches the
+    others through the one it joined, not directly. The inviter cannot
+    dial the joiner, so it delivers through the joiner's waiting pulls.
+  - A member admitted a moment ago may draw one `not_member` until the
+    published membership catches up; it asks again.
+  - The warning knows only exchanges since the last start: in the first
+    hour it can name a member when others are reachable too.
+  - A laptop removed from a room asks its former listener once an hour,
+    with its whole log, until it leaves the room or restarts.
+  - Hosts at four or more source groups can keep the machine's bucket for
+    entry-carrying requests empty, and delay a machine whose admission
+    this listener has not yet received for as long as they keep it up.
+  - Tests of dial-back on one computer set
+    `DialBackServer.LoopbackForTests`; the daemon never does.
+- **Accepted for now.**
+  - A member can make this machine try TLS handshakes (no request is
+    sent) with hosts on private networks and the internet at ports of
+    443 or 1024 and above, within the dial budgets.
+  - A host name a member advertises is looked up by this machine's
+    resolver, so its DNS operator sees when this machine is awake.
+  - Requests with log entries from keys that are not members are still
+    verified under the rooms lock (bounded, not removed).
+  - D64's stale heads (F27) are left as decided there.
+  - No per-peer override of the rule: a person can always reach a peer
+    through an invite.
+
+**Revisit if** members need addresses this rule refuses (a well-known
+port other than 443, a link-local overlay), the rooms lock is split, or
+the dial budget proves too tight for rooms with many listeners.

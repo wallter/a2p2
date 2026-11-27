@@ -21,6 +21,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"sync"
@@ -45,9 +46,12 @@ var (
 	pullTLSTimeout        = 5 * time.Second
 	pullIdleTimeout       = 120 * time.Second
 	// Dials to addresses that never completed a pinned handshake, for the
-	// whole daemon (one PullClient).
-	pullDialRate  = 2.0
-	pullDialBurst = 8.0
+	// whole daemon (one PullClient), and for each peer within that, so one
+	// member's addresses cannot spend it all.
+	pullDialRate      = 2.0
+	pullDialBurst     = 8.0
+	pullPeerDialRate  = 0.5
+	pullPeerDialBurst = 4.0
 )
 
 // PullHandler serves the pull exchange (node.Exchange) on /p/v2/pull.
@@ -125,7 +129,9 @@ func (s *pullServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(node.WithHoldNotice(r.Context(), leave))
 	defer cancel()
 	defer context.AfterFunc(s.closing, cancel)()
-	resp, err := s.h.Serve(ctx, from, q)
+	// The source, by which requests that carry entries from keys that are
+	// not members are shared out (node.WithSource); it grants nothing.
+	resp, err := s.h.Serve(node.WithSource(ctx, r.RemoteAddr), from, q)
 	if err != nil {
 		var pe *node.PullError
 		switch {
@@ -229,6 +235,15 @@ func (l *pullLimiter) take(key string) (bool, time.Duration) {
 	return true, 0
 }
 
+// give returns a token taken from key that was not used.
+func (l *pullLimiter) give(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if b := l.m[key]; b != nil {
+		b.tokens = min(l.burst, b.tokens+1)
+	}
+}
+
 // ---- client ----
 
 // PullClient implements node.PullTransport over pinned mutual TLS 1.3 and
@@ -239,9 +254,14 @@ type PullClient struct {
 	err   error
 	book  *node.AddrBook
 	dials *pullLimiter // to addresses never verified, for every peer
+	// peerDials is that budget per peer.
+	peerDials *pullLimiter
 	// Usable, if set, says whether an address is worth dialling from here
 	// (a unique-local IPv6 address of another site is not); set before use.
 	Usable func(addr string) bool
+	// Resolve looks up a name another machine gave (node.DialTargets); nil:
+	// the system's resolver. Set before use.
+	Resolve node.Resolver
 
 	mu      sync.Mutex
 	clients map[string]*http.Client
@@ -253,7 +273,7 @@ var _ node.PullTransport = (*PullClient)(nil)
 func NewPullClient(id *Identity, book *node.AddrBook) *PullClient {
 	cert, err := selfSigned(id)
 	return &PullClient{cert: cert, err: err, book: book, dials: newPullLimiter(pullDialRate, pullDialBurst),
-		clients: map[string]*http.Client{}}
+		peerDials: newPullLimiter(pullPeerDialRate, pullPeerDialBurst), clients: map[string]*http.Client{}}
 }
 
 // Close closes idle connections.
@@ -300,12 +320,47 @@ func (c *PullClient) client(peer string) *http.Client {
 	protos.SetHTTP2(true)
 	dialer := &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		if !c.verified(peer, addr) {
-			if ok, _ := c.dials.take(""); !ok {
-				return nil, errDialBudget
+		// An address another machine gave is checked before anything is
+		// spent on it, and a name it gave is looked up here, once, and
+		// only the addresses found that pass are dialled (F5, F54). An
+		// address the rule refuses costs nothing. Each literal address
+		// dialled is charged to the dial budgets unless that literal itself
+		// completed a pinned handshake with peer. A name, verified or not,
+		// may resolve anywhere since: it is charged once before it is looked
+		// up (the lookup and its first address), and again for each further
+		// address it gives that did not complete a handshake.
+		given, refused := c.book.Rule(peer, addr)
+		if refused != "" {
+			return nil, node.ErrAddrRefused
+		}
+		_, perr := netip.ParseAddrPort(addr)
+		name := perr != nil
+		if name && !c.charge(peer) {
+			return nil, errDialBudget
+		}
+		targets, err := node.DialTargets(ctx, addr, given, c.Resolve)
+		if err != nil {
+			return nil, err
+		}
+		var last error
+		for i, t := range targets {
+			free := (name && i == 0) || c.verified(peer, t)
+			if !free && !c.charge(peer) {
+				if last == nil {
+					last = errDialBudget
+				}
+				return nil, last
+			}
+			conn, err := dialer.DialContext(ctx, network, t)
+			if err == nil {
+				return conn, nil
+			}
+			last = err
+			if ctx.Err() != nil {
+				break
 			}
 		}
-		return dialer.DialContext(ctx, network, addr)
+		return nil, last
 	}
 	hc := &http.Client{
 		Transport: &http.Transport{
@@ -329,9 +384,38 @@ func (c *PullClient) usable(addr string) bool {
 	return validAddr(addr) && (c.Usable == nil || c.Usable(addr))
 }
 
+// dialled says whether addr of peer is one this machine dials at all
+// (node.AddrBook.Rule) and can route from here (usable). An address
+// refused here is noted as failing, so one an earlier version stored
+// ages out, and is charged nothing: no token of the requester's budget
+// or of the dial budgets.
+func (c *PullClient) dialled(peer, addr string) bool {
+	if !c.usable(addr) {
+		return false
+	}
+	if _, refused := c.book.Rule(peer, addr); refused != "" {
+		c.book.Failed(peer, addr, time.Now())
+		return false
+	}
+	return true
+}
+
 // errDialBudget: the daemon's budget of dials to unverified addresses is
 // spent for now; the address is not tried and not counted as failing.
 var errDialBudget = errors.New("peer: dial budget for unverified addresses spent")
+
+// charge takes one dial from peer's budget and the machine's; false, and
+// nothing taken, when either is spent.
+func (c *PullClient) charge(peer string) bool {
+	if ok, _ := c.peerDials.take(peer); !ok {
+		return false
+	}
+	if ok, _ := c.dials.take(""); !ok {
+		c.peerDials.give(peer) // not dialled: the peer's share is not spent
+		return false
+	}
+	return true
+}
 
 // verified says whether addr of peer ever completed a pinned handshake.
 func (c *PullClient) verified(peer, addr string) bool {
@@ -369,7 +453,7 @@ func (c *PullClient) Pull(ctx context.Context, peer string, req *node.PullReques
 	lastErr := errors.New("peer: no usable address")
 	tried := false
 	for _, addr := range c.book.Addrs(peer) {
-		if !c.usable(addr) {
+		if !c.dialled(peer, addr) {
 			continue
 		}
 		// Each attempt may reach the peer: one after the first pays the
