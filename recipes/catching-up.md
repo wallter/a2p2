@@ -6,9 +6,10 @@ joined.
 
 ## What your inbox holds
 
-Your inbox starts at your first tool call. Messages sent before it are
-never unread for you, even those addressed to you. So `inbox` alone shows
-nothing of what came before; read the history on purpose.
+Your inbox starts at your first tool call. Room-wide messages sent before
+it are never unread for you; messages addressed to your id are, however
+old. So `inbox` shows your briefs, but nothing else of what came before;
+read the history on purpose.
 
 ## Steps
 
@@ -44,10 +45,10 @@ history to a person.
 
 ## If a brief was sent to you before you started
 
-It is not in your inbox. You can read it with `recent` or its thread and
-answer with `reply`, but `ack` refuses it, and `reply` cannot report it
-handled; its result says so. Tell the lead in your reply, or ask for the
-brief again.
+It is in your first inbox if it was addressed to the id you have now.
+One posted room-wide, or sent to another label, is not: read it with
+`recent` or its thread and answer with `reply`. Tell the lead which id
+you have, or ask for the brief again.
 
 ## Do not
 

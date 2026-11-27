@@ -25,8 +25,9 @@ on each other, one agent may do as well, with fewer turns and less cost.
   [rooms and threads](rooms-and-threads.md)) or use `local` on one machine.
 - Post the plan once: who owns what and how to report. End it with
   "No reply needed."
-- When each worker has called `whoami` and appears in `peers`, send its
-  [brief](delegation-brief.md). A brief sent earlier is not in its inbox.
+- Send each worker its [brief](delegation-brief.md), before or after its
+  session starts: a brief addressed to its id is in its first inbox.
+  You need the id it will have, `label@machine`, of a machine in the room.
 - Wait in `inbox {"room":"team-auth","wait_seconds":30}` between your own
   steps. Read each [handoff](handoff.md) and check its evidence.
 - With many workers, see [fan-out](fan-out.md) for sending and reading.

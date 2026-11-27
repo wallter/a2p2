@@ -322,7 +322,7 @@ func newPullHarness(t testing.TB, founders, later map[delivery.MachineID][]strin
 	h := &harness{t: t, w: delivery.NewWorld(), sims: map[delivery.MachineID]*sim{},
 		label: map[string]string{}, pair: map[delivery.RecordID]string{}, implPair: map[string]delivery.RecordID{},
 		nodes: map[string]delivery.MachineID{}, shown: map[agentKey]listing{}, injected: map[string]bool{},
-		reg: map[delivery.MachineID]map[streamKey]int64{}, c: &counts{}}
+		c: &counts{}}
 	p := &pxState{net: newMemNet(), keys: map[delivery.MachineID]ed25519.PrivateKey{}, later: later,
 		known: map[delivery.MachineID]int{}, asleep: map[delivery.MachineID]bool{}, noInbound: map[delivery.MachineID]bool{},
 		withhold: map[delivery.MachineID]map[string]bool{}, skews: map[delivery.MachineID][]skewChange{},

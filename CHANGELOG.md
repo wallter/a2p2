@@ -61,6 +61,20 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Fixed
 
+- **A message sent to an agent before it registers now reaches it.**
+  Since 0.1.0 a label's first use started its reading at the end of every
+  room, so a brief a lead sent to `w1@<machine>` before the worker's
+  session existed was never unread for it, while `send` printed an id as
+  if it would be read. Now every message addressed to that agent and held
+  when it first registers is unread for it, however old, from this
+  machine or another; room-wide history from before stays read, as
+  before (`recent` reads it). A brief replaced since is shown with its
+  new text, one withdrawn is not shown, one whose text expired is shown
+  as expired. `send` (and the MCP send, reply and ask_human results) now
+  names addressees on this machine that have not registered yet; the
+  CLI prints that on stderr. An agent registered before this version
+  keeps its place. The database gains a column (migration 15), so an
+  older a2p2 will not open it.
 - **Serving and making a pull no longer gets slower as a room's history
   grows.** Every pull request served or made worked out the machine's
   summary of the room by reading every record of it, under the lock that

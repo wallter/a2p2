@@ -336,13 +336,14 @@ func NewMachine(st *store.Store, key ed25519.PrivateKey, o MachineOpts) *Machine
 
 // Register makes agent known here. The first time, in one transaction, its
 // cursors start at the current end of every stream in every room, so what
-// was written before it arrived is not unread for it. It reports whether
-// the agent is new.
+// was written to the room before it arrived is not unread for it; a
+// message held then that is addressed to it is unread all the same
+// (store.Register, D-NEW-prereg). It reports whether the agent is new.
 func (m *Machine) Register(ctx context.Context, agent string) (bool, error) {
 	if err := checkAgent(agent); err != nil {
 		return false, err
 	}
-	return m.st.Register(ctx, agent, m.now())
+	return m.st.Register(ctx, m.ID, agent, m.now())
 }
 
 // Prune is the pruning pass [R6]: text 30 days old by this machine's clock
@@ -427,6 +428,11 @@ type Sent struct {
 	// ToOmitted is how many thread participants a reply to the thread
 	// left out at the addressee limit (Surface, SendInput.Thread).
 	ToOmitted int
+	// NotRegistered: the addressees on this machine that have never
+	// registered here (Surface.Send). Each reads the message when it first
+	// registers (D-NEW-prereg). Nothing is said of other machines' agents:
+	// this machine cannot know them.
+	NotRegistered []core.Addressee
 }
 
 // Send writes a message. Once it returns, the message is committed (D1).

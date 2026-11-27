@@ -109,9 +109,9 @@ func (g *agentState) keptOut(h *held) bool {
 }
 
 // unconfirmed says whether the agent has neither confirmed message r nor
-// reported it handled, and r is after the agent's time began.
+// reported it handled, and r is in the agent's time (inTime).
 func (m *Machine) unconfirmed(g *agentState, agent string, r *Record) bool {
-	return r.Seq > g.start[r.Stream()] && !g.seen[string(r.ID)] && !g.seen["x:"+string(r.ID)] &&
+	return g.inTime(r, m.ID, agent) && !g.seen[string(r.ID)] && !g.seen["x:"+string(r.ID)] &&
 		!m.handledByAgent(r.ID, agent)
 }
 

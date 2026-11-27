@@ -1560,7 +1560,12 @@ func send(c *cmd, args []string) error {
 		return c.call("send", req, &w, func() { printSendFiles(os.Stdout, w) })
 	}
 	var m localapi.SendResp
-	return c.call("send", req, &m, func() { fmt.Println(m.ID) })
+	return c.call("send", req, &m, func() {
+		fmt.Println(m.ID)
+		for _, a := range m.NotRegistered {
+			fmt.Fprintf(os.Stderr, "%s has not registered yet; it reads this message when it first registers\n", a)
+		}
+	})
 }
 
 // filesModeWords says what each files setting of a room does.

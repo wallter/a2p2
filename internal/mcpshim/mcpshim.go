@@ -568,8 +568,16 @@ func sentOf(m localapi.SendResp, local string) sent {
 	if len(to) == 0 {
 		to = []string{"everyone"}
 	}
-	return sent{ID: m.ID, roomRef: ref(m.Room, m.RoomLabel, local), To: lines(to), Note: "Other machines fetch it."}
+	s := sent{ID: m.ID, roomRef: ref(m.Room, m.RoomLabel, local), To: lines(to), Note: "Other machines fetch it."}
+	if len(m.NotRegistered) > 0 {
+		s.Note += " " + noteNotRegistered + strings.Join(lines(m.NotRegistered), ", ") + "."
+	}
+	return s
 }
+
+// noteNotRegistered names addressees on this machine that have not
+// registered yet (D-NEW-prereg).
+const noteNotRegistered = "Not registered here yet; each reads it when it first registers: "
 
 func (sh *shim) send(ctx context.Context, in sendIn) (string, error) {
 	if strings.TrimSpace(in.Text) == "" && in.Replaces == "" {

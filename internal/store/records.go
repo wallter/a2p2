@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -64,6 +65,13 @@ CREATE INDEX reads_msg ON reads (agent, room, msg, key);
 CREATE TABLE read_heads (
   agent TEXT NOT NULL, room TEXT NOT NULL, author TEXT NOT NULL, record TEXT NOT NULL,
   PRIMARY KEY (agent, room, author, record));
+`
+
+// schemaEarly is migration 15 (D-NEW-prereg): cursors.early, where an
+// agent's time began for messages addressed to it. NULL, which every row
+// from before has and every cursor but a registration's gets, means start.
+const schemaEarly = `
+ALTER TABLE cursors ADD COLUMN early INTEGER;
 `
 
 // Reasons a held record has, or lacks, its text [R6]. Every reason but
@@ -162,12 +170,17 @@ type Stream struct {
 }
 
 // Cursor is one agent's place in one stream [R7]: every position at or below
-// Pos is resolved for the agent; Start is where its time began.
+// Pos is resolved for the agent; Start is where its time began. Early, at
+// or below Start, is where its time began for messages addressed to it: a
+// position above Early and at or below Start is in the agent's time only
+// if it holds a message addressed to the agent (Register; D-NEW-prereg).
+// Early is Start for every cursor but a registration's.
 type Cursor struct {
 	Author string
 	Epoch  string
 	Start  int64
 	Pos    int64
+	Early  int64
 }
 
 // Read is one confirmed inbox entry: its key, the version of the text shown
@@ -252,9 +265,13 @@ func (s *Store) AddRoom(ctx context.Context, id, label, createID string, now tim
 
 // Register records agent as registered, if it was not, and in the same
 // transaction starts its reading at the current end of every stream of
-// every room, so history from before it arrived is not unread for it
-// (v0.2's behaviour). It reports whether the agent is new.
-func (s *Store) Register(ctx context.Context, agent string, now time.Time) (bool, error) {
+// every room, so room-wide history from before it arrived is not unread
+// for it (v0.2's behaviour). A message held now that is addressed to this
+// agent (agent on node, this machine), however long before it was sent,
+// is unread for it all the same (D-NEW-prereg): in that message's stream
+// the cursor starts just before the first such message, with Early there.
+// It reports whether the agent is new.
+func (s *Store) Register(ctx context.Context, node, agent string, now time.Time) (bool, error) {
 	fresh := false
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.Exec(`INSERT INTO registrations (agent, at) VALUES (?,?) ON CONFLICT DO NOTHING`, agent, ms(now))
@@ -286,10 +303,62 @@ func (s *Store) Register(ctx context.Context, agent string, now time.Time) (bool
 			if err := seedCursors(tx, agent, r, currentEnd); err != nil {
 				return err
 			}
+			if err := seedAddressed(tx, node, agent, r); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
 	return fresh, err
+}
+
+// seedAddressed moves agent's cursors in room, just seeded by Register,
+// back to just before the first message held that is addressed to it,
+// stream by stream, and sets Early there (D-NEW-prereg). It reads the
+// header of every message held in the room once, at registration: a
+// message's addressees are in its signed header, so no text is needed.
+func seedAddressed(tx *sql.Tx, node, agent, room string) error {
+	rows, err := tx.Query(`SELECT author, epoch, seq, hdr, sig FROM records WHERE room = ? AND kind = ?`,
+		room, string(core.KindMessage))
+	if err != nil {
+		return err
+	}
+	first := map[[2]string]int64{}
+	want := core.Addressee{Node: node, Agent: agent}
+	for rows.Next() {
+		var author, epoch string
+		var seq int64
+		var hdr, sig []byte
+		if err := rows.Scan(&author, &epoch, &seq, &hdr, &sig); err != nil {
+			rows.Close()
+			return err
+		}
+		r, err := core.RecordFromParts(hdr, sig, nil)
+		if err != nil {
+			rows.Close()
+			return fmt.Errorf("stored record does not parse: %w", err)
+		}
+		if !slices.Contains(r.Fields().To, want) {
+			continue
+		}
+		k := [2]string{author, epoch}
+		if n, ok := first[k]; !ok || seq < n {
+			first[k] = seq
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for k, n := range first {
+		// Only a cursor seeded just now moves: pos is still start, early
+		// unset, and the message at or below start.
+		if _, err := tx.Exec(`UPDATE cursors SET pos = ?, early = ? WHERE agent = ? AND room = ? AND author = ? AND epoch = ?
+			AND pos = start AND early IS NULL AND start >= ?`, n-1, n-1, agent, room, k[0], k[1], n); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // currentEnd is where an agent registered now starts in a stream: after
@@ -885,9 +954,13 @@ func (s *Store) Seen(ctx context.Context, agent, room string, plan func(*Reader)
 			return err
 		}
 		for _, c := range p.Cursors {
-			if _, err := tx.Exec(`INSERT INTO cursors (agent, room, author, epoch, start, pos) VALUES (?,?,?,?,?,?)
+			var early any // NULL: start
+			if c.Early != c.Start {
+				early = c.Early
+			}
+			if _, err := tx.Exec(`INSERT INTO cursors (agent, room, author, epoch, start, pos, early) VALUES (?,?,?,?,?,?,?)
 				ON CONFLICT (agent, room, author, epoch) DO UPDATE SET pos = excluded.pos`,
-				agent, room, c.Author, c.Epoch, c.Start, c.Pos); err != nil {
+				agent, room, c.Author, c.Epoch, c.Start, c.Pos, early); err != nil {
 				return err
 			}
 		}
@@ -1063,8 +1136,8 @@ func (rd *Reader) Registered(agent string) (bool, error) {
 
 // Cursors returns agent's cursors in room.
 func (rd *Reader) Cursors(agent, room string) ([]Cursor, error) {
-	rows, err := rd.tx.Query(`SELECT author, epoch, start, pos FROM cursors WHERE agent = ? AND room = ?
-		ORDER BY author, epoch`, agent, room)
+	rows, err := rd.tx.Query(`SELECT author, epoch, start, pos, coalesce(early, start) FROM cursors
+		WHERE agent = ? AND room = ? ORDER BY author, epoch`, agent, room)
 	if err != nil {
 		return nil, err
 	}
@@ -1072,7 +1145,7 @@ func (rd *Reader) Cursors(agent, room string) ([]Cursor, error) {
 	var out []Cursor
 	for rows.Next() {
 		var c Cursor
-		if err := rows.Scan(&c.Author, &c.Epoch, &c.Start, &c.Pos); err != nil {
+		if err := rows.Scan(&c.Author, &c.Epoch, &c.Start, &c.Pos, &c.Early); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

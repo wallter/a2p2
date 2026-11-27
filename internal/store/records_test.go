@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -456,7 +457,7 @@ func TestSeenAppliesItsPlansReadsHeadsAndCursors(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := snapshot(t, s, "bob")
-	want := dump{Cursors: []Cursor{{"A", "e", 0, 5}}, Reads: []Read{{"k1", "v2", "m1"}, {"x:k2", "", "k2"}},
+	want := dump{Cursors: []Cursor{{"A", "e", 0, 5, 0}}, Reads: []Read{{"k1", "v2", "m1"}, {"x:k2", "", "k2"}},
 		Heads: map[string][]string{"A": {"h3"}}}
 	d.Streams, d.Records = nil, nil
 	if !reflect.DeepEqual(d, want) {
@@ -505,7 +506,7 @@ func TestFailureBetweenStatementsLeavesNoHalfAppliedWrite(t *testing.T) {
 	}
 	plan := func(*Reader) (SeenPlan, error) {
 		return SeenPlan{Reads: []Read{{"k", "v", "k"}}, Heads: map[string][]string{"A": {"h"}},
-			Cursors: []Cursor{{"A", "e", 0, 1}}}, nil
+			Cursors: []Cursor{{"A", "e", 0, 1, 0}}}, nil
 	}
 	for _, point := range []string{"seen:reads", "seen:heads"} {
 		testHook = func(p string) error {
@@ -556,7 +557,7 @@ func TestReopeningTheDatabaseGivesTheSameAnswers(t *testing.T) {
 	}
 	if err := s.Seen(ctx, "bob", testRoom, func(*Reader) (SeenPlan, error) {
 		return SeenPlan{Reads: []Read{{m.ID(), r.ID(), m.ID()}}, Heads: map[string][]string{nodeOf(a): {m.ID()}},
-			Cursors: []Cursor{{nodeOf(a), "00000000000000e1", 0, 2}}}, nil
+			Cursors: []Cursor{{nodeOf(a), "00000000000000e1", 0, 2, 0}}}, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -788,15 +789,15 @@ func TestRegisteringAnAgentStartsItsCursorsAtTheCurrentEnd(t *testing.T) {
 	m1 := mk(t, a, core.RecordFields{})
 	wantOutcome(t, put(t, s, m1, t0), OutcomeStored)
 	wantOutcome(t, put(t, s, mk(t, a, core.RecordFields{Seq: 2, Prev: m1.ID()}), t0), OutcomeStored)
-	if fresh, err := s.Register(ctx, "dave", t0); err != nil || !fresh {
+	if fresh, err := s.Register(ctx, nodeOf(testKey("self")), "dave", t0); err != nil || !fresh {
 		t.Fatalf("register: %v %v", fresh, err)
 	}
-	want := []Cursor{{nodeOf(a), "00000000000000e1", 2, 2}}
+	want := []Cursor{{nodeOf(a), "00000000000000e1", 2, 2, 2}}
 	if d := snapshot(t, s, "dave"); !reflect.DeepEqual(d.Cursors, want) {
 		t.Fatalf("cursors %+v", d.Cursors)
 	}
 	wantOutcome(t, put(t, s, mk(t, a, core.RecordFields{Epoch: "00000000000000e2"}), t0), OutcomeStored)
-	if fresh, err := s.Register(ctx, "dave", t0); err != nil || fresh {
+	if fresh, err := s.Register(ctx, nodeOf(testKey("self")), "dave", t0); err != nil || fresh {
 		t.Fatalf("second register: %v %v", fresh, err)
 	}
 	if d := snapshot(t, s, "dave"); !reflect.DeepEqual(d.Cursors, want) {
@@ -808,5 +809,47 @@ func TestRegisteringAnAgentStartsItsCursorsAtTheCurrentEnd(t *testing.T) {
 	}
 	if err := s.AddRoom(ctx, "r_ffffffffffffffffffffffffffffffff", "other", "", t0); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// D-NEW-prereg: registering starts a cursor just before the first message
+// held that is addressed to the new agent on this machine, with Early
+// there and Start at the current end; a message to the same label on
+// another machine, a room-wide one and one to another label move nothing.
+// Seen keeps Early, and a cursor Seen adds later has none of its own.
+func TestRegisteringStartsACursorJustBeforeTheFirstMessageAddressedToTheAgent(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	self, other := nodeOf(testKey("self")), nodeOf(testKey("other"))
+	a, b := testKey("a"), testKey("b")
+	var prev string
+	for i, to := range [][]core.Addressee{
+		nil, {{Node: other, Agent: "dave"}}, {{Node: self, Agent: "erin"}},
+		{{Node: self, Agent: "erin"}, {Node: self, Agent: "dave"}}, nil, {{Node: self, Agent: "dave"}},
+	} {
+		r := mk(t, a, core.RecordFields{Seq: int64(i + 1), Prev: prev, To: to})
+		wantOutcome(t, put(t, s, r, t0), OutcomeStored)
+		prev = r.ID()
+	}
+	wantOutcome(t, put(t, s, mk(t, b, core.RecordFields{To: []core.Addressee{{Node: other, Agent: "dave"}}}), t0), OutcomeStored)
+	if _, err := s.Register(ctx, self, "dave", t0); err != nil {
+		t.Fatal(err)
+	}
+	want := []Cursor{{nodeOf(a), "00000000000000e1", 6, 3, 3}, {nodeOf(b), "00000000000000e1", 1, 1, 1}}
+	slices.SortFunc(want, func(x, y Cursor) int { return strings.Compare(x.Author, y.Author) })
+	if d := snapshot(t, s, "dave"); !reflect.DeepEqual(d.Cursors, want) {
+		t.Fatalf("cursors %+v, want %+v", d.Cursors, want)
+	}
+	err := s.Seen(ctx, "dave", testRoom, func(*Reader) (SeenPlan, error) {
+		return SeenPlan{Cursors: []Cursor{{Author: nodeOf(a), Epoch: "00000000000000e1", Start: 6, Pos: 6, Early: 3},
+			{Author: nodeOf(a), Epoch: "00000000000000e2", Pos: 1}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = []Cursor{{nodeOf(a), "00000000000000e1", 6, 6, 3}, {nodeOf(a), "00000000000000e2", 0, 1, 0}, {nodeOf(b), "00000000000000e1", 1, 1, 1}}
+	slices.SortFunc(want, func(x, y Cursor) int { return strings.Compare(x.Author+x.Epoch, y.Author+y.Epoch) })
+	if d := snapshot(t, s, "dave"); !reflect.DeepEqual(d.Cursors, want) {
+		t.Fatalf("after Seen: cursors %+v, want %+v", d.Cursors, want)
 	}
 }

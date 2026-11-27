@@ -81,7 +81,12 @@ type observation struct {
 // agentState is one agent's reading state on its machine. It is durable and
 // goes back in time with a restored backup.
 type agentState struct {
-	start   map[StreamID]int      // positions at or below were before this agent's time
+	start map[StreamID]int // positions at or below were before this agent's time
+	// early, at or below start: a message above it and at or below start
+	// is in the agent's time only if it is addressed to the agent (an
+	// agent registered after a brief was sent to it; Register, inTime).
+	// It is start for an agent the machine began with.
+	early   map[StreamID]int
 	cursor  map[StreamID]int      // every position at or below is resolved for this agent
 	seen    map[string]bool       // entry keys the agent confirmed
 	seenMsg map[RecordID]RecordID // message -> version of its text the agent confirmed
@@ -109,6 +114,7 @@ type agentState struct {
 func newAgent(start map[StreamID]int) *agentState {
 	return &agentState{
 		start:    copyInts(start),
+		early:    copyInts(start),
 		cursor:   copyInts(start),
 		seen:     map[string]bool{},
 		seenMsg:  map[RecordID]RecordID{},
@@ -122,7 +128,7 @@ func newAgent(start map[StreamID]int) *agentState {
 
 func (a *agentState) clone() *agentState {
 	b := *a
-	b.start, b.cursor = copyInts(a.start), copyInts(a.cursor)
+	b.start, b.early, b.cursor = copyInts(a.start), copyInts(a.early), copyInts(a.cursor)
 	b.seen = make(map[string]bool, len(a.seen))
 	for k, v := range a.seen {
 		b.seen[k] = v

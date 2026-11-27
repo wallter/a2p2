@@ -1136,7 +1136,9 @@ not), the stored label, or the stored label with `#` and at least 8 hex
 of the id; a name that could mean two rooms is refused, so a label shown
 before another room arrived never picks that room. `send`, `reply` and `ask_human`
 return `{"id","room","room_label","local"?,"to","note"}` (`to` is `["everyone"]` for
-a room-wide post; `replaced` or `withdrew` instead for `replaces`), `reply`
+a room-wide post; `replaced` or `withdrew` instead for `replaces`; the
+`note` ends "Not registered here yet; each reads it when it first
+registers: " and those ids when the daemon's `not_registered` names any), `reply`
 also `handled_report`, `ask_human` also `answer_from`, the person's id
 by this machine's full key (`human@<full key>`), which does not change
 when machines join or leave. The answer is the reply whose `parent` is
@@ -1212,7 +1214,7 @@ Linux the daemon writes no key and ignores the header (D47).
 
 | Call | Request | Response |
 |---|---|---|
-| `send` (changed) | `{"agent","room","text","to"?,"reply_to"?,"ask_handled"?,"replaces"?,"choices"?,"thread"?}`; `"human"` in `to` is the person at this machine; `thread: true` with `reply_to` and no `to` addresses the parent's author and every agent of a current member that has posted in the parent's thread as held here, without the sender, at most 32 (the parent's author always kept, then newest post first); the surface writes that list as `to`, so on the wire it is an ordinary addressed reply. Without `thread`, a reply with no `to` goes to the parent's author | `{"id","room","room_label","created","to"?,"to_omitted"?}`; `to` is the addressees as written, omitted for everyone and for `replaces`; `to_omitted` counts thread participants the limit left out |
+| `send` (changed) | `{"agent","room","text","to"?,"reply_to"?,"ask_handled"?,"replaces"?,"choices"?,"thread"?}`; `"human"` in `to` is the person at this machine; `thread: true` with `reply_to` and no `to` addresses the parent's author and every agent of a current member that has posted in the parent's thread as held here, without the sender, at most 32 (the parent's author always kept, then newest post first); the surface writes that list as `to`, so on the wire it is an ordinary addressed reply. Without `thread`, a reply with no `to` goes to the parent's author | `{"id","room","room_label","created","to"?,"to_omitted"?,"not_registered"?}`; `to` is the addressees as written, omitted for everyone and for `replaces`; `to_omitted` counts thread participants the limit left out; `not_registered` lists the addressees on this machine that have never registered here, each of which reads the message when it first registers (nothing is said of other machines' agents) |
 | `inbox` (changed) | `{"agent","room"?,"limit"?,"wait_ms"?,"max_bytes"?,"level"?}`; `max_bytes` (512 to 40,000; absent or 0: no budget, as before 0.2.4): oldest first, the entries whose MCP inbox tool result (section 6) fits that many bytes; a receipt is kept of those only; an oldest entry that fits no budget comes cut, with `text_cut` (the bytes of its rendering left out). `level`: the agent's level is set in `room`, or every room, as by `level`, once the page as it will be at that level fits; a call refused for its budget sets nothing. Refused with `too_large` as in section 6 | `{"entries":[Entry],"waiting":[Wait],"more"?,"max_bytes"?,"levels"?}`; `more`: entries held at the look that `limit` or `max_bytes` left out; `max_bytes`: the budget applied, as asked (a daemon before 0.2.4 ignores the fields and never sends it back); `levels`: the rooms `level` set |
 | `thread` (changed) | `{"agent","id","after"?}`; `after` is a message id in that thread | `{"entries":[Entry]}`, only those after `after` when given (`not_found` if it is not in the thread); marks nothing |
 | `seen` (changed) | `{"agent","entries":[{"key","version"}]}` | `{"results":[{"key","ok","reason"?}]}`: each entry is confirmed only if a full `inbox` read listed this key at this version to this agent (its receipt) and the inbox would show exactly it now; the rest are applied. An entry only `unread`, `history` or `thread` showed is refused (`not_shown`). A replaced entry's key names the replace record |
@@ -1321,7 +1323,7 @@ Migration 13 adds the tables for attachments; they are in
 | `peer_addrs` (migration 8) | `node`, `addr`, `source` (`self`, `peer`), `seen_at`, `failed_at`, `fails`; only for members of a room this machine is in | (`node`,`addr`) |
 | index `records_reading` (migration 12; replaces migration 9's `records_history`) | `records (room, kind, created, author, seq, id)`, for `history` in place order | |
 | `agents` | `id`, `label`, `harness`, `cwd`, `first_seen_at`, `last_seen_at` (v0.2's table without `joined_n`, which migration 10 dropped) | `id` |
-| `cursors` | `agent`, `room`, `author`, `epoch`, `start`, `pos` | (`agent`,`room`,`author`,`epoch`) |
+| `cursors` | `agent`, `room`, `author`, `epoch`, `start`, `pos`, `early` (migration 15; nullable, NULL is `start`: where the agent's time began for messages addressed to it, set only by a first registration) | (`agent`,`room`,`author`,`epoch`) |
 | `reads` | `agent`, `room`, `key`, `version`, `msg` (indexed) | (`agent`,`room`,`key`) |
 | `read_heads` | `agent`, `room`, `author`, `record` | (`agent`,`room`,`author`,`record`) |
 | `levels` (migration 11) | `agent` (label), `room`, `level` (`addressed` or `none`; no row is `all`) | (`agent`,`room`) |
@@ -1348,7 +1350,12 @@ key `seq`, drops the tables `marks`, `deliveries`, `messages`, `members` and
 `agents.joined_n`. Migration 11 adds `levels` and `skips` (reading
 levels, U1 to U3); leaving a room deletes its rows. Migration 12 adds
 `shown` and replaces the index `records_history` with `records_reading`
-(D-reading); leaving a room deletes its `shown` rows. While `v02_removed` is set and `v02_dropped_notice` is
+(D-reading); leaving a room deletes its `shown` rows. Migration 15 adds
+`cursors.early` (D-NEW-prereg): an agent's first registration starts its
+cursor in a stream just before the first message held there that is
+addressed to it, with `early` there and `start` at the stream's end; a
+message above `early` and at or below `start` is in the agent's time only
+if it is addressed to it. While `v02_removed` is set and `v02_dropped_notice` is
 not, `status` with `show_notice` and the page return the notice (section
 7). Per room at most 32 requests this machine started wait (proposals,
 invite accepts, sends with files; a removal of an admin passes it once

@@ -162,3 +162,38 @@ func TestRandomLevelChangesNeitherLoseNorRepeatAMessage(t *testing.T) {
 		}
 	}
 }
+
+// Requirements: R7, U3. An agent registered after a brief was sent to it,
+// from this machine or another, reads the brief; room-wide history from
+// before, and a message to the same label on another machine, it does
+// not. At level none the brief is in Skipped. Registering again changes
+// nothing.
+func TestAgentRegisteredLaterReadsWhatWasAddressedToItButNotTheRoomsHistory(t *testing.T) {
+	w := levelRoom()
+	post(w, Msg{Body: "room-wide"})
+	post(w, Msg{Body: "remote brief", To: []Addr{{"A", "w"}}})
+	post(w, Msg{Body: "for w on B", To: []Addr{{"B", "w"}}})
+	pull(t, w, "A", "B")
+	w.Advance(Hour)
+	must(w.Send("A", "a", Msg{Body: "local brief", To: []Addr{{"A", "w"}, {"A", "v"}}}))
+	if _, err := w.Inbox("A", "w"); err == nil {
+		t.Fatal("an agent never registered has an inbox")
+	}
+	for _, a := range []string{"w", "v"} {
+		if err := w.Register("A", a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.SetLevel("A", "v", None); err != nil {
+		t.Fatal(err)
+	}
+	wantTexts(t, readAs(t, w, "A", "w"), "shown:local brief shown:remote brief")
+	wantTexts(t, readAs(t, w, "A", "v"), "")
+	wantTexts(t, w.Skipped("A", "v"), "shown:local brief")
+	if err := w.Register("A", "w"); err != nil {
+		t.Fatal(err)
+	}
+	post(w, Msg{Body: "after"})
+	pull(t, w, "A", "B")
+	wantTexts(t, readAs(t, w, "A", "w"), "shown:after")
+}

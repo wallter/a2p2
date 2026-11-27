@@ -3454,3 +3454,69 @@ did not hold the line; this entry is the line as it now is.
 **Revisit if** members need addresses this rule refuses (a well-known
 port other than 443, a link-local overlay), the rooms lock is split, or
 the dial budget proves too tight for rooms with many listeners.
+
+## D-NEW-prereg. A message addressed to an agent before it registers is unread when it does (2026-11-27)
+
+A field report: a lead that briefs workers before their sessions start
+loses those briefs. `send` returned an id, but the worker's first inbox
+was empty, because `Store.Register` started every cursor at the current
+end of every stream (since 0.1.0). The fan-out recipe tells a lead to send
+one brief per worker, which a lead often does before the workers exist.
+
+D35 declined showing a late registrant earlier messages in its inbox: U3
+stands, a new agent's inbox starts empty and `recent` is the way back.
+That was about room-wide history, and it still holds: a new agent is not
+handed the room's backlog as unread. It did not consider a message
+addressed to exactly that agent. Dropping that one in silence defeats
+addressing: the sender named this reader, and no one else will read it.
+So this amends D35 for addressed messages only.
+
+- **The rule.** At its first registration, a message held then that is
+  addressed to the agent (its label on this machine's key, `to` in the
+  signed header) is unread for it, however long before it was sent.
+  Room-wide history from before stays read. The message is then read
+  like any other: its newest text, `edited` if replaced, nothing if
+  withdrawn, `expired` if its text expired first (the reader is told,
+  as D7 asks), kept out at level `none` and listed by `skipped`.
+- **How.** The cursor of each stream holding such a message starts just
+  before the first one. A new column, `cursors.early` (migration 15,
+  nullable, NULL meaning `start`), records where, so that a message
+  between `early` and `start` counts only if it is addressed to the agent
+  (`inTime`), and `skipped` and level changes find those messages after
+  the cursor has passed them. A column is needed because `skipped` walks
+  from where the agent's time began, not from the cursor, and the
+  room-wide bound (`start`) must stay. Cursors seeded any other way
+  (joining a room, an admission frontier, Seen adding one) leave `early`
+  NULL and behave as before. Rows from before the migration are NULL, so
+  an agent registered under the old rule does not now receive old briefs.
+- **The model changes with the code.** `World.Register` adds an agent
+  later with the same rule and `inTime` is used in `decide` and
+  `unconfirmed`. The differential harness now registers on both sides
+  instead of filtering the model's listings, its exhaustive prefix sends
+  a brief to the agent that registers later, and the walk-from-the-start
+  check walks from `early`.
+- **What `send` says.** The local API's send result gains
+  `not_registered`, the addressees on this machine never registered
+  here; the CLI prints a line for each on stderr (stdout is still the
+  id alone), and the MCP send, reply and ask_human results end their
+  `note` with "Not registered here yet; each reads it when it first
+  registers: " and the ids (81 bytes for one addressee with a 6-letter
+  label; no tool definition changes). Nothing is said of another
+  machine's agents: this machine cannot know them, and guessing would be
+  an oracle for which labels exist there. A local agent learns only what
+  `peers` already lists. Labels carry no authority, and this changes no
+  check.
+- **Bounds.** Registration reads every message header the room holds
+  once, in its transaction. Any member can address any label on this
+  machine's key, registered or not, so a flood of briefs to a label not
+  registered yet is no worse than one to a registered label; either is
+  paged by the inbox's `limit` and `max_bytes`. A brief at the start of a
+  long stream makes the first walk read that stream from there, as an
+  old unconfirmed message does for any agent.
+- **Compatibility.** No wire or signed format changes. Migration 15
+  makes a database older binaries refuse to open ("upgrade a2p2"), as
+  every migration does.
+
+**Revisit if** registration becomes slow in rooms with very many
+messages (an index of addressees would replace the scan), or a way to
+forget an agent is added (it would have to say whether briefs return).

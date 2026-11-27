@@ -87,7 +87,7 @@ func (v *roomView) unconfirmed(g *agentState, agent string, r *rec) (bool, error
 	return !done, err
 }
 
-// forAgent calls fn with every message held after where agent's time began
+// forAgent calls fn with every message held in the agent's time (inTime)
 // in each stream it reads, that is relevant to it and that it has not
 // confirmed.
 func (v *roomView) forAgent(g *agentState, agent string, fn func(*rec) error) error {
@@ -99,12 +99,12 @@ func (v *roomView) forAgent(g *agentState, agent string, fn func(*rec) error) er
 			}
 			continue
 		}
-		for n := g.start[k] + 1; n <= s.Contig; n++ {
+		for n := g.early[k] + 1; n <= s.Contig; n++ {
 			r, err := v.at(k, n)
 			if err != nil {
 				return err
 			}
-			if r == nil || !relevant(r, v.self, agent) {
+			if r == nil || !relevant(r, v.self, agent) || !g.inTime(r, v.self) {
 				continue
 			}
 			if ok, err := v.unconfirmed(g, agent, r); err != nil {
@@ -120,11 +120,10 @@ func (v *roomView) forAgent(g *agentState, agent string, fn func(*rec) error) er
 }
 
 // skippedFor says whether message r is one Skipped lists for the agent:
-// relevant to it, after its time began, kept out by its level and not
-// confirmed.
+// relevant to it, in its time, kept out by its level and not confirmed.
 func (v *roomView) skippedFor(g *agentState, agent string, r *rec) (bool, error) {
 	k := r.stream()
-	if r.f.Kind != core.KindMessage || !relevant(r, v.self, agent) || !g.keptOut(r) || r.f.Seq <= g.start[k] {
+	if r.f.Kind != core.KindMessage || !relevant(r, v.self, agent) || !g.keptOut(r) || !g.inTime(r, v.self) {
 		return false, nil
 	}
 	if u, err := v.unseeded(g, k); err != nil || u {

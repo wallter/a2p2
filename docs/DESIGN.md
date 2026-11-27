@@ -658,6 +658,34 @@ room's last messages through `history`. None of these three marks anything
 seen. A reply goes to its
 parent's author unless the sender names addressees (D10).
 
+**What a new agent sees (D-NEW-prereg).** A label is registered the
+first time it is used here (`send`, `inbox`, the MCP shim's first call).
+In the same transaction its cursors start at the current end of every
+stream of every room, so the room's history from before is not unread
+for it (D35; `recent` reads it). A message held then that is addressed to
+exactly this agent (its label on this machine's key, from any member) is
+unread for it all the same, however long before it was sent: a lead can
+brief workers before their sessions start. Where a stream holds such a
+message, the cursor starts just before the first one and `cursors.early`
+(migration 15) records where; a message between `early` and `start` is
+in the agent's time only if it is addressed to it (`inTime`, the same in
+the delivery model's `Register`), so the walk passes the room-wide ones.
+The brief is then read like any other message: its newest text, as
+edited if it was replaced; nothing if it was withdrawn; an `expired`
+notice if its text expired first; skipped at level `none`. The scan
+reads every message header the room holds once, at registration. A
+flood of briefs to a label not yet registered is paged like any inbox
+(`limit`, `max_bytes`) and is no worse than one to a registered label:
+any member can address any label on this machine's key either way.
+Registration is never undone; a restore to a backup from before it takes
+it back, and registering again applies the rule to what the restored
+store holds. `send` names, in `not_registered`, the addressees on this
+machine never registered here ("Not registered here yet; each reads it
+when it first registers"); of other machines' agents it says nothing,
+since this machine cannot know them, and the list shows a local agent
+only what `peers` already lists. An agent registered before this rule
+existed keeps its cursors as they were.
+
 **Waiting and looking again.** An inbox with a wait registers before it
 looks, so a write committed after the look always ends the wait. A
 message or handled report this machine writes wakes only the waiters it
