@@ -248,6 +248,16 @@ and treats a failed run or a very short answer as a failure.
   waiting (`inbox` with `wait_seconds`).
 - The cross-harness case of `scripts/e2e/run.sh` since the rewrite, and
   any harness on Linux.
+- What changed for agents in 0.3.0, beyond the 2026-11-27 runs: whether a
+  model follows `more` and calls `inbox` again, how each harness shows a
+  cut page, and how models treat the new marks in tool results (D65). Those
+  runs used a build before D72, with a default page of 24,000 bytes and
+  slightly longer tool descriptions.
+- The CLI's check for an agent's shell (D66) in Codex and Gemini CLI: the
+  variables were read from their binaries, not seen in a running shell.
+  Claude Code's were seen in its shell (2.1.332), not in an end-to-end run.
+- Codex since install stopped pre-approving a2p2's tools (D60): an
+  interactive session's prompts, and `codex exec` with `--approve-tools`.
 
 ## Per-run configuration
 

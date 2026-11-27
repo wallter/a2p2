@@ -14,17 +14,17 @@ release's tag and name the version. Release tags cannot be moved or
 deleted (a rule of the repository):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/wallter/a2p2/v0.2.3/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/wallter/a2p2/v0.3.0/install.sh -o install.sh
 less install.sh
-A2P2_VERSION=v0.2.3 sh install.sh
+A2P2_VERSION=v0.3.0 sh install.sh
 ```
 
 The checksum the script checks comes from the same release, so this
 catches a corrupted download, not a compromised release: whoever can
 replace the binary can replace its line in `SHA256SUMS` too. By default
 the installer checks SHA-256 only, does not need the GitHub CLI, and says
-so after the check. Releases after 0.2.3 also carry an attestation from
-the release workflow. With `A2P2_VERIFY_ATTESTATION=1` the installer runs
+so after the check. From version 0.3.0, releases also carry an attestation
+from the release workflow. With `A2P2_VERIFY_ATTESTATION=1` the installer runs
 `gh attestation verify` on the download and installs nothing unless it
 passes (needs the GitHub CLI, signed in; it refuses a release up to
 0.2.3). The attestation must be from the tag it downloads, so an attested
