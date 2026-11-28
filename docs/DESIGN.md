@@ -47,7 +47,11 @@ and `doctor` (`daemon.HomeWarnings`). Only users who can reach a
 directory count: the walk keeps the search bits of the directories above
 each one, so a 0777 directory under a 0700 one of the user's is neither
 refused nor warned about. The path is walked one name at a
-time, following each link from the directory that holds it.
+time, following each link from the directory that holds it. Whether the
+user's primary group is private to it is asked of the system's user
+database only when the walk meets a directory of that group that the
+group can write: the lookup costs about 1.4 ms on macOS, and every
+command that talks to the daemon makes the walk.
 
 The loopback page has no long-lived secret in any address. Each `status`
 call (and so `a2p2 ui`) gives the page's address with a new one-time
