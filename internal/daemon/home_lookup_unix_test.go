@@ -12,8 +12,8 @@ import (
 // home. Whether this user's primary group is private to it is asked of
 // the directory service (about 1.4 ms on macOS), and the answer matters
 // only for a directory of that group that the group can write; it is
-// asked then, once, and not otherwise. The checks themselves are
-// unchanged: such a directory still gives its warning.
+// asked then, once per walk. Each reachable group-writable ancestor
+// still gives its own warning.
 func TestTheHomeCheckAsksForTheUsersGroupOnlyWhenADirectoryNeedsIt(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("as root every directory is root's")
@@ -28,15 +28,21 @@ func TestTheHomeCheckAsksForTheUsersGroupOnlyWhenADirectoryNeedsIt(t *testing.T)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(parent) })
-	home := filepath.Join(parent, "h")
+	child := filepath.Join(parent, "child")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(child, "h")
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chown(parent, -1, os.Getgid()); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(parent, 0o755); err != nil {
-		t.Fatal(err)
+	for _, dir := range []string{parent, child} {
+		if err := os.Chown(dir, -1, os.Getgid()); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := CheckHome(home); err != nil {
 		t.Fatal(err)
@@ -44,10 +50,12 @@ func TestTheHomeCheckAsksForTheUsersGroupOnlyWhenADirectoryNeedsIt(t *testing.T)
 	if w := HomeWarnings(home); len(w) != 0 || asked != 0 {
 		t.Fatalf("under directories no group can write: warnings %q, the user's group asked for %d times, want none", w, asked)
 	}
-	if err := os.Chmod(parent, 0o775); err != nil {
-		t.Fatal(err)
+	for _, dir := range []string{parent, child} {
+		if err := os.Chmod(dir, 0o775); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if w, err := checkAncestors(home); err != nil || len(w) != 1 || asked != 1 {
-		t.Fatalf("under a directory its own group can write: warnings %q (%v), the user's group asked for %d times, want 1 and 1", w, err, asked)
+	if w, err := checkAncestors(home); err != nil || len(w) != 2 || asked != 1 {
+		t.Fatalf("under two directories their group can write: warnings %q (%v), the user's group asked for %d times, want 2 and 1", w, err, asked)
 	}
 }

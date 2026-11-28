@@ -20,8 +20,24 @@ const loneLeg = 5 * time.Millisecond
 // lone sends one message from w and returns how long it took to be held at
 // r, and the requests each machine sent the other from the write until
 // everything was quiet again (10 s).
-func lone(t *testing.T, net *recNet, w, r *snode, room string) (took time.Duration, wr, rw []sent) {
+func lone(t *testing.T, net *recNet, w, r *snode, room string, listeners ...*snode) (took time.Duration, wr, rw []sent) {
 	t.Helper()
+	type hold struct {
+		server, peer *snode
+		initial      chan struct{}
+	}
+	var holds []hold
+	for _, server := range listeners {
+		peer := r
+		if server == r {
+			peer = w
+		}
+		initial := loneHold(server, peer, room)
+		if initial == nil {
+			t.Fatalf("before send, %s is not holding a pull from %s", server.name, peer.name)
+		}
+		holds = append(holds, hold{server, peer, initial})
+	}
 	at := net.clock.Now()
 	id := w.send(room, "lone")
 	for !r.holds(room, id) {
@@ -32,6 +48,11 @@ func lone(t *testing.T, net *recNet, w, r *snode, room string) (took time.Durati
 	}
 	took = net.clock.Now().Sub(at)
 	net.run(t, 10*time.Second)
+	for _, h := range holds {
+		if final := loneHold(h.server, h.peer, room); final == nil || final == h.initial {
+			t.Fatalf("after delivery, %s is not holding a new pull from %s", h.server.name, h.peer.name)
+		}
+	}
 	for _, s := range net.sent() {
 		if s.at.Before(at) || s.at.After(at.Add(10*time.Second)) {
 			continue
@@ -44,6 +65,12 @@ func lone(t *testing.T, net *recNet, w, r *snode, room string) (took time.Durati
 		}
 	}
 	return took, wr, rw
+}
+
+func loneHold(server, peer *snode, room string) chan struct{} {
+	server.x.mu.Lock()
+	defer server.x.mu.Unlock()
+	return server.x.waiting[[2]string{room, peer.id}]
 }
 
 func describe(ss []sent) string {
@@ -79,7 +106,7 @@ func TestALoneMessageCostsAFixedNumberOfRequestsAndNoTokenWait(t *testing.T) {
 			net, a, b, room := outboundPair(t, loneLeg)
 			for i := range 3 {
 				net.run(t, 5*time.Second) // the budget full again
-				took, ab, ba := lone(t, net, a, b, room)
+				took, ab, ba := lone(t, net, a, b, room, a)
 				t.Logf("message %d: %v; b to a:%s", i+1, took, describe(ba))
 				// the waiting pull's answer, then the continuation's two legs
 				if took != 3*loneLeg {
@@ -102,7 +129,7 @@ func TestALoneMessageCostsAFixedNumberOfRequestsAndNoTokenWait(t *testing.T) {
 			net.run(t, time.Minute)
 			for i := range 3 {
 				net.run(t, 5*time.Second)
-				took, ab, ba := lone(t, net, a, b, room)
+				took, ab, ba := lone(t, net, a, b, room, a, b)
 				t.Logf("message %d: %v; a to b:%s; b to a:%s", i+1, took, describe(ab), describe(ba))
 				if took != loneLeg {
 					t.Fatalf("message %d held at b %v after it was sent, want %v (the offer's first leg)", i+1, took, loneLeg)
@@ -120,7 +147,7 @@ func TestALoneMessageCostsAFixedNumberOfRequestsAndNoTokenWait(t *testing.T) {
 			net, a, b, room := outboundPair(t, loneLeg)
 			for i := range 3 {
 				net.run(t, 5*time.Second)
-				took, ba, ab := lone(t, net, b, a, room)
+				took, ba, ab := lone(t, net, b, a, room, a)
 				t.Logf("message %d: %v; b to a:%s", i+1, took, describe(ba))
 				// the offer's first leg
 				if took != loneLeg {

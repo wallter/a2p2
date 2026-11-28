@@ -26,11 +26,11 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   daemons on loopback, the reader waiting, the requester's budget full
   (700 ms apart); ping-pong between long-lived clients; and the same
   message sent with `a2p2 send` and read with `a2p2 inbox --wait`
-  processes. Measured on the same MacBook, partly under load, medians of
-  three runs of n=10 to 15: 4.8 to 6.8 ms pulled by an outbound-only
-  machine (or between two listening ones), 3.3 to 5.5 ms offered by it;
-  a ping-pong round 9.9 to 10.7 ms; through the two processes 12 to 17
-  ms, of which the send process is 10 to 15. A message pulled costs 4 requests,
+  processes. Measured on the same MacBook, one run, medians: 6.9 ms
+  pulled by an outbound-only machine and 5.3 ms offered by it, 5.9 and
+  6.1 ms between two listening ones (n=30 each); a ping-pong round 9.7
+  to 9.8 ms (n=50); through the two processes 13.8 to 14.9 ms (n=10), of
+  which the send process is 12.9 to 13.5. A message pulled costs 4 requests,
   one offered 3, and none waits for a token or a timer
   (`TestALoneMessageCostsAFixedNumberOfRequestsAndNoTokenWait`). The 61
   ms of 0.3.0's notes for one message at a time is a sender writing every

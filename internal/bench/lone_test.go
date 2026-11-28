@@ -4,18 +4,22 @@ package bench
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/wallter/a2p2/internal/localapi"
+	"github.com/wallter/a2p2/internal/node"
 )
 
 // M9: a lone addressed message between two daemons on loopback, the
@@ -26,8 +30,8 @@ import (
 // then a lone message as a person times it by hand, a reader process `a2p2 inbox --wait`
 // and a sender process `a2p2 send --to`, so process start is in it.
 // A2P2_BENCH_LONE_PAUSES (Go durations, comma separated) replaces the
-// 700 ms pause: below about 150 ms the budget is spent and each request
-// waits for its token, which is the budget's bound, not a lone message.
+// 700 ms pause: short pauses can exhaust the budget once the initial burst
+// is spent, so requests may wait for tokens.
 func TestM9LoneMessage(t *testing.T) {
 	n := scaled(30, 10)
 	pauses := []time.Duration{700 * time.Millisecond}
@@ -43,14 +47,22 @@ func TestM9LoneMessage(t *testing.T) {
 	}
 	for _, arr := range []struct{ name, bnet string }{{"A listens, B outbound", "outbound"}, {"both listen", "on"}} {
 		a, b := startDaemon(t, "alpha"), startDaemon(t, "beta")
-		a.setNet("on", fmt.Sprintf("127.0.0.1:%d", freePort(t)))
+		aAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+		a.setNet("on", aAddr)
+		var bAddr string
 		if arr.bnet == "on" {
-			b.setNet("on", fmt.Sprintf("127.0.0.1:%d", freePort(t)))
+			bAddr = fmt.Sprintf("127.0.0.1:%d", freePort(t))
+			b.setNet("on", bAddr)
 		} else {
 			b.setNet("outbound", "")
 		}
 		room := call[localapi.Room](t, a.c, "room/create", localapi.RoomReq{Room: "bench"}).ID
 		join(t, a, b, room)
+		if bAddr != "" {
+			// The first invite makes B an admin. A accepts B's invite to
+			// the same room so both loopback addresses are trusted.
+			join(t, b, a, room)
+		}
 		aa, bb := a.agent("ann"), b.agent("bea")
 		ac, bc := a.client(), b.client()
 		ra, rb := startReader(t, ac, aa, room), startReader(t, bc, bb, room)
@@ -65,6 +77,10 @@ func TestM9LoneMessage(t *testing.T) {
 				t.Fatal(err)
 			}
 			w.r.await(t, m.ID)
+		}
+		if bAddr != "" {
+			awaitInbound(t, a, b, aAddr)
+			awaitInbound(t, b, a, bAddr)
 		}
 		for _, pause := range pauses {
 			time.Sleep(3 * time.Second) // the budget full again
@@ -81,6 +97,16 @@ func TestM9LoneMessage(t *testing.T) {
 		b.stop()
 		a.home, b.home = "", "" // stopped and removed: nothing for the cleanup
 	}
+}
+
+func awaitInbound(t *testing.T, listener, dialer *proc, addr string) {
+	t.Helper()
+	eventually(t, fmt.Sprintf("%s to accept a connection from %s", addr, dialer.node), func() bool {
+		st := call[localapi.Status](t, listener.c, "status", localapi.Empty{})
+		return slices.ContainsFunc(st.Reach.ConnectedIn, func(c node.ConnectIn) bool {
+			return c.Node == dialer.node && c.Local == addr
+		})
+	})
 }
 
 // pingPong is rounds of ann's message to bea and bea's answer, each
@@ -114,11 +140,20 @@ func pingPong(t *testing.T, ac, bc *localapi.Client, aa, bb, room string, ra, rb
 // alone.
 func cliLone(t *testing.T, s, r *proc, from, to, what, cs string) {
 	t.Helper()
+	type inboxResult struct {
+		at     time.Time
+		output string
+		err    error
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	var l, sendL lat
 	for i := 0; i < scaled(10, 5); i++ {
-		cmd := exec.Command(r.bin, "inbox", "--as", to, "--room", "bench", "--wait", "90")
+		cmd := exec.CommandContext(ctx, r.bin, "inbox", "--as", to, "--room", "bench", "--wait", "90", "--limit", "1")
 		cmd.Env = env(r.home)
 		cmd.Dir = filepath.Join(r.home, "fakehome")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
 		out, err := cmd.StdoutPipe()
 		if err != nil {
 			t.Fatal(err)
@@ -126,19 +161,33 @@ func cliLone(t *testing.T, s, r *proc, from, to, what, cs string) {
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
+		inbox := make(chan inboxResult, 1)
+		go func() {
+			br := bufio.NewReader(out)
+			line, lineErr := br.ReadString('\n')
+			at := time.Now()
+			rest, readErr := io.ReadAll(br)
+			inbox <- inboxResult{at: at, output: line + string(rest), err: errors.Join(lineErr, readErr, cmd.Wait())}
+		}()
 		time.Sleep(time.Second) // the reader is waiting
 		t0 := time.Now()
-		if o, err := s.run("send", "--as", from, "--room", "bench", "--to", to+"@"+r.node[:8], "TIMING "+strconv.Itoa(i)); err != nil {
+		o, err := s.run("send", "--as", from, "--room", "bench", "--to", to+"@"+r.node[:8], "TIMING "+strconv.Itoa(i))
+		sendTime := time.Since(t0)
+		if err != nil {
+			cancel()
+			<-inbox
 			t.Fatalf("send: %v %s", err, o)
 		}
-		sendL.add(time.Since(t0))
-		br := bufio.NewReader(out)
-		if _, err := br.ReadString('\n'); err != nil {
-			t.Fatal(err)
+		read := <-inbox
+		if read.err != nil {
+			t.Fatalf("inbox: %v\nstdout: %s\nstderr: %s", read.err, read.output, &stderr)
 		}
-		l.add(time.Since(t0))
-		_, _ = io.Copy(io.Discard, br)
-		_ = cmd.Wait()
+		id := strings.TrimSpace(o)
+		if id == "" || !strings.Contains(read.output, "\n    id "+id+"\n") || read.at.Before(t0) {
+			t.Fatalf("inbox: want entry %q after send started, got %q at %v relative to send", id, read.output, read.at.Sub(t0))
+		}
+		l.add(read.at.Sub(t0))
+		sendL.add(sendTime)
 	}
 	result(t, what, cs+", send process to inbox line", &l, 0, "-")
 	result(t, what, cs+" [send process only]", &sendL, 0, "-")

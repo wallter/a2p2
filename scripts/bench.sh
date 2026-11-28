@@ -32,8 +32,8 @@ Measures a2p2 on this computer and prints one table per run:
      waiting, 700 ms apart (the budget full): A listening and B outbound,
      then both listening, each way; ping-pong, 1 s apart; then through
      `a2p2 send` and `a2p2 inbox --wait` processes, process start included.
-     A2P2_BENCH_LONE_PAUSES=5ms,50ms: other pauses (below about 150 ms
-     the budget is spent and each request waits for its token)
+     A2P2_BENCH_LONE_PAUSES=5ms,50ms: other pauses (short pauses can
+     exhaust the budget once the initial burst is spent)
   micro: Ed25519, record encode/parse, raw SQLite commit and fsync, the
      product's Surface.Send with and without the socket
   and a CPU profile of a serial 200 B send through the socket, in process.
