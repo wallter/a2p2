@@ -10,8 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"os"
+	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -48,6 +52,12 @@ type shim struct {
 	local, node string
 	// budgeted: the daemon's status listed inbox_max_bytes (budgeted).
 	budgeted bool
+	// ceilinged: it listed inbox_ceiling (ceilingDaemon).
+	ceilinged bool
+	// inline is the largest inbox result this harness shows inline, 0
+	// when not known (inlineCap); floored: its limit is below the floor.
+	inline  int
+	floored bool
 }
 
 // personHarness refuses the harness name of the person's own path: an
@@ -100,6 +110,7 @@ const MaxInstructionsBytes = 300
 // NewServer builds the MCP server with its seven tools.
 func NewServer(c *localapi.Client, harness, label, cwd, version string) *mcp.Server {
 	sh := &shim{c: c, harness: harness, label: label, cwd: cwd}
+	sh.inline, sh.floored = inlineCap(harness, os.Getenv)
 	s := mcp.NewServer(&mcp.Implementation{Name: "a2p2", Version: version}, &mcp.ServerOptions{Instructions: Instructions})
 	add(s, "whoami", descWhoami, readOnly, sh.whoami)
 	add(s, "peers", descPeers, readOnly, sh.peers)
@@ -968,13 +979,116 @@ const oldDaemonNote = "The a2p2 daemon is older than this tool, so max_bytes was
 // done at the ceiling, less the note's own bytes, rather than refused.
 var ceilingNote = fmt.Sprintf("max_bytes above %d was read as %d, the most one result holds.", node.MaxInboxBytes, node.MaxInboxBytes)
 
-// ceilingNoteBytes is what ceilingNote adds to a result: the field, its
-// name and its quoted text.
-var ceilingNoteBytes = func() int {
-	s, _ := localapi.ToolJSON(localapi.ToolInbox{Note: ceilingNote})
+// Claude Code saves an MCP result above its token limit to a file, which
+// the model may never read, after the page was confirmed (D74). The limit
+// is 25,000 tokens unless MAX_MCP_OUTPUT_TOKENS, which this process sees
+// in its environment, sets another, and an inbox result was never
+// measured at more tokens than bytes. So under Claude Code no result is
+// larger in bytes than the limit, less a margin for the harness's own
+// wrapping.
+const (
+	harnessClaude     = "claude" // the --harness its install writes
+	envClaudeLimit    = "MAX_MCP_OUTPUT_TOKENS"
+	claudeLimit       = 25000
+	claudeInlineSlack = 1000
+)
+
+// inlineCap is the largest inbox result, in bytes, that the harness shows
+// inline: 0 when it is not known (any harness but Claude Code), else its
+// token limit (claudeLimitOf) less claudeInlineSlack, within the ceiling.
+// floored: the cap would fall under MinInboxBytes, the least a read takes,
+// which it is instead.
+func inlineCap(harness string, getenv func(string) string) (cap int, floored bool) {
+	if harness != harnessClaude {
+		return 0, false
+	}
+	cap = min(claudeLimitOf(getenv(envClaudeLimit))-claudeInlineSlack, node.MaxInboxBytes)
+	if cap < node.MinInboxBytes {
+		return node.MinInboxBytes, true
+	}
+	return cap, false
+}
+
+// limitNumber is the start of a number as a lenient parser reads one: a
+// sign, digits with a decimal part, an exponent.
+var limitNumber = regexp.MustCompile(`^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?`)
+
+// claudeLimitOf is the token limit Claude Code takes from the value of
+// MAX_MCP_OUTPUT_TOKENS, read low: a2p2 cannot know exactly how the
+// harness parses it, and a cap above the real limit is the unsafe error.
+// Spaces are trimmed; every reading a lenient parser could make (the
+// number it starts with, with a decimal part or an exponent, or a whole
+// integer with a base prefix) counts, and the least positive finite one
+// is taken, its integer part, at most claudeLimit. Only a value with no
+// such reading (empty, not a number, zero, negative) leaves claudeLimit.
+func claudeLimitOf(v string) int {
+	v = strings.TrimSpace(v)
+	limit := float64(claudeLimit)
+	consider := func(f float64) {
+		if f > 0 && !math.IsInf(f, 0) && !math.IsNaN(f) {
+			limit = min(limit, f)
+		}
+	}
+	if m := limitNumber.FindString(v); m != "" {
+		if f, err := strconv.ParseFloat(m, 64); err == nil {
+			consider(f)
+		}
+	}
+	if i, err := strconv.ParseInt(v, 0, 64); err == nil {
+		consider(float64(i))
+	}
+	return int(limit)
+}
+
+// ceilingDaemon says whether the daemon's inbox takes ceiling
+// (localapi.FeatureInboxCeiling), as budgetedDaemon does for max_bytes.
+// When its status cannot be read it says no, and asks again next time: a
+// read without the cap is today's read, and better than none.
+func (sh *shim) ceilingDaemon(ctx context.Context) bool {
+	sh.selfMu.Lock()
+	ok := sh.ceilinged
+	sh.selfMu.Unlock()
+	if ok {
+		return true
+	}
+	st, err := sh.status(ctx)
+	if err != nil {
+		slog.Warn("reading the daemon's features failed; reading without the harness's cap", "err", err)
+		return false
+	}
+	ok = slices.Contains(st.Features, localapi.FeatureInboxCeiling)
+	sh.selfMu.Lock()
+	sh.ceilinged = ok
+	sh.selfMu.Unlock()
+	return ok
+}
+
+// distrustCeiling makes the next read ask the daemon's status again: its
+// answer did not show it applied the ceiling sent, or it refused the read.
+func (sh *shim) distrustCeiling() {
+	sh.selfMu.Lock()
+	sh.ceilinged = false
+	sh.selfMu.Unlock()
+}
+
+// Notes of a read under a harness's cap (D74), one at most per result.
+func capNote(cap int) string {
+	return fmt.Sprintf("max_bytes above %d was read as %d, the most this harness shows inline.", cap, cap)
+}
+
+const (
+	floorNote     = "MAX_MCP_OUTPUT_TOKENS is below one page: read at 512 bytes, the least."
+	overNote      = "This result is larger than this harness shows inline: one entry's fields besides its text pass it, so it came alone without its text. If it was saved to a file, read the file."
+	levelsNotNote = "The level was set; the rooms set are not listed, to fit."
+)
+
+// noteBytes is what a note adds to a result: the field, its name and its
+// quoted text.
+func noteBytes(note string) int {
+	s, _ := localapi.ToolJSON(localapi.ToolInbox{Note: note})
 	e, _ := localapi.ToolJSON(localapi.ToolInbox{})
 	return len(s) - len(e)
-}()
+}
 
 // read is inbox reading unread messages. The daemon returns, oldest
 // first, what fits the budget with the levels the call sets, keeping a
@@ -983,25 +1097,51 @@ var ceilingNoteBytes = func() int {
 // of its own, with a receipt of each entry, so the shim returns that page
 // whole and confirms it, as 0.2.3 did, and says the budget was not
 // applied (D70); the level was set first (inbox).
+//
+// Under a harness with a known cap (inlineCap) and a daemon that takes a
+// ceiling, the cap is the ceiling: the default is at most the cap, a
+// larger max_bytes is read as the cap, and the daemon cuts at the cap an
+// oldest entry that fits no smaller budget (D74). The cap is trusted only
+// while the daemon's answers echo it; a refusal or an answer without it
+// makes the next read ask its status again.
+//
+// The budget sent is never under MinInboxBytes. A note of the shim's own
+// is added only when the result with it still fits its bound (the cap or
+// ceiling, or the ceiling for a result already over the cap): the bound
+// matters more than the explanation.
 func (sh *shim) read(ctx context.Context, in inboxIn, levels []localapi.RoomLevel) (string, error) {
-	budget := in.MaxBytes
-	clamped := budget > node.MaxInboxBytes
+	capped := 0
+	if sh.inline > 0 && sh.ceilingDaemon(ctx) {
+		capped = sh.inline
+	}
+	ceil, ceilNote := node.MaxInboxBytes, ceilingNote
+	if capped > 0 {
+		ceil, ceilNote = capped, capNote(capped)
+	}
+	budget, note := in.MaxBytes, ""
 	switch {
+	case capped > 0 && sh.floored:
+		budget, note = node.MinInboxBytes, floorNote
 	case budget == 0:
-		budget = node.DefaultInboxBytes
-	case clamped:
+		budget = min(node.DefaultInboxBytes, ceil)
+	case budget > ceil:
 		// The note is not measured by the daemon, so its bytes come out
-		// of the budget and the result stays within the ceiling.
-		budget = node.MaxInboxBytes - ceilingNoteBytes
+		// of the budget, never below the floor.
+		budget, note = max(ceil-noteBytes(ceilNote), node.MinInboxBytes), ceilNote
 	}
 	var res localapi.InboxResp
 	var agent string
 	err := sh.call(ctx, func(a string) error {
 		agent = a
 		return sh.c.Call(ctx, "inbox", localapi.InboxReq{Agent: a, Room: in.Room, Limit: in.Limit, WaitMS: int64(in.WaitSeconds) * 1000,
-			MaxBytes: budget, Level: in.Level}, &res)
+			MaxBytes: budget, Level: in.Level, Ceiling: capped}, &res)
 	})
 	if err != nil {
+		if capped > 0 {
+			// A daemon that no longer takes the ceiling refuses at the cap
+			// an entry it would cut only at 32,000: ask again first.
+			sh.distrustCeiling()
+		}
 		return "", err
 	}
 	old := res.MaxBytes == 0
@@ -1018,6 +1158,14 @@ func (sh *shim) read(ctx context.Context, in inboxIn, levels []localapi.RoomLeve
 	}
 	if !old {
 		levels = res.Levels
+		if in.Level != "" && len(levels) == 0 && len(res.Entries) > 0 {
+			// Set before a wait, and left out of the result to fit
+			// (node.InboxOpts.page).
+			note = levelsNotNote
+		}
+	}
+	if capped > 0 && res.Ceiling != capped {
+		sh.distrustCeiling()
 	}
 	more := res.More
 	if old {
@@ -1026,12 +1174,6 @@ func (sh *shim) read(ctx context.Context, in inboxIn, levels []localapi.RoomLeve
 	local := sh.localRoom(ctx)
 	out := localapi.ToolInboxOf(res.Entries, len(res.Waiting), more, levels, local)
 	out.Waited = in.WaitSeconds > 0 && len(res.Entries) == 0
-	switch {
-	case old:
-		out.Note = oldDaemonNote
-	case clamped:
-		out.Note = ceilingNote
-	}
 	if len(res.Entries) > 0 {
 		seen := localapi.SeenReq{Agent: agent}
 		for _, e := range res.Entries {
@@ -1055,6 +1197,24 @@ func (sh *shim) read(ctx context.Context, in inboxIn, levels []localapi.RoomLeve
 			out.More += len(res.Entries) - confirmed
 		}
 	}
+	if old {
+		out.Note = oldDaemonNote // the daemon bounded nothing
+		return jsonOut(out)
+	}
+	s, err := jsonOut(out)
+	if err != nil {
+		return "", err
+	}
+	bound := ceil
+	if capped > 0 && len(s) > capped {
+		// Only an entry whose fields alone pass the cap takes the result
+		// over it (node.InboxOpts.Ceiling); say so if it fits.
+		bound, note = node.MaxInboxBytes, overNote
+	}
+	if note == "" || len(s)+noteBytes(note) > bound {
+		return s, nil
+	}
+	out.Note = note
 	return jsonOut(out)
 }
 

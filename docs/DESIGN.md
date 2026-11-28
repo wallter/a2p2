@@ -818,9 +818,34 @@ not applied. The budget never counts tokens and knows nothing of how full
 a model's context is; the recipes tell an agent short of context to ask
 for less. A harness may still set a result aside or cut it after the
 daemon has recorded the page as seen: the sizes make that rarer (D72),
-not impossible. The delivery model needs no change: a page is a listing of the
-first entries, which the differential tests compare as such (`opPage`,
-cut by `InboxOpts.page`).
+not impossible. The delivery model needs no change: a page is a listing
+of the first entries, which the differential tests compare as such
+(`opPage`, cut by `InboxOpts.page`).
+
+**A cap for the harness (D74).** Under Claude Code (the server started
+with `--harness claude`, as `a2p2 install claude` writes it) the MCP
+server caps every unread page at `min(25000, MAX_MCP_OUTPUT_TOKENS) -
+1000` bytes, within 512 and 32,000: the harness sets aside a result above
+its token limit, and no inbox result was measured at more tokens than
+bytes. The variable is read low: every reading a lenient parser could
+make counts, and the least wins. The cap takes the ceiling's place: the
+default is at most the cap, a larger `max_bytes` is read as the cap less
+its note (never under 512), and the server passes the cap to the daemon
+as the inbox call's `ceiling`, so an oldest entry that fits no smaller
+budget comes cut at the cap. An entry whose fields alone pass the cap
+comes alone with no text, over the cap but within 32,000: it is the only
+result that can pass the cap, and it never holds the queue. A note of
+the server's own comes only when the result with it fits its bound. The
+server trusts the cap only while the daemon echoes it; after a refusal or
+an answer without it, it asks status again, and a daemon whose status
+does not list `inbox_ceiling`, or a status that cannot be read, gets
+today's sizes. Any other harness reads as before. `peek`, `recent`,
+`skipped`, `thread` and `fetch` mark nothing seen and are not capped; an
+error repeats at most 200 bytes of any string (`node.MaxErrorEcho`). A
+read that set a level before a wait leaves the list of rooms set out of
+its result when that list would keep the first entry from fitting whole.
+The page is still confirmed before the harness shows it, so the cap does
+not show the model read it, and it covers no other harness.
 
 A level change runs in one transaction: every message held then that the
 old level kept out and the new one lets in, and that the agent has not

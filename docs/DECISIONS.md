@@ -3695,3 +3695,149 @@ So this amends D35 for addressed messages only.
 addressees would make it exact), the records table stops being
 insert-only in rowid order (a VACUUM, a rebuild), or a way to forget an
 agent is added (it would have to say whether briefs return).
+
+## D74. Under Claude Code the inbox is capped at the harness's token limit, read as bytes (2026-11-27)
+
+D72 left open that a harness can set a tool result aside in a file, or
+cut it, after a2p2 has recorded the page as seen. Claude Code does this
+to an MCP result above its token limit: 25,000 tokens by default, or the
+value of `MAX_MCP_OUTPUT_TOKENS`. D72 measured 1.54 bytes a token at
+worst, so a page of 18,000 bytes could not pass that limit, but a
+`max_bytes` up to 32,000 or a lowered limit could, and text that tokenizes
+worse was possible.
+
+**What was measured.** Inbox results of text chosen to tokenize badly,
+in Claude Code 2.1.332 with its default model, one run per kind of text
+(n=1), tokens taken from the usage of each API call (they include about
+25 to 40 tokens of the tool call's framing, so bytes a token are slightly
+understated):
+
+| Text | Result bytes | Tokens | Bytes a token |
+|---|---|---|---|
+| random hex | 16,403 | 10,576 | 1.55 |
+| random base64 | 16,394 | 15,404 | 1.06 |
+| punctuation and symbols, no equal neighbours | 16,355 | 15,582 | 1.05 |
+| CJK, emoji, Thai, Ethiopic and Yi | 16,401 | 12,287 | 1.33 |
+| short runs of hex, punctuation, rare characters and letters | 16,661 | 14,342 | 1.16 |
+| control characters, quotes and backslashes as a2p2 escapes them (5,017 bytes of text) | 18,380 | 17,419 | 1.06 |
+
+In no run did a result cost more tokens than it has bytes. That is
+measured, once per kind, with one model and one harness version; it is
+not proven, and Claude's tokenizer is not public. Digit strings were not
+tried. The MCP server process saw `MAX_MCP_OUTPUT_TOKENS` in its own
+environment whether it was set in the shell or in the project's
+`.claude/settings.json`, though the server's MCP entry set only
+`A2P2_HOME` (user-level and managed settings not tried).
+
+- **The rule.** When the MCP server runs under Claude Code, the largest
+  unread page `inbox` returns is `min(25000, MAX_MCP_OUTPUT_TOKENS) - 1000`
+  bytes, the cap: 24,000 by default. The 1,000 is a margin for what the
+  harness wraps around a result. The cap is never above the ceiling of
+  32,000 and never below the floor of 512. The default page stays 18,000
+  unless the cap is lower, when it is the cap. A `max_bytes` above the cap
+  is read as the cap less the bytes of one `note` saying so ("max_bytes
+  above 7000 was read as 7000, the most this harness shows inline."), but
+  never under 512. A page is still confirmed as it is returned, before
+  the harness shows it, as before.
+- **Notes never pass the bound.** Every note the server adds (above the
+  cap, below the floor, an oversized entry, levels left out) is added
+  only when the result with it still fits its bound: the cap, or 32,000
+  for the one result allowed over the cap. Otherwise the page comes
+  without the note. The bound matters more than the explanation.
+- **What the cap covers.** Unread pages only: the reads that mark
+  messages seen. `peek`, `recent`, `skipped`, `thread` and `fetch` mark
+  nothing seen, so a result of theirs that a harness sets aside or cuts
+  loses nothing; they are not capped. Refusals are not paged either, but
+  an error now repeats at most 200 bytes of any one string, cut between
+  characters and marked with how many bytes were left out
+  (`node.MaxErrorEcho`, applied where every user error is built): an
+  unknown `room` of 40 KB was echoed whole before.
+- **How the server knows its harness.** From `--harness`, which
+  `a2p2 install claude` writes into Claude Code's MCP entry
+  (`a2p2 mcp --harness claude`). A server started without it runs as
+  harness `mcp`, and any name but `claude` gets no cap: today's sizes.
+  No environment marker of Claude Code is read.
+- **The variable, read low.** `MAX_MCP_OUTPUT_TOKENS` is Claude Code's own
+  setting, read from the server's environment only; a2p2 adds no config
+  key or flag for it. a2p2 can only be as right as its reading of that
+  value, and a cap above the real limit is the unsafe error, so it reads
+  low. Review read the parsing of the installed harness (2.1.332, the
+  version measured; not checked by a2p2's tests): it trims spaces,
+  accepts a sign, and reads `8000.5` and `8e3` as 8,000. a2p2 trims
+  spaces and takes every reading a lenient parser could make: the number
+  the value starts with (sign, decimal part, exponent), or the whole value
+  as an integer with a base prefix (`0x1f40`); the least positive finite
+  one, its integer part, at most 25,000. Only a value with no such
+  reading (empty, not a number, zero, negative) leaves 25,000. A harness
+  may also apply a fallback configured where a2p2 cannot see it, or parse
+  otherwise in another version; then the cap can be wrong.
+- **Below the floor.** A limit under 1,512 tokens would put the cap under
+  512 bytes, the least a read takes. The cap is then 512, and its note,
+  that the limit is below one page, comes only if it fits: such a result
+  is at most 512 bytes, which can still pass the harness's limit.
+- **No reader is blocked by the cap.** The cap takes the ceiling's place
+  in D70's rule. An oldest entry that fits no budget up to the cap is
+  refused below the cap naming the cap, and at the cap comes alone with
+  its text cut between characters and `text_cut`, as at the ceiling. A
+  request above the cap, read at the cap less its note, is refused the
+  same way, as D72 does at the ceiling. So a 5 KB text of control
+  characters, which renders past 18,000 bytes, comes cut under a cap of
+  7,000 rather than being refused for ever. An entry whose fields other
+  than its text pass the cap (at their largest the validators admit they
+  take 27,527 bytes, D72) is returned alone with no text, `text_cut`
+  saying so, though the result then passes the cap (within 32,000), with
+  a `note`, if it fits, that the result is larger than this harness shows
+  inline and to read the file if it was saved to one. It is confirmed like
+  any other: a harness that sets it aside gives the model a file it can
+  read (observed once). Only a result holding that one entry can exceed
+  the cap.
+- **A level set before a wait.** A read that sets a level, fits empty,
+  sets the level and waits can get an entry that fits alone but not beside
+  the list of rooms set. Such a read now leaves the list out (the level is
+  set; a note says so if it fits) and returns the entry whole. An entry
+  is cut, or sent without its text, only when it does not fit alone in a
+  result with no list. Before, it lost its text or was refused. This holds
+  under any ceiling.
+- **The daemon is told the cap.** The cut happens where the page is
+  measured, in the daemon, so the local API's `inbox` takes `ceiling`
+  (the cap; 0 means 32,000; outside 512 to 32,000, or under `max_bytes`,
+  refused whatever `max_bytes` is) and echoes it only when it applied it,
+  and `status` lists the feature `inbox_ceiling`. This is the local API
+  between the server and the daemon of one machine: no wire, schema,
+  entry field, tool definition or CLI flag changes, and the definitions
+  stay at 3,995 bytes.
+- **Trusting the daemon.** The server uses the cap only while the
+  daemon's answers echo exactly the ceiling it sent. A refusal, or an
+  answer without that echo, makes the next read ask the daemon's status
+  again. A daemon that does not list the feature (0.2.4 to 0.3.0, or one
+  this daemon was replaced by) gets no cap, today's sizes: it would refuse
+  at the cap an entry it cuts only at 32,000, and a reader asking for more
+  would be read at the cap again. A daemon replaced mid-session costs one
+  refusal, then the read goes through. When status cannot be read, the
+  read goes on without the cap and the server asks again next time.
+- **What it guarantees.** In Claude Code, with the server installed by
+  `a2p2 install claude`, a daemon of this version, and a limit the server
+  reads as the harness does, no unread page is larger in bytes than the
+  harness's token limit, except the one oversized-envelope result, at any
+  text, as far as tokens never exceed bytes.
+- **What it does not.** It does not show that the model read the page: a
+  page is confirmed before the harness shows it, and a model can ignore a
+  result shown inline. A daemon without the feature can still return a
+  page the harness sets aside. It covers no other harness: their limits
+  are not known here. In Codex's code mode the page reaches the model's
+  own code, which may filter it, so "seen" there means given to that
+  code. A limit the server cannot see (set where the harness does not pass
+  it to the server's environment, a fallback configured elsewhere, or a
+  harness version that parses it otherwise) is not honoured. A process
+  killed between confirming a page and writing its result still loses
+  that page.
+- **Still open.** An explicit acknowledgement token, which the next call
+  carries back before a page is confirmed, is the only proof that a
+  result reached the model; it costs definition bytes and a behaviour
+  every model must learn, and is not built. Flagging an entry shown
+  before (`shown_before`), so that a repeat seen by two sessions of one
+  label is marked, is not built.
+
+**Revisit if** a result is measured at more tokens than bytes, Claude
+Code changes its limit or how it counts, another harness's limit becomes
+known, or the acknowledgement token is built.

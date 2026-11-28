@@ -50,6 +50,23 @@ type InboxOpts struct {
 	// The surface knows no result's shape: the local API gives the MCP
 	// tool's (localapi.ToolInboxSize). Required with MaxBytes.
 	Size func(v InboxView) int
+	// Ceiling, when not 0 (MinInboxBytes to MaxInboxBytes, at least
+	// MaxBytes): the most any read of this caller holds, in place of
+	// MaxInboxBytes, set by a reader whose harness shows less inline
+	// (D74). An oldest entry that fits no budget up to it is cut at it,
+	// as at MaxInboxBytes, and a refusal names it. When even that entry
+	// without its text does not fit it, it is returned alone with no text
+	// as long as that fits MaxInboxBytes: no entry holds the queue, and
+	// only such a result exceeds the ceiling.
+	Ceiling int
+}
+
+// ceiling is the most a read of o holds: Ceiling, or MaxInboxBytes.
+func (o InboxOpts) ceiling() int {
+	if o.Ceiling > 0 {
+		return o.Ceiling
+	}
+	return MaxInboxBytes
 }
 
 // FitPage is how many of count entries, oldest first, fit a result of at
@@ -101,6 +118,7 @@ func (o InboxOpts) page(v InboxView, limit int, levelSet bool) (InboxView, error
 		es = es[:limit]
 	}
 	if o.MaxBytes > 0 {
+		ceil := o.ceiling()
 		set := ""
 		if levelSet {
 			set = "; the level was set: leave level out when you call again"
@@ -112,19 +130,28 @@ func (o InboxOpts) page(v InboxView, limit int, levelSet bool) (InboxView, error
 			w.Entries, w.More = page, held
 			return o.Size(w)
 		}
+		if levelSet && len(v.LevelsSet) > 0 && (measure(nil) > o.MaxBytes || measure(es[:min(1, len(es))]) > o.MaxBytes) {
+			// The level was set before a wait, and the result with the
+			// rooms set listed leaves no room: list none (the reader asked
+			// for the level and it is set) rather than refuse, or cut an
+			// entry that fits alone (D74).
+			w := v
+			w.LevelsSet = nil
+			return o.page(w, limit, levelSet)
+		}
 		if empty := measure(nil); empty > o.MaxBytes {
 			if len(v.LevelsSet) > 0 && !levelSet {
 				return InboxView{}, codedErr(ErrorTooLarge, "the list of the %d rooms whose level this call sets takes the result to %d bytes before any message, over max_bytes %d; nothing was changed: set the level in a call of its own (inbox with level and peek), then read", len(v.LevelsSet), empty, o.MaxBytes)
 			}
-			return InboxView{}, codedErr(ErrorTooLarge, "this result takes %d bytes before any message, over max_bytes %d; nothing was marked seen: call inbox again with max_bytes %d%s", empty, o.MaxBytes, min(empty+NeedSlack, MaxInboxBytes), set)
+			return InboxView{}, codedErr(ErrorTooLarge, "this result takes %d bytes before any message, over max_bytes %d; nothing was marked seen: call inbox again with max_bytes %d%s", empty, o.MaxBytes, min(empty+NeedSlack, ceil), set)
 		}
 		n, need := FitPage(len(es), o.MaxBytes, func(n int) int { return measure(es[:n]) })
 		if n == 0 && len(es) > 0 {
 			switch {
-			case need <= MaxInboxBytes:
-				return InboxView{}, codedErr(ErrorTooLarge, "the oldest unread entry needs max_bytes of at least %d to be read (this call gave %d); nothing was marked seen: call inbox again with max_bytes %d%s", need, o.MaxBytes, min(need+NeedSlack, MaxInboxBytes), set)
-			case o.MaxBytes < MaxInboxBytes:
-				return InboxView{}, codedErr(ErrorTooLarge, "the oldest unread entry takes %d bytes, more than any max_bytes holds; nothing was marked seen: call inbox again with max_bytes %d to read it with its text cut to fit%s", need, MaxInboxBytes, set)
+			case need <= ceil:
+				return InboxView{}, codedErr(ErrorTooLarge, "the oldest unread entry needs max_bytes of at least %d to be read (this call gave %d); nothing was marked seen: call inbox again with max_bytes %d%s", need, o.MaxBytes, min(need+NeedSlack, ceil), set)
+			case o.MaxBytes < ceil:
+				return InboxView{}, codedErr(ErrorTooLarge, "the oldest unread entry takes %d bytes, more than any max_bytes holds; nothing was marked seen: call inbox again with max_bytes %d to read it with its text cut to fit%s", need, ceil, set)
 			}
 			e, ok := cutToFit(es[0], func(e Entry) int { return measure([]Entry{e}) }, o.MaxBytes)
 			if !ok {
@@ -133,6 +160,13 @@ func (o InboxOpts) page(v InboxView, limit int, levelSet bool) (InboxView, error
 					// Without the list of rooms set, the entry fits
 					// (TestAnEntryAtItsLargestBesidesItsTextFitsTheCeiling).
 					return InboxView{}, codedErr(ErrorTooLarge, "the list of the %d rooms whose level this call sets and the oldest unread entry take %d bytes before its text, over max_bytes %d; nothing was changed: set the level in a call of its own (inbox with level and peek), then read", len(v.LevelsSet), bare, o.MaxBytes)
+				}
+				if c, ok := withoutText(es[0], func(e Entry) int { return measure([]Entry{e}) }); ok && ceil < MaxInboxBytes {
+					// Its fields alone pass the ceiling: it comes alone,
+					// with no text, over the ceiling but within
+					// MaxInboxBytes, rather than block every later entry.
+					v.Entries, v.More = []Entry{c}, held-1
+					return v, nil
 				}
 				return InboxView{}, codedErr(ErrorTooLarge, "the oldest unread entry takes %d bytes before its text, more than any max_bytes holds; nothing was marked seen%s", bare, set)
 			}
@@ -143,6 +177,15 @@ func (o InboxOpts) page(v InboxView, limit int, levelSet bool) (InboxView, error
 	v.Entries = es
 	v.More = held - len(es)
 	return v, nil
+}
+
+// withoutText is e with no text, TextCut saying what was left out, when
+// that fits MaxInboxBytes.
+func withoutText(e Entry, size func(Entry) int) (Entry, bool) {
+	full := size(e)
+	c := entryWithText(e, "")
+	c.TextCut = max(full-size(c), 1)
+	return c, size(c) <= MaxInboxBytes
 }
 
 func entryWithText(e Entry, text string) Entry {
@@ -192,12 +235,16 @@ func cutToFit(e Entry, size func(Entry) int, budget int) (Entry, bool) {
 // check refuses a budget out of bounds, or one without a size.
 func (o InboxOpts) check() error {
 	switch {
+	case o.Ceiling != 0 && (o.Ceiling < MinInboxBytes || o.Ceiling > MaxInboxBytes):
+		return userErr("ceiling is %d to %d, or 0", MinInboxBytes, MaxInboxBytes)
 	case o.MaxBytes == 0:
 		return nil
 	case o.MaxBytes < MinInboxBytes || o.MaxBytes > MaxInboxBytes:
 		return userErr("max_bytes is %d to %d", MinInboxBytes, MaxInboxBytes)
 	case o.Size == nil:
 		return errors.New("inbox: max_bytes without a size")
+	case o.Ceiling != 0 && o.Ceiling < o.MaxBytes:
+		return userErr("ceiling is at least max_bytes")
 	}
 	return nil
 }

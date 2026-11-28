@@ -22,6 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wallter/a2p2/internal/core"
 	"github.com/wallter/a2p2/internal/members"
@@ -54,11 +55,37 @@ func (r *ackRefusal) As(target any) bool {
 
 func refuse(code, msg string) error { return &ackRefusal{UserError{msg, code}} }
 
-func userErr(format string, a ...any) error { return &UserError{Msg: fmt.Sprintf(format, a...)} }
+func userErr(format string, a ...any) error { return &UserError{Msg: errorf(format, a...)} }
 
 // codedErr is userErr with a code from ErrorCodes.
 func codedErr(code, format string, a ...any) error {
-	return &UserError{Msg: fmt.Sprintf(format, a...), Code: code}
+	return &UserError{Msg: errorf(format, a...), Code: code}
+}
+
+// MaxErrorEcho is the most bytes of one string an error repeats: a
+// caller's input, such as an unknown room's name, can be any length, and
+// a refusal is a tool result that no budget bounds (D74).
+const MaxErrorEcho = 200
+
+// errorf is fmt.Sprintf with every string argument longer than
+// MaxErrorEcho cut, between characters, and marked.
+func errorf(format string, a ...any) string {
+	for i, v := range a {
+		if s, ok := v.(string); ok && len(s) > MaxErrorEcho {
+			a[i] = cutEcho(s)
+		}
+	}
+	return fmt.Sprintf(format, a...)
+}
+
+// cutEcho is the start of s within MaxErrorEcho bytes, cut between
+// characters, and how many bytes were left out.
+func cutEcho(s string) string {
+	n := MaxErrorEcho
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return fmt.Sprintf("%s...(%d more bytes)", s[:n], len(s)-n)
 }
 
 // writeErr says in plain words why a message could not be written and

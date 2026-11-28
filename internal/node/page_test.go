@@ -385,3 +385,150 @@ func TestLevelsThatLeaveNoRoomForTheFirstEntrySayToSetTheLevelAlone(t *testing.T
 		t.Fatalf("without the level: %d %v", len(v.Entries), err)
 	}
 }
+
+// [U4, D74] A reader's ceiling below MaxInboxBytes takes its place: an
+// oldest entry that fits no budget up to it is refused naming it below
+// it, and at it comes alone with its text cut to fit, confirmed by Seen.
+func TestAnOldestEntryLargerThanTheReadersCeilingIsCutAtIt(t *testing.T) {
+	ctx := context.Background()
+	e := newSurf(t)
+	alice, bob := e.agent("alice"), e.agent("bob")
+	text := strings.Repeat("\u200b", 1000)
+	sent := e.send(SendInput{Agent: bob, Text: text})
+	e.send(SendInput{Agent: bob, Text: "after it"})
+	if escapedSize(InboxView{Entries: []Entry{{Text: text}}}) > MaxInboxBytes {
+		t.Fatal("the text does not fit the general ceiling")
+	}
+	_, err := e.s.InboxPage(ctx, alice, "", InboxOpts{MaxBytes: 6999, Ceiling: 7000, Size: escapedSize})
+	if msg := refusedFor(t, err); !strings.Contains(msg, "max_bytes 7000 to read it with its text cut") {
+		t.Fatalf("refusal %q", msg)
+	}
+	if _, err := e.s.InboxPage(ctx, alice, "", InboxOpts{MaxBytes: 7001, Ceiling: 7000, Size: escapedSize}); err == nil {
+		t.Fatal("a budget above the ceiling was taken")
+	}
+	v, err := e.s.InboxPage(ctx, alice, "", InboxOpts{MaxBytes: 7000, Ceiling: 7000, Size: escapedSize})
+	if err != nil || len(v.Entries) != 1 || v.More != 1 || v.Entries[0].TextCut == 0 || len(v.Entries[0].Text) == 0 {
+		t.Fatalf("page %d more %d %v", len(v.Entries), v.More, err)
+	}
+	if got := escapedSize(v); got > 7000 {
+		t.Fatalf("result %d bytes over the ceiling 7000", got)
+	}
+	c := v.Entries[0]
+	if res, err := e.s.Seen(ctx, alice, []store.Read{{Key: c.Key, Version: c.Version}}); err != nil || !res[0].Confirmed || c.Key != sent.ID {
+		t.Fatalf("the cut entry: %+v %v", res, err)
+	}
+}
+
+// [U4, D74] An entry whose fields besides its text pass the reader's
+// ceiling comes alone, with no text and TextCut set, over the ceiling but
+// within MaxInboxBytes, and is confirmed; below the ceiling it is refused
+// naming it; one wider than MaxInboxBytes is refused, ceiling or not.
+func TestAnEntryWhoseFieldsPassTheReadersCeilingComesAloneWithoutItsText(t *testing.T) {
+	ctx := context.Background()
+	e := newSurf(t)
+	alice, bob := e.agent("alice"), e.agent("bob")
+	sent := e.send(SendInput{Agent: bob, Text: "its fields are wide"})
+	e.send(SendInput{Agent: bob, Text: "after it"})
+	// Every entry's fields take 3,000 bytes besides its text.
+	wide := func(v InboxView) int { return escapedSize(v) + 3000*len(v.Entries) }
+	_, err := e.s.InboxPage(ctx, alice, "", InboxOpts{MaxBytes: 1999, Ceiling: 2000, Size: wide})
+	if msg := refusedFor(t, err); !strings.Contains(msg, "max_bytes 2000") {
+		t.Fatalf("refusal %q", msg)
+	}
+	huge := func(v InboxView) int { return escapedSize(v) + 40000*len(v.Entries) }
+	for _, o := range []InboxOpts{{MaxBytes: MaxInboxBytes, Size: huge}, {MaxBytes: 2000, Ceiling: 2000, Size: huge}} {
+		if _, err := e.s.InboxPage(ctx, alice, "", o); err == nil {
+			t.Fatalf("an entry wider than the general ceiling was returned, ceiling %d", o.Ceiling)
+		}
+	}
+	v, err := e.s.InboxPage(ctx, alice, "", InboxOpts{MaxBytes: 2000, Ceiling: 2000, Size: wide})
+	if err != nil || len(v.Entries) != 1 || v.More != 1 || v.Entries[0].Key != sent.ID || v.Entries[0].Text != "" || v.Entries[0].TextCut == 0 {
+		t.Fatalf("page %+v %v", v.Entries, err)
+	}
+	if got := wide(v); got <= 2000 || got > MaxInboxBytes {
+		t.Fatalf("result %d bytes", got)
+	}
+	if res, err := e.s.Seen(ctx, alice, []store.Read{{Key: sent.ID, Version: v.Entries[0].Version}}); err != nil || !res[0].Confirmed {
+		t.Fatalf("seen %+v %v", res, err)
+	}
+}
+
+// [U2, U4, D74] A read sets a level, its empty page fits and the level is
+// set, and it waits; an entry that arrives then fits alone but not beside
+// the list of rooms set. The read returns it whole without that list
+// (the level is set), not cut and not stripped of its text; an entry
+// that fits no budget even alone is cut with no list, as much text as
+// fits.
+func TestAnEntryArrivingDuringALevelReadsWaitComesWholeWithoutTheLevelList(t *testing.T) {
+	ctx := context.Background()
+	e := newSurf(t)
+	alice, bob := e.agent("alice"), e.agent("bob")
+	size := func(v InboxView) int {
+		n := pageSize(v)
+		if len(v.LevelsSet) > 0 {
+			n += 1500
+		}
+		return n
+	}
+	sendWhileWaiting := func(text string) <-chan Sent {
+		c := make(chan Sent, 1)
+		e.s.waiting = func() {
+			go func() {
+				s, err := e.s.Send(ctx, SendInput{Agent: bob, To: []string{alice}, Text: text})
+				if err != nil {
+					t.Error(err)
+				}
+				c <- s
+			}()
+		}
+		return c
+	}
+	sentc := sendWhileWaiting(strings.Repeat("w", 400))
+	v, err := e.s.InboxPage(ctx, alice, "", InboxOpts{Level: store.LevelAddressed, Wait: 5 * time.Second, MaxBytes: 2000, Ceiling: 2000, Size: size})
+	sent := <-sentc
+	e.s.waiting = nil
+	if err != nil || len(v.Entries) != 1 || v.Entries[0].ID != sent.ID || v.Entries[0].TextCut != 0 || len(v.Entries[0].Text) != 400 || len(v.LevelsSet) != 0 {
+		t.Fatalf("page %+v levels %d: %v", v.Entries, len(v.LevelsSet), err)
+	}
+	if got := size(v); got > 2000 {
+		t.Fatalf("result %d bytes over 2000", got)
+	}
+	if ls, err := e.s.Levels(ctx, alice, "", ""); err != nil || ls[0].Level != store.LevelAddressed {
+		t.Fatalf("level %+v %v", ls, err)
+	}
+	if _, err := e.s.Seen(ctx, alice, []store.Read{{Key: v.Entries[0].Key, Version: v.Entries[0].Version}}); err != nil {
+		t.Fatal(err)
+	}
+
+	sentc = sendWhileWaiting(strings.Repeat("x", 3000))
+	v, err = e.s.InboxPage(ctx, alice, "", InboxOpts{Level: store.LevelAddressed, Wait: 5 * time.Second, MaxBytes: 2000, Ceiling: 2000, Size: size})
+	<-sentc
+	e.s.waiting = nil
+	if err != nil || len(v.Entries) != 1 || v.Entries[0].TextCut == 0 || len(v.Entries[0].Text) < 1000 || len(v.LevelsSet) != 0 || size(v) > 2000 {
+		t.Fatalf("too large alone: %+v levels %d: %v", v.Entries, len(v.LevelsSet), err)
+	}
+}
+
+// [U4, D74] A ceiling out of range is refused whatever max_bytes is, and
+// an error repeats at most MaxErrorEcho bytes of a caller's input.
+func TestACeilingOutOfRangeIsRefusedAndAnErrorEchoesAShortInput(t *testing.T) {
+	ctx := context.Background()
+	e := newSurf(t)
+	alice := e.agent("alice")
+	for _, c := range []int{-1, 1, MinInboxBytes - 1, MaxInboxBytes + 1} {
+		for _, mb := range []int{0, MinInboxBytes} {
+			if _, err := e.s.InboxPage(ctx, alice, "", InboxOpts{MaxBytes: mb, Ceiling: c, Size: pageSize}); err == nil {
+				t.Fatalf("ceiling %d with max_bytes %d was taken", c, mb)
+			}
+		}
+	}
+	if _, err := e.s.InboxPage(ctx, alice, "", InboxOpts{MaxBytes: 600, Ceiling: 599, Size: pageSize}); err == nil {
+		t.Fatal("a ceiling under max_bytes was taken")
+	}
+	long := strings.Repeat("é", 40000)
+	_, err := e.s.InboxPage(ctx, alice, long, InboxOpts{})
+	ue, ok := err.(*UserError)
+	if !ok || len(ue.Msg) > MaxErrorEcho+100 || !utf8.ValidString(ue.Msg) || !strings.Contains(ue.Msg, "more bytes") {
+		t.Fatalf("a room of %d bytes echoed: %v", len(long), err)
+	}
+}

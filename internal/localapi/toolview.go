@@ -19,6 +19,10 @@ import (
 // and level (InboxReq, D70).
 const FeatureInboxMaxBytes = "inbox_max_bytes"
 
+// FeatureInboxCeiling, in Status.Features: the inbox takes ceiling
+// (InboxReq, D74).
+const FeatureInboxCeiling = "inbox_ceiling"
+
 // MaxToolLevels is how many rooms a result's levels list names; the rest
 // are counted in levels_unlisted, so that setting a level in every room
 // stays a small result.

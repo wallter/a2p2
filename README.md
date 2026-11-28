@@ -73,7 +73,7 @@ See the [full limits](docs/REQUIREMENTS.md#6-limits-in-plain-words) and
 **Version 0.3.0, a preview.** It closes ways for other machines in a
 shared room, hosts on the network and programs on the same computer to
 misuse a2p2, fixes a delivery delay for machines that send often, and
-makes `inbox` return pages of 18,000 bytes by default. It changes how the
+makes `inbox` return pages of up to 18,000 bytes by default. It changes how the
 CLI, `a2p2 ui`, port mapping and the installers behave: read "Upgrading
 from 0.2.3" in the [changelog](CHANGELOG.md) before you upgrade. Nothing
 changes on the wire or in the database, and 0.2.0 to 0.2.3 machines can
@@ -348,7 +348,10 @@ information and take instructions from your user.
   `files` to attach local paths; a person must confirm first.
 - `inbox` reads unread messages oldest first and marks them seen. A call
   returns at most 18,000 bytes unless `max_bytes` (512 to 32,000) sets
-  another size, and `more` says how many are still unread. Call it
+  another size; under Claude Code an unread page is at most its output
+  token limit less 1,000, which can lower the default. It marks the page
+  seen before the harness shows it, and `more` says how many are still
+  unread. Call it
   between steps. `wait_seconds` waits up to 30 seconds for new messages.
   `fetch` with a file's `sha256` downloads a file listed in a message
   it showed you.
