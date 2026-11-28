@@ -8,6 +8,35 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Changed
+
+- **Every command that talks to the daemon starts about 1 ms sooner on
+  macOS.** Before it dials, a client checks the directories above its
+  home, and that check asked the system's user database whether the
+  user's primary group is private to it (about 1.4 ms on macOS), though
+  the answer matters only for a directory of that group that the group
+  can write. It is now asked only then. The checks and their warnings are
+  unchanged. Measured on a MacBook (Apple silicon, macOS, load about 2),
+  each command started as a new process against a running daemon, n=30
+  interleaved, median before and after: `a2p2 send` 7.85 and 6.79 ms,
+  `a2p2 status` 7.49 and 6.49 ms, `a2p2 inbox` 8.28 and 6.53 ms; an empty
+  Go program takes 2.89 ms there. Hooks start sooner by the same.
+- **A lone message is now measured and its cost is pinned by a test.**
+  `scripts/bench.sh` gains M9: one addressed message at a time between two
+  daemons on loopback, the reader waiting, the requester's budget full
+  (700 ms apart); ping-pong between long-lived clients; and the same
+  message sent with `a2p2 send` and read with `a2p2 inbox --wait`
+  processes. Measured on the same MacBook, partly under load, medians of
+  three runs of n=10 to 15: 4.8 to 6.8 ms pulled by an outbound-only
+  machine (or between two listening ones), 3.3 to 5.5 ms offered by it;
+  a ping-pong round 9.9 to 10.7 ms; through the two processes 12 to 17
+  ms, of which the send process is 10 to 15. A message pulled costs 4 requests,
+  one offered 3, and none waits for a token or a timer
+  (`TestALoneMessageCostsAFixedNumberOfRequestsAndNoTokenWait`). The 61
+  ms of 0.3.0's notes for one message at a time is a sender writing every
+  5 ms, which spends the budget (15 requests a second to one peer) and
+  then waits for it: the bound, not a delay of a lone message.
+
 ## [0.4.0] - 2026-11-27
 
 A message addressed to an agent before its session starts is now unread

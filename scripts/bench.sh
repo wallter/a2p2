@@ -28,6 +28,12 @@ Measures a2p2 on this computer and prints one table per run:
      the daemon's surface in the test process, so that go test's
      -cpuprofile, -mutexprofile and -blockprofile see it, and each case
      prints its inbox looks and store transactions per question)
+  M9 a lone addressed message between two daemons on loopback, the reader
+     waiting, 700 ms apart (the budget full): A listening and B outbound,
+     then both listening, each way; ping-pong, 1 s apart; then through
+     `a2p2 send` and `a2p2 inbox --wait` processes, process start included.
+     A2P2_BENCH_LONE_PAUSES=5ms,50ms: other pauses (below about 150 ms
+     the budget is spent and each request waits for its token)
   micro: Ed25519, record encode/parse, raw SQLite commit and fsync, the
      product's Surface.Send with and without the socket
   and a CPU profile of a serial 200 B send through the socket, in process.

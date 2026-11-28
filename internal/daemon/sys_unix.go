@@ -68,7 +68,7 @@ func checkAncestors(home string) (warns []string, err error) {
 		abs = wd + "/" + home
 	}
 	groups, _ := os.Getgroups() // none known: a directory only another group can write is refused
-	w := &walk{home: home, uid: os.Getuid(), gid: os.Getgid(), groups: groups, groupOK: privateGroup()}
+	w := &walk{home: home, uid: os.Getuid(), gid: os.Getgid(), groups: groups, lookup: privateGroup}
 	if _, err := w.resolve("/", abs); err != nil {
 		return nil, err
 	}
@@ -96,9 +96,22 @@ type walk struct {
 	uid, gid int
 	groups   []int // this user's supplementary groups
 	groupOK  bool  // the primary group is private to this user
-	links    int
-	warns    []string
-	chain    []step // the directories of the current one's path, from the root, with no link
+	// lookup, if set, says whether it is, asked the first time a
+	// directory of the primary group that it can write is met (private):
+	// asking costs a directory service lookup, about 1.4 ms on macOS, on
+	// every command that talks to the daemon.
+	lookup func() bool
+	links  int
+	warns  []string
+	chain  []step // the directories of the current one's path, from the root, with no link
+}
+
+// private reports whether the primary group is private to this user.
+func (w *walk) private() bool {
+	if w.lookup != nil {
+		w.groupOK, w.lookup = w.lookup(), nil
+	}
+	return w.groupOK
 }
 
 // step is a directory on the way down, as far as passing through it goes.
@@ -252,7 +265,7 @@ func (w *walk) check(dir string, fi os.FileInfo) error {
 		return fmt.Errorf("%s, a directory above the a2p2 home %s, can be changed by other users: "+
 			"its group %s, which you are not in, can write it (mode %o); run: chmod g-w %s, or move the home",
 			dir, w.home, groupName(gid), mode, dir)
-	case gid == w.gid && w.groupOK:
+	case gid == w.gid && w.private():
 	default:
 		w.warns = append(w.warns, fmt.Sprintf("%s, a directory above the a2p2 home, can be changed by every member of its group %s (mode %o); "+
 			"anyone else in that group could replace the home. To close this, run: chmod g-w %s", dir, groupName(gid), mode, dir))
