@@ -3,6 +3,8 @@
 #   scripts/e2e/local.sh [opencode|hermes|pi|all] [MODEL...]
 # Default model: qwen3.6:32k (qwen3.6:64k for hermes, which needs 64K context).
 # OLLAMA_URL defaults to http://127.0.0.1:11434/v1.
+# A2P2_E2E_HERMES_TOOLSET names the toolset given to hermes -t: mcp-a2p2 by
+# default (Hermes 0.15.2); Hermes 0.19.0 takes a2p2.
 #
 # Uses a throwaway A2P2_HOME and project directory, and gives each harness
 # a2p2 for one run only: OpenCode through a project opencode.json, Hermes
@@ -73,7 +75,7 @@ run_hermes() {
   mkdir -p "$2/.hermes"
   printf 'model:\n  default: "%s"\n  provider: custom\n  base_url: %s\n  api_key: ollama\n  context_length: 65536\nmcp_servers:\n  a2p2:\n    command: "%s"\n    args: ["mcp", "--harness", "hermes", "--name", "%s"]\n    env:\n      A2P2_HOME: "%s"\n' \
     "$1" "$url" "$(logged "$2")" "$3" "$A2P2_HOME" > "$2/.hermes/config.yaml"
-  (cd "$2" && HERMES_HOME="$2/.hermes" sandbox "$2" hermes -z "$(prompt_mcp "$3" "$4")" -t mcp-a2p2 </dev/null 2>&1)
+  (cd "$2" && HERMES_HOME="$2/.hermes" sandbox "$2" hermes -z "$(prompt_mcp "$3" "$4")" -t "${A2P2_E2E_HERMES_TOOLSET:-mcp-a2p2}" </dev/null 2>&1)
 }
 run_pi() {
   mkdir -p "$2/.pi-agent"
