@@ -163,7 +163,7 @@ type (
 		// budget comes with its text cut (text_cut). Level, when given:
 		// the call first sets the agent's level in room, or every room,
 		// as level does, and lists them in levels; a call refused for its
-		// budget sets nothing (D70). Daemons before 0.2.4 ignore both
+		// budget sets nothing (D70). Daemons of 0.2.3 or earlier ignore both
 		// and answer without max_bytes; the status of a daemon that takes
 		// them lists the feature inbox_max_bytes.
 		MaxBytes int    `json:"max_bytes,omitempty"`
@@ -248,7 +248,7 @@ type (
 		// More: the entries held at the look that the limit or max_bytes
 		// left out; they stay unread with no receipt, and the next call
 		// offers them. MaxBytes: the budget applied, as asked (absent
-		// from a daemon before 0.2.4, which ignores it). Levels: the
+		// from a daemon of 0.2.3 or earlier, which ignores it). Levels: the
 		// rooms whose level the call set (InboxReq.Level).
 		More     int         `json:"more,omitempty"`
 		MaxBytes int         `json:"max_bytes,omitempty"`
@@ -714,12 +714,12 @@ type (
 		Quarantined []Quarantined `json:"quarantined,omitempty"`
 		// Features are what this daemon does that an older one does not
 		// and a client must know before it asks: inbox_max_bytes, the
-		// inbox's max_bytes and level (D70). Absent from daemons before
-		// 0.2.4.
+		// inbox's max_bytes and level (D70). Absent from daemons of
+		// 0.2.3 or earlier.
 		Features []string `json:"features,omitempty"`
 		// Unattended counts the CLI's uses of --person away from a
 		// terminal or in an agent's shell since the daemon started.
-		// Absent when there were none, and from daemons before 0.2.4.
+		// Absent when there were none, and from daemons of 0.2.3 or earlier.
 		Unattended *Unattended `json:"unattended,omitempty"`
 	}
 	// Unattended is how often the person's identity was taken with

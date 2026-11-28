@@ -1,6 +1,7 @@
 package mcpshim
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
@@ -15,6 +16,7 @@ import (
 	"github.com/wallter/a2p2/internal/daemon"
 	"github.com/wallter/a2p2/internal/localapi"
 	"github.com/wallter/a2p2/internal/node"
+	"github.com/wallter/a2p2/internal/store"
 )
 
 // Under Claude Code the inbox result is capped at the harness's token
@@ -462,7 +464,7 @@ func TestAnotherHarnessKeepsTodaysSizesWhateverTheClaudeCodeLimit(t *testing.T) 
 }
 
 // [U4, D74, R7] Under Claude Code on a daemon that takes max_bytes but not
-// ceiling (0.2.4 to 0.3.0), the server reads as today: no cap, so no entry
+// ceiling (0.3.0), the server reads as today: no cap, so no entry
 // is stranded by a cap the daemon would not cut at.
 func TestUnderClaudeCodeADaemonWithoutTheCeilingReadsAsToday(t *testing.T) {
 	c, home := startDaemonHome(t)
@@ -588,9 +590,35 @@ func TestUnderClaudeCodeAnEntryArrivingDuringALevelReadsWaitComesWhole(t *testin
 	a := claudeSession(t, cl, "alice", "2500")
 	alice := agentID(t, a)
 	text := strings.Repeat("v", 700)
+	// Send only once the call has passed its first look. A fixed sleep
+	// was wrong: on a loaded machine the call could take longer than the
+	// sleep to reach the daemon, the entry was then there at the first
+	// look, and that read is refused (too_large) as it should be, so the
+	// test failed without a bug. The daemon writes the level only after
+	// the first look, just before it waits (node.Surface.InboxPage), so
+	// the level showing in status proves the call has looked once and
+	// gone on to wait; an entry from then on takes the wait's path. The
+	// bound makes a broken build fail instead of hang.
 	done := make(chan string, 1)
 	go func() {
-		time.Sleep(500 * time.Millisecond)
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			var st localapi.Status
+			if err := cl.Call(context.Background(), "status", nil, &st); err != nil {
+				t.Error(err)
+				done <- ""
+				return
+			}
+			if slices.ContainsFunc(st.Levels, func(l store.AgentLevel) bool { return l.Agent == alice && l.Level == "addressed" }) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Error("the inbox call never set its level")
+				done <- ""
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
 		done <- bob.send(localapi.SendReq{Text: text, To: []string{alice}})
 	}()
 	p, s := readCapped(t, a, map[string]any{"level": "addressed", "wait_seconds": 5})

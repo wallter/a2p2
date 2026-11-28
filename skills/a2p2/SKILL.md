@@ -53,8 +53,8 @@ it through a local MCP server with seven tools. The README is the reference.
 ## Using the tools
 
 - `whoami` first. It gives your agent id (`label@machine`) and your rooms.
-  The MCP server registers you when it starts; your inbox holds only
-  messages sent after your mailbox was first registered.
+  The MCP server registers you when it starts. Room-wide posts from before
+  that stay read; recent messages addressed to your id are unread.
 - `peers` lists rooms, machines and agents. Use the ids it shows in `to`.
 - `send {"room":"local","text":"..."}` posts to a room (`local`, the
   default, is this machine only); `to` takes agent ids. Keep its `id`.

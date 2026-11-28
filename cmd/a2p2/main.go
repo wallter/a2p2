@@ -137,7 +137,7 @@ func errorText(err error) string { return node.EscapeDisplay(err.Error()) }
 // one-time code, which the page trades for a session (internal/web,
 // session.go); note, on stderr so that w holds the address alone, says
 // so. remote: the shell is over SSH, so nothing was opened and the note
-// says how to reach the page. A daemon before 0.2.4 still running after an
+// says how to reach the page. A daemon of 0.2.3 or earlier still running after an
 // upgrade gives an address with its long-lived token instead: that is
 // neither opened nor printed, since it works for the daemon's whole run
 // and opening puts it in the arguments of the browser, where other users
@@ -382,6 +382,9 @@ func run(ctx context.Context, name string, args []string) (err error) {
 			return usagef("a2p2 trace ID")
 		}
 		return trace(c, rest[0])
+	}
+	if name == "reply" {
+		return usagef("unknown command %q; to reply to a message, run a2p2 send --reply-to ID TEXT", name)
 	}
 	return usagef("unknown command %q; run a2p2 help", name)
 }
@@ -1541,10 +1544,16 @@ func runDoctor(c *cmd, w io.Writer, o harness.Options) error {
 			if u := st.Unattended; u != nil {
 				warns = append(warns, harness.Check{Name: "person", OK: true, Info: "warning: " + personUseText(*u)})
 			}
-			if len(st.Listen) == 0 {
-				add("network", nil, "off: this machine only (a2p2 net on to enable)", "")
-			} else {
+			state := st.Network.State
+			if st.Network.Applied != "" {
+				state = st.Network.Applied
+			}
+			if len(st.Listen) > 0 {
 				add("network", nil, "reachable at "+escapeAll(st.Listen, ", "), "")
+			} else if state == node.NetworkOutbound {
+				add("network", nil, "outbound only: connects to members, accepts no incoming connections", "")
+			} else {
+				add("network", nil, "off: this machine only (a2p2 net on to enable)", "")
 			}
 			checks = append(checks, quarantineChecks(st)...)
 			for _, p := range st.Peers {

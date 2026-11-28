@@ -311,8 +311,8 @@ can make it grow only by what its records cost the machine anyway, for
 example by sending headers whose text never follows, or by withdrawing
 every other one of its messages.
 
-The cache stores nothing and needs no schema change. (The first release
-after 0.3.0 changes the schema for another reason: migration 15, D73.)
+The cache stores nothing and needs no schema change. (Version 0.4.0
+changes the schema for another reason: migration 15, D73.)
 `TestSummaryCacheEqualsAReadOfTheRoomAfterEveryKindOfWrite` compares the
 cached summary with a read of the table after every step of random
 schedules of these writes, rollbacks, reads inside a write, forks, hints,
