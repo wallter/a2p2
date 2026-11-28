@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,7 +17,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/wallter/a2p2/internal/daemon"
 	"github.com/wallter/a2p2/internal/localapi"
 	"github.com/wallter/a2p2/internal/node"
 )
@@ -24,11 +27,51 @@ import (
 // The tests run in whatever shell started them, perhaps an agent's: none
 // of its variables decide who the CLI acts as, unless a test sets them.
 func TestMain(m *testing.M) {
+	// Give even commands that unexpectedly auto-start a daemon a short,
+	// private state path. Tests can still override it with t.Setenv.
+	base := "/tmp"
+	if runtime.GOOS == "windows" {
+		base = os.TempDir()
+	}
+	home, err := os.MkdirTemp(base, "a2p2t")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("A2P2_HOME", home); err != nil {
+		_ = os.RemoveAll(home)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	getenv = func(string) string { return "" }
 	stderrTerminal = func() bool { return false }       // a test that wants one sets it
 	homeWarnings = func(string) []string { return nil } // never a look at the real home's directories
 	openURL = func(string) error { return errors.New("no browser is opened in tests") }
-	os.Exit(m.Run())
+	code := m.Run()
+
+	// Stop only the daemon serving this suite's home, through its local API.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if cl, ok := daemon.Running(ctx, home); ok {
+		if err := cl.Call(ctx, "stop", nil, nil); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		if !daemon.WaitStopped(home, 5*time.Second) {
+			fmt.Fprintf(os.Stderr, "test daemon in %s did not stop\n", home)
+		}
+	}
+	cancel()
+	if err := os.RemoveAll(home); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+	}
+	os.Exit(code)
+}
+
+func TestTheCLITestsNeverResolveTheRealHome(t *testing.T) {
+	userHome, _ := os.UserHomeDir()
+	if got := newCmd(context.Background(), "status").home; got == filepath.Join(userHome, ".a2p2") {
+		t.Fatalf("CLI tests resolved the default state directory %q", got)
+	}
 }
 
 // inShell makes the CLI see the environment env for the rest of t.
