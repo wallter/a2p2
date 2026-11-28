@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -21,6 +22,25 @@ import (
 	"github.com/wallter/a2p2/internal/node"
 	"github.com/wallter/a2p2/internal/store"
 )
+
+func TestMain(m *testing.M) {
+	// Keep install records here even if a test omits Options.StateDir.
+	home, err := os.MkdirTemp(sockTemp(), "a2p2t")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("A2P2_HOME", home); err != nil {
+		_ = os.RemoveAll(home)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	code := m.Run()
+	if err := os.RemoveAll(home); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+	}
+	os.Exit(code)
+}
 
 type rec struct {
 	calls []string
