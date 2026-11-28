@@ -891,7 +891,7 @@ func (sh *shim) inbox(ctx context.Context, in inboxIn) (string, error) {
 		return sh.fetch(ctx, in.Room, in.Fetch, in.WaitSeconds)
 	}
 	// A read sets its level in the daemon's inbox call, which checks the
-	// budget first (D70); a daemon before 0.2.4 does not, and the shim
+	// budget first (D70); a daemon of 0.2.3 or earlier does not, and the shim
 	// sets it first, as 0.2.3 did.
 	reading := !in.Peek && in.Thread == "" && in.Recent == 0 && !in.Skipped
 	var levels []localapi.RoomLevel
@@ -1093,7 +1093,7 @@ func noteBytes(note string) int {
 // read is inbox reading unread messages. The daemon returns, oldest
 // first, what fits the budget with the levels the call sets, keeping a
 // receipt of exactly that, and the shim confirms what it returned. A
-// daemon before 0.2.4 ignores the budget and the level: it listed a page
+// daemon of 0.2.3 or earlier ignores the budget and the level: it listed a page
 // of its own, with a receipt of each entry, so the shim returns that page
 // whole and confirms it, as 0.2.3 did, and says the budget was not
 // applied (D70); the level was set first (inbox).

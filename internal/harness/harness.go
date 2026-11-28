@@ -628,6 +628,17 @@ func AnyConnected(checks []Check) bool {
 	return false
 }
 
+// missingCLI says of a harness whose program is not on PATH that a2p2
+// installed into it, so a person can tell it was skipped: one Check when
+// there is an install record, and nil otherwise.
+func missingCLI(name, cli string, o Options) *Check {
+	rec, err := loadRecord(name, o)
+	if rec != nil && err == nil {
+		return &Check{Name: name, OK: true, Info: "installed by a2p2, but " + cli + " is not on PATH, so it was not checked"}
+	}
+	return nil
+}
+
 // Doctor reports whether each installed harness is wired correctly: its
 // unread-notice hook and its MCP registration, each by name, so a half
 // install says which half is missing, and for Codex which a2p2 tools run
@@ -636,6 +647,9 @@ func Doctor(o Options) []Check {
 	var out []Check
 	for _, name := range hookNames {
 		if _, err := o.lookPath(specs[name].cli); err != nil {
+			if c := missingCLI(name, specs[name].cli, o); c != nil {
+				out = append(out, *c)
+			}
 			continue
 		}
 		o := o
@@ -695,6 +709,8 @@ func Doctor(o Options) []Check {
 				o := o
 				_ = forOS(name, &o)
 				out = append(out, a.doctor(name, o))
+			} else if c := missingCLI(name, a.cli, o); c != nil {
+				out = append(out, *c)
 			}
 		}
 	}

@@ -525,7 +525,7 @@ func strip(b []byte, keys ...string) []byte {
 	return out
 }
 
-// oldDaemon is a proxy that answers as a daemon before 0.2.4 does: its
+// oldDaemon is a proxy that answers as a daemon of 0.2.3 or earlier does: its
 // inbox takes neither max_bytes nor level and answers without more,
 // max_bytes or levels, and its status lists no features.
 func oldDaemon(t *testing.T, real string) *localapi.Client {
@@ -546,7 +546,7 @@ func oldDaemon(t *testing.T, real string) *localapi.Client {
 	})
 }
 
-// [D3, R7, U4, D70] A new MCP server on a daemon before 0.2.4, which ignores
+// [D3, R7, U4, D70] A new MCP server on a daemon of 0.2.3 or earlier, which ignores
 // max_bytes: the server reads as 0.2.3 did, the daemon's own page of up
 // to fifty, whole, and confirms all of it, and says the budget was not
 // applied and how to start the new daemon, with max_bytes given or not.

@@ -462,7 +462,7 @@ func TestAnotherHarnessKeepsTodaysSizesWhateverTheClaudeCodeLimit(t *testing.T) 
 }
 
 // [U4, D74, R7] Under Claude Code on a daemon that takes max_bytes but not
-// ceiling (0.2.4 to 0.3.0), the server reads as today: no cap, so no entry
+// ceiling (0.3.0), the server reads as today: no cap, so no entry
 // is stranded by a cap the daemon would not cut at.
 func TestUnderClaudeCodeADaemonWithoutTheCeilingReadsAsToday(t *testing.T) {
 	c, home := startDaemonHome(t)

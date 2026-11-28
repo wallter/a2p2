@@ -62,6 +62,17 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   15): once this version has opened a home, 0.3.0 and earlier refuse it
   ("upgrade a2p2"). To be able to go back, copy the home before upgrading
   ([installing](docs/INSTALL.md#going-back-to-an-older-version)).
+- **`a2p2 doctor` no longer calls an outbound-only machine off.** Its
+  network line said "off: this machine only" whenever the machine
+  listened on no address. It now says "outbound only" when that is what
+  runs, as `a2p2 status` does.
+- **`a2p2 doctor` names a harness it could not check.** A harness that
+  a2p2 installed into was left out of `doctor` without a word when its
+  program was not on PATH. It now gets one line saying so.
+- **`a2p2 reply` points at the command that exists.** The agent tool is
+  called `reply`, so people type it; the CLI now answers that unknown
+  command with `a2p2 send --reply-to ID TEXT` instead of only "run a2p2
+  help".
 
 ## [0.3.0] - 2026-11-27
 
