@@ -202,8 +202,10 @@ Then run `a2p2 doctor`. For a connected harness the lines say
 `unread-notice hook installed in FILE` and `MCP server registered with
 NAME`; for OpenCode and Hermes `MCP server in place for NAME`, and for Pi
 `skill in place for pi`. A line that says `not connected` is marked `ok`
-but means that harness is not installed. No line for a harness means its
-command is not on your `PATH`. When no harness is connected, doctor ends
+but means that harness is not installed. A harness that a2p2 installed
+into but whose command is not on your `PATH` gets the line `installed by
+a2p2, but NAME is not on PATH, so it was not checked`; no line at all
+means neither. When no harness is connected, doctor ends
 with `No harness is connected. Run: a2p2 install claude (or codex, agy,
 opencode, hermes, pi), then a2p2 doctor again.` If a line says `FAIL`, run the `fix:`
 command under it, for example after you move the binary. In the Codex
@@ -284,7 +286,7 @@ carries the addresses listed as `advertised` by `a2p2 status` on A.
 
 To find out whether that works before and after joining, run
 `a2p2 net check`. On B, `a2p2 net check --invite` (paste the invite)
-tries A's addresses and checks A's key without using the invite. Once
+tries A's addresses and checks A's key without using it up. Once
 both are in a room, `a2p2 net check` on either machine tries every member
 and asks the members it reaches to connect back, then says what to do,
 for example that B cannot be reached and should run outbound-only.
@@ -338,6 +340,21 @@ in when it can tell.
    `a2p2 trace ID` shows which machines reported a copy and which
    handling reports have arrived. Run it again if the report is still
    on its way.
+
+Send the first test message only after the reading machine's agent has
+started and used a2p2 once, say with `whoami`. An agent's label is
+registered the first time it is used, and a room-wide message sent
+before that is not unread for it; one addressed to it is, while it is
+among that machine's newest messages. An earlier
+room-wide one is read with `a2p2 history --room design-review`.
+
+After a reboot the daemon is not running, and no part of a2p2 starts it
+by itself: the first command that talks to the daemon starts it in the
+background, which is what a harness does when it launches `a2p2 mcp`.
+The person's networking decision is recorded and re-read when the daemon
+starts, so `a2p2 net on` need not be run again. When it runs again,
+`a2p2 status` shows the same network line as before the reboot (on with
+its addresses, or outbound only).
 
 ## What an agent sees
 

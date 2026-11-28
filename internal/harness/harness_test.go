@@ -250,6 +250,31 @@ func TestDoctor(t *testing.T) {
 	}
 }
 
+func TestDoctorSaysWhenAnInstalledHarnessIsNotOnPATH(t *testing.T) {
+	o, _ := setup(t)
+	o.Run = fakeCLI(o.HomeDir)
+	if _, err := Install("claude", o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install("opencode", o); err != nil {
+		t.Fatal(err)
+	}
+	o.LookPath = func(string) (string, error) { return "", errors.New("no") }
+	cs := Doctor(o)
+	found := map[string]bool{}
+	for _, c := range cs {
+		if strings.HasPrefix(c.Name, "codex") {
+			t.Errorf("codex never installed, but reported: %+v", c)
+		}
+		if (c.Name == "claude" || c.Name == "opencode") && c.OK && strings.Contains(c.Info, "not on PATH") {
+			found[c.Name] = true
+		}
+	}
+	if !found["claude"] || !found["opencode"] {
+		t.Fatalf("missing installed-but-missing checks: %+v", cs)
+	}
+}
+
 func TestAnyConnectedIsFalseUntilAHarnessIsInstalled(t *testing.T) {
 	o, _ := setup(t)
 	o.Run = fakeCLI(o.HomeDir)

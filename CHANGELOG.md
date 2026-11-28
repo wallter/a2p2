@@ -93,6 +93,16 @@ different networks.
   and `a2p2 stop`. `doctor` fails the check "daemon version" when the
   daemon is older, and warns when it is newer or the two cannot be
   ordered.
+- **`a2p2 doctor` says "outbound only" for a machine that connects out
+  and does not listen.** Its network line said "off: this machine only"
+  whenever this machine listened on no address. It now follows the state
+  that runs, as `a2p2 status` does.
+- **`a2p2 doctor` names a harness it did not check.** A harness a2p2
+  installed into was left out without a word when its program was not on
+  PATH. It now gets one line, marked ok, saying it was not checked.
+- **`a2p2 reply` points to `a2p2 send --reply-to ID TEXT`.** The agent
+  tool is called `reply`, so people type it; the CLI answered only that
+  the command was unknown.
 
 ### Changed
 

@@ -235,7 +235,7 @@ func TestUIPrintOnlyPrintsTheAddressAndOpensNothing(t *testing.T) {
 	}
 }
 
-// F14, F72: after an upgrade, a daemon before 0.2.4 may still run, and its
+// F14, F72: after an upgrade, a daemon of 0.2.3 or earlier may still run, and its
 // address carries its long-lived token. a2p2 ui neither opens that (the
 // browser's arguments show it to other users) nor, since the second
 // review, prints it with --print (it works for the daemon's whole run):
@@ -308,5 +308,16 @@ func TestUIPrintRefusesJSON(t *testing.T) {
 func TestUIPrintIsAFlagOfUIOnly(t *testing.T) {
 	if err := run(context.Background(), "status", []string{"--print"}); err == nil {
 		t.Fatal("a2p2 status --print should be refused")
+	}
+}
+
+func TestReplyIsNotACommandButTheErrorPointsAtSendReplyTo(t *testing.T) {
+	t.Setenv("A2P2_HOME", t.TempDir())
+	err := run(context.Background(), "reply", []string{"abc", "hi"})
+	if !errors.Is(err, errUsage) || !strings.Contains(err.Error(), "send --reply-to") {
+		t.Fatalf("a2p2 reply: %v", err)
+	}
+	if err := run(context.Background(), "nosuchcommand", nil); !strings.Contains(err.Error(), "run a2p2 help") {
+		t.Fatalf("a2p2 nosuchcommand: %v", err)
 	}
 }
