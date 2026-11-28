@@ -11,6 +11,33 @@ the earlier version of the daemon and its tools. They show how each harness
 treats a stdio MCP server and a hook; they do not show that the current code
 works.
 
+## Verified on 2026-11-27, 0.4.0 on Linux
+
+The released `a2p2 v0.4.0` binary for Linux x86-64 (SHA-256
+`9c14446958ed9a67e26ab878c430a7b9a6ad8ebe05734dadab941b28e02b296e`, the
+file the install script checked), on Ubuntu 26.04: one run per harness of
+`scripts/e2e/local.sh`, with a throwaway `A2P2_HOME` and its own daemon,
+and the home and XDG directories inside the run directory. Model
+`qwen3.6:35b-a3b` through Ollama 0.34.0. The run differed from the script
+as it then stood in three ways: Hermes's toolset was named `a2p2`
+(Hermes 0.19.0 takes `-t a2p2` where 0.15.2 took `-t mcp-a2p2`; the
+script now reads `A2P2_E2E_HERMES_TOOLSET` for this), the model's output
+was capped at 4,096 tokens, and each harness had 480 seconds.
+
+| Harness, version | Through | Result | Planted word sent to the person | Time |
+|---|---|---|---|---|
+| OpenCode 1.19.6 | MCP | 6 of 6 | yes | 400 s, the model shared with another job |
+| Hermes Agent 0.19.0 | MCP | 6 of 6 | no | 143 s |
+| Pi 1.7.0 (Node 24.14.0) | the skill, `a2p2` commands | 5 of 5 (`a2p2 status` answers the first two checks in one call) | no | 6 s |
+
+The checks are: the harness exits 0, it learns who it is, it lists its
+peers, it reads the message and replies to the checker, it reports the
+message handled, and it sends a new message to a second agent. No tool
+call failed. The script reports a planted word that reaches the person
+and does not fail the run for it; the model that sent it here sent it in
+three earlier runs of the same check that day too. This is the first run of Hermes
+and Pi on Linux, and one run each.
+
 ## Verified on 2026-11-27, before 0.4.0
 
 Build `v0.3.0-14-g0c814e0` (`bin/a2p2 version`), macOS arm64, each run
