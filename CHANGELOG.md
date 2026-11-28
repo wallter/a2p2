@@ -10,8 +10,9 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Changed
 
-- **Under Claude Code, an `inbox` result is never larger in bytes than
-  the harness's output token limit, less 1,000.** Claude Code saves a
+- **Under Claude Code, an unread `inbox` page is no larger in bytes than
+  the harness's output token limit, less 1,000, but for one oversized
+  entry.** Claude Code saves a
   tool result above that limit (25,000 tokens, or `MAX_MCP_OUTPUT_TOKENS`)
   to a file, which the model may never read, after the page was marked
   seen. No inbox result was measured at more tokens than bytes. So when
@@ -20,9 +21,13 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
   with a `note`, and the default page of 18,000 shrinks to it when the
   limit is lower. A message too large for that size comes cut, as at the
   32,000-byte ceiling, and one whose fields alone pass it comes alone
-  without its text, saying so; none is held back. Other harnesses, and a
-  daemon from before this release, read as before. No tool definition
-  changes (D74).
+  without its text; none is held back. The page is still marked seen
+  before the harness shows it. Other harnesses, and a daemon from before
+  this release (which can still return a page the harness sets aside),
+  read as before. Only unread pages are capped; an error now repeats at
+  most 200 bytes of any input. A read that sets a level and waits now
+  returns an entry that arrived whole, leaving the list of rooms set out
+  when it would not fit. No tool definition changes (D74).
 
 ### Fixed
 

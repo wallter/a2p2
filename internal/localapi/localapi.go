@@ -1109,7 +1109,10 @@ func Handler(s *node.Surface, info Info) http.Handler {
 		v, err := s.InboxPage(ctx, r.Agent, r.Room, o)
 		out := InboxResp{Entries: entriesOf(v.Entries), Waiting: []Wait{}, More: v.More, Levels: roomLevelsOf(v.LevelsSet)}
 		if err == nil {
-			out.MaxBytes, out.Ceiling = r.MaxBytes, r.Ceiling
+			out.MaxBytes = r.MaxBytes
+			if r.MaxBytes != 0 {
+				out.Ceiling = r.Ceiling // applied only with a budget
+			}
 		}
 		for _, w := range v.Waiting {
 			out.Waiting = append(out.Waiting, Wait{Room: w.Room, Author: w.Author, Have: w.Have, Known: w.Known,

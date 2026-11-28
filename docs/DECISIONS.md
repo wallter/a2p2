@@ -3730,62 +3730,107 @@ environment whether it was set in the shell or in the project's
 `A2P2_HOME` (user-level and managed settings not tried).
 
 - **The rule.** When the MCP server runs under Claude Code, the largest
-  `inbox` result it returns is `min(25000, MAX_MCP_OUTPUT_TOKENS) - 1000`
+  unread page `inbox` returns is `min(25000, MAX_MCP_OUTPUT_TOKENS) - 1000`
   bytes, the cap: 24,000 by default. The 1,000 is a margin for what the
   harness wraps around a result. The cap is never above the ceiling of
   32,000 and never below the floor of 512. The default page stays 18,000
   unless the cap is lower, when it is the cap. A `max_bytes` above the cap
-  is read as the cap, with one `note` saying so ("max_bytes above 7000
-  was read as 7000, the most this harness shows inline."), whose bytes
-  come out of the budget as the ceiling's note's do. A page is confirmed
-  as it is returned, as before.
+  is read as the cap less the bytes of one `note` saying so ("max_bytes
+  above 7000 was read as 7000, the most this harness shows inline."), but
+  never under 512. A page is still confirmed as it is returned, before
+  the harness shows it, as before.
+- **Notes never pass the bound.** Every note the server adds (above the
+  cap, below the floor, an oversized entry, levels left out) is added
+  only when the result with it still fits its bound: the cap, or 32,000
+  for the one result allowed over the cap. Otherwise the page comes
+  without the note. The bound matters more than the explanation.
+- **What the cap covers.** Unread pages only: the reads that mark
+  messages seen. `peek`, `recent`, `skipped`, `thread` and `fetch` mark
+  nothing seen, so a result of theirs that a harness sets aside or cuts
+  loses nothing; they are not capped. Refusals are not paged either, but
+  an error now repeats at most 200 bytes of any one string, cut between
+  characters and marked with how many bytes were left out
+  (`node.MaxErrorEcho`, applied where every user error is built): an
+  unknown `room` of 40 KB was echoed whole before.
 - **How the server knows its harness.** From `--harness`, which
   `a2p2 install claude` writes into Claude Code's MCP entry
   (`a2p2 mcp --harness claude`). A server started without it runs as
   harness `mcp`, and any name but `claude` gets no cap: today's sizes.
   No environment marker of Claude Code is read.
-- **The variable.** `MAX_MCP_OUTPUT_TOKENS` is Claude Code's own setting,
-  read from the server's environment only; a2p2 adds no config key or
-  flag for it. A value that is not a positive integer (empty, malformed,
-  zero, negative, too large to parse) is ignored and 25,000 applies; one
-  above 25,000 changes nothing, since the cap is the smaller.
+- **The variable, read low.** `MAX_MCP_OUTPUT_TOKENS` is Claude Code's own
+  setting, read from the server's environment only; a2p2 adds no config
+  key or flag for it. a2p2 can only be as right as its reading of that
+  value, and a cap above the real limit is the unsafe error, so it reads
+  low. Review read the parsing of the installed harness (2.1.332, the
+  version measured; not checked by a2p2's tests): it trims spaces,
+  accepts a sign, and reads `8000.5` and `8e3` as 8,000. a2p2 trims
+  spaces and takes every reading a lenient parser could make: the number
+  the value starts with (sign, decimal part, exponent), or the whole value
+  as an integer with a base prefix (`0x1f40`); the least positive finite
+  one, its integer part, at most 25,000. Only a value with no such
+  reading (empty, not a number, zero, negative) leaves 25,000. A harness
+  may also apply a fallback configured where a2p2 cannot see it, or parse
+  otherwise in another version; then the cap can be wrong.
 - **Below the floor.** A limit under 1,512 tokens would put the cap under
-  512 bytes, the least a read takes. The read is then done at 512 and the
-  `note` says the limit is below one page; that result can pass the limit.
+  512 bytes, the least a read takes. The cap is then 512, and its note,
+  that the limit is below one page, comes only if it fits: such a result
+  is at most 512 bytes, which can still pass the harness's limit.
 - **No reader is blocked by the cap.** The cap takes the ceiling's place
   in D70's rule. An oldest entry that fits no budget up to the cap is
   refused below the cap naming the cap, and at the cap comes alone with
-  its text cut between characters and `text_cut`, as at the ceiling. So a
-  5 KB text of control characters, which renders past 18,000 bytes, comes
-  cut under a cap of 7,000 rather than being refused for ever. An entry
-  whose fields other than its text pass the cap (at their largest the
-  validators admit they take 27,527 bytes, D72) is returned alone with no text, `text_cut` saying so, though the result
-  then passes the cap (within 32,000), with a `note` that the result is
-  larger than this harness shows inline and to read the file if it was
-  saved to one. It is confirmed like any other: a harness that sets it
-  aside gives the model a file it can read (observed once). Only a result
-  holding that one entry can exceed the cap.
+  its text cut between characters and `text_cut`, as at the ceiling. A
+  request above the cap, read at the cap less its note, is refused the
+  same way, as D72 does at the ceiling. So a 5 KB text of control
+  characters, which renders past 18,000 bytes, comes cut under a cap of
+  7,000 rather than being refused for ever. An entry whose fields other
+  than its text pass the cap (at their largest the validators admit they
+  take 27,527 bytes, D72) is returned alone with no text, `text_cut`
+  saying so, though the result then passes the cap (within 32,000), with
+  a `note`, if it fits, that the result is larger than this harness shows
+  inline and to read the file if it was saved to one. It is confirmed like
+  any other: a harness that sets it aside gives the model a file it can
+  read (observed once). Only a result holding that one entry can exceed
+  the cap.
+- **A level set before a wait.** A read that sets a level, fits empty,
+  sets the level and waits can get an entry that fits alone but not beside
+  the list of rooms set. Such a read now leaves the list out (the level is
+  set; a note says so if it fits) and returns the entry whole. An entry
+  is cut, or sent without its text, only when it does not fit alone in a
+  result with no list. Before, it lost its text or was refused. This holds
+  under any ceiling.
 - **The daemon is told the cap.** The cut happens where the page is
   measured, in the daemon, so the local API's `inbox` takes `ceiling`
-  (the cap; 0 means 32,000) and echoes it, and `status` lists the feature
-  `inbox_ceiling`. This is the local API between the server and the
-  daemon of one machine: no wire, schema, entry field, tool definition
-  or CLI flag changes, and the definitions stay at 3,995 bytes. A daemon
-  that does not list the feature (0.2.4 to 0.3.0) gets no cap: it would
-  refuse at the cap an entry it cuts only at 32,000, and a reader asking
-  for more would be read at the cap again. That lasts until it restarts.
+  (the cap; 0 means 32,000; outside 512 to 32,000, or under `max_bytes`,
+  refused whatever `max_bytes` is) and echoes it only when it applied it,
+  and `status` lists the feature `inbox_ceiling`. This is the local API
+  between the server and the daemon of one machine: no wire, schema,
+  entry field, tool definition or CLI flag changes, and the definitions
+  stay at 3,995 bytes.
+- **Trusting the daemon.** The server uses the cap only while the
+  daemon's answers echo exactly the ceiling it sent. A refusal, or an
+  answer without that echo, makes the next read ask the daemon's status
+  again. A daemon that does not list the feature (0.2.4 to 0.3.0, or one
+  this daemon was replaced by) gets no cap, today's sizes: it would refuse
+  at the cap an entry it cuts only at 32,000, and a reader asking for more
+  would be read at the cap again. A daemon replaced mid-session costs one
+  refusal, then the read goes through. When status cannot be read, the
+  read goes on without the cap and the server asks again next time.
 - **What it guarantees.** In Claude Code, with the server installed by
-  `a2p2 install claude` and a daemon of this version, no `inbox` result
-  except the one oversized-envelope case is larger in bytes than the
-  harness's token limit, at any text, as far as tokens never exceed bytes.
+  `a2p2 install claude`, a daemon of this version, and a limit the server
+  reads as the harness does, no unread page is larger in bytes than the
+  harness's token limit, except the one oversized-envelope result, at any
+  text, as far as tokens never exceed bytes.
 - **What it does not.** It does not show that the model read the page: a
-  model can ignore a result shown inline. It covers no other harness:
-  their limits are not known here. In Codex's code mode the page reaches
-  the model's own code, which may filter it, so "seen" there means given
-  to that code. A limit the server cannot see (set where the harness does
-  not pass it to the server's environment, or a harness version that
-  parses it otherwise) is not honoured. A process killed between
-  confirming a page and writing its result still loses that page.
+  page is confirmed before the harness shows it, and a model can ignore a
+  result shown inline. A daemon without the feature can still return a
+  page the harness sets aside. It covers no other harness: their limits
+  are not known here. In Codex's code mode the page reaches the model's
+  own code, which may filter it, so "seen" there means given to that
+  code. A limit the server cannot see (set where the harness does not pass
+  it to the server's environment, a fallback configured elsewhere, or a
+  harness version that parses it otherwise) is not honoured. A process
+  killed between confirming a page and writing its result still loses
+  that page.
 - **Still open.** An explicit acknowledgement token, which the next call
   carries back before a page is confirmed, is the only proof that a
   result reached the model; it costs definition bytes and a behaviour

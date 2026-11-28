@@ -130,6 +130,15 @@ func (o InboxOpts) page(v InboxView, limit int, levelSet bool) (InboxView, error
 			w.Entries, w.More = page, held
 			return o.Size(w)
 		}
+		if levelSet && len(v.LevelsSet) > 0 && (measure(nil) > o.MaxBytes || measure(es[:min(1, len(es))]) > o.MaxBytes) {
+			// The level was set before a wait, and the result with the
+			// rooms set listed leaves no room: list none (the reader asked
+			// for the level and it is set) rather than refuse, or cut an
+			// entry that fits alone (D74).
+			w := v
+			w.LevelsSet = nil
+			return o.page(w, limit, levelSet)
+		}
 		if empty := measure(nil); empty > o.MaxBytes {
 			if len(v.LevelsSet) > 0 && !levelSet {
 				return InboxView{}, codedErr(ErrorTooLarge, "the list of the %d rooms whose level this call sets takes the result to %d bytes before any message, over max_bytes %d; nothing was changed: set the level in a call of its own (inbox with level and peek), then read", len(v.LevelsSet), empty, o.MaxBytes)
@@ -226,14 +235,16 @@ func cutToFit(e Entry, size func(Entry) int, budget int) (Entry, bool) {
 // check refuses a budget out of bounds, or one without a size.
 func (o InboxOpts) check() error {
 	switch {
+	case o.Ceiling != 0 && (o.Ceiling < MinInboxBytes || o.Ceiling > MaxInboxBytes):
+		return userErr("ceiling is %d to %d, or 0", MinInboxBytes, MaxInboxBytes)
 	case o.MaxBytes == 0:
 		return nil
 	case o.MaxBytes < MinInboxBytes || o.MaxBytes > MaxInboxBytes:
 		return userErr("max_bytes is %d to %d", MinInboxBytes, MaxInboxBytes)
 	case o.Size == nil:
 		return errors.New("inbox: max_bytes without a size")
-	case o.Ceiling != 0 && (o.Ceiling < o.MaxBytes || o.Ceiling > MaxInboxBytes):
-		return userErr("ceiling is max_bytes to %d", MaxInboxBytes)
+	case o.Ceiling != 0 && o.Ceiling < o.MaxBytes:
+		return userErr("ceiling is at least max_bytes")
 	}
 	return nil
 }

@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wallter/a2p2/internal/daemon"
@@ -66,10 +68,20 @@ func TestTheInlineCapFollowsClaudeCodesOutputLimit(t *testing.T) {
 		{"claude", "100000", 24000, false},
 		{"claude", "99999999999999999999999", 24000, false},
 		{"claude", "garbage", 24000, false},
-		{"claude", "8000tokens", 24000, false},
+		{"claude", "8000tokens", 7000, false},
+		{"claude", "8000.5", 7000, false},
+		{"claude", "8e3", 7000, false},
+		{"claude", "+8000", 7000, false},
+		{"claude", "0x1f40", 7000, false},
+		{"claude", ".8e4", 7000, false},
+		{"claude", "1.5e4", 14000, false},
+		{"claude", "0.5", 512, true},
 		{"claude", "0", 24000, false},
 		{"claude", "-5", 24000, false},
-		{"claude", "1.5e4", 24000, false},
+		{"claude", "-8e3", 24000, false},
+		{"claude", "Infinity", 24000, false},
+		{"claude", "NaN", 24000, false},
+		{"claude", "  ", 24000, false},
 		{"claude", "1512", 512, false},
 		{"claude", "1511", 512, true},
 		{"claude", "1", 512, true},
@@ -144,14 +156,63 @@ func TestUnderClaudeCodeARequestAboveTheCapIsReadAtTheCapAndALowCapLowersTheDefa
 	}
 }
 
-// [U4, D74] Below the floor: a limit under 1,512 tokens reads at 512 bytes,
-// the least, and the note says the limit is below one page.
-func TestUnderClaudeCodeALimitBelowTheFloorReadsAtTheFloorAndSaysSo(t *testing.T) {
-	cl := startDaemon(t)
-	a := claudeSession(t, cl, "alice", "700")
-	p, s := readCapped(t, a, map[string]any{"max_bytes": 20000})
-	if p.Note != floorNote || len(s) > node.MinInboxBytes+noteBytes(floorNote) {
-		t.Fatalf("%d bytes: %s", len(s), s)
+// [U4, D74] At caps near the floor and above it, with and without a
+// request above the cap, the budget sent is never under 512 and a note is
+// added only when the result with it fits the cap: every result is within
+// the cap as rendered, but one holding a single entry whose fields alone
+// pass it (no text, within 32,000), and every entry is read once. Below
+// the floor (a limit of 700) the cap is 512, with no note on top.
+func TestUnderClaudeCodeNoNoteTakesAResultOverTheCapNearTheFloor(t *testing.T) {
+	for _, c := range []struct {
+		env string
+		cap int
+	}{{"700", 512}, {"1512", 512}, {"1550", 550}, {"1593", 593}, {"1594", 594}, {"8000", 7000}} {
+		t.Run("limit="+c.env, func(t *testing.T) {
+			cl := startDaemon(t)
+			bob := newWriter(t, cl, "bob")
+			a := claudeSession(t, cl, "alice", c.env)
+			if cap, _ := inlineCap(harnessClaude, func(string) string { return c.env }); cap != c.cap {
+				t.Fatalf("cap %d, want %d", cap, c.cap)
+			}
+			var sent, got []string
+			for i := 0; i < 6; i++ {
+				sent = append(sent, bob.send(localapi.SendReq{Text: fmt.Sprintf("m%d %s", i, strings.Repeat("z", []int{1, 30, 300}[i%3]))}))
+			}
+			for i := 0; i < 20 && len(got) < len(sent); i++ {
+				for _, args := range []map[string]any{nil, {"max_bytes": c.cap + 1}, {"max_bytes": 40000}} {
+					s, isErr := call(t, a, "inbox", args)
+					if isErr {
+						// Read above the cap, less its note: an entry that
+						// needs the whole cap is refused naming it, as at
+						// the ceiling (D72), and comes at it.
+						if !strings.Contains(s, fmt.Sprintf("max_bytes %d", c.cap)) || args == nil {
+							t.Fatalf("%v: %s", args, s)
+						}
+						s = ok(t, a, "inbox", map[string]any{"max_bytes": c.cap})
+					}
+					var p capped
+					if err := json.Unmarshal([]byte(s), &p); err != nil {
+						t.Fatal(err)
+					}
+					if len(s) > c.cap {
+						if len(p.Messages) != 1 || p.Messages[0].Text != "" || p.Messages[0].TextCut == "" || len(s) > node.MaxInboxBytes {
+							t.Fatalf("%v: %d bytes over the cap %d: %s", args, len(s), c.cap, s)
+						}
+					}
+					for _, m := range p.Messages {
+						got = append(got, m.ID)
+					}
+				}
+			}
+			if !slices.Equal(got, sent) {
+				t.Fatalf("read %d of %d", len(got), len(sent))
+			}
+			for _, args := range []map[string]any{nil, {"max_bytes": 40000}} {
+				if _, s := readCapped(t, a, args); len(s) > c.cap {
+					t.Fatalf("an empty read of %d bytes over the cap %d", len(s), c.cap)
+				}
+			}
+		})
 	}
 }
 
@@ -427,5 +488,122 @@ func TestUnderClaudeCodeADaemonWithoutTheCeilingReadsAsToday(t *testing.T) {
 	p, s := readCapped(t, a, nil)
 	if len(s) > node.DefaultInboxBytes || len(s) < 8000 || p.Note != "" || !p.MarkedSeen {
 		t.Fatalf("%d bytes, note %q", len(s), p.Note)
+	}
+}
+
+// downgradable is a proxy to a daemon that, once down is set, answers as
+// 0.3.0 does: its inbox takes max_bytes but not ceiling, and its status
+// does not list inbox_ceiling.
+func downgradable(t *testing.T, home string, down *atomic.Bool) *localapi.Client {
+	return proxy(t, daemon.SockPath(home), func(path string, b []byte) []byte {
+		if down.Load() && path == "/v1/inbox" {
+			return strip(b, "ceiling")
+		}
+		return b
+	}, func(path string, status int, b []byte) (int, []byte) {
+		if down.Load() && status == http.StatusOK && path == "/v1/status" {
+			var m map[string]any
+			json.Unmarshal(b, &m)
+			m["features"] = []string{localapi.FeatureInboxMaxBytes}
+			b, _ = json.Marshal(m)
+		}
+		return status, b
+	})
+}
+
+// [U4, D74, R7] The cap was learnt, then the daemon is replaced by one
+// that ignores ceiling (0.3.0 after a downgrade): an entry over the cap is
+// refused once, at the cap, and the next read, which asks the daemon's
+// status again, reads without the cap and delivers it.
+func TestUnderClaudeCodeADaemonThatStopsTakingTheCeilingDoesNotStrandAnEntry(t *testing.T) {
+	c, home := startDaemonHome(t)
+	bob := newWriter(t, c, "bob")
+	var down atomic.Bool
+	a := claudeSession(t, downgradable(t, home, &down), "alice", "8000")
+	if p, _ := readCapped(t, a, nil); len(p.Messages) != 0 {
+		t.Fatal("not empty")
+	}
+	down.Store(true)
+	big := bob.send(localapi.SendReq{Text: strings.Repeat("a", 9000)})
+	if r := refusal(t, a, "inbox", nil); r.Code != node.ErrorTooLarge {
+		t.Fatalf("first read %+v", r)
+	}
+	p, s := readCapped(t, a, nil)
+	if len(p.Messages) != 1 || p.Messages[0].ID != big || p.Messages[0].TextCut != "" || !p.MarkedSeen || len(s) > node.DefaultInboxBytes {
+		t.Fatalf("second read: %d bytes: %+v", len(s), p)
+	}
+}
+
+// [U4, D74] A status that cannot be read does not block reading: the read
+// goes on without the cap, and the cap is learnt on a later read.
+func TestUnderClaudeCodeAFailedStatusReadsWithoutTheCap(t *testing.T) {
+	c, home := startDaemonHome(t)
+	bob := newWriter(t, c, "bob")
+	var fail atomic.Bool
+	pc := proxy(t, daemon.SockPath(home), func(path string, b []byte) []byte { return b },
+		func(path string, status int, b []byte) (int, []byte) {
+			if fail.Load() && path == "/v1/status" {
+				return http.StatusInternalServerError, []byte(`{"error":"down for a test","code":"internal"}`)
+			}
+			return status, b
+		})
+	a := claudeSession(t, pc, "alice", "8000")
+	fail.Store(true)
+	for i := 0; i < 40; i++ {
+		bob.send(localapi.SendReq{Text: strings.Repeat("y", 1000)})
+	}
+	if _, s := readCapped(t, a, nil); len(s) <= 7000 || len(s) > node.DefaultInboxBytes {
+		t.Fatalf("without status: %d bytes", len(s))
+	}
+	fail.Store(false)
+	if _, s := readCapped(t, a, nil); len(s) > 7000 {
+		t.Fatalf("with status: %d bytes", len(s))
+	}
+}
+
+// [U4, D74] Errors repeat at most a short start of a caller's input: an
+// unknown room named with 40 KB comes back in a few hundred bytes.
+func TestAnInboxErrorDoesNotEchoALongInputWhole(t *testing.T) {
+	cl := startDaemon(t)
+	a := claudeSession(t, cl, "alice", "")
+	for _, args := range []map[string]any{{"room": strings.Repeat("r", 40000)}, {"room": strings.Repeat("r", 40000), "peek": true}} {
+		s, isErr := call(t, a, "inbox", args)
+		if !isErr || len(s) > 600 || !strings.Contains(s, "more bytes") {
+			t.Fatalf("%d bytes: %.300s", len(s), s)
+		}
+	}
+}
+
+// [U2, U4, D74] Under Claude Code, a read that sets a level in eight
+// rooms and waits: its empty page fits the cap and the level is set; an
+// entry that arrives during the wait fits the cap alone but not beside the
+// list of rooms. It comes whole, without the list, and the result stays
+// within the cap, with a note only if that fits.
+func TestUnderClaudeCodeAnEntryArrivingDuringALevelReadsWaitComesWhole(t *testing.T) {
+	cl := startDaemon(t)
+	for i := 0; i < 8; i++ {
+		createRoom(t, cl, fmt.Sprintf("room-with-a-long-label-%d", i))
+	}
+	bob := newWriter(t, cl, "bob")
+	a := claudeSession(t, cl, "alice", "2500")
+	alice := agentID(t, a)
+	text := strings.Repeat("v", 700)
+	done := make(chan string, 1)
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		done <- bob.send(localapi.SendReq{Text: text, To: []string{alice}})
+	}()
+	p, s := readCapped(t, a, map[string]any{"level": "addressed", "wait_seconds": 5})
+	id := <-done
+	if len(p.Messages) != 1 || p.Messages[0].ID != id || p.Messages[0].Text != text || p.Messages[0].TextCut != "" || len(p.Levels) != 0 || len(s) > 1500 || !p.MarkedSeen {
+		t.Fatalf("%d bytes: %s", len(s), s)
+	}
+	if p.Note != "" && p.Note != levelsNotNote {
+		t.Fatalf("note %q", p.Note)
+	}
+	t.Logf("%d bytes, note %q", len(s), p.Note)
+	lv := parseLevels(t, ok(t, a, "inbox", map[string]any{"peek": true, "level": "addressed"}))
+	if len(lv.Levels) == 0 || lv.Levels[0].Level != "addressed" {
+		t.Fatalf("levels %+v", lv.Levels)
 	}
 }
