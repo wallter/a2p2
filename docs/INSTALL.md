@@ -14,9 +14,9 @@ release's tag and name the version. Release tags cannot be moved or
 deleted (a rule of the repository):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/wallter/a2p2/v0.3.0/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/wallter/a2p2/v0.4.0/install.sh -o install.sh
 less install.sh
-A2P2_VERSION=v0.3.0 sh install.sh
+A2P2_VERSION=v0.4.0 sh install.sh
 ```
 
 The checksum the script checks comes from the same release, so this
@@ -100,7 +100,7 @@ not.
 A release that changes the database schema says so in the
 [changelog](../CHANGELOG.md). After a new version has opened your home
 once, an older a2p2 refuses it: `database is version N, this binary
-understands M: upgrade a2p2`. The first release after 0.3.0 is one
+understands M: upgrade a2p2`. Version 0.4.0 is one
 (migration 15): once it has opened a home, 0.3.0 and earlier refuse it.
 There is no downgrade. If you may need to
 go back, keep a copy of the home made before upgrading: close the agent

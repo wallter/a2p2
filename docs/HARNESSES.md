@@ -11,6 +11,52 @@ the earlier version of the daemon and its tools. They show how each harness
 treats a stdio MCP server and a hook; they do not show that the current code
 works.
 
+## Verified on 2026-11-27, before 0.4.0
+
+Build `v0.3.0-14-g0c814e0` (`bin/a2p2 version`), macOS arm64, each run
+with a throwaway `A2P2_HOME`, a throwaway project directory and the MCP
+server given on the command line. Every run passed, with no repeat and no
+change to the scripts.
+
+| Run | Harness, version | Model | Result | Uncached tokens |
+|---|---|---|---|---|
+| `scripts/e2e/run.sh claude` | Claude Code 2.1.332 | the account default | 4 of 4 | about 24K written to cache, 0.3K out |
+| `scripts/e2e/run.sh codex` | Codex CLI 0.171.0 | `gpt-6.2-sol` | 4 of 4 | 162.1K in (135.2K cached), 0.2K out |
+| `scripts/e2e/local.sh opencode` | OpenCode 1.18.30 | `qwen3.6:32k` | 6 of 6, in 31 seconds | none (local model) |
+| D73 check | Claude Code 2.1.332 | the account default | passed | 13.8K written to cache, 0.6K out |
+| D74 check, `MAX_MCP_OUTPUT_TOKENS` unset | Claude Code 2.1.332 | the account default | passed | 44.0K written to cache, 0.7K out |
+| D74 check, `MAX_MCP_OUTPUT_TOKENS=8000` | Claude Code 2.1.332 | the account default | passed | 44.8K written to cache, 1.1K out |
+
+The two checks were headless Claude Code sessions set up as
+`scripts/e2e/run.sh` sets one up, with prompts that name no tool
+parameter. What the transcripts (`--output-format stream-json`) show:
+
+- **D73.** With the daemon running and no session yet, `a2p2 send --as
+  lead` to `claude-proj@<machine>` printed on stderr that the label had
+  not registered on this machine yet. The session was asked to check its
+  a2p2 messages and do what it found. Its first `inbox` returned the
+  brief; it replied with the word the brief asked for, and the reply's
+  handled report was sent.
+- **D74.** Six messages of about 5,000 bytes each of punctuation with no
+  two equal neighbours, sent to the label before the session started;
+  the session was asked to read all its a2p2 messages and count them.
+  With the variable unset the model called `inbox` twice with no
+  arguments: 16,764 and 16,744 bytes, three entries each (the default
+  page of 18,000 bound, not the cap of 24,000). With 8,000 the model
+  called `inbox` six times, once with `max_bytes` 32,000, which came back
+  with the note that it was read as 7,000; each result held one entry,
+  5,706 to 5,825 bytes. Both sessions called again while `more` was
+  above 0 and answered 6. No `inbox` result in either session, or in the
+  harness's own session records, was saved to a file or replaced by an
+  error.
+- The cap of 24,000 itself was seen only outside a model: the MCP server
+  run by hand with `--harness claude` and the variable unset, asked for
+  `max_bytes` 32,000 over eight such messages, returned 22,288 bytes
+  (four entries) with the note that it was read as 24,000.
+- Not shown: another harness under a cap (there is none), a page that
+  Claude Code would have set aside without the cap, and Antigravity,
+  which was not run.
+
 ## Verified on 2026-11-27, release candidate for 0.3.0
 
 Build `v0.2.3-126-g99bb885` (`bin/a2p2 version`), macOS arm64, one
@@ -248,11 +294,11 @@ and treats a failed run or a very short answer as a failure.
   waiting (`inbox` with `wait_seconds`).
 - The cross-harness case of `scripts/e2e/run.sh` since the rewrite, and
   any harness on Linux.
-- What changed for agents in 0.3.0, beyond the 2026-11-27 runs: whether a
-  model follows `more` and calls `inbox` again, how each harness shows a
-  cut page, and how models treat the new marks in tool results (D65). Those
-  runs used a build before D72, with a default page of 24,000 bytes and
-  slightly longer tool descriptions.
+- What changed for agents in 0.3.0, beyond the 2026-11-27 runs: how each
+  harness shows a cut page, and how models treat the new marks in tool
+  results (D65). That a model follows `more` and calls `inbox` again was
+  seen in Claude Code only (the D74 checks before 0.4.0), not in Codex or
+  Antigravity.
 - The CLI's check for an agent's shell (D66) in Codex and Gemini CLI: the
   variables were read from their binaries, not seen in a running shell.
   Claude Code's were seen in its shell (2.1.332), not in an end-to-end run.

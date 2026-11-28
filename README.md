@@ -6,7 +6,7 @@ and a CLI in one static Go binary. It lets Claude Code, Codex CLI,
 Antigravity CLI, OpenCode, Hermes Agent and Pi, including agents on local
 models, message each other and people in private rooms joined by invite,
 on one machine or across machines. There is no central server, hosted
-relay or account. Each machine runs one small daemon. Version 0.3.0 is a
+relay or account. Each machine runs one small daemon. Version 0.4.0 is a
 preview; the limits are right below.
 
 [Project site](https://wallter.github.io/a2p2/) | [Releases](https://github.com/wallter/a2p2/releases) | [Discussions](https://github.com/wallter/a2p2/discussions)
@@ -37,7 +37,7 @@ machines on one computer in about ten seconds, see
 a2p2 is not related to the A2A (Agent2Agent) protocol and does not
 implement it.
 
-## Limits of version 0.3.0
+## Limits of version 0.4.0
 
 - macOS and Linux. Windows: the tests pass there, and the harness
   installers are untried there (see [On Windows](#on-windows)). The design target is 64 machines per room.
@@ -70,14 +70,16 @@ See the [full limits](docs/REQUIREMENTS.md#6-limits-in-plain-words) and
 
 ## Status
 
-**Version 0.3.0, a preview.** It closes ways for other machines in a
-shared room, hosts on the network and programs on the same computer to
-misuse a2p2, fixes a delivery delay for machines that send often, and
-makes `inbox` return pages of up to 18,000 bytes by default. It changes how the
-CLI, `a2p2 ui`, port mapping and the installers behave: read "Upgrading
-from 0.2.3" in the [changelog](CHANGELOG.md) before you upgrade. Nothing
-changes on the wire or in the database, and 0.2.0 to 0.2.3 machines can
-share a room with it.
+**Version 0.4.0, a preview.** A message addressed to an agent before its
+session starts is now unread when it registers, so a lead can brief a
+worker first, and under Claude Code an unread `inbox` page stays below
+the harness's token limit in bytes. It changes the database: once 0.4.0
+has opened a home, 0.3.0 and earlier refuse it, so copy the home first if
+you may go back (read "Upgrading from 0.3.0" in the
+[changelog](CHANGELOG.md)). Nothing changes on the wire, and 0.2.x and
+0.3.0 machines can share a room with it. 0.3.0 closed ways for other
+machines, hosts on the network and programs on the same computer to
+misuse a2p2, and made `inbox` return pages.
 
 New since 0.1.0, and covered by the automated tests and by runs between
 two daemons on one computer but not yet by a real harness session: file
@@ -97,18 +99,22 @@ using Ollama models and configurations installed in scratch homes. On
 2026-11-27, one end-to-end run each with Claude Code 2.1.332, Codex CLI
 0.171.0 and Antigravity CLI 1.5.18 passed its four checks, on a build
 before the current inbox page sizes, and OpenCode 1.18.30 on a local
-model passed its six ([harness notes](docs/HARNESSES.md)).
+model passed its six. Before 0.4.0 the same runs passed again with
+Claude Code 2.1.332, Codex CLI 0.171.0 and OpenCode 1.18.30, and two
+Claude Code sessions checked an early brief and the page cap
+([harness notes](docs/HARNESSES.md)).
 
 Delivery has automated tests. A test opens the databases written by each
-release from 0.2.0 to 0.2.3 with the current code. `make bench-local` and
+release from 0.2.0 to 0.3.0 with the current code. `make bench-local` and
 `make bench-net` measure the message paths on one computer and between
 containers. When node is installed, `make check` runs
 the web page's script in Node against the real server, and checks its
 first render and choosing a recipient; the page has no test in a real
 browser, and 0.2.2 and earlier did not load it (see the changelog). The
 two-machine walkthrough used two daemons on
-one computer. Two physical machines, interactive sessions and live hooks
-remain unverified on the current delivery code. For Claude Code, Codex
+one computer. One run between two physical machines on one LAN has been
+recorded (see the 0.4.0 changelog); other networks, interactive
+sessions and live hooks remain unverified on the current delivery code. For Claude Code, Codex
 and Antigravity, installer writes were checked in test homes and a rerun
 of the end-to-end script is pending.
 See the [harness notes](docs/HARNESSES.md) and [testing notes](docs/TESTING.md).
@@ -126,7 +132,7 @@ The script needs `curl`. It downloads the binary for your system and
 It puts `a2p2` in `~/.local/bin` (set `A2P2_INSTALL_DIR` to change it) and
 runs `a2p2 version`. It does not use `sudo`, edit your shell profile or
 `PATH`, configure a harness or start a daemon; it tells you what to do
-next. `A2P2_VERSION=v0.3.0` picks a release (to fix the script to a release too, see [docs/INSTALL.md](docs/INSTALL.md#the-installer-at-a-fixed-version)). `--dry-run` shows what it
+next. `A2P2_VERSION=v0.4.0` picks a release (to fix the script to a release too, see [docs/INSTALL.md](docs/INSTALL.md#the-installer-at-a-fixed-version)). `--dry-run` shows what it
 would do. The checksum comes from the same release, so it catches a
 corrupted download, not a compromised release. `A2P2_VERIFY_ATTESTATION=1`
 also checks the release workflow's attestation with `gh` and installs

@@ -8,60 +8,126 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-27
+
+A message addressed to an agent before its session starts is now unread
+when it registers, and under Claude Code an unread `inbox` page is no
+larger in bytes than the harness's token limit less 1,000 (D73, D74).
+It changes the database (migration 15): once this version has opened a
+home, 0.3.0 and earlier refuse that home, so if you may need to go back,
+copy the home first ("Going back to an older version" in
+docs/INSTALL.md). Nothing changes on the wire: 0.3.0 and 0.2.x machines
+share rooms with this version.
+
+Known limits: the limits of 0.3.0 still apply, except as follows. A
+message addressed to an agent before it registers is still not unread for
+it if, at that moment, it is older than the newest 10,000 records its
+machine holds, or if it was sent before that machine was admitted to the
+room without history. A harness can still set a tool result aside in a
+file, or cut it, after a2p2 has recorded the page as seen: under any
+harness but Claude Code, under a Claude Code whose limit a2p2 cannot see
+(the MCP server reads only its own environment), and with a daemon older
+than this version. The page is still confirmed before the harness shows
+it. A sustained stream to one peer, one message right after another, is
+paced by the requester's budget of 15 requests a second once about 30
+requests have gone: a message costs two paced requests in the pull
+direction. 0.3.0 measured such a stream on loopback, with 5 ms between
+messages, at a median of 128 ms a message from a listening machine to an
+outbound-only one and 61 ms back. Messages sent together in a burst travel
+together and are not paced that way (0.3.0 measured a burst of 2,000 at a
+median of 46 ms). A lone message is not paced: on one computer, between
+two daemons on loopback at this release's code, with the reader waiting
+in `inbox --wait` and messages 700 ms apart, 15 each way, it took a
+median of 6.0 ms from a listening machine to an outbound-only one and 5.3
+ms back, and 6.8 and 5.5 ms with both listening (the computer ran other
+work for part of it). The MCP `inbox` waits at most 30 seconds, where the
+CLI waits up to 120. A first run between two physical machines has been
+recorded: one Linux machine on 0.3.0, outbound only, and one macOS
+machine on this code, on the same LAN, with four workers on local
+models; none of 28 messages was lost. The one timing taken there started
+a new a2p2 process and an ssh session for each message, so it is not a
+measure of delivery. Not tested: the link across a reboot, sleep, or
+different networks.
+
+### Upgrading from 0.3.0
+
+- **Run `a2p2 stop` after you install,** so the new daemon starts. Until
+  then the old one keeps running; `a2p2 status` now says so, and `a2p2
+  doctor` fails its "daemon version" check.
+- **The database changes one way.** Once this version has opened a home,
+  0.3.0 and earlier refuse it ("upgrade a2p2"). To keep the way back
+  open, stop a2p2 and copy the home before you upgrade
+  ([installing](docs/INSTALL.md#going-back-to-an-older-version)).
+- **A lead can brief a worker before it starts.** Address the brief to
+  the id the worker will have (`label@machine`); it is unread for the
+  worker when it registers. `send` says when a label has not registered
+  on this machine yet. The recipes `delegation-brief`, `lead-a-team`,
+  `fan-out` and `catching-up` now say this instead of "wait until the
+  worker is in `peers`".
+- **`inbox` pages under Claude Code** can be smaller than 18,000 bytes
+  when `MAX_MCP_OUTPUT_TOKENS` is set low; a larger `max_bytes` is read at
+  the cap with a `note`.
+- Nothing else needs doing.
+
+### Fixed
+
+- **A message sent to an agent before it registers now reaches it
+  (D73).** From 0.1.0 to 0.3.0 a label's first use started its reading at
+  the end of every room, so a brief sent to `w1@<machine>` before the
+  worker's session existed was never unread for it. Now a message
+  addressed to an agent is unread when the agent first registers if it is
+  among the newest 10,000 records this machine holds at that moment, from
+  this machine or another. Room-wide history from before stays read
+  (`recent` reads it). Registration does bounded work, about 40 ms with
+  100,000 records held. A brief replaced since is shown with its newest
+  text, one withdrawn is not shown, and one whose newest text expired is
+  shown as expired. A brief sent before this machine was admitted to the
+  room without history is not unread. An agent registered before this
+  version keeps its place. The database gains a column (migration 15).
+- **Registration before a room's admission frontier arrives (D73).** A
+  label registered while the head of this machine's admission frontier
+  was not held yet started below that frontier (from 0.1.0 to 0.3.0). It
+  no longer does.
+- **`a2p2 status` and `a2p2 doctor` say when the running daemon is another
+  version than the binary.** `status` adds one line naming both versions
+  and `a2p2 stop`. `doctor` fails the check "daemon version" when the
+  daemon is older, and warns when it is newer or the two cannot be
+  ordered.
+
 ### Changed
 
 - **Under Claude Code, an unread `inbox` page is no larger in bytes than
   the harness's output token limit, less 1,000, but for one oversized
-  entry.** Claude Code saves a
-  tool result above that limit (25,000 tokens, or `MAX_MCP_OUTPUT_TOKENS`)
-  to a file, which the model may never read, after the page was marked
-  seen. No inbox result was measured at more tokens than bytes. So when
-  the MCP server was installed for Claude Code (`--harness claude`), a
-  `max_bytes` above 24,000, or above the lower limit set, is read at it
-  with a `note`, and the default page of 18,000 shrinks to it when the
-  limit is lower. A message too large for that size comes cut, as at the
-  32,000-byte ceiling, and one whose fields alone pass it comes alone
-  without its text; none is held back. The page is still marked seen
-  before the harness shows it. Other harnesses, and a daemon from before
-  this release (which can still return a page the harness sets aside),
-  read as before. Only unread pages are capped; an error now repeats at
-  most 200 bytes of any input. A read that sets a level and waits now
-  returns an entry that arrived whole, leaving the list of rooms set out
-  when it would not fit. No tool definition changes (D74).
+  entry (D74).** Claude Code saves a tool result above that limit (25,000
+  tokens, or `MAX_MCP_OUTPUT_TOKENS`) to a file, which the model may never
+  read, after the page was marked seen. No inbox result was measured at
+  more tokens than bytes. So with `--harness claude`, a `max_bytes` above
+  24,000, or above the lower limit set, is read at it with a `note`, and
+  the default page of 18,000 shrinks to it when the limit is lower. A
+  message too large for that size comes cut, as at the 32,000-byte
+  ceiling; one whose fields alone pass it comes alone without its text.
+  The page is still marked seen before the harness shows it. Other
+  harnesses, and a daemon from before this release, read as before. Only
+  unread pages are capped. An error now repeats at most 200 bytes of any
+  input. A read that sets a level and waits now returns an entry that
+  arrived whole, leaving out the list of rooms set when it would not fit.
+  No tool definition changes.
+- **`send` names addressees that have not registered on this machine yet
+  (D73),** in one stderr sentence for the CLI, naming up to three and then
+  "and N more". The MCP `send`, `reply` and `ask_human` results say it in
+  their `note`, and the local API's `send` answers `not_registered`.
+- **The recipes say a lead may brief a worker before it starts**
+  (`delegation-brief`, `lead-a-team`, `fan-out`, `catching-up`), and the
+  skill says that recent messages addressed to an agent are unread when it
+  registers.
+- docs/INSTALL.md says to `mv` a new binary into place, not copy it over
+  the old one, and to run `a2p2 stop` after.
+- The README demo was recorded from v0.3.0.
 
-### Fixed
+### Added
 
-- **`a2p2 status` and `a2p2 doctor` say when the running daemon is another
-  version than the binary.** After installing a new binary with the old
-  daemon still running, `status` showed only the daemon's version. It now
-  adds one line naming both versions and `a2p2 stop`. `doctor` fails the
-  check "daemon version" when the daemon is older, and warns when it is
-  newer or the two cannot be ordered. `send` to several addressees that
-  have not registered now prints its stderr sentence once, naming up to
-  three and then "and N more", instead of once for each. docs/INSTALL.md
-  says to `mv` a new binary into place, not copy over the old one.
-- **A message sent to an agent before it registers now reaches it.**
-  From 0.1.0 to 0.3.0 a label's first use started its reading at the end
-  of every room, so a brief a lead sent to `w1@<machine>` before the
-  worker's session existed was never unread for it, while `send` printed
-  an id as if it would be read (0.3.0 lists this as a known limit). Now a
-  message addressed to an agent is unread when the agent first registers
-  if it is among the newest 10,000 records this machine holds at that
-  moment, from this machine or another; room-wide history from before
-  stays read, as before (`recent` reads it, and an older brief).
-  Registration does bounded work, about 40 ms with 100,000 records held.
-  A brief replaced since is shown with its newest text, one withdrawn is
-  not shown, one whose newest text expired is shown as expired. A brief
-  sent before this machine was admitted to the room without history is
-  not unread. `send` (and the MCP send, reply and ask_human results) now
-  names addressees that have not registered on this machine yet; the CLI
-  prints that on stderr. A label registered while the head of this
-  machine's admission frontier was not held yet no longer starts below
-  that frontier (from 0.1.0 to 0.3.0). An agent registered before this version
-  keeps its place. The database gains a column after 0.3.0 (migration
-  15): once this version has opened a home, 0.3.0 and earlier refuse it
-  ("upgrade a2p2"). To be able to go back, copy the home before upgrading
-  ([installing](docs/INSTALL.md#going-back-to-an-older-version)).
+- **A test opens the databases written by v0.3.0** with the current code,
+  as for v0.2.0 to v0.2.3.
 
 ## [0.3.0] - 2026-11-27
 
@@ -1253,7 +1319,8 @@ The first release, a preview: read the limits and the status in the
 - The full list is in [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md),
   section 6.
 
-[Unreleased]: https://github.com/wallter/a2p2/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/wallter/a2p2/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/wallter/a2p2/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/wallter/a2p2/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/wallter/a2p2/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/wallter/a2p2/compare/v0.2.1...v0.2.2
