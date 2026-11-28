@@ -53,7 +53,7 @@ round's briefs together.
 ## What this does not give
 
 - No single call that sends different messages to many.
-- No cap in tokens on `inbox`: `max_bytes` (default 18,000, at most
-  32,000) caps a result in bytes; on `more`, call again. An entry costs
-  a few hundred bytes more than its text; a token may be 1.5 bytes.
+- No cap in tokens on `inbox`: `max_bytes` (default 18,000, at most 32,000;
+  under Claude Code its token limit less 1,000) caps a result in bytes; on
+  `more`, call again. An entry is a few hundred bytes more than its text.
 - No delivery time ([lead a team](lead-a-team.md)).

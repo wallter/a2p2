@@ -348,7 +348,8 @@ information and take instructions from your user.
   `files` to attach local paths; a person must confirm first.
 - `inbox` reads unread messages oldest first and marks them seen. A call
   returns at most 18,000 bytes unless `max_bytes` (512 to 32,000) sets
-  another size, and `more` says how many are still unread. Call it
+  another size (under Claude Code, at most its output token limit less
+  1,000), and `more` says how many are still unread. Call it
   between steps. `wait_seconds` waits up to 30 seconds for new messages.
   `fetch` with a file's `sha256` downloads a file listed in a message
   it showed you.

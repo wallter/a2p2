@@ -8,6 +8,22 @@ here. How a release is made is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Changed
+
+- **Under Claude Code, an `inbox` result is never larger in bytes than
+  the harness's output token limit, less 1,000.** Claude Code saves a
+  tool result above that limit (25,000 tokens, or `MAX_MCP_OUTPUT_TOKENS`)
+  to a file, which the model may never read, after the page was marked
+  seen. No inbox result was measured at more tokens than bytes. So when
+  the MCP server was installed for Claude Code (`--harness claude`), a
+  `max_bytes` above 24,000, or above the lower limit set, is read at it
+  with a `note`, and the default page of 18,000 shrinks to it when the
+  limit is lower. A message too large for that size comes cut, as at the
+  32,000-byte ceiling, and one whose fields alone pass it comes alone
+  without its text, saying so; none is held back. Other harnesses, and a
+  daemon from before this release, read as before. No tool definition
+  changes (D74).
+
 ### Fixed
 
 - **`a2p2 status` and `a2p2 doctor` say when the running daemon is another

@@ -818,7 +818,22 @@ not applied. The budget never counts tokens and knows nothing of how full
 a model's context is; the recipes tell an agent short of context to ask
 for less. A harness may still set a result aside or cut it after the
 daemon has recorded the page as seen: the sizes make that rarer (D72),
-not impossible. The delivery model needs no change: a page is a listing of the
+not impossible.
+
+**A cap for the harness (D74).** Under Claude Code (the server started
+with `--harness claude`, as `a2p2 install claude` writes it) the MCP
+server caps every `inbox` result at `min(25000, MAX_MCP_OUTPUT_TOKENS) -
+1000` bytes, within 512 and 32,000: the harness sets aside a result above
+its token limit, and no inbox result was measured at more tokens than
+bytes. The cap takes the ceiling's place: the default is at most the cap,
+a larger `max_bytes` is read as the cap with a `note`, and the server
+passes the cap to the daemon as the inbox call's `ceiling`, so an oldest
+entry that fits no smaller budget comes cut at the cap. An entry whose
+fields alone pass the cap comes alone with no text, over the cap but
+within 32,000, with a `note` saying so: it is the only result that can
+pass the cap, and it never holds the queue. Any other harness, and a
+daemon whose status does not list `inbox_ceiling`, read as before. The
+cap does not show the model read the page, and covers no other harness. The delivery model needs no change: a page is a listing of the
 first entries, which the differential tests compare as such (`opPage`,
 cut by `InboxOpts.page`).
 

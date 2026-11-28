@@ -168,6 +168,14 @@ type (
 		// them lists the feature inbox_max_bytes.
 		MaxBytes int    `json:"max_bytes,omitempty"`
 		Level    string `json:"level,omitempty"`
+		// Ceiling (max_bytes to 32,000; 0: 32,000): the most any read
+		// of this caller holds, for an MCP server whose harness shows less
+		// inline (D74). An oldest entry is cut at it rather than at 32,000;
+		// one whose fields besides its text pass it comes alone with no
+		// text. The status of a daemon that takes it lists the feature
+		// inbox_ceiling; one that does not ignores it and answers without
+		// ceiling.
+		Ceiling int `json:"ceiling,omitempty"`
 	}
 	Entry struct {
 		Key       string `json:"key"`
@@ -245,6 +253,8 @@ type (
 		More     int         `json:"more,omitempty"`
 		MaxBytes int         `json:"max_bytes,omitempty"`
 		Levels   []RoomLevel `json:"levels,omitempty"`
+		// Ceiling: the ceiling applied, as asked (InboxReq.Ceiling).
+		Ceiling int `json:"ceiling,omitempty"`
 	}
 	Entries struct {
 		Entries []Entry `json:"entries"`
@@ -983,7 +993,7 @@ func PreviewOf(p node.Preview) PreviewResp {
 // StatusOf renders the machine at a glance.
 func StatusOf(st node.StatusView, listen []string, info Info) Status {
 	out := Status{Node: st.Node, Name: st.Name, Human: st.Human, Local: st.Local, IDShared: st.Shared[st.Node], Rooms: roomsOf(st.Rooms),
-		Agents: st.Agents, Peers: []Peer{}, Listen: listen, Version: info.Version, PID: info.PID, Notice: st.Notice, Features: []string{FeatureInboxMaxBytes},
+		Agents: st.Agents, Peers: []Peer{}, Listen: listen, Version: info.Version, PID: info.PID, Notice: st.Notice, Features: []string{FeatureInboxMaxBytes, FeatureInboxCeiling},
 		Network: statusNetwork(st), Waiting: st.Waiting, Levels: st.Levels, Reach: st.Reach,
 		Mapping: st.Mapping}
 	if out.Levels == nil {
@@ -1089,7 +1099,7 @@ func Handler(s *node.Surface, info Info) http.Handler {
 		if err != nil {
 			return InboxResp{}, err
 		}
-		o := node.InboxOpts{Limit: r.Limit, Wait: wait, MaxBytes: r.MaxBytes, Level: r.Level}
+		o := node.InboxOpts{Limit: r.Limit, Wait: wait, MaxBytes: r.MaxBytes, Level: r.Level, Ceiling: r.Ceiling}
 		if r.MaxBytes != 0 {
 			local := s.LocalRoom()
 			o.Size = func(v node.InboxView) int {
@@ -1099,7 +1109,7 @@ func Handler(s *node.Surface, info Info) http.Handler {
 		v, err := s.InboxPage(ctx, r.Agent, r.Room, o)
 		out := InboxResp{Entries: entriesOf(v.Entries), Waiting: []Wait{}, More: v.More, Levels: roomLevelsOf(v.LevelsSet)}
 		if err == nil {
-			out.MaxBytes = r.MaxBytes
+			out.MaxBytes, out.Ceiling = r.MaxBytes, r.Ceiling
 		}
 		for _, w := range v.Waiting {
 			out.Waiting = append(out.Waiting, Wait{Room: w.Room, Author: w.Author, Have: w.Have, Known: w.Known,
